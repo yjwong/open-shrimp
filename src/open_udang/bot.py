@@ -227,6 +227,10 @@ def _format_token_count(count: int) -> str:
     return str(count)
 
 
+# Default context window for all Claude models via the Agent SDK (no 1M beta header).
+_DEFAULT_CONTEXT_LIMIT = 200_000
+
+
 def _build_status_text(
     ctx_name: str,
     ctx: ContextConfig,
@@ -252,20 +256,14 @@ def _build_status_text(
         cache_read = usage.get("cache_read_input_tokens", 0)
         cache_creation = usage.get("cache_creation_input_tokens", 0)
 
-        input_str = _escape_mdv2(_format_token_count(input_tokens))
-        output_str = _escape_mdv2(_format_token_count(output_tokens))
+        total_tokens = input_tokens + output_tokens + cache_read + cache_creation
+        total_str = _escape_mdv2(_format_token_count(total_tokens))
+        limit_str = _escape_mdv2(_format_token_count(_DEFAULT_CONTEXT_LIMIT))
+        pct = min(total_tokens / _DEFAULT_CONTEXT_LIMIT * 100, 100)
+        pct_str = _escape_mdv2(f"{pct:.0f}%")
 
         lines.append("")
-        lines.append(f"📊 *Context window:* {input_str} in / {output_str} out")
-
-        if cache_read or cache_creation:
-            cache_parts = []
-            if cache_read:
-                cache_parts.append(f"{_escape_mdv2(_format_token_count(cache_read))} read")
-            if cache_creation:
-                cache_parts.append(f"{_escape_mdv2(_format_token_count(cache_creation))} created")
-            separator = " \\| "
-            lines.append(f"💾 *Cache:* {separator.join(cache_parts)}")
+        lines.append(f"📊 *Context:* {total_str} / {limit_str} \\({pct_str}\\)")
 
         if total_cost_usd is not None:
             cost_str = _escape_mdv2(f"${total_cost_usd:.4f}")
