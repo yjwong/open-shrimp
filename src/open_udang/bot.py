@@ -687,6 +687,27 @@ def _format_edit_approval(tool_input: dict[str, Any]) -> str:
     return f"{header}\n\n```diff\n{escaped_diff}\n```"
 
 
+def _format_bash_approval(tool_input: dict[str, Any]) -> str:
+    """Format a Bash tool call for the approval prompt."""
+    command = tool_input.get("command", "")
+    description = tool_input.get("description", "")
+
+    parts: list[str] = []
+    if description:
+        parts.append(f"💻 *Bash:* {_escape_mdv2(description)}")
+    else:
+        parts.append("💻 *Bash*")
+
+    # Show the command in a code block.
+    max_cmd_len = 4096 - 200
+    if len(command) > max_cmd_len:
+        command = command[:max_cmd_len] + "\n..."
+    escaped_cmd = _escape_mdv2(command)
+    parts.append(f"```bash\n{escaped_cmd}\n```")
+
+    return "\n\n".join(parts)
+
+
 def _format_generic_approval(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Format a generic tool call for the approval prompt."""
     summary_parts = [f"*Tool:* `{tool_name}`"]
@@ -710,6 +731,8 @@ async def _send_approval_keyboard(
     """Send an inline keyboard for tool approval and wait for response."""
     if tool_name == "Edit":
         text = _format_edit_approval(tool_input)
+    elif tool_name == "Bash":
+        text = _format_bash_approval(tool_input)
     else:
         text = _format_generic_approval(tool_name, tool_input)
 
