@@ -125,28 +125,6 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
             logger.exception("Failed to send draft message")
 
 
-async def _clear_draft(bot: Bot, state: _DraftState) -> None:
-    """Clear the current draft message so it disappears before finalization.
-
-    Sending a draft with empty text removes it from the chat, preventing
-    momentary duplication when the finalized message is sent immediately after.
-    """
-    if state.drafts_disabled:
-        return
-
-    try:
-        await bot.do_api_request(
-            "sendMessageDraft",
-            api_kwargs={
-                "chat_id": state.chat_id,
-                "draft_id": state.draft_id,
-                "text": "",
-            },
-        )
-    except Exception:
-        logger.debug("Failed to clear draft %d in chat %d", state.draft_id, state.chat_id)
-
-
 async def _finalize_message(bot: Bot, state: _DraftState) -> list[int]:
     """Finalize the draft by sending the full message.
 
@@ -216,7 +194,6 @@ async def finalize_and_reset(bot: Bot, state: _DraftState) -> None:
     keyboard) to ensure correct message ordering in Telegram.
     """
     if state.raw_text.strip() or state.tool_notifications:
-        await _clear_draft(bot, state)
         msg_ids = await _finalize_message(bot, state)
         state.sent_message_ids.extend(msg_ids)
     state.raw_text = ""
@@ -342,10 +319,8 @@ async def stream_response(
             except asyncio.CancelledError:
                 pass
 
-        # Clear the draft first to avoid momentary duplication, then
-        # send the finalized message as a regular message.
+        # Final send of any remaining text
         if state.raw_text.strip() or state.tool_notifications:
-            await _clear_draft(bot, state)
             msg_ids = await _finalize_message(bot, state)
             state.sent_message_ids.extend(msg_ids)
 
@@ -359,10 +334,6 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
 
     if not chunks:
         return
-
-    # Clear the draft before sending the finalized message to avoid
-    # momentary duplication.
-    await _clear_draft(bot, state)
 
     # Send the first chunk as a finalized message
     try:
