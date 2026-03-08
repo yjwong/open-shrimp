@@ -30,7 +30,7 @@ from telegram.ext import (
     filters,
 )
 
-from open_udang.agent import FileAttachment, ImageAttachment, run_agent
+from open_udang.agent import FileAttachment, run_agent
 from open_udang.config import Config, ContextConfig
 from open_udang.db import (
     delete_session,
@@ -58,7 +58,7 @@ _running_tasks: dict[int, asyncio.Task[Any]] = {}
 
 # Per-chat message queue: messages that arrive while the agent is busy.
 # Each entry is (prompt, images, config, db, context).
-_pending_queues: dict[int, list[tuple[str, list[ImageAttachment], Config, aiosqlite.Connection, ContextTypes.DEFAULT_TYPE]]] = {}
+_pending_queues: dict[int, list[tuple[str, list[FileAttachment], Config, aiosqlite.Connection, ContextTypes.DEFAULT_TYPE]]] = {}
 
 # Pending tool approval futures: callback_data -> asyncio.Future[bool]
 _approval_futures: dict[str, asyncio.Future[bool]] = {}
@@ -468,14 +468,14 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def _download_telegram_photos(
     messages: list[Any], bot: Bot
-) -> list[ImageAttachment]:
-    """Download photos from one or more Telegram messages and return as ImageAttachments.
+) -> list[FileAttachment]:
+    """Download photos from one or more Telegram messages and return as FileAttachments.
 
     Each message may contain one photo (represented as a list of PhotoSize
     objects at different resolutions).  We take the largest resolution from
     each message.
     """
-    attachments: list[ImageAttachment] = []
+    attachments: list[FileAttachment] = []
     for message in messages:
         if not message.photo:
             continue
@@ -484,7 +484,7 @@ async def _download_telegram_photos(
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         photo_bytes = bytes(await file.download_as_bytearray())
-        attachments.append(ImageAttachment(data=photo_bytes, mime_type="image/jpeg"))
+        attachments.append(FileAttachment(data=photo_bytes, mime_type="image/jpeg"))
     return attachments
 
 
@@ -593,7 +593,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     # Download photo and document attachments if present
-    images: list[ImageAttachment] = []
+    images: list[FileAttachment] = []
     if has_photo:
         images = await _download_telegram_photos([message], context.bot)
         logger.info(
@@ -683,7 +683,7 @@ async def _handle_media_group_message(
 
 async def _dispatch_to_agent(
     prompt: str,
-    images: list[ImageAttachment],
+    images: list[FileAttachment],
     chat_id: int,
     config: Config,
     db: aiosqlite.Connection,
@@ -715,7 +715,7 @@ async def _dispatch_to_agent(
 
 async def _start_agent_task(
     prompt: str,
-    images: list[ImageAttachment],
+    images: list[FileAttachment],
     chat_id: int,
     config: Config,
     db: aiosqlite.Connection,

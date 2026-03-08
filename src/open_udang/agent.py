@@ -43,9 +43,6 @@ class FileAttachment:
     filename: str | None = None  # original filename, if available
 
 
-# Keep backward-compatible alias.
-ImageAttachment = FileAttachment
-
 
 # Map MIME types to file extensions.
 _MIME_TO_EXT: dict[str, str] = {
