@@ -125,6 +125,7 @@ async def run_agent(
     """
     can_use_tool = make_can_use_tool(
         request_approval=request_approval,
+        cwd=context.directory,
         handle_user_questions=handle_user_questions,
     )
 

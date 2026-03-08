@@ -13,14 +13,19 @@ contexts:
     description: "Default context"
     model: claude-sonnet-4-6
     allowed_tools:
-      - Read
-      - Glob
-      - Grep
       - LSP
       - AskUserQuestion
+      # Note: Read, Glob, Grep, Write, and Edit are intentionally NOT listed
+      # here. They are handled by OpenUdang's path-scoped auto-approval:
+      # paths within the context directory are auto-approved, paths outside
+      # require manual approval via Telegram. This prevents the agent from
+      # silently reading arbitrary files (e.g. ~/.ssh/*, config secrets).
+      #
+      # If you add them to allowed_tools, they bypass the path check entirely
+      # and the agent can access any file the process can read.
+      #
       # Patterns are supported — these are passed to the Claude CLI as --allowedTools
       # - "Bash(git *)"        # allow all git commands
-      # - "Edit(/safe/dir/*)"  # allow edits only in a specific directory
     # default_for_chats:
     #   - -1001234567890  # Sets initial context for this group chat
     # locked_for_chats:
