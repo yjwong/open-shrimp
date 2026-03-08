@@ -651,8 +651,8 @@ def _format_edit_approval(tool_input: dict[str, Any]) -> str:
     escaped_path = _escape_mdv2(file_path)
     header = f"✏️ *Edit:* `{escaped_path}`"
 
-    old_lines = old_string.splitlines(keepends=True)
-    new_lines = new_string.splitlines(keepends=True)
+    old_lines = old_string.splitlines()
+    new_lines = new_string.splitlines()
     diff_lines = list(difflib.unified_diff(
         old_lines, new_lines, lineterm="",
     ))
