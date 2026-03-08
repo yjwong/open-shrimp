@@ -54,6 +54,10 @@ logger = logging.getLogger(__name__)
 # Per-chat running asyncio task (for cancellation)
 _running_tasks: dict[int, asyncio.Task[Any]] = {}
 
+# Per-chat message queue: messages that arrive while the agent is busy.
+# Each entry is (prompt, images, config, db, context).
+_pending_queues: dict[int, list[tuple[str, list[ImageAttachment], Config, aiosqlite.Connection, ContextTypes.DEFAULT_TYPE]]] = {}
+
 # Pending tool approval futures: callback_data -> asyncio.Future[bool]
 _approval_futures: dict[str, asyncio.Future[bool]] = {}
 
@@ -382,6 +386,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ctx_name, ctx = await _get_context(chat_id, config, db)
 
     await _cancel_running(chat_id)
+    _pending_queues.pop(chat_id, None)
     await delete_session(db, chat_id, ctx_name)
     _edit_approved_sessions.discard((chat_id, ctx_name))
     await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
@@ -400,6 +405,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ctx_name, ctx = await _get_context(chat_id, config, db)
     session_id = await get_session_id(db, chat_id, ctx_name)
     running = chat_id in _running_tasks and not _running_tasks[chat_id].done()
+    queued = len(_pending_queues.get(chat_id, []))
 
     lines = [
         f"*Context:* `{ctx_name}`",
@@ -407,6 +413,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"*Model:* `{ctx.model}`",
         f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
         f"*Running:* {'Yes' if running else 'No'}",
+        f"*Queued:* {queued}",
     ]
     # Escape dots and dashes for MarkdownV2
     text = "\n".join(lines)
@@ -423,9 +430,20 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     chat_id = message.chat_id
-    if chat_id in _running_tasks and not _running_tasks[chat_id].done():
+    had_running = chat_id in _running_tasks and not _running_tasks[chat_id].done()
+    queued_count = len(_pending_queues.pop(chat_id, []))
+
+    if had_running:
         await _cancel_running(chat_id)
-        await message.reply_text("Cancelled\\.", parse_mode="MarkdownV2")
+
+    if had_running or queued_count:
+        parts = []
+        if had_running:
+            parts.append("Cancelled running task")
+        if queued_count:
+            parts.append(f"cleared {queued_count} queued message{'s' if queued_count != 1 else ''}")
+        text = "\\. ".join(parts) + "\\."
+        await message.reply_text(text, parse_mode="MarkdownV2")
     else:
         await message.reply_text("Nothing running\\.", parse_mode="MarkdownV2")
 
@@ -611,9 +629,40 @@ async def _dispatch_to_agent(
     db: aiosqlite.Connection,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Cancel any running task, then launch the agent for the given prompt."""
-    # Cancel any running task for this chat
-    await _cancel_running(chat_id)
+    """Queue a message for the agent.  If no task is running, start one
+    immediately.  Otherwise enqueue the message and notify the user."""
+    # If a task is already running, queue and return
+    if chat_id in _running_tasks and not _running_tasks[chat_id].done():
+        if chat_id not in _pending_queues:
+            _pending_queues[chat_id] = []
+        _pending_queues[chat_id].append((prompt, images, config, db, context))
+        queue_len = len(_pending_queues[chat_id])
+        logger.info(
+            "Queued message for chat %d (queue depth: %d)", chat_id, queue_len
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏳ Agent is busy\\. Message queued \\(position {queue_len}\\)\\.",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            logger.debug("Failed to send queue notification for chat %d", chat_id)
+        return
+
+    await _start_agent_task(prompt, images, chat_id, config, db, context)
+
+
+async def _start_agent_task(
+    prompt: str,
+    images: list[ImageAttachment],
+    chat_id: int,
+    config: Config,
+    db: aiosqlite.Connection,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Start a new agent task for *chat_id*.  Must only be called when no
+    task is currently running for this chat."""
 
     ctx_name, ctx_config = await _get_context(chat_id, config, db)
     session_id = await get_session_id(db, chat_id, ctx_name)
@@ -705,8 +754,30 @@ async def _dispatch_to_agent(
                     )
             _running_tasks.pop(chat_id, None)
 
+            # Drain the queue: start the next pending message, if any.
+            await _drain_queue(chat_id)
+
     task = asyncio.create_task(_run())
     _running_tasks[chat_id] = task
+
+
+async def _drain_queue(chat_id: int) -> None:
+    """Pop the next queued message for *chat_id* and start it."""
+    queue = _pending_queues.get(chat_id)
+    if not queue:
+        _pending_queues.pop(chat_id, None)
+        return
+
+    prompt, images, config, db, context = queue.pop(0)
+    remaining = len(queue)
+    if not queue:
+        _pending_queues.pop(chat_id, None)
+
+    logger.info(
+        "Draining queue for chat %d: starting next message (%d remaining)",
+        chat_id, remaining,
+    )
+    await _start_agent_task(prompt, images, chat_id, config, db, context)
 
 
 # ── AskUserQuestion handling ──
