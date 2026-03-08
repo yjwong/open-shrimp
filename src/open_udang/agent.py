@@ -6,6 +6,7 @@ to consume and bridge to Telegram.
 """
 
 import logging
+import re
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -79,6 +80,16 @@ class AgentResult:
 AgentEvent = Union[AssistantMessage, UserMessage, SystemMessage, ResultMessage, StreamEvent]
 
 
+def _sanitize_filename(name: str) -> str:
+    """Sanitize a filename for use in a temp file prefix.
+
+    Strips path separators, null bytes, and other characters that are
+    unsafe in file names, keeping only alphanumerics, hyphens, underscores,
+    and dots.
+    """
+    return re.sub(r"[^\w.\-]", "_", name)
+
+
 def _save_attachments_to_temp(attachments: list[FileAttachment]) -> list[Path]:
     """Save file attachments to temp files and return their paths.
 
@@ -89,8 +100,9 @@ def _save_attachments_to_temp(attachments: list[FileAttachment]) -> list[Path]:
     paths: list[Path] = []
     for att in attachments:
         ext = _MIME_TO_EXT.get(att.mime_type, ".bin")
-        # Use original filename as part of the temp name if available.
-        prefix = f"openudang_{att.filename}_" if att.filename else "openudang_"
+        # Use sanitized original filename as part of the temp name if available.
+        safe_name = _sanitize_filename(att.filename) if att.filename else ""
+        prefix = f"openudang_{safe_name}_" if safe_name else "openudang_"
         tmp = tempfile.NamedTemporaryFile(
             suffix=ext, prefix=prefix, delete=False
         )
@@ -122,7 +134,7 @@ async def run_agent(
     context: ContextConfig,
     request_approval: ApprovalCallback,
     session_id: str | None = None,
-    images: list[FileAttachment] | None = None,
+    attachments: list[FileAttachment] | None = None,
     handle_user_questions: QuestionCallback | None = None,
     is_edit_auto_approved: Callable[[], bool] | None = None,
     notify_auto_approved_edit: EditNotifyCallback | None = None,
@@ -134,7 +146,7 @@ async def run_agent(
         context: Context config with directory, model, allowed_tools.
         request_approval: Async callback for interactive tool approval.
         session_id: Optional session ID to resume a previous conversation.
-        images: Optional list of image attachments to include in the prompt.
+        attachments: Optional list of file attachments to include in the prompt.
         handle_user_questions: Optional callback for AskUserQuestion tool.
         is_edit_auto_approved: Optional callback returning True if the user
             has opted into "accept all edits" for the current session.
@@ -176,8 +188,8 @@ async def run_agent(
 
     # Save attachments to temp files and build the prompt with file references.
     attachment_paths: list[Path] = []
-    if images:
-        attachment_paths = _save_attachments_to_temp(images)
+    if attachments:
+        attachment_paths = _save_attachments_to_temp(attachments)
         actual_prompt = _build_prompt_with_attachments(prompt, attachment_paths)
     else:
         actual_prompt = prompt
@@ -215,4 +227,4 @@ async def run_agent(
             try:
                 p.unlink(missing_ok=True)
             except Exception:
-                logger.debug("Failed to remove temp image %s", p)
+                logger.debug("Failed to remove temp file %s", p)

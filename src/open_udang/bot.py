@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 _running_tasks: dict[int, asyncio.Task[Any]] = {}
 
 # Per-chat message queue: messages that arrive while the agent is busy.
-# Each entry is (prompt, images, config, db, context).
+# Each entry is (prompt, attachments, config, db, context).
 _pending_queues: dict[int, list[tuple[str, list[FileAttachment], Config, aiosqlite.Connection, ContextTypes.DEFAULT_TYPE]]] = {}
 
 # Pending tool approval futures: callback_data -> asyncio.Future[bool]
@@ -509,6 +509,17 @@ async def _download_telegram_documents(
     return attachments
 
 
+async def _download_all_attachments(
+    messages: list[Any], bot: Bot
+) -> list[FileAttachment]:
+    """Download all photos and documents from messages concurrently."""
+    photos, docs = await asyncio.gather(
+        _download_telegram_photos(messages, bot),
+        _download_telegram_documents(messages, bot),
+    )
+    return photos + docs
+
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming text, photo, and document messages: route to Claude agent.
 
@@ -593,22 +604,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     # Download photo and document attachments if present
-    images: list[FileAttachment] = []
-    if has_photo:
-        images = await _download_telegram_photos([message], context.bot)
+    attachments: list[FileAttachment] = []
+    if has_photo or has_document:
+        attachments = await _download_all_attachments([message], context.bot)
         logger.info(
-            "Downloaded %d photo(s) for chat %d (%d bytes)",
-            len(images), chat_id, sum(len(img.data) for img in images),
-        )
-    if has_document:
-        doc_attachments = await _download_telegram_documents([message], context.bot)
-        images.extend(doc_attachments)
-        logger.info(
-            "Downloaded %d document(s) for chat %d (%d bytes)",
-            len(doc_attachments), chat_id, sum(len(att.data) for att in doc_attachments),
+            "Downloaded %d attachment(s) for chat %d (%d bytes)",
+            len(attachments), chat_id, sum(len(att.data) for att in attachments),
         )
 
-    await _dispatch_to_agent(prompt, images, chat_id, config, db, context)
+    await _dispatch_to_agent(prompt, attachments, chat_id, config, db, context)
 
 
 async def _handle_media_group_message(
@@ -668,22 +672,20 @@ async def _handle_media_group_message(
             else:
                 prompt = "What's in these files?"
 
-        images = await _download_telegram_photos(messages, context.bot)
-        doc_attachments = await _download_telegram_documents(messages, context.bot)
-        images.extend(doc_attachments)
+        attachments = await _download_all_attachments(messages, context.bot)
         logger.info(
             "Media group %s complete: %d attachment(s) for chat %d (%d bytes)",
-            group_id, len(images), chat_id, sum(len(img.data) for img in images),
+            group_id, len(attachments), chat_id, sum(len(att.data) for att in attachments),
         )
 
-        await _dispatch_to_agent(prompt, images, chat_id, config, db, context)
+        await _dispatch_to_agent(prompt, attachments, chat_id, config, db, context)
 
     _media_group_tasks[group_id] = asyncio.create_task(_process_group())
 
 
 async def _dispatch_to_agent(
     prompt: str,
-    images: list[FileAttachment],
+    attachments: list[FileAttachment],
     chat_id: int,
     config: Config,
     db: aiosqlite.Connection,
@@ -695,7 +697,7 @@ async def _dispatch_to_agent(
     if chat_id in _running_tasks and not _running_tasks[chat_id].done():
         if chat_id not in _pending_queues:
             _pending_queues[chat_id] = []
-        _pending_queues[chat_id].append((prompt, images, config, db, context))
+        _pending_queues[chat_id].append((prompt, attachments, config, db, context))
         queue_len = len(_pending_queues[chat_id])
         logger.info(
             "Queued message for chat %d (queue depth: %d)", chat_id, queue_len
@@ -710,12 +712,12 @@ async def _dispatch_to_agent(
             logger.debug("Failed to send queue notification for chat %d", chat_id)
         return
 
-    await _start_agent_task(prompt, images, chat_id, config, db, context)
+    await _start_agent_task(prompt, attachments, chat_id, config, db, context)
 
 
 async def _start_agent_task(
     prompt: str,
-    images: list[FileAttachment],
+    attachments: list[FileAttachment],
     chat_id: int,
     config: Config,
     db: aiosqlite.Connection,
@@ -775,7 +777,7 @@ async def _start_agent_task(
                 context=ctx_config,
                 request_approval=request_approval,
                 session_id=session_id,
-                images=images if images else None,
+                attachments=attachments if attachments else None,
                 handle_user_questions=handle_questions,
                 is_edit_auto_approved=lambda: (chat_id, ctx_name) in _edit_approved_sessions,
                 notify_auto_approved_edit=notify_edit,
@@ -842,7 +844,7 @@ async def _drain_queue(chat_id: int) -> None:
         _pending_queues.pop(chat_id, None)
         return
 
-    prompt, images, config, db, context = queue.pop(0)
+    prompt, attachments, config, db, context = queue.pop(0)
     remaining = len(queue)
     if not queue:
         _pending_queues.pop(chat_id, None)
@@ -851,7 +853,7 @@ async def _drain_queue(chat_id: int) -> None:
         "Draining queue for chat %d: starting next message (%d remaining)",
         chat_id, remaining,
     )
-    await _start_agent_task(prompt, images, chat_id, config, db, context)
+    await _start_agent_task(prompt, attachments, chat_id, config, db, context)
 
 
 # ── AskUserQuestion handling ──
