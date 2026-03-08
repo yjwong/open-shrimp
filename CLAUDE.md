@@ -98,7 +98,7 @@ Key fields:
 | Command | Handler | Description |
 |---------|---------|-------------|
 | `/context` | `context_handler` | List or switch contexts |
-| `/new` | `new_handler` | Fresh session in current context |
+| `/clear` | `clear_handler` | Fresh session in current context |
 | `/status` | `status_handler` | Current context, session, running state |
 | `/cancel` | `cancel_handler` | Abort running Claude invocation |
 

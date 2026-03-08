@@ -55,6 +55,16 @@ _running_tasks: dict[int, asyncio.Task[Any]] = {}
 # Pending tool approval futures: callback_data -> asyncio.Future[bool]
 _approval_futures: dict[str, asyncio.Future[bool]] = {}
 
+# Media group batching: media_group_id -> list of messages received so far.
+# When Telegram sends an album (multiple photos), each photo arrives as a
+# separate Update sharing the same media_group_id.  We collect them here and
+# use a short delay to wait for the full batch before processing.
+_media_group_messages: dict[str, list[Any]] = {}
+_media_group_tasks: dict[str, asyncio.Task[Any]] = {}
+
+# How long to wait for additional media group messages (seconds).
+_MEDIA_GROUP_WAIT: float = 0.5
+
 
 def _escape_mdv2(text: str) -> str:
     """Escape MarkdownV2 special characters in plain text."""
@@ -325,8 +335,8 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _update_pinned_status(context.bot, chat_id, target, ctx, db)
 
 
-async def new_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /new command: start fresh session."""
+async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /clear command: start fresh session."""
     config: Config = context.bot_data["config"]
     db: aiosqlite.Connection = context.bot_data["db"]
     message = update.effective_message
@@ -388,41 +398,52 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _download_telegram_photos(
-    message: Any, bot: Bot
+    messages: list[Any], bot: Bot
 ) -> list[ImageAttachment]:
-    """Download photos from a Telegram message and return as ImageAttachments."""
-    if not message.photo:
-        return []
+    """Download photos from one or more Telegram messages and return as ImageAttachments.
 
-    # message.photo is a list of PhotoSize objects sorted by size.
-    # Take the largest one (last element) for best quality.
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    photo_bytes = bytes(await file.download_as_bytearray())
-
-    return [ImageAttachment(data=photo_bytes, mime_type="image/jpeg")]
+    Each message may contain one photo (represented as a list of PhotoSize
+    objects at different resolutions).  We take the largest resolution from
+    each message.
+    """
+    attachments: list[ImageAttachment] = []
+    for message in messages:
+        if not message.photo:
+            continue
+        # message.photo is a list of PhotoSize objects sorted by size.
+        # Take the largest one (last element) for best quality.
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        photo_bytes = bytes(await file.download_as_bytearray())
+        attachments.append(ImageAttachment(data=photo_bytes, mime_type="image/jpeg"))
+    return attachments
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming text and photo messages: route to Claude agent."""
+    """Handle incoming text and photo messages: route to Claude agent.
+
+    For media groups (albums with multiple photos), messages are batched
+    using a short delay so all photos are collected before processing.
+    """
     config: Config = context.bot_data["config"]
     db: aiosqlite.Connection = context.bot_data["db"]
     message = update.effective_message
     if not message:
         return
 
-    # Must have text, caption, or a photo
+    # Must have text, caption, photo, or location
     has_text = bool(message.text)
     has_photo = bool(message.photo)
     has_caption = bool(message.caption)
+    has_location = bool(message.location)
 
     logger.info(
-        "message_handler: chat=%s has_text=%s has_photo=%s has_caption=%s",
-        message.chat_id, has_text, has_photo, has_caption,
+        "message_handler: chat=%s has_text=%s has_photo=%s has_caption=%s has_location=%s media_group_id=%s",
+        message.chat_id, has_text, has_photo, has_caption, has_location, message.media_group_id,
     )
 
-    if not has_text and not has_photo:
-        logger.info("message_handler: no text or photo, ignoring")
+    if not has_text and not has_photo and not has_location:
+        logger.info("message_handler: no text, photo, or location, ignoring")
         return
 
     if not _is_authorized(update.effective_user and update.effective_user.id, config):
@@ -434,11 +455,28 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info("message_handler: bot not addressed, ignoring")
         return
 
+    # If this message is part of a media group (album), batch it.
+    if message.media_group_id and has_photo:
+        await _handle_media_group_message(update, context, message)
+        return
+
     chat_id = message.chat_id
 
     # Extract text from either message.text or message.caption (for photos)
     raw_text = message.text or message.caption or ""
     prompt = _strip_mention(raw_text, bot_username)
+
+    # Build location context string if a location was shared
+    if has_location:
+        loc = message.location
+        location_text = f"User shared location: {loc.latitude}, {loc.longitude}"
+        if loc.horizontal_accuracy:
+            location_text += f" (accuracy: {loc.horizontal_accuracy}m)"
+        if loc.heading is not None:
+            location_text += f" (heading: {loc.heading}°)"
+        # Prepend location to any existing prompt text
+        prompt = f"{location_text}\n\n{prompt}" if prompt else location_text
+        logger.info("Location shared in chat %d: %s, %s", chat_id, loc.latitude, loc.longitude)
 
     # For photos without a caption, use a default prompt
     if not prompt and has_photo:
@@ -449,12 +487,84 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Download photo attachments if present
     images: list[ImageAttachment] = []
     if has_photo:
-        images = await _download_telegram_photos(message, context.bot)
+        images = await _download_telegram_photos([message], context.bot)
         logger.info(
             "Downloaded %d photo(s) for chat %d (%d bytes)",
             len(images), chat_id, sum(len(img.data) for img in images),
         )
 
+    await _dispatch_to_agent(prompt, images, chat_id, config, db, context)
+
+
+async def _handle_media_group_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, message: Any
+) -> None:
+    """Collect media group messages and dispatch once the batch is complete.
+
+    Telegram sends each photo in an album as a separate Update with the same
+    media_group_id.  We accumulate them and use a short timer to detect when
+    the batch is complete (no new messages for _MEDIA_GROUP_WAIT seconds).
+    """
+    group_id = message.media_group_id
+    if group_id not in _media_group_messages:
+        _media_group_messages[group_id] = []
+    _media_group_messages[group_id].append(message)
+
+    logger.info(
+        "Media group %s: collected %d message(s) so far",
+        group_id, len(_media_group_messages[group_id]),
+    )
+
+    # Cancel the previous timer for this group (we got another message).
+    existing_task = _media_group_tasks.pop(group_id, None)
+    if existing_task and not existing_task.done():
+        existing_task.cancel()
+
+    # Start a new timer.  When it fires, the batch is considered complete.
+    async def _process_group() -> None:
+        await asyncio.sleep(_MEDIA_GROUP_WAIT)
+        messages = _media_group_messages.pop(group_id, [])
+        _media_group_tasks.pop(group_id, None)
+        if not messages:
+            return
+
+        config: Config = context.bot_data["config"]
+        db: aiosqlite.Connection = context.bot_data["db"]
+        chat_id = messages[0].chat_id
+        bot_username = (await context.bot.get_me()).username or ""
+
+        # Extract caption from the first message that has one.
+        raw_text = ""
+        for msg in messages:
+            if msg.caption:
+                raw_text = msg.caption
+                break
+
+        prompt = _strip_mention(raw_text, bot_username) if raw_text else ""
+        if not prompt:
+            count = len(messages)
+            prompt = f"What's in {'this image' if count == 1 else 'these images'}?"
+
+        images = await _download_telegram_photos(messages, context.bot)
+        logger.info(
+            "Media group %s complete: %d photo(s) for chat %d (%d bytes)",
+            group_id, len(images), chat_id, sum(len(img.data) for img in images),
+        )
+
+        await _dispatch_to_agent(prompt, images, chat_id, config, db, context)
+
+    _media_group_tasks[group_id] = asyncio.create_task(_process_group())
+
+
+async def _dispatch_to_agent(
+    prompt: str,
+    images: list[ImageAttachment],
+    chat_id: int,
+    config: Config,
+    db: aiosqlite.Connection,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Cancel any running task, then launch the agent for the given prompt."""
     # Cancel any running task for this chat
     await _cancel_running(chat_id)
 
@@ -678,16 +788,16 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
 
     # Command handlers
     app.add_handler(CommandHandler("context", context_handler))
-    app.add_handler(CommandHandler("new", new_handler))
+    app.add_handler(CommandHandler("clear", clear_handler))
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("cancel", cancel_handler))
 
     # Callback query handler for tool approval buttons
     app.add_handler(CallbackQueryHandler(callback_query_handler))
 
-    # Message handler (text and photos, non-command)
+    # Message handler (text, photos, and locations, non-command)
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, message_handler
+        (filters.TEXT | filters.PHOTO | filters.LOCATION) & ~filters.COMMAND, message_handler
     ))
 
     return app
@@ -700,7 +810,7 @@ async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
     await app.initialize()
     await app.bot.set_my_commands([
         BotCommand("context", "List or switch contexts"),
-        BotCommand("new", "Start a fresh session"),
+        BotCommand("clear", "Start a fresh session"),
         BotCommand("status", "Show current context, session, and state"),
         BotCommand("cancel", "Abort running Claude invocation"),
     ])

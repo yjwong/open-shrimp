@@ -64,6 +64,9 @@ class _DraftState:
     dirty: bool = False
     # Whether drafts are disabled (e.g. unsupported chat type)
     drafts_disabled: bool = False
+    # Whether the last assistant turn has completed (AssistantMessage seen).
+    # Used to insert a newline separator before text from the next turn.
+    turn_complete: bool = False
 
 
 def _format_tool_prefix(notifications: list[ToolNotification]) -> str:
@@ -197,6 +200,7 @@ async def finalize_and_reset(bot: Bot, state: _DraftState) -> None:
     state.tool_notifications = []
     state.draft_id = random.randint(1, 2**31 - 1)
     state.dirty = False
+    state.turn_complete = False
 
 
 async def stream_response(
@@ -242,6 +246,12 @@ async def stream_response(
 
         async for event in events:
             if isinstance(event, AssistantMessage):
+                # Mark this turn's text as complete. When the next
+                # turn's StreamEvent deltas arrive, we'll insert a
+                # newline separator to prevent text concatenation.
+                if state.raw_text:
+                    state.turn_complete = True
+
                 for block in event.content:
                     if isinstance(block, TextBlock):
                         # When include_partial_messages is enabled,
@@ -275,6 +285,13 @@ async def stream_response(
                     if delta.get("type") == "text_delta":
                         text = delta.get("text", "")
                         if text:
+                            # Insert a newline separator if this is
+                            # the first text from a new assistant turn
+                            # to prevent concatenation with the
+                            # previous turn's text.
+                            if state.turn_complete:
+                                state.raw_text += "\n\n"
+                                state.turn_complete = False
                             state.raw_text += text
                             state.dirty = True
 
@@ -344,6 +361,7 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
     state.tool_notifications = []
     state.draft_id = random.randint(1, 2**31 - 1)
     state.dirty = False
+    state.turn_complete = False
 
 
 def add_tool_notification(
