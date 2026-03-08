@@ -187,6 +187,11 @@ def _extract_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
         subagent = tool_input.get("subagent_type", "")
         label = f"({subagent}) " if subagent else ""
         return f"{label}{desc}" if desc else subagent
+    if tool_name == "AskUserQuestion":
+        questions = tool_input.get("questions", [])
+        if questions:
+            return questions[0].get("header", questions[0].get("question", ""))[:60]
+        return "asking user"
     # Generic: show first key's value
     for key, val in tool_input.items():
         if isinstance(val, str):

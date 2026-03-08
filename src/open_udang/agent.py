@@ -24,7 +24,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import StreamEvent
 
 from open_udang.config import ContextConfig
-from open_udang.hooks import ApprovalCallback, make_tool_approval_hook
+from open_udang.hooks import ApprovalCallback, QuestionCallback, make_tool_approval_hook
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ async def run_agent(
     request_approval: ApprovalCallback,
     session_id: str | None = None,
     images: list[ImageAttachment] | None = None,
+    handle_user_questions: QuestionCallback | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run the Claude agent and yield streaming events.
 
@@ -109,6 +110,7 @@ async def run_agent(
         request_approval: Async callback for interactive tool approval.
         session_id: Optional session ID to resume a previous conversation.
         images: Optional list of image attachments to include in the prompt.
+        handle_user_questions: Optional callback for AskUserQuestion tool.
 
     Yields:
         AgentEvent messages (AssistantMessage, SystemMessage, ResultMessage)
@@ -125,6 +127,7 @@ async def run_agent(
     tool_hook = make_tool_approval_hook(
         auto_approve_tools=context.auto_approve_tools,
         request_approval=request_approval,
+        handle_user_questions=handle_user_questions,
     )
 
     def _log_stderr(line: str) -> None:

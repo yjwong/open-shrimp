@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiosqlite
@@ -67,6 +69,27 @@ _media_group_tasks: dict[str, asyncio.Task[Any]] = {}
 
 # How long to wait for additional media group messages (seconds).
 _MEDIA_GROUP_WAIT: float = 0.5
+
+
+@dataclass
+class _QuestionState:
+    """State for an active AskUserQuestion inline keyboard."""
+
+    question_id: str
+    chat_id: int
+    options: list[dict[str, Any]]
+    multi_select: bool
+    future: asyncio.Future[str]
+    selected: set[int] = field(default_factory=set)
+    other_texts: list[str] = field(default_factory=list)
+    message_id: int | None = None
+
+
+# Pending question states: question_id -> _QuestionState
+_question_states: dict[str, _QuestionState] = {}
+
+# Pending text input futures for "Other" answers: chat_id -> asyncio.Future[str]
+_pending_text_inputs: dict[int, asyncio.Future[str]] = {}
 
 
 def _escape_mdv2(text: str) -> str:
@@ -453,6 +476,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info("message_handler: unauthorized user %s", update.effective_user)
         return
 
+    # Check if this is a text response to an "Other" question prompt.
+    # If there's a pending text input future for this chat, resolve it
+    # and don't dispatch to the agent.
+    chat_id_for_input = message.chat_id
+    if has_text and chat_id_for_input in _pending_text_inputs:
+        text_future = _pending_text_inputs.get(chat_id_for_input)
+        if text_future and not text_future.done():
+            text_future.set_result(message.text or "")
+            logger.info("Resolved pending text input for chat %d", chat_id_for_input)
+            return
+
     bot_username = (await context.bot.get_me()).username or ""
     if not _is_bot_addressed(update, bot_username):
         logger.info("message_handler: bot not addressed, ignoring")
@@ -598,12 +632,20 @@ async def _dispatch_to_agent(
                     context.bot, chat_id, tool_name, tool_input, tool_use_id
                 )
 
+            async def handle_questions(
+                questions: list[dict[str, Any]],
+            ) -> dict[str, str]:
+                return await _handle_ask_user_questions(
+                    context.bot, chat_id, questions, draft_state
+                )
+
             events = run_agent(
                 prompt=prompt,
                 context=ctx_config,
                 request_approval=request_approval,
                 session_id=session_id,
                 images=images if images else None,
+                handle_user_questions=handle_questions,
             )
 
             result = await stream_response(
@@ -654,6 +696,260 @@ async def _dispatch_to_agent(
 
     task = asyncio.create_task(_run())
     _running_tasks[chat_id] = task
+
+
+# ── AskUserQuestion handling ──
+
+
+def _build_question_keyboard(state: _QuestionState) -> InlineKeyboardMarkup:
+    """Build inline keyboard for a question's options."""
+    qid = state.question_id
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    for i, opt in enumerate(state.options):
+        label = opt.get("label", f"Option {i + 1}")
+        if state.multi_select:
+            prefix = "✓ " if i in state.selected else ""
+            cb_data = f"q_toggle:{qid}:{i}"
+        else:
+            prefix = ""
+            cb_data = f"q_opt:{qid}:{i}"
+        buttons.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=cb_data)])
+
+    # Show any "Other" texts already entered (multi-select)
+    for j, txt in enumerate(state.other_texts):
+        display = txt[:30] + ("…" if len(txt) > 30 else "")
+        buttons.append([InlineKeyboardButton(f"✓ {display}", callback_data=f"q_noop:{qid}")])
+
+    # "Other" button for custom text input
+    buttons.append([InlineKeyboardButton("Other…", callback_data=f"q_other:{qid}")])
+
+    if state.multi_select:
+        count = len(state.selected) + len(state.other_texts)
+        done_label = f"Done ({count} selected)" if count else "Done"
+        buttons.append([InlineKeyboardButton(done_label, callback_data=f"q_done:{qid}")])
+
+    return InlineKeyboardMarkup(buttons)
+
+
+def _format_question_text(question: dict[str, Any]) -> str:
+    """Format a question with its header and option descriptions."""
+    question_text = question.get("question", "")
+    header = question.get("header", "")
+    options = question.get("options", [])
+
+    parts: list[str] = []
+    if header:
+        parts.append(f"❓ *{_escape_mdv2(header)}*")
+    parts.append(_escape_mdv2(question_text))
+
+    for opt in options:
+        label = opt.get("label", "")
+        desc = opt.get("description", "")
+        if desc:
+            parts.append(f"• *{_escape_mdv2(label)}* — {_escape_mdv2(desc)}")
+
+    return "\n".join(parts)
+
+
+async def _send_question_keyboard(
+    bot: Bot,
+    chat_id: int,
+    question: dict[str, Any],
+) -> str:
+    """Present a question via inline keyboard and wait for the user's answer.
+
+    Returns the selected option label (or custom "Other" text).
+    """
+    options = question.get("options", [])
+    multi_select = question.get("multiSelect", False)
+    question_id = uuid.uuid4().hex[:8]
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str] = loop.create_future()
+
+    state = _QuestionState(
+        question_id=question_id,
+        chat_id=chat_id,
+        options=options,
+        multi_select=multi_select,
+        future=future,
+    )
+    _question_states[question_id] = state
+
+    keyboard = _build_question_keyboard(state)
+    text = _format_question_text(question)
+
+    msg = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard,
+    )
+    state.message_id = msg.message_id
+
+    try:
+        return await future
+    finally:
+        _question_states.pop(question_id, None)
+
+
+async def _handle_ask_user_questions(
+    bot: Bot,
+    chat_id: int,
+    questions: list[dict[str, Any]],
+    draft_state: _DraftState,
+) -> dict[str, str]:
+    """Present AskUserQuestion questions via Telegram and collect answers.
+
+    Called from the PreToolUse hook when AskUserQuestion is intercepted.
+    Finalizes any in-progress draft before presenting questions.
+    """
+    await finalize_and_reset(bot, draft_state)
+
+    answers: dict[str, str] = {}
+    for q in questions:
+        question_text = q.get("question", "")
+        answer = await _send_question_keyboard(bot, chat_id, q)
+        answers[question_text] = answer
+
+    return answers
+
+
+async def _handle_question_callback(
+    query: Any, data: str, config: Config
+) -> bool:
+    """Handle question-related callback queries. Returns True if handled."""
+    if not data.startswith("q_"):
+        return False
+
+    if not _is_authorized(query.from_user and query.from_user.id, config):
+        await query.answer("Unauthorized.")
+        return True
+
+    # Parse callback data
+    parts = data.split(":", 2)
+    action = parts[0]  # q_opt, q_toggle, q_done, q_other, q_noop
+
+    if action == "q_noop":
+        await query.answer()
+        return True
+
+    if len(parts) < 2:
+        await query.answer("Invalid callback data.")
+        return True
+
+    question_id = parts[1]
+    state = _question_states.get(question_id)
+    if not state or state.future.done():
+        await query.answer("This question has expired.")
+        return True
+
+    if action == "q_opt":
+        # Single-select: resolve immediately with the selected option label
+        option_idx = int(parts[2]) if len(parts) > 2 else 0
+        if 0 <= option_idx < len(state.options):
+            label = state.options[option_idx].get("label", f"Option {option_idx + 1}")
+            state.future.set_result(label)
+            await query.answer(f"Selected: {label}")
+
+            # Update message to show selection, remove keyboard
+            if query.message:
+                try:
+                    original_md = query.message.text_markdown_v2 or query.message.text or ""
+                    await query.message.edit_text(
+                        text=original_md + f"\n\n✅ *Selected:* {_escape_mdv2(label)}",
+                        parse_mode="MarkdownV2",
+                        reply_markup=None,
+                    )
+                except Exception:
+                    logger.exception("Failed to update question message")
+        return True
+
+    if action == "q_toggle":
+        # Multi-select: toggle option
+        option_idx = int(parts[2]) if len(parts) > 2 else 0
+        if 0 <= option_idx < len(state.options):
+            if option_idx in state.selected:
+                state.selected.discard(option_idx)
+            else:
+                state.selected.add(option_idx)
+
+            # Update keyboard to reflect toggled state
+            keyboard = _build_question_keyboard(state)
+            await query.answer()
+            if query.message:
+                try:
+                    original_md = query.message.text_markdown_v2 or query.message.text or ""
+                    await query.message.edit_reply_markup(reply_markup=keyboard)
+                except Exception:
+                    logger.exception("Failed to update question keyboard")
+        return True
+
+    if action == "q_done":
+        # Multi-select: finalize with all selected options
+        labels: list[str] = []
+        for idx in sorted(state.selected):
+            if 0 <= idx < len(state.options):
+                labels.append(state.options[idx].get("label", f"Option {idx + 1}"))
+        labels.extend(state.other_texts)
+
+        result = ", ".join(labels) if labels else "None selected"
+        state.future.set_result(result)
+        await query.answer(f"Done: {result[:50]}")
+
+        # Update message to show selections, remove keyboard
+        if query.message:
+            try:
+                original_md = query.message.text_markdown_v2 or query.message.text or ""
+                await query.message.edit_text(
+                    text=original_md + f"\n\n✅ *Selected:* {_escape_mdv2(result)}",
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.exception("Failed to update question message")
+        return True
+
+    if action == "q_other":
+        # "Other" — ask user to type a custom answer
+        await query.answer("Type your answer below:")
+
+        chat_id = state.chat_id
+        loop = asyncio.get_running_loop()
+        text_future: asyncio.Future[str] = loop.create_future()
+        _pending_text_inputs[chat_id] = text_future
+
+        try:
+            custom_text = await text_future
+        finally:
+            _pending_text_inputs.pop(chat_id, None)
+
+        if state.multi_select:
+            # Add to other_texts and update keyboard
+            state.other_texts.append(custom_text)
+            keyboard = _build_question_keyboard(state)
+            if query.message:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=keyboard)
+                except Exception:
+                    logger.exception("Failed to update question keyboard after Other")
+        else:
+            # Single-select: resolve with custom text
+            state.future.set_result(custom_text)
+            if query.message:
+                try:
+                    original_md = query.message.text_markdown_v2 or query.message.text or ""
+                    await query.message.edit_text(
+                        text=original_md + f"\n\n✅ *Answer:* {_escape_mdv2(custom_text)}",
+                        parse_mode="MarkdownV2",
+                        reply_markup=None,
+                    )
+                except Exception:
+                    logger.exception("Failed to update question message after Other")
+        return True
+
+    return False
 
 
 # ── Tool approval ──
@@ -829,17 +1125,21 @@ async def _send_approval_keyboard(
 
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline keyboard button presses for tool approval."""
+    """Handle inline keyboard button presses for tool approval and questions."""
     query = update.callback_query
     if not query or not query.data:
         return
 
     config: Config = context.bot_data["config"]
+    data = query.data
+
+    # Handle AskUserQuestion callbacks first
+    if await _handle_question_callback(query, data, config):
+        return
+
     if not _is_authorized(query.from_user and query.from_user.id, config):
         await query.answer("Unauthorized.")
         return
-
-    data = query.data
 
     # Handle "Show prompt" expansion for Agent tool
     if data.startswith("show_prompt:"):
