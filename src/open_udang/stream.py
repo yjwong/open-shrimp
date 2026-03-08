@@ -294,7 +294,7 @@ def _format_bash_output(
 
     output_text = _extract_bash_output_text(content).strip()
     if not output_text:
-        return f"{header_block}\n\n_No output\\._"
+        return f"{header_block}\n_No output\\._"
 
     lines = output_text.splitlines()
     truncated = False
@@ -310,7 +310,7 @@ def _format_bash_output(
     prefix = "…(truncated)\n" if truncated else ""
     output_block = f"Output:\n```\n{prefix}{result}\n```"
 
-    return f"{header_block}\n\n{output_block}"
+    return f"{header_block}\n{output_block}"
 
 
 async def _send_bash_button(
@@ -339,7 +339,7 @@ async def _send_bash_button(
         try:
             msg = await bot.send_message(
                 chat_id=state.chat_id,
-                text=header_text + "\n\n_No output\\._",
+                text=header_text + "\n_No output\\._",
                 parse_mode="MarkdownV2",
             )
             state.sent_message_ids.append(msg.message_id)
