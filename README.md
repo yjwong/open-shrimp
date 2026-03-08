@@ -4,7 +4,7 @@ Telegram bot for remote Claude access via the Agent SDK. The prawn to [OpenClaw]
 
 *Udang* is Malay for "prawn" - small, personal, gets the job done.
 
-## Features (planned)
+## Features
 
 - Stream Claude responses to Telegram via `sendMessageDraft` (Bot API 9.5)
 - Interactive tool approval via inline keyboard buttons
@@ -33,7 +33,3 @@ cp config.example.yaml ~/.config/openudang/config.yaml
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... uv run openudang
 ```
-
-## PRD
-
-See [docs/prd.md](docs/prd.md) for the full product requirements document.
