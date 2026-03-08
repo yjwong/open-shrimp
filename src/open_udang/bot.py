@@ -66,6 +66,11 @@ _approval_futures: dict[str, asyncio.Future[bool]] = {}
 # Pending Agent tool inputs for "Show prompt" expansion: tool_use_id -> tool_input
 _pending_agent_inputs: dict[str, dict[str, Any]] = {}
 
+# Tool name for each pending approval: tool_use_id -> tool_name.
+# Used to collapse verbose approval messages (e.g. Bash) to a compact
+# one-liner after the user approves/denies.
+_approval_tool_names: dict[str, str] = {}
+
 # Sessions where the user has opted into "accept all edits" for mutating
 # file-access tools (Edit, Write) within the context working directory.
 # Keyed by (chat_id, context_name).  Cleared on /clear or context switch.
@@ -1272,6 +1277,7 @@ async def _send_approval_keyboard(
 
     approve_data = f"approve:{tool_use_id}"
     deny_data = f"deny:{tool_use_id}"
+    _approval_tool_names[tool_use_id] = tool_name
 
     # Build keyboard buttons — some tools get extra buttons
     buttons = []
@@ -1311,6 +1317,7 @@ async def _send_approval_keyboard(
         _approval_futures.pop(deny_data, None)
         _approval_futures.pop(f"accept_all_edits:{tool_use_id}", None)
         _pending_agent_inputs.pop(tool_use_id, None)
+        _approval_tool_names.pop(tool_use_id, None)
 
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1439,19 +1446,34 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     approved = data.startswith("approve:")
     future.set_result(approved)
 
+    # Extract tool_use_id from callback data (format: "approve:<id>" or "deny:<id>")
+    tool_use_id = data.split(":", 1)[1] if ":" in data else ""
+    tool_name = _approval_tool_names.get(tool_use_id, "")
+
     action = "Approved" if approved else "Denied"
     await query.answer(f"{action}.")
 
-    # Update the message to show the decision (remove buttons, append status)
+    # Update the message to show the decision (remove buttons, append status).
+    # For Bash, collapse to a compact one-liner since the "Show output" button
+    # message that follows will show the command again — avoids duplication.
     if query.message:
         try:
-            original_md = query.message.text_markdown_v2 or query.message.text or ""
-            status = f"\n\n{'✅' if approved else '❌'} *{action}\\.*"
-            await query.message.edit_text(
-                text=original_md + status,
-                parse_mode="MarkdownV2",
-                reply_markup=None,
-            )
+            if tool_name == "Bash":
+                icon = '✅' if approved else '❌'
+                compact = f"{icon} *{_escape_mdv2(tool_name)}* — {action}\\."
+                await query.message.edit_text(
+                    text=compact,
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            else:
+                original_md = query.message.text_markdown_v2 or query.message.text or ""
+                status = f"\n\n{'✅' if approved else '❌'} *{action}\\.*"
+                await query.message.edit_text(
+                    text=original_md + status,
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
         except Exception:
             # Fallback: just remove the keyboard without modifying text
             try:
