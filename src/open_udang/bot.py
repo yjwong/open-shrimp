@@ -1243,7 +1243,7 @@ async def _send_auto_approved_diff(
     else:
         text = _format_generic_approval(tool_name, tool_input)
 
-    text += f"\n\n✅ _Auto\\-approved_"
+    text += f"\n✅ _Auto\\-approved_"
 
     try:
         await bot.send_message(
