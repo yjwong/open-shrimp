@@ -44,6 +44,7 @@ from open_udang.db import (
 from open_udang.stream import (
     StreamResult,
     _DraftState,
+    _relative_path,
     add_tool_notification,
     finalize_and_reset,
     stream_response,
@@ -700,7 +701,8 @@ async def _start_agent_task(
                 # appears after the accumulated text, not out of order.
                 await finalize_and_reset(context.bot, draft_state)
                 return await _send_approval_keyboard(
-                    context.bot, chat_id, tool_name, tool_input, tool_use_id
+                    context.bot, chat_id, tool_name, tool_input, tool_use_id,
+                    cwd=ctx_config.directory,
                 )
 
             async def handle_questions(
@@ -726,6 +728,7 @@ async def _start_agent_task(
                 events=events,
                 draft_state=draft_state,
                 allowed_tools=ctx_config.allowed_tools,
+                cwd=ctx_config.directory,
             )
 
             if result.session_id:
@@ -1083,9 +1086,11 @@ async def _handle_question_callback(
 # ── Tool approval ──
 
 
-def _format_edit_approval(tool_input: dict[str, Any]) -> str:
+def _format_edit_approval(
+    tool_input: dict[str, Any], cwd: str | None = None,
+) -> str:
     """Format an Edit tool call as a unified diff for the approval prompt."""
-    file_path = tool_input.get("file_path", "unknown")
+    file_path = _relative_path(tool_input.get("file_path", "unknown"), cwd)
     old_string = tool_input.get("old_string", "")
     new_string = tool_input.get("new_string", "")
 
@@ -1135,9 +1140,11 @@ def _format_bash_approval(tool_input: dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
-def _format_write_approval(tool_input: dict[str, Any]) -> str:
+def _format_write_approval(
+    tool_input: dict[str, Any], cwd: str | None = None,
+) -> str:
     """Format a Write tool call for the approval prompt."""
-    file_path = tool_input.get("file_path", "unknown")
+    file_path = _relative_path(tool_input.get("file_path", "unknown"), cwd)
     content = tool_input.get("content", "")
 
     escaped_path = _escape_mdv2(file_path)
@@ -1204,14 +1211,15 @@ async def _send_approval_keyboard(
     tool_name: str,
     tool_input: dict[str, Any],
     tool_use_id: str,
+    cwd: str | None = None,
 ) -> bool:
     """Send an inline keyboard for tool approval and wait for response."""
     if tool_name == "Edit":
-        text = _format_edit_approval(tool_input)
+        text = _format_edit_approval(tool_input, cwd=cwd)
     elif tool_name == "Bash":
         text = _format_bash_approval(tool_input)
     elif tool_name == "Write":
-        text = _format_write_approval(tool_input)
+        text = _format_write_approval(tool_input, cwd=cwd)
     elif tool_name == "Agent":
         text = _format_agent_approval(tool_input, expanded=False)
     else:

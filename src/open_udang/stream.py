@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -165,21 +166,45 @@ async def _finalize_message(bot: Bot, state: _DraftState) -> list[int]:
     return message_ids
 
 
-def _extract_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
+def _relative_path(path: str, cwd: str | None) -> str:
+    """Return *path* relative to *cwd* when it lives under that directory.
+
+    If *cwd* is ``None`` or *path* is outside *cwd*, the original absolute
+    path is returned unchanged.
+    """
+    if not cwd or not path:
+        return path
+    try:
+        rel = os.path.relpath(path, cwd)
+    except ValueError:
+        # On Windows, relpath raises ValueError for paths on different drives.
+        return path
+    # Only use the relative form when the path is actually inside cwd
+    # (i.e. doesn't start with "..").
+    if rel.startswith(".."):
+        return path
+    return rel
+
+
+def _extract_tool_summary(
+    tool_name: str, tool_input: dict[str, Any], cwd: str | None = None,
+) -> str:
     """Extract a brief summary from tool input for notifications."""
     if tool_name == "Read":
-        return tool_input.get("file_path", "")
+        return _relative_path(tool_input.get("file_path", ""), cwd)
     if tool_name == "Glob":
         return tool_input.get("pattern", "")
     if tool_name == "Grep":
         pattern = tool_input.get("pattern", "")
         path = tool_input.get("path", "")
-        return f"{pattern} in {path}" if path else pattern
+        if path:
+            return f"{pattern} in {_relative_path(path, cwd)}"
+        return pattern
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
         return cmd[:80] + ("..." if len(cmd) > 80 else "")
     if tool_name == "Write" or tool_name == "Edit":
-        return tool_input.get("file_path", "")
+        return _relative_path(tool_input.get("file_path", ""), cwd)
     if tool_name == "LSP":
         return tool_input.get("command", "")
     if tool_name == "Agent":
@@ -222,6 +247,7 @@ async def stream_response(
     events: AsyncIterator[AgentEvent],
     draft_state: _DraftState | None = None,
     allowed_tools: list[str] | None = None,
+    cwd: str | None = None,
 ) -> StreamResult:
     """Stream Agent SDK events to Telegram as draft messages.
 
@@ -238,6 +264,8 @@ async def stream_response(
             ensuring correct message ordering.
         allowed_tools: List of allowed tool patterns from config.
             Used to tag inline tool notifications as "(auto)".
+        cwd: Working directory for the current context. When set, file
+            paths under this directory are shown as relative paths.
 
     Returns:
         StreamResult with session_id, usage, cost, and timing info.
@@ -287,6 +315,7 @@ async def stream_response(
                             tool_name=block.name,
                             tool_input=block.input,
                             auto=block.name in auto_set,
+                            cwd=cwd,
                         )
 
             elif isinstance(event, StreamEvent):
@@ -389,9 +418,10 @@ def add_tool_notification(
     tool_name: str,
     tool_input: dict[str, Any],
     auto: bool,
+    cwd: str | None = None,
 ) -> None:
     """Add a tool call notification to the current draft state."""
-    summary = _extract_tool_summary(tool_name, tool_input)
+    summary = _extract_tool_summary(tool_name, tool_input, cwd=cwd)
     state.tool_notifications.append(
         ToolNotification(tool_name=tool_name, summary=summary, auto=auto)
     )
