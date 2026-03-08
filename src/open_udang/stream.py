@@ -182,6 +182,11 @@ def _extract_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
         return tool_input.get("file_path", "")
     if tool_name == "LSP":
         return tool_input.get("command", "")
+    if tool_name == "Agent":
+        desc = tool_input.get("description", "")
+        subagent = tool_input.get("subagent_type", "")
+        label = f"({subagent}) " if subagent else ""
+        return f"{label}{desc}" if desc else subagent
     # Generic: show first key's value
     for key, val in tool_input.items():
         if isinstance(val, str):

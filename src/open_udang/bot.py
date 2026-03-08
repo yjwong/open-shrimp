@@ -55,6 +55,9 @@ _running_tasks: dict[int, asyncio.Task[Any]] = {}
 # Pending tool approval futures: callback_data -> asyncio.Future[bool]
 _approval_futures: dict[str, asyncio.Future[bool]] = {}
 
+# Pending Agent tool inputs for "Show prompt" expansion: tool_use_id -> tool_input
+_pending_agent_inputs: dict[str, dict[str, Any]] = {}
+
 # Media group batching: media_group_id -> list of messages received so far.
 # When Telegram sends an album (multiple photos), each photo arrives as a
 # separate Update sharing the same media_group_id.  We collect them here and
@@ -725,6 +728,39 @@ def _format_write_approval(tool_input: dict[str, Any]) -> str:
     return f"{header}\n\n```\n{escaped_content}\n```"
 
 
+def _format_agent_approval(tool_input: dict[str, Any], expanded: bool = False) -> str:
+    """Format an Agent tool call for the approval prompt.
+
+    Shows a compact view with description and subagent type by default.
+    When expanded=True, appends the full prompt text.
+    """
+    description = tool_input.get("description", "")
+    subagent_type = tool_input.get("subagent_type", "")
+    prompt = tool_input.get("prompt", "")
+
+    parts: list[str] = []
+
+    # Header with subagent type
+    if subagent_type:
+        parts.append(f"🤖 *Agent* \\({_escape_mdv2(subagent_type)}\\)")
+    else:
+        parts.append("🤖 *Agent*")
+
+    # Description line
+    if description:
+        parts.append(_escape_mdv2(description))
+
+    # Full prompt (only when expanded)
+    if expanded and prompt:
+        max_prompt_len = 4096 - 300
+        display_prompt = prompt
+        if len(display_prompt) > max_prompt_len:
+            display_prompt = display_prompt[:max_prompt_len] + "\n..."
+        parts.append(f"```\n{_escape_mdv2(display_prompt)}\n```")
+
+    return "\n\n".join(parts)
+
+
 def _format_generic_approval(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Format a generic tool call for the approval prompt."""
     summary_parts = [f"*Tool:* `{tool_name}`"]
@@ -752,20 +788,24 @@ async def _send_approval_keyboard(
         text = _format_bash_approval(tool_input)
     elif tool_name == "Write":
         text = _format_write_approval(tool_input)
+    elif tool_name == "Agent":
+        text = _format_agent_approval(tool_input, expanded=False)
     else:
         text = _format_generic_approval(tool_name, tool_input)
 
     approve_data = f"approve:{tool_use_id}"
     deny_data = f"deny:{tool_use_id}"
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Approve", callback_data=approve_data),
-                InlineKeyboardButton("Deny", callback_data=deny_data),
-            ]
-        ]
-    )
+    # Build keyboard buttons — Agent tool gets an extra "Show prompt" button
+    buttons = []
+    if tool_name == "Agent":
+        show_prompt_data = f"show_prompt:{tool_use_id}"
+        _pending_agent_inputs[tool_use_id] = tool_input
+        buttons.append(InlineKeyboardButton("Show prompt", callback_data=show_prompt_data))
+    buttons.append(InlineKeyboardButton("Approve", callback_data=approve_data))
+    buttons.append(InlineKeyboardButton("Deny", callback_data=deny_data))
+
+    keyboard = InlineKeyboardMarkup([buttons])
 
     await bot.send_message(
         chat_id=chat_id,
@@ -785,6 +825,7 @@ async def _send_approval_keyboard(
     finally:
         _approval_futures.pop(approve_data, None)
         _approval_futures.pop(deny_data, None)
+        _pending_agent_inputs.pop(tool_use_id, None)
 
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -799,6 +840,40 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     data = query.data
+
+    # Handle "Show prompt" expansion for Agent tool
+    if data.startswith("show_prompt:"):
+        tool_use_id = data[len("show_prompt:"):]
+        tool_input = _pending_agent_inputs.get(tool_use_id)
+        if not tool_input:
+            await query.answer("Prompt data no longer available.")
+            return
+
+        await query.answer()
+
+        # Re-render the message with expanded prompt, remove "Show prompt" button
+        if query.message:
+            expanded_text = _format_agent_approval(tool_input, expanded=True)
+            approve_data = f"approve:{tool_use_id}"
+            deny_data = f"deny:{tool_use_id}"
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Approve", callback_data=approve_data),
+                        InlineKeyboardButton("Deny", callback_data=deny_data),
+                    ]
+                ]
+            )
+            try:
+                await query.message.edit_text(
+                    text=expanded_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                logger.exception("Failed to expand Agent prompt")
+        return
+
     future = _approval_futures.get(data)
     if not future or future.done():
         await query.answer("This approval has expired.")
