@@ -63,7 +63,7 @@ _pending_agent_inputs: dict[str, dict[str, Any]] = {}
 # Sessions where the user has opted into "accept all edits" for mutating
 # file-access tools (Edit, Write) within the context working directory.
 # Keyed by (chat_id, context_name).  Cleared on /clear or context switch.
-_edit_approved_sessions: set[tuple[int, str]] = {}
+_edit_approved_sessions: set[tuple[int, str]] = set()
 
 # Media group batching: media_group_id -> list of messages received so far.
 # When Telegram sends an album (multiple photos), each photo arrives as a
