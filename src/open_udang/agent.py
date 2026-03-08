@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    UserMessage,
 )
 from claude_agent_sdk.types import StreamEvent
 
@@ -59,7 +60,7 @@ class AgentResult:
 
 
 # Union of message types yielded by run_agent.
-AgentEvent = Union[AssistantMessage, SystemMessage, ResultMessage, StreamEvent]
+AgentEvent = Union[AssistantMessage, UserMessage, SystemMessage, ResultMessage, StreamEvent]
 
 
 def _save_images_to_temp(images: list[ImageAttachment]) -> list[Path]:

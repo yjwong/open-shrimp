@@ -15,7 +15,15 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock, ToolUseBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 from claude_agent_sdk.types import StreamEvent
 from telegram import Bot
 
@@ -26,6 +34,13 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LENGTH = 4096
 DRAFT_INTERVAL_SECONDS = 0.5
+# Maximum lines of Bash output to display.
+BASH_OUTPUT_MAX_LINES = 50
+# Maximum characters of Bash output to display.
+BASH_OUTPUT_MAX_CHARS = 1500
+# Tools whose blockquote notifications are suppressed because their output
+# is shown directly (Bash output as code block, Write via edit notification).
+_SUPPRESS_NOTIFICATION_TOOLS: set[str] = {"Bash", "Edit", "Write"}
 
 
 @dataclass
@@ -71,6 +86,11 @@ class _DraftState:
     # Session ID captured as early as possible (from SystemMessage init or
     # ResultMessage) so it survives task cancellation.
     session_id: str | None = None
+    # Map tool_use_id -> (tool_name, tool_input) for correlating tool results
+    # to invocations and displaying context (e.g. Bash command + output).
+    tool_use_map: dict[str, tuple[str, dict[str, Any]]] = field(
+        default_factory=dict
+    )
 
 
 def _format_tool_prefix(notifications: list[ToolNotification]) -> str:
@@ -225,6 +245,64 @@ def _extract_tool_summary(
     return ""
 
 
+def _format_bash_output(
+    tool_input: dict[str, Any],
+    content: str | list[dict[str, Any]] | None,
+) -> str:
+    """Format Bash tool invocation and output as GFM.
+
+    Mirrors the approval prompt style: shows description (if any) and the
+    command, followed by the output in a fenced code block. Truncates output
+    to BASH_OUTPUT_MAX_LINES / BASH_OUTPUT_MAX_CHARS, keeping the tail
+    (most recent output) when truncation is needed.
+    """
+    command = tool_input.get("command", "")
+    description = tool_input.get("description", "")
+
+    # Header: "💻 **Bash:** description" or just "💻 **Bash**"
+    if description:
+        header = f"💻 **Bash:** {description}"
+    else:
+        header = "💻 **Bash**"
+
+    # Command in a bash code block.
+    cmd_display = command[:200] + "..." if len(command) > 200 else command
+    cmd_block = f"```bash\n{cmd_display}\n```"
+
+    # Format the output.
+    if content is None:
+        output_text = ""
+    elif isinstance(content, list):
+        # Multi-part content (e.g. text + image blocks) — extract text parts.
+        parts = [
+            block.get("text", "") for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        output_text = "\n".join(parts)
+    else:
+        output_text = content
+
+    output_text = output_text.strip()
+    if not output_text:
+        return f"{header}\n\n{cmd_block}\n\n"
+
+    lines = output_text.splitlines()
+    truncated = False
+    if len(lines) > BASH_OUTPUT_MAX_LINES:
+        lines = lines[-BASH_OUTPUT_MAX_LINES:]
+        truncated = True
+
+    result = "\n".join(lines)
+    if len(result) > BASH_OUTPUT_MAX_CHARS:
+        result = result[-BASH_OUTPUT_MAX_CHARS:]
+        truncated = True
+
+    prefix = "…(truncated)\n" if truncated else ""
+    output_block = f"Output:\n```\n{prefix}{result}\n```"
+
+    return f"{header}\n\n{cmd_block}\n\n{output_block}\n\n"
+
+
 async def finalize_and_reset(bot: Bot, state: _DraftState) -> None:
     """Finalize the current draft and reset state for a new message.
 
@@ -303,20 +381,44 @@ async def stream_response(
                         pass
 
                     elif isinstance(block, ToolUseBlock):
-                        # Add tool invocation as an inline notification.
-                        # By this point the PreToolUse hook has already
-                        # run (auto-approved or user-approved via keyboard).
-                        # For manually-approved tools, the approval callback
-                        # finalized the draft before sending the keyboard,
-                        # so this notification appears in the new draft
-                        # after the approval message — preserving ordering.
-                        add_tool_notification(
-                            state,
-                            tool_name=block.name,
-                            tool_input=block.input,
-                            auto=block.name in auto_set,
-                            cwd=cwd,
+                        # Record the mapping so we can correlate tool
+                        # results back to the tool that produced them.
+                        state.tool_use_map[block.id] = (
+                            block.name,
+                            block.input,
                         )
+
+                        # Add tool invocation as an inline notification,
+                        # but suppress tools whose output is shown directly.
+                        if block.name not in _SUPPRESS_NOTIFICATION_TOOLS:
+                            add_tool_notification(
+                                state,
+                                tool_name=block.name,
+                                tool_input=block.input,
+                                auto=block.name in auto_set,
+                                cwd=cwd,
+                            )
+
+            elif isinstance(event, UserMessage):
+                # UserMessage carries tool results (ToolResultBlock).
+                # Display Bash output as a fenced code block.
+                if isinstance(event.content, list):
+                    for block in event.content:
+                        if isinstance(block, ToolResultBlock):
+                            tool_info = state.tool_use_map.get(
+                                block.tool_use_id
+                            )
+                            if tool_info and tool_info[0] == "Bash":
+                                tool_input = tool_info[1]
+                                formatted = _format_bash_output(
+                                    tool_input, block.content,
+                                )
+                                if formatted:
+                                    if state.turn_complete:
+                                        state.raw_text += "\n\n"
+                                        state.turn_complete = False
+                                    state.raw_text += formatted
+                                    state.dirty = True
 
             elif isinstance(event, StreamEvent):
                 # Token-level streaming: extract text deltas from raw
