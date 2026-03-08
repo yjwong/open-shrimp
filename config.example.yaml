@@ -1,0 +1,25 @@
+# OpenUdang configuration
+# Copy to ~/.config/openudang/config.yaml and fill in your values
+
+telegram:
+  token: "YOUR_BOT_TOKEN"
+
+allowed_users:
+  - 123456789  # Your Telegram user ID
+
+contexts:
+  default:
+    directory: /home/you/Documents/your-project
+    description: "Default context"
+    model: claude-sonnet-4-6
+    auto_approve_tools:
+      - Read
+      - Glob
+      - Grep
+      - LSP
+    # default_for_chats:
+    #   - -1001234567890  # Sets initial context for this group chat
+    # locked_for_chats:
+    #   - -1001234567890  # Locks this group chat to this context (cannot switch)
+
+default_context: default
