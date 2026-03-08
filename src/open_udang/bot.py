@@ -92,13 +92,21 @@ class _QuestionState:
     selected: set[int] = field(default_factory=set)
     other_texts: list[str] = field(default_factory=list)
     message_id: int | None = None
+    waiting_for_other: bool = False
+    """True when the user clicked "Other…" and we're waiting for their text input."""
+    other_query: Any = None
+    """The callback query that triggered the "Other…" flow, used to edit the message afterward."""
+    original_text_md: str = ""
+    """The original MarkdownV2 message text, saved so we can restore it after Other input."""
 
 
 # Pending question states: question_id -> _QuestionState
 _question_states: dict[str, _QuestionState] = {}
 
-# Pending text input futures for "Other" answers: chat_id -> asyncio.Future[str]
-_pending_text_inputs: dict[int, asyncio.Future[str]] = {}
+# Pending "Other" text input: chat_id -> question_id.
+# When message_handler sees a text message for a chat with a pending "Other"
+# input, it resolves the question instead of dispatching to the agent.
+_pending_other_input: dict[int, str] = {}
 
 
 def _escape_mdv2(text: str) -> str:
@@ -504,16 +512,20 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info("message_handler: unauthorized user %s", update.effective_user)
         return
 
-    # Check if this is a text response to an "Other" question prompt.
-    # If there's a pending text input future for this chat, resolve it
+    # Check if this is a text response to an "Other…" question prompt.
+    # If there's a pending "Other" input for this chat, resolve it inline
     # and don't dispatch to the agent.
     chat_id_for_input = message.chat_id
-    if has_text and chat_id_for_input in _pending_text_inputs:
-        text_future = _pending_text_inputs.get(chat_id_for_input)
-        if text_future and not text_future.done():
-            text_future.set_result(message.text or "")
-            logger.info("Resolved pending text input for chat %d", chat_id_for_input)
-            return
+    if has_text and chat_id_for_input in _pending_other_input:
+        question_id = _pending_other_input.pop(chat_id_for_input, None)
+        if question_id:
+            state = _question_states.get(question_id)
+            if state and not state.future.done():
+                custom_text = message.text or ""
+                state.waiting_for_other = False
+                await _complete_other_input(context.bot, state, custom_text)
+                logger.info("Resolved pending 'Other' input for chat %d", chat_id_for_input)
+                return
 
     bot_username = (await context.bot.get_me()).username or ""
     if not _is_bot_addressed(update, bot_username):
@@ -869,6 +881,7 @@ async def _send_question_keyboard(
         reply_markup=keyboard,
     )
     state.message_id = msg.message_id
+    state.original_text_md = text
 
     try:
         return await future
@@ -898,6 +911,49 @@ async def _handle_ask_user_questions(
     return answers
 
 
+async def _complete_other_input(
+    bot: Bot,
+    state: _QuestionState,
+    custom_text: str,
+) -> None:
+    """Complete the 'Other…' flow after the user has typed their answer.
+
+    For single-select questions, resolves the future immediately.
+    For multi-select, adds the text to other_texts and updates the keyboard
+    so the user can continue selecting or press Done.
+    """
+    query = state.other_query
+    state.other_query = None
+
+    original_md = state.original_text_md
+
+    if state.multi_select:
+        # Add to other_texts and restore keyboard; user still needs to press Done
+        state.other_texts.append(custom_text)
+        keyboard = _build_question_keyboard(state)
+        if query and query.message:
+            try:
+                await query.message.edit_text(
+                    text=original_md,
+                    parse_mode="MarkdownV2",
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                logger.exception("Failed to restore question keyboard after Other")
+    else:
+        # Single-select: resolve with custom text
+        state.future.set_result(custom_text)
+        if query and query.message:
+            try:
+                await query.message.edit_text(
+                    text=original_md + f"\n\n✅ *Answer:* {_escape_mdv2(custom_text)}",
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.exception("Failed to update question message after Other")
+
+
 async def _handle_question_callback(
     query: Any, data: str, config: Config
 ) -> bool:
@@ -925,6 +981,10 @@ async def _handle_question_callback(
     state = _question_states.get(question_id)
     if not state or state.future.done():
         await query.answer("This question has expired.")
+        return True
+
+    if state.waiting_for_other:
+        await query.answer("Please type your answer first.")
         return True
 
     if action == "q_opt":
@@ -994,41 +1054,27 @@ async def _handle_question_callback(
         return True
 
     if action == "q_other":
-        # "Other" — ask user to type a custom answer
-        await query.answer("Type your answer below:")
+        # "Other…" — mark that we're waiting for a typed answer.
+        # We must NOT await here because python-telegram-bot processes
+        # updates sequentially by default; blocking would deadlock the
+        # message_handler that needs to deliver the typed text.
+        await query.answer()
 
-        chat_id = state.chat_id
-        loop = asyncio.get_running_loop()
-        text_future: asyncio.Future[str] = loop.create_future()
-        _pending_text_inputs[chat_id] = text_future
+        state.waiting_for_other = True
+        state.other_query = query
+        _pending_other_input[state.chat_id] = question_id
 
-        try:
-            custom_text = await text_future
-        finally:
-            _pending_text_inputs.pop(chat_id, None)
-
-        if state.multi_select:
-            # Add to other_texts and update keyboard
-            state.other_texts.append(custom_text)
-            keyboard = _build_question_keyboard(state)
-            if query.message:
-                try:
-                    await query.message.edit_reply_markup(reply_markup=keyboard)
-                except Exception:
-                    logger.exception("Failed to update question keyboard after Other")
-        else:
-            # Single-select: resolve with custom text
-            state.future.set_result(custom_text)
-            if query.message:
-                try:
-                    original_md = query.message.text_markdown_v2 or query.message.text or ""
-                    await query.message.edit_text(
-                        text=original_md + f"\n\n✅ *Answer:* {_escape_mdv2(custom_text)}",
-                        parse_mode="MarkdownV2",
-                        reply_markup=None,
-                    )
-                except Exception:
-                    logger.exception("Failed to update question message after Other")
+        # Hide the keyboard and prompt the user to type their answer.
+        if query.message:
+            try:
+                original_md = query.message.text_markdown_v2 or query.message.text or ""
+                await query.message.edit_text(
+                    text=original_md + "\n\n✏️ _Type your answer below:_",
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.exception("Failed to update question message for Other prompt")
         return True
 
     return False
