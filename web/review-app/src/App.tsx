@@ -1,5 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useHunks } from "./hooks/useHunks";
+import { initShiki } from "./lib/shiki";
+import { SwipeDeck } from "./components/SwipeDeck";
 
 function getChatId(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -9,11 +11,31 @@ function getChatId(): string | null {
 export default function App() {
   const chatId = useMemo(() => getChatId(), []);
   const { hunks, totalHunks, loading, error, refresh } = useHunks(chatId);
+  const [shikiReady, setShikiReady] = useState(false);
+  const [shikiError, setShikiError] = useState<string | null>(null);
 
-  if (loading) {
+  useEffect(() => {
+    initShiki()
+      .then(() => setShikiReady(true))
+      .catch((err) =>
+        setShikiError(
+          err instanceof Error ? err.message : "Failed to load syntax highlighter",
+        ),
+      );
+  }, []);
+
+  if (loading || !shikiReady) {
     return (
       <div className="loading">
         <div className="spinner" />
+      </div>
+    );
+  }
+
+  if (shikiError) {
+    return (
+      <div className="error-container">
+        <p>Syntax highlighter failed to load: {shikiError}</p>
       </div>
     );
   }
@@ -37,18 +59,10 @@ export default function App() {
   }
 
   return (
-    <>
-      <div style={{ padding: "12px 16px", color: "var(--text-secondary)", fontSize: 13 }}>
-        {totalHunks} hunk{totalHunks !== 1 ? "s" : ""} to review
-      </div>
-      <div className="hunk-list">
-        {hunks.map((hunk) => (
-          <div key={hunk.id} className={`hunk-item${hunk.staged ? " staged" : ""}`}>
-            <div className="file-path">{hunk.file_path}</div>
-            <div className="hunk-id">{hunk.id}</div>
-          </div>
-        ))}
-      </div>
-    </>
+    <SwipeDeck
+      hunks={hunks}
+      totalHunks={totalHunks}
+      onRefresh={refresh}
+    />
   );
 }

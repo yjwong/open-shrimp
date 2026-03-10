@@ -18,6 +18,9 @@
   --error: #f44336;
   --warning: #ff9800;
 
+  --line-add-bg: rgba(76, 175, 80, 0.15);
+  --line-delete-bg: rgba(244, 67, 54, 0.15);
+
   color-scheme: dark;
 }
 
@@ -41,13 +44,7 @@ body {
   flex-direction: column;
 }
 
-.card-container {
-  touch-action: none;
-  overscroll-behavior: contain;
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-}
+/* --- Loading / Error / Empty states --- */
 
 .loading {
   display: flex;
@@ -121,36 +118,361 @@ body {
   font-size: 14px;
 }
 
-.hunk-list {
-  padding: 16px;
-  overflow-y: auto;
-  flex: 1;
+/* --- Progress Bar --- */
+
+.progress-bar-container {
+  padding: 12px 16px 8px;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
-.hunk-item {
-  padding: 12px;
-  background: var(--bg-secondary);
-  border-radius: 8px;
-  font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+.progress-bar-text {
+  color: var(--text-secondary);
   font-size: 13px;
-}
-
-.hunk-item .file-path {
-  color: var(--text-primary);
-  margin-bottom: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.hunk-item .hunk-id {
+.progress-bar-track {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-secondary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* --- Swipe Deck --- */
+
+.swipe-deck {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.swipe-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: rgba(244, 67, 54, 0.15);
+  color: var(--error);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.swipe-error button {
+  padding: 4px 12px;
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--error);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.card-container {
+  touch-action: none;
+  overscroll-behavior: contain;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+/* --- Swipe Card --- */
+
+.swipe-card {
+  position: absolute;
+  inset: 0;
+  padding: 8px 12px;
+  overflow: hidden;
+}
+
+.swipe-card-current {
+  z-index: 2;
+  will-change: transform;
+}
+
+.swipe-card-next {
+  z-index: 1;
+  opacity: 0.5;
+  transform: scale(0.97);
+}
+
+/* --- Swipe Overlays --- */
+
+.swipe-overlay {
+  position: absolute;
+  top: 16px;
+  z-index: 10;
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.swipe-overlay.active {
+  opacity: 1;
+}
+
+.swipe-overlay-right {
+  right: 16px;
+  background: rgba(76, 175, 80, 0.9);
+  color: #fff;
+  border: 2px solid var(--success);
+}
+
+.swipe-overlay-left {
+  left: 16px;
+  background: rgba(102, 102, 102, 0.9);
+  color: #fff;
+  border: 2px solid var(--text-muted);
+}
+
+.swipe-overlay-down {
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 152, 0, 0.9);
+  color: #fff;
+  border: 2px solid var(--warning);
+}
+
+/* --- HunkCard --- */
+
+.hunk-card {
+  background: var(--bg-card);
+  border-radius: 12px;
+  overflow: hidden;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.hunk-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  gap: 8px;
+}
+
+.hunk-card-header.staged {
+  border-left: 3px solid var(--success);
+}
+
+.hunk-card-filepath {
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.hunk-card-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  background: rgba(76, 175, 80, 0.2);
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+}
+
+.hunk-card-meta {
+  padding: 6px 14px;
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+  font-size: 11px;
   color: var(--text-muted);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.hunk-card-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.hunk-card-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+.hunk-card-lines {
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  min-width: fit-content;
+}
+
+/* --- Diff Lines --- */
+
+.diff-line {
+  display: flex;
+  padding: 0 8px 0 0;
+}
+
+.diff-line-add {
+  background: var(--line-add-bg);
+}
+
+.diff-line-delete {
+  background: var(--line-delete-bg);
+}
+
+.diff-line-context {
+  background: transparent;
+}
+
+.line-no {
+  display: inline-block;
+  width: 40px;
+  text-align: right;
+  padding: 0 6px;
+  color: var(--text-muted);
+  user-select: none;
+  flex-shrink: 0;
   font-size: 11px;
 }
 
-.hunk-item.staged {
-  border-left: 3px solid var(--success);
+.line-prefix {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.diff-line-add .line-prefix {
+  color: var(--success);
+}
+
+.diff-line-delete .line-prefix {
+  color: var(--error);
+}
+
+.line-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* --- Binary file placeholder --- */
+
+.hunk-card-binary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.binary-icon {
+  font-size: 40px;
+}
+
+/* --- Summary Screen --- */
+
+.summary-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+  padding: 32px 24px;
+  gap: 32px;
+  text-align: center;
+}
+
+.summary-screen h2 {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.summary-stats {
+  display: flex;
+  gap: 32px;
+}
+
+.summary-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.summary-stat-value {
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.summary-stat-value.staged {
+  color: var(--success);
+}
+
+.summary-stat-value.skipped {
+  color: var(--text-muted);
+}
+
+.summary-stat-value.total {
+  color: var(--text-primary);
+}
+
+.summary-stat-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.summary-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 280px;
+}
+
+.summary-btn {
+  padding: 12px 24px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+}
+
+.summary-btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.summary-btn-secondary {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--text-muted);
 }
