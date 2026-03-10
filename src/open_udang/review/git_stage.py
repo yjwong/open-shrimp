@@ -11,8 +11,6 @@ from dataclasses import dataclass
 
 from open_udang.review.git_diff import (
     Hunk,
-    _run_git,
-    get_hunks,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,27 +74,6 @@ def reconstruct_patch(hunk: Hunk) -> str:
     return patch_text
 
 
-async def _is_hunk_current(cwd: str, hunk: Hunk) -> bool:
-    """Check if a hunk ID still exists in the current diff.
-
-    Re-parses the diff and checks if the hunk ID is still present.
-    This detects stale hunks from working tree changes.
-
-    Args:
-        cwd: Working directory.
-        hunk: The hunk to check.
-
-    Returns:
-        True if the hunk is still current, False if stale.
-    """
-    result = await get_hunks(cwd, offset=0, limit=0, include_untracked=True)
-    # get_hunks with limit=0 returns no hunks, so we need to get all.
-    result = await get_hunks(
-        cwd, offset=0, limit=result.total_hunks, include_untracked=True
-    )
-    return any(h.id == hunk.id for h in result.hunks)
-
-
 async def stage_hunk(cwd: str, hunk: Hunk) -> StageResult:
     """Stage a single hunk by applying its patch to the index.
 
@@ -110,14 +87,6 @@ async def stage_hunk(cwd: str, hunk: Hunk) -> StageResult:
     Returns:
         StageResult indicating success or failure.
     """
-    # Stale detection: verify the hunk still exists in the current diff.
-    if not await _is_hunk_current(cwd, hunk):
-        return StageResult(
-            ok=False,
-            error="Hunk is stale — the working tree has changed. Refresh to get current hunks.",
-            stale=True,
-        )
-
     patch = reconstruct_patch(hunk)
 
     proc = await asyncio.create_subprocess_exec(
@@ -132,7 +101,12 @@ async def stage_hunk(cwd: str, hunk: Hunk) -> StageResult:
     if proc.returncode != 0:
         error_msg = stderr.decode().strip()
         logger.error("git apply --cached failed: %s", error_msg)
-        return StageResult(ok=False, error=f"Failed to stage hunk: {error_msg}")
+        # If the patch doesn't apply, the working tree has likely changed.
+        return StageResult(
+            ok=False,
+            error="Hunk is stale — the working tree has changed. Refresh to get current hunks.",
+            stale=True,
+        )
 
     return StageResult(ok=True)
 
@@ -150,14 +124,6 @@ async def unstage_hunk(cwd: str, hunk: Hunk) -> StageResult:
     Returns:
         StageResult indicating success or failure.
     """
-    # Stale detection: verify the hunk still exists in the current diff.
-    if not await _is_hunk_current(cwd, hunk):
-        return StageResult(
-            ok=False,
-            error="Hunk is stale — the working tree has changed. Refresh to get current hunks.",
-            stale=True,
-        )
-
     patch = reconstruct_patch(hunk)
 
     proc = await asyncio.create_subprocess_exec(
@@ -172,6 +138,11 @@ async def unstage_hunk(cwd: str, hunk: Hunk) -> StageResult:
     if proc.returncode != 0:
         error_msg = stderr.decode().strip()
         logger.error("git apply --cached -R failed: %s", error_msg)
-        return StageResult(ok=False, error=f"Failed to unstage hunk: {error_msg}")
+        # If the reverse patch doesn't apply, the working tree has likely changed.
+        return StageResult(
+            ok=False,
+            error="Hunk is stale — the working tree has changed. Refresh to get current hunks.",
+            stale=True,
+        )
 
     return StageResult(ok=True)

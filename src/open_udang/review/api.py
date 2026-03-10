@@ -21,7 +21,7 @@ from starlette.staticfiles import StaticFiles
 from open_udang.config import Config
 from open_udang.db import get_active_context
 from open_udang.review.auth import AuthError, validate_init_data
-from open_udang.review.git_diff import Hunk, HunkResult, get_hunks
+from open_udang.review.git_diff import Hunk, get_hunks
 from open_udang.review.git_stage import stage_hunk, unstage_hunk
 
 logger = logging.getLogger(__name__)
@@ -220,33 +220,14 @@ async def stage_endpoint(request: Request) -> JSONResponse:
     result = await stage_hunk(directory, hunk)
 
     if not result.ok:
+        status = 409 if result.stale else 500
         if result.stale:
-            # Invalidate cache on stale hunk.
+            # Invalidate cache so the next refresh fetches fresh hunks.
             cache_key = (resolved_chat_id, context_name)
             _hunk_cache.pop(cache_key, None)
-            return JSONResponse(
-                {"error": result.error}, status_code=409
-            )
-        return JSONResponse(
-            {"error": result.error}, status_code=500
-        )
+        return JSONResponse({"error": result.error}, status_code=status)
 
-    # Re-fetch to get updated counts.
-    try:
-        updated = await get_hunks(directory, offset=0, limit=10000, include_untracked=True)
-        _hunk_cache[(resolved_chat_id, context_name)] = updated.hunks
-        staged_count = sum(1 for h in updated.hunks if h.staged)
-        total_count = updated.total_hunks
-    except Exception:
-        logger.exception("Failed to refresh hunks after staging")
-        staged_count = 0
-        total_count = 0
-
-    return JSONResponse({
-        "ok": True,
-        "staged_hunks": staged_count,
-        "total_hunks": total_count,
-    })
+    return JSONResponse({"ok": True})
 
 
 async def unstage_endpoint(request: Request) -> JSONResponse:
@@ -299,32 +280,13 @@ async def unstage_endpoint(request: Request) -> JSONResponse:
     result = await unstage_hunk(directory, hunk)
 
     if not result.ok:
+        status = 409 if result.stale else 500
         if result.stale:
             cache_key = (resolved_chat_id, context_name)
             _hunk_cache.pop(cache_key, None)
-            return JSONResponse(
-                {"error": result.error}, status_code=409
-            )
-        return JSONResponse(
-            {"error": result.error}, status_code=500
-        )
+        return JSONResponse({"error": result.error}, status_code=status)
 
-    # Re-fetch to get updated counts.
-    try:
-        updated = await get_hunks(directory, offset=0, limit=10000, include_untracked=True)
-        _hunk_cache[(resolved_chat_id, context_name)] = updated.hunks
-        staged_count = sum(1 for h in updated.hunks if h.staged)
-        total_count = updated.total_hunks
-    except Exception:
-        logger.exception("Failed to refresh hunks after unstaging")
-        staged_count = 0
-        total_count = 0
-
-    return JSONResponse({
-        "ok": True,
-        "staged_hunks": staged_count,
-        "total_hunks": total_count,
-    })
+    return JSONResponse({"ok": True})
 
 
 def create_review_app(config: Config, db: aiosqlite.Connection) -> Starlette:

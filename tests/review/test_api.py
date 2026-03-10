@@ -243,15 +243,10 @@ async def test_stage_hunk_success(transport) -> None:
     hunk = _make_hunk()
     _hunk_cache[(CHAT_ID, "default")] = [hunk]
 
-    updated_hunks = [_make_hunk(staged=True)]
-    updated_result = _make_hunk_result(updated_hunks)
-
     with (
         patch("open_udang.review.api.stage_hunk", new_callable=AsyncMock) as mock_stage,
-        patch("open_udang.review.api.get_hunks", new_callable=AsyncMock) as mock_get,
     ):
         mock_stage.return_value = StageResult(ok=True)
-        mock_get.return_value = updated_result
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
@@ -263,8 +258,6 @@ async def test_stage_hunk_success(transport) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
-    assert data["staged_hunks"] == 1
-    assert data["total_hunks"] == 1
 
 
 @pytest.mark.asyncio
@@ -336,15 +329,10 @@ async def test_unstage_hunk_success(transport) -> None:
     hunk = _make_hunk(staged=True)
     _hunk_cache[(CHAT_ID, "default")] = [hunk]
 
-    updated_hunks = [_make_hunk(staged=False)]
-    updated_result = _make_hunk_result(updated_hunks)
-
     with (
         patch("open_udang.review.api.unstage_hunk", new_callable=AsyncMock) as mock_unstage,
-        patch("open_udang.review.api.get_hunks", new_callable=AsyncMock) as mock_get,
     ):
         mock_unstage.return_value = StageResult(ok=True)
-        mock_get.return_value = updated_result
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(

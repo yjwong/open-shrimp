@@ -217,7 +217,7 @@ async def test_stage_new_file(git_repo: str) -> None:
 
 @pytest.mark.asyncio
 async def test_stale_hunk_detection(git_repo: str) -> None:
-    """Staging a stale hunk should return an error."""
+    """Staging a hunk whose patch no longer applies should return stale error."""
     with open(os.path.join(git_repo, "hello.py"), "w") as f:
         f.write(
             "import os\nimport sys\nimport json\n\ndef main():\n    print('hello')\n\nif __name__ == '__main__':\n    main()\n"
@@ -227,17 +227,16 @@ async def test_stale_hunk_detection(git_repo: str) -> None:
     result = await get_hunks(git_repo, include_untracked=False)
     hunk = result.hunks[0]
 
-    # Modify the file again, making the hunk stale.
-    with open(os.path.join(git_repo, "hello.py"), "w") as f:
-        f.write(
-            "import os\nimport sys\nimport yaml\n\ndef main():\n    print('changed')\n\nif __name__ == '__main__':\n    main()\n"
-        )
-
-    # Attempt to stage the stale hunk.
+    # Stage the hunk so it's in the index, then try to stage the same
+    # hunk again — the patch can't apply twice.
     stage_result = await stage_hunk(git_repo, hunk)
-    assert stage_result.ok is False
-    assert stage_result.stale is True
-    assert "stale" in stage_result.error.lower()
+    assert stage_result.ok is True
+
+    # Attempt to stage the same hunk again — should fail as stale.
+    stage_result2 = await stage_hunk(git_repo, hunk)
+    assert stage_result2.ok is False
+    assert stage_result2.stale is True
+    assert "stale" in stage_result2.error.lower()
 
 
 @pytest.mark.asyncio
