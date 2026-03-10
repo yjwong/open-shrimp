@@ -1,8 +1,14 @@
-# OpenUdang
+<p align="center">
+  <img src="assets/logo.svg" alt="OpenUdang" width="480">
+</p>
 
-**Claude Code in your pocket. No laptop required.**
+<p align="center">
+  <strong>Claude Code in your pocket. No laptop required.</strong>
+</p>
 
-OpenUdang puts a full Claude coding agent in Telegram — complete with file editing, tool use, and project awareness. It's the prawn to [OpenClaw](https://openclaw.ai/)'s lobster.
+---
+
+OpenUdang puts a full Claude coding agent in Telegram — complete with file editing, tool use, and project awareness. It's the prawn 🦐 to [OpenClaw](https://openclaw.ai/)'s lobster.
 
 *Udang* is Malay for "prawn" — small, personal, gets the job done.
 
