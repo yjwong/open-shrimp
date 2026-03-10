@@ -33,6 +33,13 @@ contexts:
       #
       # Patterns are supported — these are passed to the Claude CLI as --allowedTools
       # - "Bash(git *)"        # allow all git commands
+    # additional_directories:
+    #   - /home/you/Documents/shared-lib  # Extra dirs the agent can access
+    #   - /home/you/Documents/api-service
+    #   # These are passed to the SDK as add_dirs (equivalent to --add-dir).
+    #   # Path-scoped auto-approval (Read, Glob, Grep) extends to these dirs.
+    #   # The project's .claude/settings.json additionalDirectories are also
+    #   # respected via setting_sources=["project"] (inherited by default).
     # default_for_chats:
     #   - -1001234567890  # Sets initial context for this group chat
     # locked_for_chats:

@@ -168,6 +168,7 @@ async def run_agent(
     can_use_tool = make_can_use_tool(
         request_approval=request_approval,
         cwd=context.directory,
+        additional_directories=context.additional_directories or None,
         handle_user_questions=handle_user_questions,
         is_edit_auto_approved=is_edit_auto_approved,
         notify_auto_approved_edit=notify_auto_approved_edit,
@@ -180,11 +181,23 @@ async def run_agent(
         cwd=context.directory,
         model=context.model,
         allowed_tools=context.allowed_tools,
-        setting_sources=["project"],
+        add_dirs=context.additional_directories,
+        setting_sources=["project", "user", "local"],
         include_partial_messages=True,
         stderr=_log_stderr,
         can_use_tool=can_use_tool,
     )
+
+    # Build a system prompt supplement that tells the agent about additional
+    # working directories so it knows they exist (--add-dir only grants
+    # permission, it doesn't inform the agent).
+    if context.additional_directories:
+        dirs_list = "\n".join(f"  - {d}" for d in context.additional_directories)
+        options.system_prompt = (
+            "You also have access to the following additional working "
+            "directories:\n" + dirs_list + "\n"
+            "You may read and search files in these directories as needed."
+        )
 
     # Save attachments to temp files and build the prompt with file references.
     attachment_paths: list[Path] = []

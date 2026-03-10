@@ -98,9 +98,17 @@ def _extract_path_for_tool(
     return None
 
 
+def _is_path_within_any_directory(
+    path: str, directories: list[str]
+) -> bool:
+    """Check if a resolved path is within any of the given directories."""
+    return any(_is_path_within_directory(path, d) for d in directories)
+
+
 def make_can_use_tool(
     request_approval: ApprovalCallback,
     cwd: str,
+    additional_directories: list[str] | None = None,
     handle_user_questions: QuestionCallback | None = None,
     is_edit_auto_approved: Callable[[], bool] | None = None,
     notify_auto_approved_edit: EditNotifyCallback | None = None,
@@ -114,10 +122,11 @@ def make_can_use_tool(
 
     1. Path-scoped auto-approval for read-only tools: Read, Glob, and Grep
        are auto-approved when their target path resolves to within the context
-       working directory. Mutating tools (Edit, Write) within cwd require
-       explicit approval unless the user has opted into "accept all edits"
-       for the session. Paths outside the cwd always fall through to the
-       interactive approval prompt.
+       working directory or any additional directory. Mutating tools (Edit,
+       Write) within those directories require explicit approval unless the
+       user has opted into "accept all edits" for the session. Paths outside
+       all approved directories always fall through to the interactive
+       approval prompt.
 
     2. AskUserQuestion: presents questions to the user via Telegram, collects
        answers, then denies the tool to prevent the CLI's own interactive UI.
@@ -128,17 +137,21 @@ def make_can_use_tool(
         request_approval: Async callback that presents the tool call to the user
             and returns True to allow or False to deny.
         cwd: The context working directory for path-scoped auto-approval.
+        additional_directories: Optional list of extra directories that are
+            also approved for path-scoped auto-approval (mirrors the SDK's
+            add_dirs / --add-dir).
         handle_user_questions: Optional async callback for AskUserQuestion.
             Receives the questions list, returns answers dict.
         is_edit_auto_approved: Optional callback that returns True if the user
             has opted into "accept all edits" for the current session. When
-            set and returning True, mutating tools (Edit, Write) within cwd
-            are auto-approved without prompting.
+            set and returning True, mutating tools (Edit, Write) within
+            approved directories are auto-approved without prompting.
         notify_auto_approved_edit: Optional async callback called when a
             mutating tool is auto-approved (accept-all-edits mode). Receives
             the tool name and input dict so the caller can display the diff
             without blocking the agent.
     """
+    approved_dirs = [cwd] + (additional_directories or [])
 
     async def can_use_tool(
         tool_name: str,
@@ -171,20 +184,20 @@ def make_can_use_tool(
 
         # Path-scoped approval for file-access tools.
         # Read-only tools (Read, Glob, Grep) are auto-approved when within
-        # cwd.  Mutating tools (Edit, Write) require explicit approval even
-        # within cwd, unless the user has opted into "accept all edits".
+        # an approved directory (cwd + additional_directories).  Mutating
+        # tools (Edit, Write) require explicit approval even within approved
+        # dirs, unless the user has opted into "accept all edits".
         tool_path = _extract_path_for_tool(tool_name, tool_input, cwd)
         if tool_path is not None:
-            if _is_path_within_directory(tool_path, cwd):
+            if _is_path_within_any_directory(tool_path, approved_dirs):
                 if tool_name in _MUTATING_PATH_TOOLS:
                     # Check session-level "accept all edits" flag
                     if is_edit_auto_approved and is_edit_auto_approved():
                         logger.info(
                             "Auto-approved %s (accept-all-edits): "
-                            "path %s is within cwd %s",
+                            "path %s is within approved dirs",
                             tool_name,
                             tool_path,
-                            cwd,
                         )
                         # Notify the user with the diff (non-blocking)
                         if notify_auto_approved_edit:
@@ -199,26 +212,24 @@ def make_can_use_tool(
                                 )
                         return PermissionResultAllow()
                     logger.info(
-                        "Mutating tool %s within cwd %s requires approval",
+                        "Mutating tool %s within approved dirs requires "
+                        "approval",
                         tool_name,
-                        cwd,
                     )
                     # Fall through to interactive approval
                 else:
                     logger.info(
-                        "Auto-approved %s: path %s is within cwd %s",
+                        "Auto-approved %s: path %s is within approved dirs",
                         tool_name,
                         tool_path,
-                        cwd,
                     )
                     return PermissionResultAllow()
             else:
                 logger.warning(
-                    "Path-scoped tool %s targets %s outside cwd %s, "
+                    "Path-scoped tool %s targets %s outside approved dirs, "
                     "requiring manual approval",
                     tool_name,
                     tool_path,
-                    cwd,
                 )
 
         logger.info("Requesting approval for tool: %s", tool_name)

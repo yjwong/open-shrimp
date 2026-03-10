@@ -20,6 +20,7 @@ class ContextConfig:
     description: str
     model: str
     allowed_tools: list[str]
+    additional_directories: list[str] = field(default_factory=list)
     default_for_chats: list[int] = field(default_factory=list)
     locked_for_chats: list[int] = field(default_factory=list)
 
@@ -69,6 +70,17 @@ def _validate_raw(raw: dict) -> None:
                 )
         if not isinstance(ctx["allowed_tools"], list):
             raise ValueError(f"Context '{name}': allowed_tools must be a list")
+        add_dirs = ctx.get("additional_directories", [])
+        if not isinstance(add_dirs, list):
+            raise ValueError(
+                f"Context '{name}': additional_directories must be a list"
+            )
+        for d in add_dirs:
+            if not isinstance(d, str):
+                raise ValueError(
+                    f"Context '{name}': additional_directories entries must "
+                    f"be strings, got: {d!r}"
+                )
 
     # default_context references a defined context
     default = raw["default_context"]
@@ -88,6 +100,7 @@ def _parse(raw: dict) -> Config:
             description=ctx["description"],
             model=ctx["model"],
             allowed_tools=ctx["allowed_tools"],
+            additional_directories=ctx.get("additional_directories", []),
             default_for_chats=ctx.get("default_for_chats", []),
             locked_for_chats=ctx.get("locked_for_chats", []),
         )
