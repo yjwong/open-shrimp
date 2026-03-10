@@ -129,6 +129,33 @@ def _build_prompt_with_attachments(prompt: str, attachment_paths: list[Path]) ->
     return "\n".join(parts)
 
 
+def prepare_prompt(
+    prompt: str,
+    attachments: list[FileAttachment] | None = None,
+) -> tuple[str, list[Path]]:
+    """Build the actual prompt and save attachments to temp files.
+
+    Returns ``(actual_prompt, attachment_paths)`` where *attachment_paths*
+    should be cleaned up by the caller after the query completes.
+    """
+    attachment_paths: list[Path] = []
+    if attachments:
+        attachment_paths = _save_attachments_to_temp(attachments)
+        actual_prompt = _build_prompt_with_attachments(prompt, attachment_paths)
+    else:
+        actual_prompt = prompt
+    return actual_prompt, attachment_paths
+
+
+def cleanup_attachments(paths: list[Path]) -> None:
+    """Remove temporary attachment files."""
+    for p in paths:
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("Failed to remove temp file %s", p)
+
+
 async def run_agent(
     prompt: str,
     context: ContextConfig,

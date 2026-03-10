@@ -30,7 +30,14 @@ from telegram.ext import (
     filters,
 )
 
-from open_udang.agent import FileAttachment, run_agent
+from open_udang.agent import FileAttachment, cleanup_attachments, prepare_prompt
+from open_udang.client_manager import (
+    CallbackContext,
+    close_all_sessions,
+    close_session,
+    get_or_create_session,
+    query_and_stream,
+)
 from open_udang.config import Config, ContextConfig
 from open_udang.db import (
     delete_session,
@@ -207,7 +214,24 @@ def _strip_mention(text: str, bot_username: str) -> str:
 
 
 async def _cancel_running(chat_id: int) -> None:
-    """Cancel any running agent task for a chat."""
+    """Cancel any running agent task for a chat.
+
+    Sends an interrupt to the persistent CLI client (if any) so it stops
+    processing, then cancels the asyncio task.  The persistent client
+    stays alive for reuse by the next message.
+    """
+    from open_udang.client_manager import get_session
+
+    session = get_session(chat_id)
+    if session is not None:
+        try:
+            await session.client.interrupt()
+            logger.info("Sent interrupt to CLI for chat %d", chat_id)
+        except Exception:
+            logger.debug(
+                "Failed to send interrupt for chat %d", chat_id, exc_info=True
+            )
+
     task = _running_tasks.pop(chat_id, None)
     if task and not task.done():
         task.cancel()
@@ -373,9 +397,9 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    # Clear "accept all edits" for the old context on switch
     old_ctx_name = await _get_context_name(chat_id, config, db)
     _edit_approved_sessions.discard((chat_id, old_ctx_name))
+    await close_session(chat_id)
 
     await set_active_context(db, chat_id, target)
     ctx = config.contexts[target]
@@ -400,6 +424,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await _cancel_running(chat_id)
     _pending_queues.pop(chat_id, None)
+    await close_session(chat_id)
     await delete_session(db, chat_id, ctx_name)
     _edit_approved_sessions.discard((chat_id, ctx_name))
     await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
@@ -505,6 +530,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
+        await close_session(chat_id)
         await set_session_id(db, chat_id, ctx_name, match.session_id)
         summary = _escape_mdv2(match.summary or "No summary")
         await message.reply_text(
@@ -821,20 +847,15 @@ async def _start_agent_task(
         await _update_pinned_status(context.bot, chat_id, ctx_name, ctx_config, db)
 
     async def _run() -> None:
-        # Create draft state early so it can be shared between the
-        # stream and the tool approval callback. This ensures the
-        # approval callback can finalize the in-progress draft
-        # before sending the keyboard, preserving message ordering.
-        # It also carries session_id for early capture so we can
-        # persist the session even if the task is cancelled.
         draft_state = _DraftState(chat_id=chat_id)
+        actual_prompt, attachment_paths = prepare_prompt(
+            prompt, attachments if attachments else None,
+        )
 
         try:
             async def request_approval(
                 tool_name: str, tool_input: dict[str, Any], tool_use_id: str
             ) -> bool:
-                # Finalize any in-progress draft so the approval keyboard
-                # appears after the accumulated text, not out of order.
                 await finalize_and_reset(context.bot, draft_state)
                 return await _send_approval_keyboard(
                     context.bot, chat_id, tool_name, tool_input, tool_use_id,
@@ -851,25 +872,28 @@ async def _start_agent_task(
             async def notify_edit(
                 tool_name: str, tool_input: dict[str, Any]
             ) -> None:
-                # Finalize any in-progress draft so the diff message
-                # appears after the accumulated text, not out of order.
                 await finalize_and_reset(context.bot, draft_state)
                 await _send_auto_approved_diff(
                     context.bot, chat_id, tool_name, tool_input,
                     cwd=ctx_config.directory,
                 )
 
-            events = run_agent(
-                prompt=prompt,
-                context=ctx_config,
+            cb_ctx = CallbackContext(
                 request_approval=request_approval,
-                session_id=session_id,
-                attachments=attachments if attachments else None,
                 handle_user_questions=handle_questions,
                 is_edit_auto_approved=lambda: (chat_id, ctx_name) in _edit_approved_sessions,
                 notify_auto_approved_edit=notify_edit,
             )
 
+            session = await get_or_create_session(
+                chat_id=chat_id,
+                context_name=ctx_name,
+                context=ctx_config,
+                session_id=session_id,
+                callback_context=cb_ctx,
+            )
+
+            events = query_and_stream(session, actual_prompt)
             result = await stream_response(
                 bot=context.bot,
                 chat_id=chat_id,
@@ -882,7 +906,6 @@ async def _start_agent_task(
             if result.session_id:
                 await set_session_id(db, chat_id, ctx_name, result.session_id)
 
-            # Update pinned message with context window usage
             if result.usage:
                 await _update_pinned_status(
                     context.bot, chat_id, ctx_name, ctx_config, db,
@@ -903,11 +926,7 @@ async def _start_agent_task(
             except Exception:
                 logger.exception("Failed to send error message")
         finally:
-            # Persist session_id even on cancellation so the next
-            # message can resume where this one left off.  The
-            # draft_state captures session_id as early as possible
-            # (from SystemMessage init), so it's usually available
-            # even if we never reached ResultMessage.
+            cleanup_attachments(attachment_paths)
             if draft_state.session_id:
                 try:
                     await set_session_id(db, chat_id, ctx_name, draft_state.session_id)
@@ -916,8 +935,6 @@ async def _start_agent_task(
                         "Failed to save session on cleanup for chat %d", chat_id
                     )
             _running_tasks.pop(chat_id, None)
-
-            # Drain the queue: start the next pending message, if any.
             await _drain_queue(chat_id)
 
     task = asyncio.create_task(_run())
@@ -1481,6 +1498,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         ctx_name, ctx = await _get_context(chat_id, config, db)
+        await close_session(chat_id)
         await set_session_id(db, chat_id, ctx_name, session_id)
         await query.answer(f"Resumed session {session_id[:8]}...")
 
@@ -1757,6 +1775,7 @@ async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        await close_all_sessions()
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
