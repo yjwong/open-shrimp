@@ -11,6 +11,8 @@ dependencies = [
     "aiosqlite",
     "pyyaml",
     "mistune>=3.0,<4.0",
+    "starlette",
+    "uvicorn[standard]",
 ]
 
 [project.scripts]
@@ -20,4 +22,5 @@ openudang = "open_udang.main:main"
 dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
+    "httpx",
 ]

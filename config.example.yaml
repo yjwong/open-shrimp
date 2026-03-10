@@ -46,3 +46,9 @@ contexts:
     #   - -1001234567890  # Locks this group chat to this context (cannot switch)
 
 default_context: default
+
+# Review Mini App settings (optional)
+# review:
+#   host: "127.0.0.1"   # HTTP server bind address
+#   port: 8080           # HTTP server port
+#   public_url: "https://your-domain.com"  # Public URL for Mini App (behind reverse proxy)

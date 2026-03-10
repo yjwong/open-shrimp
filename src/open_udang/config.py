@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -26,11 +27,19 @@ class ContextConfig:
 
 
 @dataclass
+class ReviewConfig:
+    host: str = "127.0.0.1"
+    port: int = 8080
+    public_url: str | None = None
+
+
+@dataclass
 class Config:
     telegram: TelegramConfig
     allowed_users: list[int]
     contexts: dict[str, ContextConfig]
     default_context: str
+    review: ReviewConfig = field(default_factory=ReviewConfig)
 
 
 def _validate_raw(raw: dict) -> None:
@@ -105,11 +114,20 @@ def _parse(raw: dict) -> Config:
             locked_for_chats=ctx.get("locked_for_chats", []),
         )
 
+    # Parse optional review config.
+    review_raw: dict[str, Any] = raw.get("review", {})
+    review = ReviewConfig(
+        host=str(review_raw.get("host", "127.0.0.1")),
+        port=int(review_raw.get("port", 8080)),
+        public_url=review_raw.get("public_url"),
+    )
+
     return Config(
         telegram=TelegramConfig(token=raw["telegram"]["token"]),
         allowed_users=raw["allowed_users"],
         contexts=contexts,
         default_context=raw["default_context"],
+        review=review,
     )
 
 

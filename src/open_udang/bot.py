@@ -1653,6 +1653,53 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                 logger.exception("Failed to edit approval message")
 
 
+# ── Review command ──
+
+
+async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /review — open the review Mini App for the current context."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    chat_id = update.effective_chat.id
+
+    if not _is_authorized(update.effective_user.id, config):
+        return
+
+    context_name, ctx = await _get_context(chat_id, config, db)
+
+    # Build the Mini App URL.
+    # Use the configured public URL if available, otherwise build from
+    # host:port.  For production behind a reverse proxy the user should
+    # set review.public_url in config.
+    if config.review.public_url:
+        base_url = config.review.public_url.rstrip("/")
+    else:
+        base_url = f"https://{config.review.host}:{config.review.port}"
+
+    app_url = f"{base_url}/app/?chat_id={chat_id}"
+
+    from telegram import WebAppInfo
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text="📝 Open Review",
+            web_app=WebAppInfo(url=app_url),
+        )]
+    ])
+
+    escaped_context = _escape_mdv2(context_name)
+    escaped_dir = _escape_mdv2(ctx.directory)
+    await update.message.reply_text(
+        f"Review changes in *{escaped_context}*\n"
+        f"📁 `{escaped_dir}`",
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard,
+    )
+
+
 # ── Application setup ──
 
 
@@ -1673,6 +1720,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("cancel", cancel_handler))
     app.add_handler(CommandHandler("resume", resume_handler))
+    app.add_handler(CommandHandler("review", review_handler))
 
     # Callback query handler for tool approval buttons
     app.add_handler(CallbackQueryHandler(callback_query_handler))
@@ -1696,6 +1744,7 @@ async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
         BotCommand("status", "Show current context, session, and state"),
         BotCommand("cancel", "Abort running Claude invocation"),
         BotCommand("resume", "List and resume a previous session"),
+        BotCommand("review", "Review and stage git changes"),
     ])
     await app.start()
     await app.updater.start_polling()

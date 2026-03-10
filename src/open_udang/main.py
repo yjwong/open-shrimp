@@ -26,6 +26,29 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+async def _run_http_server(config: "Config", db: "aiosqlite.Connection") -> None:  # noqa: F821
+    """Run the review API HTTP server."""
+    import uvicorn
+
+    from open_udang.review.api import create_review_app
+
+    app = create_review_app(config, db)
+
+    server_config = uvicorn.Config(
+        app,
+        host=config.review.host,
+        port=config.review.port,
+        log_level="info",
+    )
+    server = uvicorn.Server(server_config)
+    logger.info(
+        "Starting review API server on %s:%d",
+        config.review.host,
+        config.review.port,
+    )
+    await server.serve()
+
+
 async def _async_main(config_path: str) -> None:
     config = load_config(config_path)
     logger.info("Config loaded from %s", config_path)
@@ -41,15 +64,18 @@ async def _async_main(config_path: str) -> None:
         loop.add_signal_handler(sig, stop_event.set)
 
     bot_task = asyncio.create_task(run_bot(config, db))
+    http_task = asyncio.create_task(_run_http_server(config, db))
 
     await stop_event.wait()
     logger.info("Shutting down...")
 
     bot_task.cancel()
-    try:
-        await bot_task
-    except asyncio.CancelledError:
-        pass
+    http_task.cancel()
+    for task in (bot_task, http_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     await db.close()
     logger.info("Shutdown complete")
