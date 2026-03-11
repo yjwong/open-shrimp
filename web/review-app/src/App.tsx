@@ -15,7 +15,7 @@ function getDir(): string {
 export default function App() {
   const chatId = useMemo(() => getChatId(), []);
   const dir = useMemo(() => getDir(), []);
-  const { hunks, totalHunks, loading, error, refresh } = useHunks(chatId, dir);
+  const { hunks, totalHunks, loading, error, refresh, loadMore } = useHunks(chatId, dir);
 
   if (loading) {
     return (
@@ -50,6 +50,7 @@ export default function App() {
       chatId={chatId!}
       dir={dir}
       onRefresh={refresh}
+      onNeedMore={loadMore}
     />
   );
 }

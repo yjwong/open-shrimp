@@ -235,7 +235,7 @@ export function SwipeDeck({
 
   return (
     <div className="swipe-deck">
-      <ProgressBar current={currentIndex} total={hunks.length} />
+      <ProgressBar current={currentIndex} total={totalHunks} />
 
       {error && (
         <div className="swipe-error">

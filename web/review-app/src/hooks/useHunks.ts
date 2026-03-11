@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchHunks } from "../lib/api";
 import type { Hunk } from "../lib/types";
+
+const PAGE_SIZE = 20;
 
 interface UseHunksResult {
   hunks: Hunk[];
@@ -8,13 +10,12 @@ interface UseHunksResult {
   loading: boolean;
   error: string | null;
   refresh: () => void;
+  loadMore: () => void;
 }
 
 export function useHunks(
   chatId: string | null,
   dir: string,
-  offset: number = 0,
-  limit: number = 20,
 ): UseHunksResult {
   const [hunks, setHunks] = useState<Hunk[]>([]);
   const [totalHunks, setTotalHunks] = useState(0);
@@ -22,10 +23,24 @@ export function useHunks(
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // Track the next offset to fetch. Use a ref so loadMore() doesn't
+  // trigger a re-render cycle — we only update state when the fetch
+  // actually completes.
+  const nextOffsetRef = useRef(0);
+  const loadingMoreRef = useRef(false);
+  const allLoadedRef = useRef(false);
+
   const refresh = useCallback(() => {
+    // Reset pagination state on refresh.
+    nextOffsetRef.current = 0;
+    loadingMoreRef.current = false;
+    allLoadedRef.current = false;
+    setHunks([]);
+    setTotalHunks(0);
     setRefreshKey((k) => k + 1);
   }, []);
 
+  // Initial load (and reload on refresh).
   useEffect(() => {
     if (!chatId) {
       setLoading(false);
@@ -38,12 +53,18 @@ export function useHunks(
     async function load() {
       setLoading(true);
       setError(null);
+      nextOffsetRef.current = 0;
+      allLoadedRef.current = false;
 
       try {
-        const result = await fetchHunks(chatId!, dir, offset, limit);
+        const result = await fetchHunks(chatId!, dir, 0, PAGE_SIZE);
         if (!cancelled) {
           setHunks(result.hunks);
           setTotalHunks(result.total_hunks);
+          nextOffsetRef.current = result.hunks.length;
+          if (result.hunks.length >= result.total_hunks) {
+            allLoadedRef.current = true;
+          }
         }
       } catch (err) {
         if (!cancelled) {
@@ -61,7 +82,30 @@ export function useHunks(
     return () => {
       cancelled = true;
     };
-  }, [chatId, dir, offset, limit, refreshKey]);
+  }, [chatId, dir, refreshKey]);
 
-  return { hunks, totalHunks, loading, error, refresh };
+  const loadMore = useCallback(() => {
+    if (!chatId || loadingMoreRef.current || allLoadedRef.current) return;
+
+    loadingMoreRef.current = true;
+    const offset = nextOffsetRef.current;
+
+    fetchHunks(chatId, dir, offset, PAGE_SIZE)
+      .then((result) => {
+        setHunks((prev) => [...prev, ...result.hunks]);
+        setTotalHunks(result.total_hunks);
+        nextOffsetRef.current = offset + result.hunks.length;
+        if (offset + result.hunks.length >= result.total_hunks) {
+          allLoadedRef.current = true;
+        }
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to load more hunks");
+      })
+      .finally(() => {
+        loadingMoreRef.current = false;
+      });
+  }, [chatId, dir]);
+
+  return { hunks, totalHunks, loading, error, refresh, loadMore };
 }
