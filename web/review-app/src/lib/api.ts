@@ -12,11 +12,13 @@ export class StaleHunkError extends Error {
 
 export async function fetchHunks(
   chatId: string,
+  dir: string,
   offset: number = 0,
   limit: number = 20,
 ): Promise<HunkResult> {
   const params = new URLSearchParams({
     chat_id: chatId,
+    dir,
     offset: String(offset),
     limit: String(limit),
   });
@@ -32,14 +34,14 @@ export async function fetchHunks(
   return response.json() as Promise<HunkResult>;
 }
 
-export async function stageHunk(hunkId: string): Promise<void> {
+export async function stageHunk(hunkId: string, chatId: string, dir: string): Promise<void> {
   const response = await fetch(`${BASE_URL}/stage`, {
     method: "POST",
     headers: {
       ...getAuthHeader(),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ hunk_id: hunkId }),
+    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir }),
   });
 
   if (response.status === 409) {
@@ -51,14 +53,14 @@ export async function stageHunk(hunkId: string): Promise<void> {
   }
 }
 
-export async function unstageHunk(hunkId: string): Promise<void> {
+export async function unstageHunk(hunkId: string, chatId: string, dir: string): Promise<void> {
   const response = await fetch(`${BASE_URL}/unstage`, {
     method: "POST",
     headers: {
       ...getAuthHeader(),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ hunk_id: hunkId }),
+    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir }),
   });
 
   if (response.status === 409) {

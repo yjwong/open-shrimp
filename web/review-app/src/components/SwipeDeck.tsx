@@ -9,6 +9,8 @@ import { useSwipe, type SwipeDirection } from "../hooks/useSwipe";
 interface SwipeDeckProps {
   hunks: Hunk[];
   totalHunks: number;
+  chatId: string;
+  dir: string;
   onRefresh: () => void;
   onNeedMore?: () => void;
 }
@@ -22,6 +24,8 @@ interface Decision {
 export function SwipeDeck({
   hunks,
   totalHunks,
+  chatId,
+  dir,
   onRefresh,
   onNeedMore,
 }: SwipeDeckProps) {
@@ -67,7 +71,7 @@ export function SwipeDeck({
         try {
           // If we staged the hunk, unstage it
           if (lastDecision.action === "staged" && !lastDecision.wasAlreadyStaged) {
-            await unstageHunk(lastDecision.hunkId);
+            await unstageHunk(lastDecision.hunkId, chatId, dir);
           }
 
           setHistory((h) => h.slice(0, -1));
@@ -95,7 +99,7 @@ export function SwipeDeck({
         setIsProcessing(true);
         try {
           if (!currentHunk.staged) {
-            await stageHunk(currentHunk.id);
+            await stageHunk(currentHunk.id, chatId, dir);
           }
           setHistory((h) => [
             ...h,
@@ -124,7 +128,7 @@ export function SwipeDeck({
         setIsProcessing(true);
         try {
           if (currentHunk.staged) {
-            await unstageHunk(currentHunk.id);
+            await unstageHunk(currentHunk.id, chatId, dir);
           }
           setHistory((h) => [
             ...h,
@@ -147,7 +151,7 @@ export function SwipeDeck({
         }
       }
     },
-    [currentHunk, history],
+    [currentHunk, history, chatId, dir],
   );
 
   // When swipe threshold is reached, clear the drag overlay immediately

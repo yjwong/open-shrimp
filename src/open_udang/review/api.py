@@ -18,7 +18,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from open_udang.config import Config
+from open_udang.config import Config, ContextConfig
 from open_udang.db import get_active_context
 from open_udang.review.auth import AuthError, validate_init_data
 from open_udang.review.git_diff import Hunk, get_hunks
@@ -26,10 +26,18 @@ from open_udang.review.git_stage import stage_hunk, unstage_hunk
 
 logger = logging.getLogger(__name__)
 
-# In-memory hunk cache: (chat_id, context_name) -> list[Hunk]
+# In-memory hunk cache: (chat_id, context_name, dir_index) -> list[Hunk]
 # Stores the full (unpaginated) hunk list so we can look up hunks by ID
 # for stage/unstage operations.
-_hunk_cache: dict[tuple[int, str], list[Hunk]] = {}
+_hunk_cache: dict[tuple[int, str, int], list[Hunk]] = {}
+
+
+def _get_directories(ctx: ContextConfig) -> list[str]:
+    """Return the ordered list of directories for a context.
+
+    Index 0 is the main directory, followed by additional_directories.
+    """
+    return [ctx.directory] + ctx.additional_directories
 
 
 def _hunk_to_dict(hunk: Hunk) -> dict[str, Any]:
@@ -60,13 +68,22 @@ async def _authenticate(request: Request) -> int:
 
 
 async def _resolve_context(
-    request: Request, chat_id: int
+    request: Request, chat_id: int, dir_index: int = 0
 ) -> tuple[str, str]:
-    """Resolve the active context for a chat.
+    """Resolve the active context and directory for a chat.
 
-    Returns (context_name, working_directory).
+    Args:
+        request: The incoming HTTP request.
+        chat_id: Telegram chat ID.
+        dir_index: Zero-based directory index (0 = main directory,
+            1+ = additional_directories).
 
-    Raises AuthError(404) if the context is not found.
+    Returns:
+        (context_name, working_directory).
+
+    Raises:
+        AuthError(404) if the context is not found.
+        AuthError(400) if dir_index is out of range.
     """
     config: Config = request.app.state.config
     db: aiosqlite.Connection = request.app.state.db
@@ -79,7 +96,10 @@ async def _resolve_context(
         raise AuthError(404, f"Context '{context_name}' not found")
 
     ctx = config.contexts[context_name]
-    return context_name, ctx.directory
+    dirs = _get_directories(ctx)
+    if dir_index < 0 or dir_index >= len(dirs):
+        raise AuthError(400, f"Invalid directory index: {dir_index}")
+    return context_name, dirs[dir_index]
 
 
 async def hunks_endpoint(request: Request) -> JSONResponse:
@@ -100,12 +120,15 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
 
     offset = int(request.query_params.get("offset", "0"))
     limit = int(request.query_params.get("limit", "20"))
+    dir_index = int(request.query_params.get("dir", "0"))
     include_untracked = request.query_params.get(
         "include_untracked", "true"
     ).lower() in ("true", "1", "yes")
 
     try:
-        context_name, directory = await _resolve_context(request, chat_id)
+        context_name, directory = await _resolve_context(
+            request, chat_id, dir_index
+        )
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
@@ -123,7 +146,7 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
         )
 
         # Cache the full hunk list.
-        _hunk_cache[(chat_id, context_name)] = all_result.hunks
+        _hunk_cache[(chat_id, context_name, dir_index)] = all_result.hunks
 
         # Apply pagination.
         total = all_result.total_hunks
@@ -136,6 +159,11 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
             "offset": offset,
             "hunks": [_hunk_to_dict(h) for h in paginated],
         }
+    except ValueError as e:
+        logger.warning("Not a git repo: %s — %s", directory, e)
+        return JSONResponse(
+            {"error": str(e)}, status_code=400
+        )
     except Exception:
         logger.exception("Failed to get hunks for %s", directory)
         return JSONResponse(
@@ -146,28 +174,32 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
 
 
 def _find_cached_hunk(
-    hunk_id: str, chat_id: int | None = None, context_name: str | None = None
-) -> tuple[Hunk | None, str | None, int | None]:
+    hunk_id: str,
+    chat_id: int | None = None,
+    context_name: str | None = None,
+    dir_index: int | None = None,
+) -> tuple[Hunk | None, str | None, int | None, int | None]:
     """Find a hunk by ID in the cache.
 
-    If chat_id and context_name are provided, search only that entry.
-    Otherwise, search all cache entries.
+    If chat_id, context_name, and dir_index are all provided, search only
+    that specific cache entry.  Otherwise, search all cache entries.
 
-    Returns (hunk, context_name, chat_id) or (None, None, None).
+    Returns (hunk, context_name, chat_id, dir_index) or
+    (None, None, None, None).
     """
-    if chat_id is not None and context_name is not None:
-        hunks = _hunk_cache.get((chat_id, context_name), [])
+    if chat_id is not None and context_name is not None and dir_index is not None:
+        hunks = _hunk_cache.get((chat_id, context_name, dir_index), [])
         for h in hunks:
             if h.id == hunk_id:
-                return h, context_name, chat_id
-        return None, None, None
+                return h, context_name, chat_id, dir_index
+        return None, None, None, None
 
     # Search all cache entries.
-    for (cid, cname), hunks in _hunk_cache.items():
+    for (cid, cname, didx), hunks in _hunk_cache.items():
         for h in hunks:
             if h.id == hunk_id:
-                return h, cname, cid
-    return None, None, None
+                return h, cname, cid, didx
+    return None, None, None, None
 
 
 async def stage_endpoint(request: Request) -> JSONResponse:
@@ -191,16 +223,24 @@ async def stage_endpoint(request: Request) -> JSONResponse:
         )
 
     chat_id = body.get("chat_id")
+    dir_index_raw = body.get("dir", 0)
+    try:
+        dir_index = int(dir_index_raw)
+    except (TypeError, ValueError):
+        dir_index = 0
+
     context_name_hint = None
     if chat_id is not None:
         try:
             chat_id = int(chat_id)
-            context_name_hint, _ = await _resolve_context(request, chat_id)
+            context_name_hint, _ = await _resolve_context(
+                request, chat_id, dir_index
+            )
         except (ValueError, AuthError):
             pass
 
-    hunk, context_name, resolved_chat_id = _find_cached_hunk(
-        hunk_id, chat_id, context_name_hint
+    hunk, context_name, resolved_chat_id, resolved_dir_index = _find_cached_hunk(
+        hunk_id, chat_id, context_name_hint, dir_index
     )
     if hunk is None:
         return JSONResponse(
@@ -215,7 +255,15 @@ async def stage_endpoint(request: Request) -> JSONResponse:
             {"error": f"Context '{context_name}' not found"},
             status_code=404,
         )
-    directory = config.contexts[context_name].directory
+    ctx = config.contexts[context_name]
+    dirs = _get_directories(ctx)
+    didx = resolved_dir_index if resolved_dir_index is not None else 0
+    if didx < 0 or didx >= len(dirs):
+        return JSONResponse(
+            {"error": f"Invalid directory index: {didx}"},
+            status_code=400,
+        )
+    directory = dirs[didx]
 
     result = await stage_hunk(directory, hunk)
 
@@ -223,7 +271,7 @@ async def stage_endpoint(request: Request) -> JSONResponse:
         status = 409 if result.stale else 500
         if result.stale:
             # Invalidate cache so the next refresh fetches fresh hunks.
-            cache_key = (resolved_chat_id, context_name)
+            cache_key = (resolved_chat_id, context_name, didx)
             _hunk_cache.pop(cache_key, None)
         return JSONResponse({"error": result.error}, status_code=status)
 
@@ -251,16 +299,24 @@ async def unstage_endpoint(request: Request) -> JSONResponse:
         )
 
     chat_id = body.get("chat_id")
+    dir_index_raw = body.get("dir", 0)
+    try:
+        dir_index = int(dir_index_raw)
+    except (TypeError, ValueError):
+        dir_index = 0
+
     context_name_hint = None
     if chat_id is not None:
         try:
             chat_id = int(chat_id)
-            context_name_hint, _ = await _resolve_context(request, chat_id)
+            context_name_hint, _ = await _resolve_context(
+                request, chat_id, dir_index
+            )
         except (ValueError, AuthError):
             pass
 
-    hunk, context_name, resolved_chat_id = _find_cached_hunk(
-        hunk_id, chat_id, context_name_hint
+    hunk, context_name, resolved_chat_id, resolved_dir_index = _find_cached_hunk(
+        hunk_id, chat_id, context_name_hint, dir_index
     )
     if hunk is None:
         return JSONResponse(
@@ -275,14 +331,22 @@ async def unstage_endpoint(request: Request) -> JSONResponse:
             {"error": f"Context '{context_name}' not found"},
             status_code=404,
         )
-    directory = config.contexts[context_name].directory
+    ctx = config.contexts[context_name]
+    dirs = _get_directories(ctx)
+    didx = resolved_dir_index if resolved_dir_index is not None else 0
+    if didx < 0 or didx >= len(dirs):
+        return JSONResponse(
+            {"error": f"Invalid directory index: {didx}"},
+            status_code=400,
+        )
+    directory = dirs[didx]
 
     result = await unstage_hunk(directory, hunk)
 
     if not result.ok:
         status = 409 if result.stale else 500
         if result.stale:
-            cache_key = (resolved_chat_id, context_name)
+            cache_key = (resolved_chat_id, context_name, didx)
             _hunk_cache.pop(cache_key, None)
         return JSONResponse({"error": result.error}, status_code=status)
 

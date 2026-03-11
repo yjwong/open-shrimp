@@ -1698,22 +1698,40 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         base_url = f"https://{config.review.host}:{config.review.port}"
 
-    app_url = f"{base_url}/app/?chat_id={chat_id}"
-
     from telegram import WebAppInfo
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            text="📝 Open Review",
-            web_app=WebAppInfo(url=app_url),
-        )]
-    ])
-
     escaped_context = _escape_mdv2(context_name)
-    escaped_dir = _escape_mdv2(ctx.directory)
+    dirs = [ctx.directory] + (ctx.additional_directories or [])
+
+    if len(dirs) == 1:
+        # Single directory: current behavior.
+        app_url = f"{base_url}/app/?chat_id={chat_id}"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                text="📝 Open Review",
+                web_app=WebAppInfo(url=app_url),
+            )]
+        ])
+        escaped_dir = _escape_mdv2(ctx.directory)
+        text = (
+            f"Review changes in *{escaped_context}*\n"
+            f"📁 `{escaped_dir}`"
+        )
+    else:
+        # Multiple directories: one button per directory.
+        rows = []
+        for i, d in enumerate(dirs):
+            app_url = f"{base_url}/app/?chat_id={chat_id}&dir={i}"
+            basename = d.rstrip("/").rsplit("/", 1)[-1]
+            rows.append([InlineKeyboardButton(
+                text=f"📁 {basename}",
+                web_app=WebAppInfo(url=app_url),
+            )])
+        keyboard = InlineKeyboardMarkup(rows)
+        text = f"Review changes in *{escaped_context}*"
+
     await update.message.reply_text(
-        f"Review changes in *{escaped_context}*\n"
-        f"📁 `{escaped_dir}`",
+        text,
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
     )

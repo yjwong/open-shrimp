@@ -7,9 +7,15 @@ function getChatId(): string | null {
   return params.get("chat_id");
 }
 
+function getDir(): string {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("dir") ?? "0";
+}
+
 export default function App() {
   const chatId = useMemo(() => getChatId(), []);
-  const { hunks, totalHunks, loading, error, refresh } = useHunks(chatId);
+  const dir = useMemo(() => getDir(), []);
+  const { hunks, totalHunks, loading, error, refresh } = useHunks(chatId, dir);
 
   if (loading) {
     return (
@@ -41,6 +47,8 @@ export default function App() {
     <SwipeDeck
       hunks={hunks}
       totalHunks={totalHunks}
+      chatId={chatId!}
+      dir={dir}
       onRefresh={refresh}
     />
   );

@@ -12,6 +12,7 @@ interface UseHunksResult {
 
 export function useHunks(
   chatId: string | null,
+  dir: string,
   offset: number = 0,
   limit: number = 20,
 ): UseHunksResult {
@@ -39,7 +40,7 @@ export function useHunks(
       setError(null);
 
       try {
-        const result = await fetchHunks(chatId!, offset, limit);
+        const result = await fetchHunks(chatId!, dir, offset, limit);
         if (!cancelled) {
           setHunks(result.hunks);
           setTotalHunks(result.total_hunks);
@@ -60,7 +61,7 @@ export function useHunks(
     return () => {
       cancelled = true;
     };
-  }, [chatId, offset, limit, refreshKey]);
+  }, [chatId, dir, offset, limit, refreshKey]);
 
   return { hunks, totalHunks, loading, error, refresh };
 }

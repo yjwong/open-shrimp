@@ -328,7 +328,19 @@ async def get_hunks(
 
     Returns:
         HunkResult with total count and paginated hunk list.
+
+    Raises:
+        ValueError: If cwd is not inside a git repository.
     """
+    # Verify we're inside a git repository before running diff commands.
+    # Without this check, git falls back to --no-index mode which doesn't
+    # support --cached and produces confusing errors.
+    _, _, rc = await _run_git(cwd, "rev-parse", "--git-dir")
+    if rc != 0:
+        raise ValueError(
+            f"Directory is not inside a git repository: {cwd}"
+        )
+
     # Handle untracked files first.
     if include_untracked:
         untracked = await _get_untracked_files(cwd)
