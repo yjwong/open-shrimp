@@ -1069,26 +1069,29 @@ async def _start_agent_task(
                         chat_id,
                     )
 
-            # Consume events (the query has already been sent above).
-            events = receive_events(session)
-            result = await stream_response(
-                bot=context.bot,
-                chat_id=chat_id,
-                events=events,
-                draft_state=draft_state,
-                allowed_tools=ctx_config.allowed_tools,
-                cwd=ctx_config.directory,
-            )
-
-            if result.session_id:
-                await set_session_id(db, chat_id, ctx_name, result.session_id)
-
-            if result.usage:
-                await _update_pinned_status(
-                    context.bot, chat_id, ctx_name, ctx_config, db,
-                    usage=result.usage,
-                    total_cost_usd=result.total_cost_usd,
+            while True:
+                events = receive_events(session)
+                result = await stream_response(
+                    bot=context.bot,
+                    chat_id=chat_id,
+                    events=events,
+                    draft_state=draft_state,
+                    allowed_tools=ctx_config.allowed_tools,
+                    cwd=ctx_config.directory,
                 )
+
+                if result.session_id:
+                    await set_session_id(db, chat_id, ctx_name, result.session_id)
+
+                if result.usage:
+                    await _update_pinned_status(
+                        context.bot, chat_id, ctx_name, ctx_config, db,
+                        usage=result.usage,
+                        total_cost_usd=result.total_cost_usd,
+                    )
+
+                if result.num_turns == 0 and result.session_id is None:
+                    break
 
         except asyncio.CancelledError:
             logger.info("Agent task cancelled for chat %d", chat_id)

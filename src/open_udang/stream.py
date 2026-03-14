@@ -24,7 +24,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
-from claude_agent_sdk.types import StreamEvent
+from claude_agent_sdk.types import StreamEvent, TaskNotificationMessage
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from open_udang.agent import AgentEvent
@@ -529,6 +529,29 @@ async def stream_response(
                     state.session_id = sid
                     result.session_id = sid
 
+                if isinstance(event, TaskNotificationMessage):
+                    logger.info(
+                        "Background task %s %s for chat %d: %s",
+                        event.task_id,
+                        event.status,
+                        state.chat_id,
+                        event.summary,
+                    )
+                    await finalize_and_reset(bot, state)
+                    try:
+                        summary = event.summary or event.status
+                        chunks = gfm_to_telegram(f"📋 {summary}")
+                        text = chunks[0] if chunks else f"📋 {summary}"
+                        await bot.send_message(
+                            chat_id=state.chat_id,
+                            text=text,
+                            parse_mode="MarkdownV2",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to send task notification message"
+                        )
+
     finally:
         if draft_task:
             draft_task.cancel()
@@ -541,6 +564,13 @@ async def stream_response(
         if state.raw_text.strip() or state.tool_notifications:
             msg_ids = await _finalize_message(bot, state)
             state.sent_message_ids.extend(msg_ids)
+
+        # Reset for the next stream_response() iteration.
+        state.raw_text = ""
+        state.tool_notifications = []
+        state.draft_id = random.randint(1, 2**31 - 1)
+        state.dirty = False
+        state.turn_complete = False
 
     return result
 
