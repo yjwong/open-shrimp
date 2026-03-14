@@ -30,6 +30,20 @@ Both are self-hosted and open source. They solve different problems.
 
 **TL;DR:** OpenClaw is a Swiss Army knife for daily life. OpenUdang is a scalpel for code — it does one thing and does it well.
 
+## OpenUdang vs Claude Code Remote Control
+
+Both let you use Claude Code from your phone. They take very different approaches.
+
+| | **OpenUdang** | **Claude Code Remote Control** |
+|---|---|---|
+| **How it works** | Standalone bot — talks to Agent SDK directly | Remote view into a running Claude Code terminal session |
+| **Interface** | Telegram — no extra app needed | claude.ai/code or Claude mobile app |
+| **Always on** | Yes — runs as a systemd service, message it anytime | No — requires a Claude Code session to be started first |
+| **Code review** | Built-in review UI with inline approve/deny buttons | No dedicated review UI |
+| **Stability** | Simple architecture, fewer moving parts | Research preview — still buggy |
+
+**TL;DR:** Remote Control mirrors a terminal session to your phone. OpenUdang *is* the session — always on, in Telegram, with a proper code review flow. No extra app required.
+
 ## Why OpenUdang?
 
 You're away from your desk but need Claude to fix a bug, review a diff, or scaffold something quick. OpenUdang gives you a proper Claude Code session from any Telegram chat — on your phone, your tablet, wherever.
