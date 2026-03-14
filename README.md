@@ -46,12 +46,34 @@ You're away from your desk but need Claude to fix a bug, review a diff, or scaff
 
 ### Prerequisites
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated
 - An [Anthropic API key](https://console.anthropic.com/)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
-### Install & Configure
+### Option 1: Download Binary (recommended)
+
+Grab the latest binary from [Releases](https://github.com/yjwong/open-udang/releases). No Python or package manager required — just download, configure, and run.
+
+```bash
+# Linux x86_64
+curl -fsSL https://github.com/yjwong/open-udang/releases/latest/download/openudang-linux-x86_64 -o openudang
+# Linux ARM64
+curl -fsSL https://github.com/yjwong/open-udang/releases/latest/download/openudang-linux-aarch64 -o openudang
+# macOS Apple Silicon
+curl -fsSL https://github.com/yjwong/open-udang/releases/latest/download/openudang-macos-aarch64 -o openudang
+
+chmod +x openudang
+
+# Set up your config
+mkdir -p ~/.config/openudang
+curl -fsSL https://raw.githubusercontent.com/yjwong/open-udang/main/config.example.yaml -o ~/.config/openudang/config.yaml
+```
+
+On first run, the binary will automatically set up an isolated Python environment and install dependencies. Subsequent runs start instantly.
+
+### Option 2: From Source
+
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/yjwong/open-udang.git
@@ -83,6 +105,10 @@ default_context: my-project
 ### Run
 
 ```bash
+# Binary
+ANTHROPIC_API_KEY=sk-ant-... ./openudang
+
+# From source
 ANTHROPIC_API_KEY=sk-ant-... uv run openudang
 ```
 
