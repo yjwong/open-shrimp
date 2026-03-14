@@ -359,8 +359,12 @@ def create_review_app(config: Config, db: aiosqlite.Connection) -> Starlette:
     The config and db are stored on app.state so route handlers can access them.
     Serves the review Mini App frontend at /app/ and API routes at /api/review/.
     """
-    # Resolve the frontend dist directory relative to this package.
-    _dist_dir = Path(__file__).resolve().parent.parent.parent.parent / "web" / "review-app" / "dist"
+    # Resolve the frontend dist directory.  Check the package-bundled location
+    # first (used by PyApp / pip install), then fall back to the development
+    # layout (git checkout with web/review-app/dist/ built locally).
+    _pkg_static = Path(__file__).resolve().parent / "static"
+    _dev_dist = Path(__file__).resolve().parent.parent.parent.parent / "web" / "review-app" / "dist"
+    _dist_dir = _pkg_static if _pkg_static.is_dir() else _dev_dist
 
     routes: list[Route | Mount] = [
         Route("/api/review/hunks", hunks_endpoint, methods=["GET"]),

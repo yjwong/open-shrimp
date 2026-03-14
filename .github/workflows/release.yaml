@@ -19,6 +19,15 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Build review app frontend
+        working-directory: web/review-app
+        run: npm ci && npm run build
+
       - name: Build sdist
         run: uv build --sdist
 
