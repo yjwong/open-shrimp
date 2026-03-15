@@ -88,13 +88,9 @@ curl -fsSL https://github.com/yjwong/open-udang/releases/latest/download/openuda
 curl -fsSL https://github.com/yjwong/open-udang/releases/latest/download/openudang-macos-aarch64 -o openudang
 
 chmod +x openudang
-
-# Set up your config
-mkdir -p ~/.config/openudang
-curl -fsSL https://raw.githubusercontent.com/yjwong/open-udang/main/config.example.yaml -o ~/.config/openudang/config.yaml
 ```
 
-On first run, the binary will automatically set up an isolated Python environment and install dependencies. Subsequent runs start instantly.
+On first run, the binary will automatically set up an isolated Python environment and install dependencies. If no config file exists, an interactive setup wizard walks you through creating one. Subsequent runs start instantly.
 
 ### Option 2: From Source
 
@@ -131,10 +127,13 @@ default_context: my-project
 
 ```bash
 # Binary
-ANTHROPIC_API_KEY=sk-ant-... ./openudang
+./openudang
 
 # From source
-ANTHROPIC_API_KEY=sk-ant-... uv run openudang
+uv run openudang
+
+# If using an API key instead of Claude Code login
+ANTHROPIC_API_KEY=sk-ant-... ./openudang
 ```
 
 If no config file exists, OpenUdang starts an interactive setup wizard that walks you through creating one — no need to copy or edit YAML manually.
@@ -149,7 +148,9 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 | `/clear` | Start a fresh session in the current context |
 | `/status` | Show current context, session, and running state |
 | `/cancel` | Abort a running Claude invocation |
+| `/model [name]` | Show or override the model for this chat |
 | `/resume` | List and resume a previous session |
+| `/review` | Open the mobile code review UI |
 
 ## How Tool Approval Works
 
@@ -188,7 +189,8 @@ Description=OpenUdang Telegram Bot
 
 [Service]
 ExecStart=/path/to/uv run openudang
-Environment=ANTHROPIC_API_KEY=sk-ant-...
+# Only needed if not using Claude Code login:
+# Environment=ANTHROPIC_API_KEY=sk-ant-...
 Restart=always
 
 [Install]
