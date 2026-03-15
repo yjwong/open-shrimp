@@ -41,7 +41,7 @@ class TestGetBinaryName:
         with patch("open_udang.tunnel.platform") as mock_platform:
             mock_platform.system.return_value = "Darwin"
             mock_platform.machine.return_value = "arm64"
-            assert _get_binary_name() == "cloudflared-darwin-amd64.tgz"
+            assert _get_binary_name() == "cloudflared-darwin-arm64.tgz"
 
     def test_unsupported_platform(self) -> None:
         with patch("open_udang.tunnel.platform") as mock_platform:
