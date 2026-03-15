@@ -23,6 +23,7 @@ Telegram <-> OpenUdang (Python, async) <-> Claude Agent SDK
 - **Context**: A working directory + CLAUDE.md. Switch with `/context <name>`. Each context has its own model, auto-approve list, and tools.
 - **Session**: A persistent Claude conversation. The Agent SDK handles persistence as `.jsonl` files under `~/.claude/projects/<encoded-cwd>/`. OpenUdang maps `(chat_id, context_name) -> session_id` in SQLite.
 - **Tool approval**: Uses the SDK's `allowedTools` for auto-approved tools (patterns like `Bash(git *)`) and a `canUseTool` callback for everything else. Read-only file tools (Read, Glob, Grep) are auto-approved within the context working directory. Mutating tools (Edit, Write) always require explicit approval via Telegram inline keyboard, even within cwd, unless the user opts into "accept all edits" for the session. The callback sends Telegram inline keyboards and `await`s the user's response.
+- **Containerization**: Optional per-context Docker isolation via `containerize: true`. The Claude CLI runs inside a container with only the project directory bind-mounted (at the same host path). Session storage is isolated under `~/.config/openudang/containers/<context>/`, mounted as `~/.claude` inside the container. The container runs as the host user's uid/gid to avoid root-owned files. The SDK's `cli_path` is pointed at a generated wrapper script that invokes `docker run`; all other SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.
 
 ### Key SDK Patterns
 
@@ -60,6 +61,7 @@ src/open_udang/
     hooks.py          # canUseTool callback, tool approval logic
     stream.py         # Stream bridge: SDK messages -> sendMessageDraft
     config.py         # Config loading and validation (YAML)
+    container.py      # Docker container wrapper for isolated CLI execution
     db.py             # SQLite session ID mapping
     markdown.py       # GFM -> Telegram MarkdownV2 conversion
     service.py        # install/uninstall as systemd/launchd service
@@ -72,7 +74,7 @@ Config lives at `~/.config/openudang/config.yaml`. See `config.example.yaml` for
 Key fields:
 - `telegram.token` - Bot token from @BotFather
 - `allowed_users` - List of Telegram user IDs (integers)
-- `contexts` - Map of context name -> {directory, description, model, allowed_tools, default_for_chats}
+- `contexts` - Map of context name -> {directory, description, model, allowed_tools, default_for_chats, containerize}
 - `default_context` - Context name to use when none is specified
 
 `ANTHROPIC_API_KEY` is read from the environment, not the config file.

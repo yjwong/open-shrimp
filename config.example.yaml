@@ -44,6 +44,12 @@ contexts:
     #   - -1001234567890  # Sets initial context for this group chat
     # locked_for_chats:
     #   - -1001234567890  # Locks this group chat to this context (cannot switch)
+    # containerize: true  # Run the Claude CLI inside a Docker container.
+    #                      # Provides strong filesystem isolation — the agent
+    #                      # can only access the project directory (bind-mounted
+    #                      # at the same path) and its own session storage.
+    #                      # Requires: docker build -f Dockerfile.claude \
+    #                      #   -t openudang-claude:latest .
 
 default_context: default
 

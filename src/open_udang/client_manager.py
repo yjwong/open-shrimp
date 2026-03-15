@@ -34,6 +34,7 @@ from open_udang.hooks import (
     EditNotifyCallback,
     QuestionCallback,
 )
+from open_udang.container import build_cli_wrapper, cleanup_wrapper
 from open_udang.tools import create_openudang_mcp_server
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class AgentSession:
     session_id: str | None = None
     context_name: str = ""
     callback_context: CallbackContext = field(default_factory=CallbackContext)
+    container_wrapper_path: str | None = None
 
 
 _active_sessions: dict[int, AgentSession] = {}
@@ -134,6 +136,24 @@ async def get_or_create_session(
     allowed_tools = list(context.allowed_tools or [])
     allowed_tools.append("mcp__openudang__send_file")
 
+    # When containerized, generate a wrapper script that runs the Claude
+    # CLI inside Docker.  The wrapper is pointed at via cli_path; all other
+    # SDK machinery (stdin/stdout streaming, canUseTool, MCP) is unchanged.
+    wrapper_path: str | None = None
+    cli_path: str | None = None
+    if context.containerize:
+        wrapper_path = build_cli_wrapper(
+            context_name=context_name,
+            project_dir=context.directory,
+            additional_directories=context.additional_directories or None,
+        )
+        cli_path = wrapper_path
+        logger.info(
+            "Containerized context '%s': using wrapper %s",
+            context_name,
+            wrapper_path,
+        )
+
     options = ClaudeAgentOptions(
         cwd=context.directory,
         model=context.model,
@@ -143,6 +163,7 @@ async def get_or_create_session(
         include_partial_messages=True,
         stderr=_log_stderr,
         can_use_tool=can_use_tool,
+        cli_path=cli_path,
     )
 
     if context.additional_directories:
@@ -214,6 +235,8 @@ async def close_session(chat_id: int) -> None:
         logger.info("Closed client for chat %d", chat_id)
     except Exception:
         logger.debug("Error closing client for chat %d", chat_id, exc_info=True)
+    if session.container_wrapper_path:
+        cleanup_wrapper(session.container_wrapper_path)
 
 
 async def close_all_sessions() -> None:

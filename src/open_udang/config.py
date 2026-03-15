@@ -24,6 +24,7 @@ class ContextConfig:
     additional_directories: list[str] = field(default_factory=list)
     default_for_chats: list[int] = field(default_factory=list)
     locked_for_chats: list[int] = field(default_factory=list)
+    containerize: bool = False
 
 
 @dataclass
@@ -113,6 +114,7 @@ def _parse(raw: dict) -> Config:
             additional_directories=ctx.get("additional_directories", []),
             default_for_chats=ctx.get("default_for_chats", []),
             locked_for_chats=ctx.get("locked_for_chats", []),
+            containerize=bool(ctx.get("containerize", False)),
         )
 
     # Parse optional review config.
