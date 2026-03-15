@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import type { Hunk } from "../lib/types";
+import type { FileSummary, Hunk } from "../lib/types";
 import { stageHunk, unstageHunk, StaleHunkError } from "../lib/api";
 import { HunkCard } from "./HunkCard";
 import { FilePicker } from "./FilePicker";
@@ -10,6 +10,7 @@ import { useSwipe, type SwipeDirection } from "../hooks/useSwipe";
 interface SwipeDeckProps {
   hunks: Hunk[];
   totalHunks: number;
+  files: FileSummary[];
   chatId: string;
   dir: string;
   onRefresh: () => void;
@@ -25,6 +26,7 @@ interface Decision {
 export function SwipeDeck({
   hunks,
   totalHunks,
+  files,
   chatId,
   dir,
   onRefresh,
@@ -36,6 +38,7 @@ export function SwipeDeck({
   const [skippedCount, setSkippedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [pendingJumpIndex, setPendingJumpIndex] = useState<number | null>(null);
   const swipeEnabled = !isProcessing;
 
   // Track swipe direction for overlay — use refs + direct DOM updates
@@ -48,7 +51,7 @@ export function SwipeDeck({
 
   const currentHunk = hunks[currentIndex] ?? null;
   const nextHunk = hunks[currentIndex + 1] ?? null;
-  const isComplete = currentIndex >= hunks.length;
+  const isComplete = currentIndex >= hunks.length && hunks.length >= totalHunks;
 
   // Request more hunks when nearing the end
   useEffect(() => {
@@ -260,11 +263,31 @@ export function SwipeDeck({
     (hunkIndex: number) => {
       if (hunkIndex === currentIndex) return;
       setError(null);
-      setCurrentIndex(hunkIndex);
+      if (hunkIndex < hunks.length) {
+        setCurrentIndex(hunkIndex);
+      } else {
+        // Target hunk not loaded yet — queue jump and trigger loading
+        setPendingJumpIndex(hunkIndex);
+        onNeedMore?.();
+      }
       // Don't record decisions for jumps — the user is navigating, not reviewing
     },
-    [currentIndex],
+    [currentIndex, hunks.length, onNeedMore],
   );
+
+  // Complete a pending jump once enough hunks are loaded.
+  useEffect(() => {
+    if (pendingJumpIndex === null) return;
+    if (pendingJumpIndex < hunks.length) {
+      setCurrentIndex(pendingJumpIndex);
+      setPendingJumpIndex(null);
+    } else if (hunks.length < totalHunks) {
+      onNeedMore?.();
+    } else {
+      // All hunks loaded but index out of range — clear pending
+      setPendingJumpIndex(null);
+    }
+  }, [hunks.length, pendingJumpIndex, totalHunks, onNeedMore]);
 
   const hasUnstagedAhead = hunks.some(
     (h, i) => i >= currentIndex && !h.staged,
@@ -306,10 +329,11 @@ export function SwipeDeck({
       <div className="swipe-deck-toolbar">
         <ProgressBar current={currentIndex} total={totalHunks} />
         <FilePicker
+          files={files}
           hunks={hunks}
           currentIndex={currentIndex}
           onJumpToFile={handleJumpToFile}
-          disabled={isProcessing}
+          disabled={isProcessing || pendingJumpIndex !== null}
         />
         {showSkipButton && (
           <button
@@ -331,6 +355,13 @@ export function SwipeDeck({
       )}
 
       <div className="card-container">
+        {/* Loading more hunks */}
+        {!currentHunk && !isComplete && (
+          <div className="swipe-card swipe-card-loading">
+            Loading more hunks…
+          </div>
+        )}
+
         {/* Next card (peeking underneath) */}
         {nextHunk && (
           <div className="swipe-card swipe-card-next">

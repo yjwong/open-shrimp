@@ -17,10 +17,18 @@ export interface Hunk {
   staged: boolean;
 }
 
+export interface FileSummary {
+  path: string;
+  first_hunk_index: number;
+  hunk_count: number;
+  staged_count: number;
+}
+
 export interface HunkResult {
   context: string;
   directory: string;
   total_hunks: number;
   offset: number;
   hunks: Hunk[];
+  files: FileSummary[];
 }

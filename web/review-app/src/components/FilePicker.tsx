@@ -1,7 +1,8 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import type { Hunk } from "../lib/types";
+import type { FileSummary, Hunk } from "../lib/types";
 
 interface FilePickerProps {
+  files: FileSummary[];
   hunks: Hunk[];
   currentIndex: number;
   onJumpToFile: (hunkIndex: number) => void;
@@ -16,6 +17,7 @@ interface FileEntry {
 }
 
 export function FilePicker({
+  files,
   hunks,
   currentIndex,
   onJumpToFile,
@@ -26,25 +28,15 @@ export function FilePicker({
 
   const currentFile = hunks[currentIndex]?.file_path ?? null;
 
-  const files: FileEntry[] = useMemo(() => {
-    const map = new Map<string, FileEntry>();
-    for (let i = 0; i < hunks.length; i++) {
-      const h = hunks[i]!;
-      const existing = map.get(h.file_path);
-      if (existing) {
-        existing.hunkCount++;
-        if (h.staged) existing.stagedCount++;
-      } else {
-        map.set(h.file_path, {
-          path: h.file_path,
-          firstHunkIndex: i,
-          hunkCount: 1,
-          stagedCount: h.staged ? 1 : 0,
-        });
-      }
-    }
-    return Array.from(map.values());
-  }, [hunks]);
+  // Map server-provided file summaries to FileEntry shape.
+  const fileEntries: FileEntry[] = useMemo(() => {
+    return files.map((f) => ({
+      path: f.path,
+      firstHunkIndex: f.first_hunk_index,
+      hunkCount: f.hunk_count,
+      stagedCount: f.staged_count,
+    }));
+  }, [files]);
 
   const handleSelect = useCallback(
     (hunkIndex: number) => {
@@ -92,7 +84,7 @@ export function FilePicker({
 
       {open && (
         <div className="file-picker-dropdown">
-          {files.map((f) => {
+          {fileEntries.map((f) => {
             const isActive = f.path === currentFile;
             const allStaged = f.stagedCount === f.hunkCount;
             return (

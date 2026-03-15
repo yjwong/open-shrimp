@@ -15,7 +15,7 @@ function getDir(): string {
 export default function App() {
   const chatId = useMemo(() => getChatId(), []);
   const dir = useMemo(() => getDir(), []);
-  const { hunks, totalHunks, loading, error, refresh, loadMore } = useHunks(chatId, dir);
+  const { hunks, totalHunks, files, loading, error, refresh, loadMore } = useHunks(chatId, dir);
 
   if (loading) {
     return (
@@ -47,6 +47,7 @@ export default function App() {
     <SwipeDeck
       hunks={hunks}
       totalHunks={totalHunks}
+      files={files}
       chatId={chatId!}
       dir={dir}
       onRefresh={refresh}

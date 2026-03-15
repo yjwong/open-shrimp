@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchHunks } from "../lib/api";
-import type { Hunk } from "../lib/types";
+import type { FileSummary, Hunk } from "../lib/types";
 
 const PAGE_SIZE = 20;
 
 interface UseHunksResult {
   hunks: Hunk[];
   totalHunks: number;
+  files: FileSummary[];
   loading: boolean;
   error: string | null;
   refresh: () => void;
@@ -19,6 +20,7 @@ export function useHunks(
 ): UseHunksResult {
   const [hunks, setHunks] = useState<Hunk[]>([]);
   const [totalHunks, setTotalHunks] = useState(0);
+  const [files, setFiles] = useState<FileSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -37,6 +39,7 @@ export function useHunks(
     allLoadedRef.current = false;
     setHunks([]);
     setTotalHunks(0);
+    setFiles([]);
     setRefreshKey((k) => k + 1);
   }, []);
 
@@ -61,6 +64,7 @@ export function useHunks(
         if (!cancelled) {
           setHunks(result.hunks);
           setTotalHunks(result.total_hunks);
+          setFiles(result.files);
           nextOffsetRef.current = result.hunks.length;
           if (result.hunks.length >= result.total_hunks) {
             allLoadedRef.current = true;
@@ -94,6 +98,7 @@ export function useHunks(
       .then((result) => {
         setHunks((prev) => [...prev, ...result.hunks]);
         setTotalHunks(result.total_hunks);
+        setFiles(result.files);
         nextOffsetRef.current = offset + result.hunks.length;
         if (offset + result.hunks.length >= result.total_hunks) {
           allLoadedRef.current = true;
@@ -107,5 +112,5 @@ export function useHunks(
       });
   }, [chatId, dir]);
 
-  return { hunks, totalHunks, loading, error, refresh, loadMore };
+  return { hunks, totalHunks, files, loading, error, refresh, loadMore };
 }

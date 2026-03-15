@@ -148,6 +148,26 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
         # Cache the full hunk list.
         _hunk_cache[(chat_id, context_name, dir_index)] = all_result.hunks
 
+        # Build per-file summary from the full hunk list so the
+        # frontend can populate the file picker even before all
+        # pages have been loaded.
+        file_summary: list[dict[str, Any]] = []
+        file_map: dict[str, dict[str, Any]] = {}
+        for idx, h in enumerate(all_result.hunks):
+            if h.file_path not in file_map:
+                entry = {
+                    "path": h.file_path,
+                    "first_hunk_index": idx,
+                    "hunk_count": 1,
+                    "staged_count": 1 if h.staged else 0,
+                }
+                file_map[h.file_path] = entry
+                file_summary.append(entry)
+            else:
+                file_map[h.file_path]["hunk_count"] += 1
+                if h.staged:
+                    file_map[h.file_path]["staged_count"] += 1
+
         # Apply pagination.
         total = all_result.total_hunks
         paginated = all_result.hunks[offset : offset + limit]
@@ -158,6 +178,7 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
             "total_hunks": total,
             "offset": offset,
             "hunks": [_hunk_to_dict(h) for h in paginated],
+            "files": file_summary,
         }
     except ValueError as e:
         logger.warning("Not a git repo: %s — %s", directory, e)
