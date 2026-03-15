@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -41,33 +42,34 @@ def _detect_platform() -> str:
     )
 
 
-def _detect_executable() -> str:
+def _detect_executable() -> list[str]:
     """Find the best executable path for the service.
 
-    Returns the absolute path to the ``openudang`` binary or script.
-    Falls back to ``sys.executable -m open_udang`` if the script is not
-    found on PATH.
+    Returns a list of arguments for the ``openudang`` command.  Typically a
+    single-element list with the absolute path, but falls back to
+    ``[sys.executable, "-m", "open_udang"]`` if the script is not found.
     """
     # 1. Check if openudang is on PATH
     which = shutil.which("openudang")
     if which:
-        return str(Path(which).resolve())
+        return [str(Path(which).resolve())]
 
     # 2. Check for the script next to the running Python interpreter
     bin_dir = Path(sys.executable).parent
     candidate = bin_dir / "openudang"
     if candidate.is_file():
-        return str(candidate.resolve())
+        return [str(candidate.resolve())]
 
     # 3. Fallback: run as a module
-    return f"{sys.executable} -m open_udang"
+    return [sys.executable, "-m", "open_udang"]
 
 
 def _generate_systemd_unit(
-    exec_path: str,
+    exec_args: list[str],
     config_path: str,
 ) -> str:
     """Generate a systemd user unit file."""
+    exec_start = " ".join(shlex.quote(a) for a in exec_args)
     return dedent(f"""\
         [Unit]
         Description=OpenUdang Telegram Bot
@@ -76,7 +78,7 @@ def _generate_systemd_unit(
 
         [Service]
         Type=simple
-        ExecStart={exec_path} --config {config_path}
+        ExecStart={exec_start} --config {shlex.quote(config_path)}
         Restart=on-failure
         RestartSec=5
 
@@ -86,41 +88,43 @@ def _generate_systemd_unit(
 
 
 def _generate_launchd_plist(
-    exec_path: str,
+    exec_args: list[str],
     config_path: str,
 ) -> str:
     """Generate a launchd user agent plist."""
-    # Build ProgramArguments — handle the "python -m" fallback case
-    parts = exec_path.split()
-    args_xml = "\n".join(f"            <string>{p}</string>" for p in parts)
-    args_xml += "\n            <string>--config</string>"
-    args_xml += f"\n            <string>{config_path}</string>"
+    indent = "        "
+    args_lines = [f"{indent}<string>{p}</string>" for p in exec_args]
+    args_lines.append(f"{indent}<string>--config</string>")
+    args_lines.append(f"{indent}<string>{config_path}</string>")
+    args_xml = "\n".join(args_lines)
 
     log_dir = _LAUNCHD_LOG_DIR
 
-    return dedent(f"""\
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-          "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>{_LAUNCHD_LABEL}</string>
-            <key>ProgramArguments</key>
-            <array>
-        {args_xml}
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
-            <key>StandardOutPath</key>
-            <string>{log_dir}/openudang.stdout.log</string>
-            <key>StandardErrorPath</key>
-            <string>{log_dir}/openudang.stderr.log</string>
-        </dict>
-        </plist>
-    """)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"',
+        '  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+        '<plist version="1.0">',
+        "<dict>",
+        "    <key>Label</key>",
+        f"    <string>{_LAUNCHD_LABEL}</string>",
+        "    <key>ProgramArguments</key>",
+        "    <array>",
+        args_xml,
+        "    </array>",
+        "    <key>RunAtLoad</key>",
+        "    <true/>",
+        "    <key>KeepAlive</key>",
+        "    <true/>",
+        "    <key>StandardOutPath</key>",
+        f"    <string>{log_dir}/openudang.stdout.log</string>",
+        "    <key>StandardErrorPath</key>",
+        f"    <string>{log_dir}/openudang.stderr.log</string>",
+        "</dict>",
+        "</plist>",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
@@ -182,13 +186,13 @@ def install_service(config_path: str) -> None:
         print("Run 'openudang' first to complete the setup wizard.\n")
 
     # Detect executable
-    exec_path = _detect_executable()
+    exec_args = _detect_executable()
 
     # Generate and write service file
     if platform == "linux":
-        content = _generate_systemd_unit(exec_path, resolved_config)
+        content = _generate_systemd_unit(exec_args, resolved_config)
     else:
-        content = _generate_launchd_plist(exec_path, resolved_config)
+        content = _generate_launchd_plist(exec_args, resolved_config)
         _LAUNCHD_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     svc_path.parent.mkdir(parents=True, exist_ok=True)

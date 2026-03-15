@@ -43,7 +43,7 @@ class TestDetectExecutable:
         exe.touch()
         with patch("open_udang.service.shutil.which", return_value=str(exe)):
             result = _detect_executable()
-        assert result == str(exe.resolve())
+        assert result == [str(exe.resolve())]
 
     def test_found_next_to_python(self, tmp_path: Path) -> None:
         fake_python = tmp_path / "python"
@@ -56,7 +56,7 @@ class TestDetectExecutable:
         ):
             mock_sys.executable = str(fake_python)
             result = _detect_executable()
-        assert result == str(exe.resolve())
+        assert result == [str(exe.resolve())]
 
     def test_fallback_to_module(self, tmp_path: Path) -> None:
         fake_python = tmp_path / "python"
@@ -67,12 +67,12 @@ class TestDetectExecutable:
         ):
             mock_sys.executable = str(fake_python)
             result = _detect_executable()
-        assert result == f"{fake_python} -m open_udang"
+        assert result == [str(fake_python), "-m", "open_udang"]
 
 
 class TestGenerateSystemdUnit:
     def test_basic(self) -> None:
-        unit = _generate_systemd_unit("/usr/bin/openudang", "/etc/config.yaml")
+        unit = _generate_systemd_unit(["/usr/bin/openudang"], "/etc/config.yaml")
         assert "ExecStart=/usr/bin/openudang --config /etc/config.yaml" in unit
         assert "WantedBy=default.target" in unit
         assert "Restart=on-failure" in unit
@@ -81,7 +81,7 @@ class TestGenerateSystemdUnit:
 
 class TestGenerateLaunchdPlist:
     def test_basic(self) -> None:
-        plist = _generate_launchd_plist("/usr/bin/openudang", "/etc/config.yaml")
+        plist = _generate_launchd_plist(["/usr/bin/openudang"], "/etc/config.yaml")
         assert "<string>/usr/bin/openudang</string>" in plist
         assert "<string>--config</string>" in plist
         assert "<string>/etc/config.yaml</string>" in plist
@@ -92,7 +92,7 @@ class TestGenerateLaunchdPlist:
 
     def test_module_fallback_args(self) -> None:
         plist = _generate_launchd_plist(
-            "/usr/bin/python -m open_udang", "/etc/config.yaml"
+            ["/usr/bin/python", "-m", "open_udang"], "/etc/config.yaml"
         )
         assert "<string>/usr/bin/python</string>" in plist
         assert "<string>-m</string>" in plist
@@ -101,7 +101,7 @@ class TestGenerateLaunchdPlist:
 
 class TestInstallService:
     @patch("open_udang.service._run")
-    @patch("open_udang.service._detect_executable", return_value="/usr/bin/openudang")
+    @patch("open_udang.service._detect_executable", return_value=["/usr/bin/openudang"])
     @patch("open_udang.service._detect_platform", return_value="linux")
     def test_install_linux(
         self,
@@ -129,7 +129,7 @@ class TestInstallService:
         assert ["systemctl", "--user", "start", "open-udang.service"] in cmd_lists
 
     @patch("open_udang.service._run")
-    @patch("open_udang.service._detect_executable", return_value="/usr/bin/openudang")
+    @patch("open_udang.service._detect_executable", return_value=["/usr/bin/openudang"])
     @patch("open_udang.service._detect_platform", return_value="macos")
     def test_install_macos(
         self,
