@@ -20,6 +20,7 @@ from typing import Any
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    ProcessError,
     ResultMessage,
     SystemMessage,
 )
@@ -174,13 +175,30 @@ async def get_or_create_session(
         )
 
     client = ClaudeSDKClient(options=options)
-    await client.connect()
+    try:
+        await client.connect()
+    except ProcessError:
+        if not session_id:
+            raise
+        # The session file may no longer exist (e.g. container state was
+        # rebuilt, or the .jsonl was deleted).  Fall back to a fresh
+        # session instead of surfacing a cryptic error.
+        logger.warning(
+            "Failed to resume session %s for chat %d – starting fresh",
+            session_id,
+            chat_id,
+        )
+        session_id = None
+        options.resume = None
+        client = ClaudeSDKClient(options=options)
+        await client.connect()
 
     session = AgentSession(
         client=client,
         session_id=session_id,
         context_name=context_name,
         callback_context=callback_context,
+        container_wrapper_path=wrapper_path,
     )
     _active_sessions[chat_id] = session
     return session
