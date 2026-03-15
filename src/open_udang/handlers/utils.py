@@ -163,11 +163,20 @@ def _format_token_count(count: int) -> str:
     return str(count)
 
 
+_TODO_STATUS_EMOJI: dict[str, str] = {
+    "completed": "\u2705",
+    "in_progress": "\U0001f504",
+    "pending": "\u2b1c",
+    "cancelled": "\u274c",
+}
+
+
 def _build_status_text(
     ctx_name: str,
     ctx: ContextConfig,
     usage: dict[str, int] | None = None,
     total_cost_usd: float | None = None,
+    todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the pinned status message text in MarkdownV2."""
     escaped_name = _escape_mdv2(ctx_name)
@@ -201,6 +210,23 @@ def _build_status_text(
             cost_str = _escape_mdv2(f"${total_cost_usd:.4f}")
             lines.append(f"\U0001f4b0 *Cost:* {cost_str}")
 
+    if todos:
+        lines.append("")
+        lines.append("\U0001f4dd *Tasks:*")
+        # Cap at 15 items to avoid hitting Telegram's message length limit.
+        display_todos = todos[:15]
+        for todo in display_todos:
+            status = todo.get("status", "pending")
+            emoji = _TODO_STATUS_EMOJI.get(status, "\u2b1c")
+            content = _escape_mdv2(todo.get("content", ""))
+            if status == "completed":
+                lines.append(f"{emoji} ~{content}~")
+            else:
+                lines.append(f"{emoji} {content}")
+        remaining = len(todos) - len(display_todos)
+        if remaining > 0:
+            lines.append(_escape_mdv2(f"   ...and {remaining} more"))
+
     return "\n".join(lines)
 
 
@@ -212,9 +238,12 @@ async def _update_pinned_status(
     db: aiosqlite.Connection,
     usage: dict[str, int] | None = None,
     total_cost_usd: float | None = None,
+    todos: list[dict[str, Any]] | None = None,
 ) -> None:
     """Send or update the pinned status message for a chat."""
-    text = _build_status_text(ctx_name, ctx, usage=usage, total_cost_usd=total_cost_usd)
+    text = _build_status_text(
+        ctx_name, ctx, usage=usage, total_cost_usd=total_cost_usd, todos=todos,
+    )
     existing_msg_id = await get_pinned_message_id(db, chat_id)
 
     # Try to edit the existing pinned message

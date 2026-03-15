@@ -431,6 +431,19 @@ async def _start_agent_task(
                     cwd=ctx_config.directory,
                 )
 
+            # Mutable container for the latest todo list from TodoWrite.
+            # Preserved across stream_response iterations so the pinned
+            # message retains the task list when usage is updated.
+            latest_todos: list[dict[str, Any]] = []
+
+            async def on_todo_update(todos: list[dict[str, Any]]) -> None:
+                latest_todos.clear()
+                latest_todos.extend(todos)
+                await _update_pinned_status(
+                    context.bot, chat_id, ctx_name, ctx_config, db,
+                    todos=todos if todos else None,
+                )
+
             cb_ctx = CallbackContext(
                 request_approval=request_approval,
                 handle_user_questions=handle_questions,
@@ -483,6 +496,7 @@ async def _start_agent_task(
                     draft_state=draft_state,
                     allowed_tools=ctx_config.allowed_tools,
                     cwd=ctx_config.directory,
+                    on_todo_update=on_todo_update,
                 )
 
                 if result.session_id:
@@ -493,6 +507,7 @@ async def _start_agent_task(
                         context.bot, chat_id, ctx_name, ctx_config, db,
                         usage=result.usage,
                         total_cost_usd=result.total_cost_usd,
+                        todos=latest_todos if latest_todos else None,
                     )
 
                 if result.num_turns == 0 and result.session_id is None:

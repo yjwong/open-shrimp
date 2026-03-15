@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -241,6 +241,13 @@ def _extract_tool_summary(
         if questions:
             return questions[0].get("header", questions[0].get("question", ""))[:60]
         return "asking user"
+    if tool_name == "TodoWrite":
+        todos = tool_input.get("todos", [])
+        if not todos:
+            return "clear all"
+        completed = sum(1 for t in todos if t.get("status") == "completed")
+        total = len(todos)
+        return f"{completed}/{total} done"
     if tool_name == "mcp__openudang__send_file":
         path = tool_input.get("file_path", "")
         basename = os.path.basename(path) if path else ""
@@ -455,6 +462,7 @@ async def stream_response(
     draft_state: _DraftState | None = None,
     allowed_tools: list[str] | None = None,
     cwd: str | None = None,
+    on_todo_update: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
 ) -> StreamResult:
     """Stream Agent SDK events to Telegram as draft messages.
 
@@ -532,6 +540,18 @@ async def stream_response(
                                 auto=block.name in auto_set,
                                 cwd=cwd,
                             )
+
+                        # TodoWrite: update the pinned message with the
+                        # current task list.
+                        if block.name == "TodoWrite" and on_todo_update is not None:
+                            todos = block.input.get("todos", [])
+                            try:
+                                await on_todo_update(todos)
+                            except Exception:
+                                logger.exception(
+                                    "Failed to update todos for chat %d",
+                                    state.chat_id,
+                                )
 
             elif isinstance(event, UserMessage):
                 # UserMessage carries tool results (ToolResultBlock).
