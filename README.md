@@ -72,8 +72,7 @@ Session state is stored separately per context under `~/.config/openudang/contai
 
 ### Prerequisites
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated
-- An [Anthropic API key](https://console.anthropic.com/)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated (via `claude` login or an [Anthropic API key](https://console.anthropic.com/))
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
 ### Option 1: Download Binary (recommended)
