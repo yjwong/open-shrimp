@@ -12,6 +12,11 @@ OpenUdang puts a full Claude coding agent in Telegram — complete with file edi
 
 *Udang* is Malay for "prawn" — small, personal, gets the job done.
 
+<p align="center">
+  <a href="#quick-start">Quick Start</a> · <a href="#commands">Commands</a> · <a href="#code-review">Code Review</a> · <a href="#deployment">Deployment</a>
+</p>
+
+<div align="center">
 <table>
 <tr>
 <td align="center"><strong>Agent</strong></td>
@@ -30,10 +35,7 @@ https://github.com/user-attachments/assets/b8971e87-2003-4956-a449-8f8ca09a043f
 </td>
 </tr>
 </table>
-
-<p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#commands">Commands</a> · <a href="#code-review">Code Review</a> · <a href="#deployment">Deployment</a>
-</p>
+</div>
 
 ---
 
