@@ -12,6 +12,25 @@ OpenUdang puts a full Claude coding agent in Telegram — complete with file edi
 
 *Udang* is Malay for "prawn" — small, personal, gets the job done.
 
+<table>
+<tr>
+<td align="center"><strong>Agent</strong></td>
+<td align="center"><strong>Code Review</strong></td>
+</tr>
+<tr>
+<td>
+
+https://github.com/user-attachments/assets/2eaedb5a-cdff-4088-82c2-5cb4d6eee23a
+
+</td>
+<td>
+
+https://github.com/user-attachments/assets/b8971e87-2003-4956-a449-8f8ca09a043f
+
+</td>
+</tr>
+</table>
+
 ---
 
 ## OpenUdang vs OpenClaw
