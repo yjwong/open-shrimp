@@ -145,4 +145,21 @@ async def unstage_hunk(cwd: str, hunk: Hunk) -> StageResult:
             stale=True,
         )
 
+    # For new files, reverse-applying removes the file from the index
+    # entirely, making it fully untracked.  Re-add with --intent-to-add
+    # so the file stays visible in future diffs.
+    if hunk.is_new_file:
+        proc2 = await asyncio.create_subprocess_exec(
+            "git", "add", "--intent-to-add", "--", hunk.file_path,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr2 = await proc2.communicate()
+        if proc2.returncode != 0:
+            logger.warning(
+                "git add --intent-to-add failed after unstage: %s",
+                stderr2.decode().strip(),
+            )
+
     return StageResult(ok=True)
