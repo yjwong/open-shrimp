@@ -7,6 +7,7 @@ from typing import Any
 
 import aiosqlite
 from telegram import Bot, Update
+from telegram.error import BadRequest
 
 from open_udang.config import Config, ContextConfig
 from open_udang.db import (
@@ -256,6 +257,14 @@ async def _update_pinned_status(
                 parse_mode="MarkdownV2",
             )
             return
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            logger.debug(
+                "Could not edit pinned message %d in chat %d, will send new one",
+                existing_msg_id,
+                chat_id,
+            )
         except Exception:
             logger.debug(
                 "Could not edit pinned message %d in chat %d, will send new one",
