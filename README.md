@@ -13,7 +13,7 @@ OpenUdang puts a full Claude coding agent in Telegram — complete with file edi
 *Udang* is Malay for "prawn" — small, personal, gets the job done.
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#commands">Commands</a> · <a href="#code-review">Code Review</a> · <a href="#deployment">Deployment</a>
+  <a href="#quick-start">Quick Start</a> · <a href="#commands">Commands</a> · <a href="#code-review">Code Review</a> · <a href="#voice-notes">Voice Notes</a> · <a href="#deployment">Deployment</a>
 </p>
 
 <div align="center">
@@ -73,6 +73,7 @@ You're away from your desk but need Claude to fix a bug, review a diff, or scaff
 
 - **Real agent, not a chatbot.** Claude can read, edit, and write files in your actual project directories. Full tool use, not just text completion.
 - **You stay in control.** Every file mutation requires your explicit approval via inline keyboard buttons. One tap to approve, one tap to deny. Or hit "Accept all edits" when you trust the flow. When you're ready to commit, `/review` opens a swipe-based UI to stage exactly the hunks you want.
+- **Talk to it.** Send a voice note and it gets transcribed automatically as a prompt — no typing needed. Great for quick instructions when you're on the go.
 - **Stream responses in real-time.** Responses stream directly into Telegram using `sendMessageDraft` — no waiting for the full response to generate.
 - **Multiple projects, one bot.** Switch between project contexts on the fly with `/context`. Each context has its own working directory, CLAUDE.md, model, and tool permissions.
 - **Persistent sessions.** Pick up where you left off. Sessions survive restarts, and you can `/resume` any previous conversation.
@@ -85,6 +86,12 @@ You're away from your desk but need Claude to fix a bug, review a diff, or scaff
 OpenUdang includes a mobile-first code review UI built as a Telegram Mini App. Send `/review` to open it.
 
 It works like Tinder for diffs — each hunk is a card. Swipe right to stage, left to skip, down to undo. You review at the hunk level, not the file level, so you can cherry-pick exactly the changes you want — like `git add -p`, but designed for your phone.
+
+## Voice Notes
+
+Send a voice message instead of typing. OpenUdang automatically transcribes it using [Moonshine](https://github.com/usefulsensors/moonshine) — a fast, lightweight speech-to-text model that runs locally. The transcribed text is sent to Claude as a prompt, prefixed with `[Transcribed from voice note]` so it knows the input came from speech.
+
+The `moonshine-stt` binary is auto-downloaded on first use. No setup required.
 
 ## Container Isolation
 
@@ -205,7 +212,7 @@ OpenUdang enforces a layered permission model:
 - **Bash and other tools** — configurable per-context via `allowed_tools` patterns (e.g., `Bash(git *)`)
 - **Paths outside the context directory** — always require manual approval, regardless of tool type
 
-You can tap **"Accept all edits"** during a session to auto-approve subsequent Edit/Write calls. This resets on `/clear` or context switch.
+When a tool needs approval, you get three options: **Allow** (once), **Accept all [tool]** (auto-approve that tool for the session), or **Deny**. Edit/Write get the familiar **"Accept all edits"** button instead. All session-level approvals reset on `/clear` or context switch.
 
 ## Deployment
 
