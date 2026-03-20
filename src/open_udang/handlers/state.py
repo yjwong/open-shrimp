@@ -72,12 +72,14 @@ _approval_tool_names: dict[str, str] = {}
 _edit_approved_sessions: set[tuple[ChatScope, str]] = set()
 
 # ---------------------------------------------------------------------------
-# Per-session auto-approved tool names for non-path-scoped tools (e.g.
-# WebFetch, WebSearch, Bash).  When a tool name is in the set for a given
-# (scope, context_name), future uses of that tool are auto-approved without
-# prompting.  Cleared on /clear or context switch.
+# Per-session auto-approval rules for non-path-scoped tools (e.g.
+# WebFetch, WebSearch, Bash).  Each rule can optionally carry a pattern
+# (e.g. "git *" for Bash) so approval can be scoped to command prefixes.
+# Cleared on /clear or context switch.
 # ---------------------------------------------------------------------------
-_tool_approved_sessions: dict[tuple[ChatScope, str], set[str]] = {}
+from open_udang.hooks import ApprovalRule
+
+_tool_approved_sessions: dict[tuple[ChatScope, str], list[ApprovalRule]] = {}
 
 # ---------------------------------------------------------------------------
 # Per-scope model override: scope -> model name.  Set via /model command.

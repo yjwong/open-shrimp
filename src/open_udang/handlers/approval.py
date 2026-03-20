@@ -15,9 +15,69 @@ from open_udang.handlers.state import (
     _pending_agent_inputs,
 )
 from open_udang.handlers.utils import _escape_mdv2
+from open_udang.hooks import ApprovalRule
 from open_udang.stream import _relative_path
 
 logger = logging.getLogger(__name__)
+
+
+# Prefixes to skip when extracting the bash command name (e.g. "sudo git").
+_BASH_SKIP_PREFIXES = {"sudo", "env", "nohup", "nice", "ionice", "time", "strace"}
+
+
+def _extract_bash_prefix(command: str) -> str | None:
+    """Extract the primary command name from a bash command string.
+
+    Handles chained commands (``&&``, ``||``, ``;``), skips common prefixes
+    like ``sudo`` and ``env VAR=val``, and returns the first significant
+    word.  Returns None if the command is too complex to extract a useful
+    prefix (e.g. starts with a subshell or heredoc).
+    """
+    cmd = command.strip()
+    if not cmd or cmd.startswith("(") or cmd.startswith("{"):
+        return None
+
+    # Take only the first command in a chain.
+    for sep in ("&&", "||", ";"):
+        cmd = cmd.split(sep, 1)[0].strip()
+
+    # Handle pipes: take only the first segment.
+    cmd = cmd.split("|", 1)[0].strip()
+
+    words = cmd.split()
+    if not words:
+        return None
+
+    # Skip common prefixes and their flags/arguments.
+    idx = 0
+    in_prefix = True
+    while idx < len(words) and in_prefix:
+        word = words[idx]
+        if word in _BASH_SKIP_PREFIXES:
+            idx += 1
+            # Skip any flags that belong to the prefix command
+            # (e.g. "nice -n 10", "sudo -u user").
+            while idx < len(words) and words[idx].startswith("-"):
+                idx += 1
+                # Skip the flag's argument if it looks like a value
+                if idx < len(words) and not words[idx].startswith("-"):
+                    idx += 1
+            continue
+        # env VAR=val ... — skip variable assignments.
+        if "=" in word and idx > 0:
+            idx += 1
+            continue
+        in_prefix = False
+
+    if idx >= len(words):
+        return None
+
+    prefix = words[idx]
+    # Reject if it looks like a path to a script rather than a command name.
+    if "/" in prefix and not prefix.startswith("./"):
+        return None
+
+    return prefix
 
 
 # ---------------------------------------------------------------------------
@@ -212,18 +272,34 @@ async def _send_approval_keyboard(
     deny_data = f"deny:{tool_use_id}"
     _approval_tool_names[tool_use_id] = tool_name
 
-    # Build keyboard buttons -- some tools get extra buttons
-    buttons = []
+    # Build keyboard rows -- primary actions on top, session-scoped on bottom.
+    # Row 1: [Approve] [Deny] (and optional [Show prompt] for Agent)
+    primary_row: list[InlineKeyboardButton] = []
     if tool_name == "Agent":
         show_prompt_data = f"show_prompt:{tool_use_id}"
         _pending_agent_inputs[tool_use_id] = tool_input
-        buttons.append(InlineKeyboardButton("Show prompt", callback_data=show_prompt_data))
-    buttons.append(InlineKeyboardButton("Approve", callback_data=approve_data))
+        primary_row.append(InlineKeyboardButton("Show prompt", callback_data=show_prompt_data))
+    primary_row.append(InlineKeyboardButton("Approve", callback_data=approve_data))
+    primary_row.append(InlineKeyboardButton("Deny", callback_data=deny_data))
+
+    # Row 2: session-scoped auto-approval buttons
+    session_row: list[InlineKeyboardButton] = []
     # Edit and Write get an "Accept all edits" option for session-scoped
     # auto-approval of mutating file operations within the working directory.
     if tool_name in ("Edit", "Write"):
         accept_all_data = f"accept_all_edits:{tool_use_id}"
-        buttons.append(InlineKeyboardButton("Accept all edits", callback_data=accept_all_data))
+        session_row.append(InlineKeyboardButton("Accept all edits", callback_data=accept_all_data))
+    # For Bash, offer a prefix-specific button (e.g. "Accept all git")
+    # before the blanket "Accept all Bash" button.
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        prefix = _extract_bash_prefix(command)
+        if prefix:
+            accept_prefix_data = f"accept_bash_pfx:{tool_use_id}:{prefix}"
+            if len(accept_prefix_data.encode()) <= 64:
+                session_row.append(InlineKeyboardButton(
+                    f"Accept all {prefix}", callback_data=accept_prefix_data,
+                ))
     # All tools (except Edit/Write which have the more specific "Accept all
     # edits" button) get a generic "Accept all <tool>" option for session-
     # scoped auto-approval of that specific tool type.
@@ -231,12 +307,14 @@ async def _send_approval_keyboard(
         accept_all_tool_data = f"accept_all_tool:{tool_use_id}:{tool_name}"
         # Truncate callback_data to 64 bytes (Telegram limit)
         if len(accept_all_tool_data.encode()) <= 64:
-            buttons.append(InlineKeyboardButton(
+            session_row.append(InlineKeyboardButton(
                 f"Accept all {tool_name}", callback_data=accept_all_tool_data,
             ))
-    buttons.append(InlineKeyboardButton("Deny", callback_data=deny_data))
 
-    keyboard = InlineKeyboardMarkup([buttons])
+    rows = [primary_row]
+    if session_row:
+        rows.append(session_row)
+    keyboard = InlineKeyboardMarkup(rows)
 
     thread_kwargs: dict[str, Any] = {}
     if thread_id is not None:
@@ -260,6 +338,15 @@ async def _send_approval_keyboard(
     accept_all_tool_key = f"accept_all_tool:{tool_use_id}:{tool_name}"
     if tool_name not in ("Edit", "Write") and len(accept_all_tool_key.encode()) <= 64:
         _approval_futures[accept_all_tool_key] = future
+    # Register prefix-specific key for Bash.
+    accept_prefix_key = ""
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        prefix = _extract_bash_prefix(command)
+        if prefix:
+            accept_prefix_key = f"accept_bash_pfx:{tool_use_id}:{prefix}"
+            if len(accept_prefix_key.encode()) <= 64:
+                _approval_futures[accept_prefix_key] = future
 
     try:
         return await future
@@ -268,6 +355,8 @@ async def _send_approval_keyboard(
         _approval_futures.pop(deny_data, None)
         _approval_futures.pop(f"accept_all_edits:{tool_use_id}", None)
         _approval_futures.pop(accept_all_tool_key, None)
+        if accept_prefix_key:
+            _approval_futures.pop(accept_prefix_key, None)
         _pending_agent_inputs.pop(tool_use_id, None)
         _approval_tool_names.pop(tool_use_id, None)
 
@@ -285,7 +374,8 @@ async def handle_approval_callback(
 ) -> bool:
     """Handle approval-related callback queries.
 
-    Handles: approve:*, deny:*, show_prompt:*, show_bash:*, accept_all_edits:*.
+    Handles: approve:*, deny:*, show_prompt:*, show_bash:*,
+    accept_all_edits:*, accept_bash_pfx:*, accept_all_tool:*.
     Returns True if the callback was handled.
     """
     import aiosqlite
@@ -396,6 +486,58 @@ async def handle_approval_callback(
                     logger.exception("Failed to edit approval message")
         return True
 
+    # Handle "Accept all <prefix>" for Bash commands — approve this tool and
+    # enable auto-approval for future Bash commands matching "<prefix> *".
+    if data.startswith("accept_bash_pfx:"):
+        future = _approval_futures.get(data)
+        if not future or future.done():
+            await query.answer("This approval has expired.")
+            return True
+
+        # Parse: "accept_bash_pfx:<id>:<prefix>"
+        parts = data.split(":", 2)
+        prefix = parts[2] if len(parts) >= 3 else ""
+
+        if query.message and prefix:
+            from open_udang.handlers.state import _tool_approved_sessions
+
+            scope = chat_scope_from_message(query.message)
+            db: aiosqlite.Connection = context.bot_data["db"]
+            ctx_name, _ = await _get_context(scope, config, db)
+            rule = ApprovalRule(tool_name="Bash", pattern=f"{prefix} *")
+            _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
+            logger.info(
+                "Accept-all-Bash(%s *) enabled for scope %s context %s",
+                prefix,
+                scope,
+                ctx_name,
+            )
+
+        future.set_result(True)
+        escaped_prefix = _escape_mdv2(prefix)
+        await query.answer(
+            f"Approved. Future {prefix} commands auto-approved."
+        )
+
+        if query.message:
+            try:
+                icon = '\u2705'
+                compact = (
+                    f"{icon} *Bash* \u2014 Approved\\. "
+                    f"_Future {escaped_prefix} commands auto\\-approved\\._"
+                )
+                await query.message.edit_text(
+                    text=compact,
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    logger.exception("Failed to edit approval message")
+        return True
+
     # Handle "Accept all <tool>" -- approve this tool and enable auto-approval
     # for all future uses of that specific tool for this session.
     if data.startswith("accept_all_tool:"):
@@ -415,9 +557,8 @@ async def handle_approval_callback(
             scope = chat_scope_from_message(query.message)
             db: aiosqlite.Connection = context.bot_data["db"]
             ctx_name, _ = await _get_context(scope, config, db)
-            _tool_approved_sessions.setdefault((scope, ctx_name), set()).add(
-                accepted_tool_name
-            )
+            rule = ApprovalRule(tool_name=accepted_tool_name, pattern=None)
+            _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
             logger.info(
                 "Accept-all-%s enabled for scope %s context %s",
                 accepted_tool_name,

@@ -22,6 +22,7 @@ from open_udang.client_manager import (
 from open_udang.config import Config
 from open_udang.db import ChatScope, get_pinned_message_id, get_session_id, set_session_id
 from open_udang.handlers.approval import _send_approval_keyboard, _send_auto_approved_diff
+from open_udang.hooks import matches_approval_rule as _matches_rule
 from open_udang.handlers.questions import (
     _complete_other_input,
     _handle_ask_user_questions,
@@ -539,7 +540,10 @@ async def _start_agent_task(
                 handle_user_questions=handle_questions,
                 is_edit_auto_approved=lambda: (scope, ctx_name) in _edit_approved_sessions,
                 notify_auto_approved_edit=notify_edit,
-                is_tool_auto_approved=lambda tn: tn in _tool_approved_sessions.get((scope, ctx_name), set()),
+                is_tool_auto_approved=lambda tn, ti: any(
+                    _matches_rule(rule, tn, ti)
+                    for rule in _tool_approved_sessions.get((scope, ctx_name), [])
+                ),
             )
 
             session = await get_or_create_session(

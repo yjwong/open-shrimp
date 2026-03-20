@@ -55,7 +55,7 @@ class CallbackContext:
     handle_user_questions: QuestionCallback | None = None
     is_edit_auto_approved: Callable[[], bool] | None = None
     notify_auto_approved_edit: EditNotifyCallback | None = None
-    is_tool_auto_approved: Callable[[str], bool] | None = None
+    is_tool_auto_approved: Callable[[str, dict[str, Any]], bool] | None = None
 
 
 @dataclass
@@ -134,6 +134,7 @@ async def get_or_create_session(
         notify_auto_approved_edit=_make_edit_notify_proxy(callback_context),
         chat_id=scope.chat_id,
         is_tool_auto_approved=_make_tool_approved_proxy(callback_context),
+        is_containerized=context.containerize,
     )
 
     def _log_stderr(line: str) -> None:
@@ -374,10 +375,10 @@ def _make_edit_notify_proxy(
 
 def _make_tool_approved_proxy(
     ctx: CallbackContext,
-) -> Callable[[str], bool]:
-    def _proxy(tool_name: str) -> bool:
+) -> Callable[[str, dict[str, Any]], bool]:
+    def _proxy(tool_name: str, tool_input: dict[str, Any]) -> bool:
         if ctx.is_tool_auto_approved is None:
             return False
-        return ctx.is_tool_auto_approved(tool_name)
+        return ctx.is_tool_auto_approved(tool_name, tool_input)
 
     return _proxy

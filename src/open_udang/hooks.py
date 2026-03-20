@@ -20,11 +20,13 @@ config files with secrets) when these tools are removed from allowedTools and
 handled here instead.
 """
 
+import fnmatch
 import logging
 import os
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -55,9 +57,155 @@ QuestionCallback = Callable[[list[dict[str, Any]]], Awaitable[dict[str, str]]]
 # auto-approved so the user can still see the diff without blocking.
 EditNotifyCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
-# Type for the per-tool auto-approval check: receives tool_name, returns
-# True if the user has opted into auto-approval for that tool this session.
-ToolAutoApprovedCallback = Callable[[str], bool]
+# Type for the per-tool auto-approval check: receives tool_name and
+# tool_input, returns True if the user has opted into auto-approval for
+# that tool (possibly with a pattern constraint) this session.
+ToolAutoApprovedCallback = Callable[[str, dict[str, Any]], bool]
+
+
+# ---------------------------------------------------------------------------
+# Pattern-based approval rules
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ApprovalRule:
+    """A session-scoped auto-approval rule.
+
+    ``tool_name`` must always match.  When ``pattern`` is set, it is matched
+    against the tool's input using fnmatch glob semantics (for Bash this is
+    the command string).  A ``None`` pattern means blanket approval for the
+    tool.
+    """
+
+    tool_name: str
+    pattern: str | None = None
+
+
+# Bash commands that are auto-approved when "accept all edits" is active.
+# Mirrors Claude Code's acceptEdits mode allowlist — these are common
+# file-manipulation commands that complement Edit/Write auto-approval.
+_ACCEPT_EDITS_BASH_COMMANDS: set[str] = {
+    "mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed", "chmod",
+}
+
+
+def _extract_bash_base_command(command: str) -> str | None:
+    """Extract the base command name from a bash command string.
+
+    Strips any leading path (e.g. ``/bin/mkdir`` → ``mkdir``) and returns
+    the first word.  Returns None if the command is empty.
+    """
+    cmd = command.strip()
+    if not cmd:
+        return None
+    base = cmd.split()[0]
+    # Strip any leading path (e.g. /bin/mkdir -> mkdir)
+    return base.rsplit("/", 1)[-1] or None
+
+
+def _extract_bash_path_args(command: str) -> list[str]:
+    """Extract positional (non-flag) arguments from a bash command.
+
+    Strips the base command and any flags (words starting with ``-``).
+    Returns the remaining words as path arguments.  This is intentionally
+    simple — it doesn't handle quoting or escaping, which means edge
+    cases fall through to the interactive approval prompt (safe default).
+    """
+    words = command.strip().split()
+    if len(words) <= 1:
+        return []
+    # Skip the base command, collect non-flag arguments.
+    return [w for w in words[1:] if not w.startswith("-")]
+
+
+def _is_dangerous_rm_target(path: str) -> bool:
+    """Return True if *path* is a dangerous target for rm/rmdir.
+
+    Mirrors Claude Code's ``f8f`` function: catches ``/``, home dir,
+    top-level directories, and dangerous globs.
+    """
+    if path == "*" or path.endswith("/*"):
+        return True
+    normalized = path.rstrip("/") or "/"
+    if normalized == "/":
+        return True
+    home = os.path.expanduser("~")
+    if os.path.realpath(normalized) == os.path.realpath(home):
+        return True
+    # Top-level directories (e.g. /usr, /etc, /bin)
+    parent = os.path.dirname(normalized)
+    if parent == "/":
+        return True
+    return False
+
+
+def _is_safe_bash_for_accept_edits(
+    command: str, approved_dirs: list[str]
+) -> bool:
+    """Return True if *command* is safe to auto-approve in accept-all-edits mode.
+
+    Checks:
+    1. The base command is in the allowlist.
+    2. All path arguments resolve to within the approved directories.
+    3. Rejects shell expansion characters (``$``, ``~``, backticks).
+    4. For rm/rmdir, additionally rejects dangerous targets (``/``, home,
+       top-level dirs, ``*``).
+
+    If any check fails, returns False so the command falls through to
+    the interactive approval prompt.
+    """
+    base = _extract_bash_base_command(command)
+    if base is None or base not in _ACCEPT_EDITS_BASH_COMMANDS:
+        return False
+
+    path_args = _extract_bash_path_args(command)
+
+    for arg in path_args:
+        # Reject shell expansion characters — we can't reliably resolve
+        # the actual path without executing the shell.
+        if "$" in arg or "`" in arg or "~" in arg or "%" in arg:
+            return False
+
+        # For rm/rmdir, check for dangerous targets before path resolution.
+        if base in ("rm", "rmdir") and _is_dangerous_rm_target(arg):
+            return False
+
+    # Validate that all path arguments resolve to within approved dirs.
+    # Commands with no path args (e.g. bare "touch" which is unlikely but
+    # harmless) pass through — the command itself will fail or be a no-op.
+    for arg in path_args:
+        # Glob patterns (containing * or ?) can't be reliably resolved —
+        # reject them for write operations.
+        if "*" in arg or "?" in arg:
+            return False
+
+        resolved = os.path.realpath(arg)
+        if not any(
+            _is_path_within_directory(resolved, d)
+            for d in approved_dirs
+        ):
+            return False
+
+    return True
+
+
+def matches_approval_rule(
+    rule: ApprovalRule,
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> bool:
+    """Return True if *rule* matches the given tool invocation."""
+    if rule.tool_name != tool_name:
+        return False
+    if rule.pattern is None:
+        return True
+    # For Bash, match the pattern against the full command string.
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        return fnmatch.fnmatch(command, rule.pattern)
+    # For other tools, pattern is currently unused — treat as match.
+    return True
 
 # Tools that access the filesystem, mapped to the input key(s) containing
 # the path to check. Each value is a list of keys to try (first match wins).
@@ -126,6 +274,7 @@ def make_can_use_tool(
     notify_auto_approved_edit: EditNotifyCallback | None = None,
     chat_id: int | None = None,
     is_tool_auto_approved: ToolAutoApprovedCallback | None = None,
+    is_containerized: bool = False,
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext], Awaitable[PermissionResult]
 ]:
@@ -169,9 +318,12 @@ def make_can_use_tool(
             to the approved directories so Read access to uploaded files is
             auto-approved.
         is_tool_auto_approved: Optional callback that receives a tool name
-            and returns True if the user has opted into auto-approval for
-            that specific tool in the current session. Used for non-path-
-            scoped tools (e.g. WebFetch, WebSearch, Bash).
+            and tool input dict, returns True if the user has opted into
+            auto-approval for that specific tool (possibly with a pattern
+            constraint) in the current session. Used for non-path-scoped
+            tools (e.g. WebFetch, WebSearch, Bash).
+        is_containerized: When True, all Bash commands are auto-approved
+            because Docker isolation provides the safety boundary.
     """
     approved_dirs = [cwd] + (additional_directories or [])
     if chat_id is not None:
@@ -257,11 +409,37 @@ def make_can_use_tool(
                     tool_path,
                 )
 
-        # Per-tool session-scoped auto-approval (e.g. "Accept all WebFetch").
+        # Accept-all-edits mode: also auto-approve common safe Bash
+        # commands (mkdir, touch, rm, mv, cp, sed, etc.) that complement
+        # file editing.  Mirrors Claude Code's acceptEdits allowlist.
+        # Path arguments must resolve to within the approved directories.
+        if (
+            tool_name == "Bash"
+            and is_edit_auto_approved
+            and is_edit_auto_approved()
+            and _is_safe_bash_for_accept_edits(
+                tool_input.get("command", ""), approved_dirs
+            )
+        ):
+            logger.info(
+                "Auto-approved safe Bash command (accept-all-edits): %s",
+                tool_input.get("command", "")[:100],
+            )
+            return PermissionResultAllow()
+
+        # Containerized contexts: auto-approve all Bash commands since
+        # Docker isolation provides the safety boundary.
+        if is_containerized and tool_name == "Bash":
+            logger.info(
+                "Auto-approved Bash in containerized context"
+            )
+            return PermissionResultAllow()
+
+        # Per-tool session-scoped auto-approval (e.g. "Accept all git").
         # Checked for all tools that reach the interactive approval stage,
         # including mutating path tools that weren't caught by the
         # accept-all-edits check above.
-        if is_tool_auto_approved and is_tool_auto_approved(tool_name):
+        if is_tool_auto_approved and is_tool_auto_approved(tool_name, tool_input):
             logger.info(
                 "Auto-approved %s (per-tool session approval)", tool_name
             )
