@@ -45,6 +45,9 @@ def create_openudang_mcp_server(
     bot: Bot,
     chat_id: int,
     thread_id: int | None = None,
+    db: Any | None = None,
+    config: Any | None = None,
+    job_queue: Any | None = None,
 ) -> McpSdkServerConfig:
     """Create an in-process MCP server with OpenUdang-specific tools.
 
@@ -52,10 +55,16 @@ def create_openudang_mcp_server(
     optional *thread_id* so tool handlers can send files directly to the
     correct Telegram chat or forum thread.
 
+    When *db*, *config*, and *job_queue* are provided, scheduling tools
+    (create_schedule, list_schedules, delete_schedule) are also registered.
+
     Args:
         bot: Telegram Bot instance.
         chat_id: Telegram chat ID to send files to.
         thread_id: Optional message_thread_id for forum topics.
+        db: Optional aiosqlite connection for scheduled task persistence.
+        config: Optional Config for context validation.
+        job_queue: Optional JobQueue for registering scheduled jobs.
 
     Returns:
         An ``McpSdkServerConfig`` ready for ``ClaudeAgentOptions.mcp_servers``.
@@ -296,6 +305,232 @@ def create_openudang_mcp_server(
             return _text_result(f"Topic updated: {summary}")
 
         tools_list.append(edit_topic)
+
+    # --- Scheduling tools (when db, config, and job_queue are available) ---
+    if db is not None and config is not None and job_queue is not None:
+        from open_udang.db import (
+            ChatScope,
+            ScheduledTask,
+            create_scheduled_task,
+            delete_scheduled_task,
+            list_scheduled_tasks,
+        )
+        from open_udang.scheduler import (
+            _register_task_with_jobqueue,
+            validate_schedule,
+        )
+
+        _scope = ChatScope(
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+
+        @tool(
+            "create_schedule",
+            "Create a scheduled task that runs a Claude prompt automatically. "
+            "The task will run in the current chat/thread with read-only tools. "
+            "Supports three schedule types: 'interval' (e.g. '30m', '1h', '2d'), "
+            "'cron' (standard 5-field cron: 'minute hour day month day_of_week'), "
+            "and 'once' (ISO 8601 datetime for a one-shot task). "
+            "Minimum interval for recurring tasks is 5 minutes. "
+            "Maximum 20 scheduled tasks per chat.",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "A short, descriptive name for this task "
+                            "(e.g. 'CI check', 'daily summary'). Must be "
+                            "unique within this chat."
+                        ),
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "The prompt to send to Claude when the task fires. "
+                            "Be specific about what you want checked or summarized."
+                        ),
+                    },
+                    "schedule_type": {
+                        "type": "string",
+                        "enum": ["interval", "cron", "once"],
+                        "description": (
+                            "Type of schedule: 'interval' for recurring with "
+                            "a fixed gap (e.g. every 30m), 'cron' for "
+                            "time-of-day patterns (e.g. 9am weekdays), "
+                            "'once' for a single future execution."
+                        ),
+                    },
+                    "schedule_expr": {
+                        "type": "string",
+                        "description": (
+                            "The schedule expression. For 'interval': '30m', "
+                            "'1h', '2d'. For 'cron': '0 9 * * 1-5' (9am "
+                            "weekdays). For 'once': ISO datetime like "
+                            "'2026-03-21T09:00:00'."
+                        ),
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum execution time in seconds. Default 600 "
+                            "(10 minutes). The task is cancelled if it exceeds "
+                            "this timeout."
+                        ),
+                    },
+                },
+                "required": ["name", "prompt", "schedule_type", "schedule_expr"],
+            },
+            annotations=ToolAnnotations(readOnlyHint=False),
+        )
+        async def create_schedule(args: dict[str, Any]) -> dict[str, Any]:
+            name = args.get("name", "").strip()
+            prompt = args.get("prompt", "").strip()
+            schedule_type = args.get("schedule_type", "")
+            schedule_expr = args.get("schedule_expr", "")
+            timeout_seconds = args.get("timeout_seconds", 600)
+
+            if not name:
+                return _text_result("Error: name is required.", is_error=True)
+            if not prompt:
+                return _text_result("Error: prompt is required.", is_error=True)
+
+            # Get the active context for this scope.
+            from open_udang.db import get_active_context
+
+            context_name = await get_active_context(db, _scope)
+            if not context_name:
+                context_name = config.default_context
+
+            try:
+                validate_schedule(schedule_type, schedule_expr)
+            except ValueError as exc:
+                return _text_result(f"Error: {exc}", is_error=True)
+
+            try:
+                task = await create_scheduled_task(
+                    db,
+                    _scope,
+                    context_name,
+                    name,
+                    prompt,
+                    schedule_type,
+                    schedule_expr,
+                    timeout_seconds,
+                )
+            except ValueError as exc:
+                return _text_result(f"Error: {exc}", is_error=True)
+            except Exception as exc:
+                if "UNIQUE constraint" in str(exc):
+                    return _text_result(
+                        f"Error: A task named '{name}' already exists in "
+                        f"this chat. Choose a different name or delete the "
+                        f"existing one first.",
+                        is_error=True,
+                    )
+                logger.exception("Failed to create scheduled task")
+                return _text_result(f"Error creating task: {exc}", is_error=True)
+
+            # Register with JobQueue.
+            _register_task_with_jobqueue(job_queue, task, bot, db, config)
+
+            type_desc = {
+                "interval": f"every {schedule_expr}",
+                "cron": f"cron: {schedule_expr}",
+                "once": f"at {schedule_expr}",
+            }.get(schedule_type, schedule_expr)
+
+            return _text_result(
+                f"Scheduled task '{name}' created successfully.\n"
+                f"Schedule: {type_desc}\n"
+                f"Context: {context_name}\n"
+                f"Timeout: {timeout_seconds}s\n"
+                f"Prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}"
+            )
+
+        @tool(
+            "list_schedules",
+            "List all scheduled tasks in the current chat/thread. "
+            "Shows task name, schedule, context, and prompt.",
+            {
+                "type": "object",
+                "properties": {},
+            },
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        async def list_schedules(args: dict[str, Any]) -> dict[str, Any]:
+            tasks = await list_scheduled_tasks(db, _scope)
+
+            if not tasks:
+                return _text_result("No scheduled tasks in this chat.")
+
+            lines = [f"Scheduled tasks ({len(tasks)}):"]
+            for t in tasks:
+                type_desc = {
+                    "interval": f"every {t.schedule_expr}",
+                    "cron": f"cron: {t.schedule_expr}",
+                    "once": f"at {t.schedule_expr}",
+                }.get(t.schedule_type, t.schedule_expr)
+
+                prompt_preview = t.prompt[:60] + ("..." if len(t.prompt) > 60 else "")
+                lines.append(
+                    f"\n• {t.name}\n"
+                    f"  Schedule: {type_desc}\n"
+                    f"  Context: {t.context_name}\n"
+                    f"  Timeout: {t.timeout_seconds}s\n"
+                    f"  Prompt: {prompt_preview}\n"
+                    f"  Created: {t.created_at}"
+                )
+
+            return _text_result("\n".join(lines))
+
+        @tool(
+            "delete_schedule",
+            "Delete a scheduled task by name. The task will stop firing "
+            "immediately.",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the scheduled task to delete.",
+                    },
+                },
+                "required": ["name"],
+            },
+            annotations=ToolAnnotations(readOnlyHint=False),
+        )
+        async def delete_schedule(args: dict[str, Any]) -> dict[str, Any]:
+            name = args.get("name", "").strip()
+            if not name:
+                return _text_result("Error: name is required.", is_error=True)
+
+            # Look up the task ID before deleting so we can remove the
+            # correct job from the JobQueue.
+            tasks = await list_scheduled_tasks(db, _scope)
+            task_id = None
+            for t in tasks:
+                if t.name == name:
+                    task_id = t.id
+                    break
+
+            deleted = await delete_scheduled_task(db, _scope, name)
+            if not deleted:
+                return _text_result(
+                    f"No scheduled task named '{name}' found in this chat.",
+                    is_error=True,
+                )
+
+            # Remove the corresponding job from JobQueue.
+            if task_id is not None:
+                job_name = f"scheduled_task_{task_id}"
+                for j in job_queue.get_jobs_by_name(job_name):
+                    j.schedule_removal()
+
+            return _text_result(f"Scheduled task '{name}' deleted successfully.")
+
+        tools_list.extend([create_schedule, list_schedules, delete_schedule])
 
     return create_sdk_mcp_server(
         name="openudang",

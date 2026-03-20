@@ -35,6 +35,7 @@ from open_udang.handlers.commands import (
     model_handler,
     resume_handler,
     review_handler,
+    schedule_handler,
     status_handler,
 )
 from open_udang.handlers.messages import message_handler, web_app_data_handler
@@ -103,6 +104,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("model", model_handler))
     app.add_handler(CommandHandler("review", review_handler))
     app.add_handler(CommandHandler("mcp", mcp_handler))
+    app.add_handler(CommandHandler("schedule", schedule_handler))
 
     # Callback query handler for tool approval buttons
     app.add_handler(CallbackQueryHandler(callback_query_handler))
@@ -148,10 +150,23 @@ async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
         BotCommand("model", "Show or override the model for this chat"),
         BotCommand("review", "Review and stage git changes"),
         BotCommand("mcp", "List and manage MCP servers"),
+        BotCommand("schedule", "List scheduled tasks"),
     ])
     await app.start()
     await app.updater.start_polling()
     logger.info("Bot is running")
+
+    # Reload scheduled tasks from the database.
+    from open_udang.scheduler import reload_tasks
+
+    if app.job_queue is not None:
+        loaded = await reload_tasks(db, app.bot, config, app.job_queue)
+        logger.info("Loaded %d scheduled tasks", loaded)
+    else:
+        logger.warning(
+            "JobQueue not available — scheduled tasks disabled. "
+            "Install python-telegram-bot[job-queue] to enable."
+        )
 
     # Keep running until stopped
     stop_event = asyncio.Event()

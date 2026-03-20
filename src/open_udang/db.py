@@ -1,11 +1,14 @@
-"""SQLite session ID mapping for OpenUdang.
+"""SQLite persistence for OpenUdang.
 
 Maps (chat_id, message_thread_id, context_name) -> session_id so sessions
 can be resumed across bot restarts.  Forum topics (threads) get independent
 sessions within the same chat.
+
+Also stores scheduled tasks for the scheduler module.
 """
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -57,6 +60,22 @@ CREATE TABLE IF NOT EXISTS pinned_messages (
     message_thread_id INTEGER NOT NULL DEFAULT 0,
     message_id INTEGER NOT NULL,
     PRIMARY KEY (chat_id, message_thread_id)
+)
+"""
+
+_CREATE_SCHEDULED_TASKS_TABLE = """
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    message_thread_id INTEGER NOT NULL DEFAULT 0,
+    context_name TEXT NOT NULL,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    schedule_type TEXT NOT NULL,
+    schedule_expr TEXT NOT NULL,
+    timeout_seconds INTEGER NOT NULL DEFAULT 600,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(chat_id, message_thread_id, name)
 )
 """
 
@@ -135,6 +154,7 @@ async def init_db(db_path: Path = DEFAULT_DB_PATH) -> aiosqlite.Connection:
     await db.execute(_CREATE_SESSIONS_TABLE)
     await db.execute(_CREATE_ACTIVE_CONTEXTS_TABLE)
     await db.execute(_CREATE_PINNED_MESSAGES_TABLE)
+    await db.execute(_CREATE_SCHEDULED_TASKS_TABLE)
     await db.commit()
     await _migrate_schema(db)
     logger.info("Database initialized at %s", db_path)
@@ -231,4 +251,162 @@ async def set_pinned_message_id(
         "DO UPDATE SET message_id = excluded.message_id",
         (scope.chat_id, _thread_id_to_db(scope.thread_id), message_id),
     )
+    await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Scheduled tasks
+# ---------------------------------------------------------------------------
+
+# Maximum scheduled tasks per chat scope.
+MAX_SCHEDULED_TASKS_PER_CHAT = 20
+
+
+@dataclass
+class ScheduledTask:
+    """A scheduled task row from the database."""
+
+    id: int
+    chat_id: int
+    message_thread_id: int
+    context_name: str
+    name: str
+    prompt: str
+    schedule_type: str  # "cron", "interval", "once"
+    schedule_expr: str
+    timeout_seconds: int
+    created_at: str
+
+    @property
+    def scope(self) -> ChatScope:
+        thread_id = self.message_thread_id if self.message_thread_id != 0 else None
+        return ChatScope(chat_id=self.chat_id, thread_id=thread_id)
+
+
+def _row_to_task(row: tuple) -> ScheduledTask:
+    """Convert a DB row tuple to a ScheduledTask."""
+    return ScheduledTask(
+        id=row[0],
+        chat_id=row[1],
+        message_thread_id=row[2],
+        context_name=row[3],
+        name=row[4],
+        prompt=row[5],
+        schedule_type=row[6],
+        schedule_expr=row[7],
+        timeout_seconds=row[8],
+        created_at=row[9],
+    )
+
+
+_SELECT_TASK_COLS = (
+    "id, chat_id, message_thread_id, context_name, name, prompt, "
+    "schedule_type, schedule_expr, timeout_seconds, created_at"
+)
+
+
+async def create_scheduled_task(
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    context_name: str,
+    name: str,
+    prompt: str,
+    schedule_type: str,
+    schedule_expr: str,
+    timeout_seconds: int = 600,
+) -> ScheduledTask:
+    """Insert a new scheduled task and return it.
+
+    Raises:
+        ValueError: If the max task limit per chat scope is reached.
+        aiosqlite.IntegrityError: If a task with the same name already exists.
+    """
+    # Check per-scope task limit.
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM scheduled_tasks "
+        "WHERE chat_id = ? AND message_thread_id = ?",
+        (scope.chat_id, _thread_id_to_db(scope.thread_id)),
+    )
+    (count,) = await cursor.fetchone()  # type: ignore[misc]
+    if count >= MAX_SCHEDULED_TASKS_PER_CHAT:
+        raise ValueError(
+            f"Maximum of {MAX_SCHEDULED_TASKS_PER_CHAT} scheduled tasks "
+            f"per chat reached."
+        )
+
+    cursor = await db.execute(
+        "INSERT INTO scheduled_tasks "
+        "(chat_id, message_thread_id, context_name, name, prompt, "
+        " schedule_type, schedule_expr, timeout_seconds) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            scope.chat_id,
+            _thread_id_to_db(scope.thread_id),
+            context_name,
+            name,
+            prompt,
+            schedule_type,
+            schedule_expr,
+            timeout_seconds,
+        ),
+    )
+    await db.commit()
+    task_id = cursor.lastrowid
+
+    # Fetch the full row to return.
+    cursor = await db.execute(
+        f"SELECT {_SELECT_TASK_COLS} FROM scheduled_tasks WHERE id = ?",
+        (task_id,),
+    )
+    row = await cursor.fetchone()
+    return _row_to_task(row)  # type: ignore[arg-type]
+
+
+async def delete_scheduled_task(
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    name: str,
+) -> bool:
+    """Delete a scheduled task by name within a scope. Returns True if deleted."""
+    cursor = await db.execute(
+        "DELETE FROM scheduled_tasks "
+        "WHERE chat_id = ? AND message_thread_id = ? AND name = ?",
+        (scope.chat_id, _thread_id_to_db(scope.thread_id), name),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def list_scheduled_tasks(
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+) -> list[ScheduledTask]:
+    """Return all scheduled tasks for a scope, ordered by creation time."""
+    cursor = await db.execute(
+        f"SELECT {_SELECT_TASK_COLS} FROM scheduled_tasks "
+        "WHERE chat_id = ? AND message_thread_id = ? "
+        "ORDER BY created_at",
+        (scope.chat_id, _thread_id_to_db(scope.thread_id)),
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_task(row) for row in rows]
+
+
+async def get_all_scheduled_tasks(
+    db: aiosqlite.Connection,
+) -> list[ScheduledTask]:
+    """Return all scheduled tasks across all scopes (for reload on startup)."""
+    cursor = await db.execute(
+        f"SELECT {_SELECT_TASK_COLS} FROM scheduled_tasks ORDER BY id"
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_task(row) for row in rows]
+
+
+async def delete_scheduled_task_by_id(
+    db: aiosqlite.Connection,
+    task_id: int,
+) -> None:
+    """Delete a scheduled task by its primary key ID."""
+    await db.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
     await db.commit()

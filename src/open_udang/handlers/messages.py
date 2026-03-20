@@ -549,6 +549,9 @@ async def _start_agent_task(
                 session_id=session_id,
                 callback_context=cb_ctx,
                 bot=context.bot,
+                db=db,
+                config=config,
+                job_queue=getattr(context, "job_queue", None),
             )
 
             # Send the primary query.

@@ -25,6 +25,7 @@ Telegram <-> OpenUdang (Python, async) <-> Claude Agent SDK
 - **Session**: A persistent Claude conversation. The Agent SDK handles persistence as `.jsonl` files under `~/.claude/projects/<encoded-cwd>/`. OpenUdang maps `(chat_id, thread_id, context_name) -> session_id` in SQLite.
 - **Tool approval**: Uses the SDK's `allowedTools` for auto-approved tools (patterns like `Bash(git *)`) and a `canUseTool` callback for everything else. Read-only file tools (Read, Glob, Grep) are auto-approved within the context working directory. Mutating tools (Edit, Write) always require explicit approval via Telegram inline keyboard, even within cwd, unless the user opts into "accept all edits" for the session. The callback sends Telegram inline keyboards and `await`s the user's response.
 - **Containerization**: Optional per-context Docker isolation via `containerize: true`. The Claude CLI runs inside a container with only the project directory bind-mounted (at the same host path). Session storage is isolated under `~/.config/openudang/containers/<context>/`, mounted as `~/.claude` inside the container. The container runs as the host user's uid/gid to avoid root-owned files. The SDK's `cli_path` is pointed at a generated wrapper script that invokes `docker run`; all other SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.
+- **Scheduled tasks**: Cron-like recurring and one-shot Claude prompts. Users describe schedules in natural language; Claude calls MCP tools (`create_schedule`, `list_schedules`, `delete_schedule`) to manage them. Tasks run in isolated sessions with read-only tools only (no approval UI needed). Persistence via SQLite `scheduled_tasks` table, scheduling via `python-telegram-bot` JobQueue (APScheduler). Safety: 5-minute minimum interval, max 20 tasks per chat, max 3 concurrent executions (global semaphore), per-task timeout (default 10 minutes). One-shot tasks auto-delete after execution.
 
 ### Key SDK Patterns
 
@@ -68,8 +69,9 @@ src/open_udang/
     stream.py         # Stream bridge: SDK messages -> sendMessageDraft
     config.py         # Config loading and validation (YAML)
     container.py      # Docker container wrapper for isolated CLI execution
-    tools.py          # MCP tool registration (edit_topic for forum topics)
-    db.py             # SQLite session ID mapping, ChatScope definition
+    tools.py          # MCP tool registration (edit_topic, scheduling tools)
+    db.py             # SQLite persistence: sessions, contexts, scheduled tasks
+    scheduler.py      # Scheduled task execution, JobQueue integration
     markdown.py       # GFM -> Telegram MarkdownV2 conversion
     stt.py            # Speech-to-text: download/invoke moonshine-stt binary
     service.py        # install/uninstall as systemd/launchd service
@@ -116,6 +118,7 @@ Key fields:
 | `/resume` | `resume_handler` | List and resume a previous session |
 | `/review` | `review_handler` | Open the review Mini App for the current context |
 | `/mcp` | `mcp_handler` | List and manage MCP servers (reset/enable/disable) |
+| `/schedule` | `schedule_handler` | List and manage scheduled tasks |
 
 ## Conventions
 

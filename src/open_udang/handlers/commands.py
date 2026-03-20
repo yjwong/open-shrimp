@@ -637,3 +637,92 @@ async def _mcp_toggle(message: Any, session: AgentSession, server_name: str, *, 
         f"{emoji} `{escaped}` {past}\\.",
         parse_mode="MarkdownV2",
     )
+
+
+# ── /schedule ──
+
+
+async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /schedule command: list and manage scheduled tasks.
+
+    Usage:
+        /schedule           -- list all scheduled tasks for this chat
+        /schedule delete <n> -- delete a scheduled task by name
+    """
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    message = update.effective_message
+    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    scope = chat_scope_from_message(message)
+    args = message.text.split() if message.text else []
+
+    if len(args) >= 3 and args[1] == "delete":
+        # Delete a task by name.
+        task_name = " ".join(args[2:])
+        from open_udang.db import delete_scheduled_task, list_scheduled_tasks
+
+        # Find task ID for JobQueue removal.
+        tasks = await list_scheduled_tasks(db, scope)
+        task_id = None
+        for t in tasks:
+            if t.name == task_name:
+                task_id = t.id
+                break
+
+        deleted = await delete_scheduled_task(db, scope, task_name)
+        if deleted:
+            # Remove from JobQueue.
+            if task_id is not None and context.job_queue:
+                job_name = f"scheduled_task_{task_id}"
+                for j in context.job_queue.get_jobs_by_name(job_name):
+                    j.schedule_removal()
+
+            escaped = _escape_mdv2(task_name)
+            await message.reply_text(
+                f"Deleted scheduled task `{escaped}`\\.",
+                parse_mode="MarkdownV2",
+            )
+        else:
+            escaped = _escape_mdv2(task_name)
+            await message.reply_text(
+                f"No scheduled task named `{escaped}` found\\.",
+                parse_mode="MarkdownV2",
+            )
+        return
+
+    # List all tasks.
+    from open_udang.db import list_scheduled_tasks
+
+    tasks = await list_scheduled_tasks(db, scope)
+    if not tasks:
+        await message.reply_text(
+            "No scheduled tasks\\. Ask Claude to create one\\!",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    lines = [f"*Scheduled tasks \\({len(tasks)}\\):*\n"]
+    for t in tasks:
+        type_desc = {
+            "interval": f"every {t.schedule_expr}",
+            "cron": f"cron: {t.schedule_expr}",
+            "once": f"at {t.schedule_expr}",
+        }.get(t.schedule_type, t.schedule_expr)
+
+        prompt_preview = t.prompt[:50] + ("..." if len(t.prompt) > 50 else "")
+        name_escaped = _escape_mdv2(t.name)
+        desc_escaped = _escape_mdv2(type_desc)
+        prompt_escaped = _escape_mdv2(prompt_preview)
+        ctx_escaped = _escape_mdv2(t.context_name)
+
+        lines.append(
+            f"• *{name_escaped}*\n"
+            f"  📅 {desc_escaped}\n"
+            f"  📁 `{ctx_escaped}`\n"
+            f"  💬 _{prompt_escaped}_"
+        )
+
+    text = "\n".join(lines)
+    await message.reply_text(text, parse_mode="MarkdownV2")

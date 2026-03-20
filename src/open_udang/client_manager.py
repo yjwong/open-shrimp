@@ -79,6 +79,9 @@ async def get_or_create_session(
     session_id: str | None,
     callback_context: CallbackContext,
     bot: Bot | None = None,
+    db: Any | None = None,
+    config: Any | None = None,
+    job_queue: Any | None = None,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
@@ -142,6 +145,13 @@ async def get_or_create_session(
     allowed_tools.append("mcp__openudang__send_file")
     if scope.thread_id is not None:
         allowed_tools.append("mcp__openudang__edit_topic")
+    # Auto-approve scheduling tools when available.
+    if db is not None and config is not None and job_queue is not None:
+        allowed_tools.extend([
+            "mcp__openudang__create_schedule",
+            "mcp__openudang__list_schedules",
+            "mcp__openudang__delete_schedule",
+        ])
 
     # When containerized, generate a wrapper script that runs the Claude
     # CLI inside Docker.  The wrapper is pointed at via cli_path; all other
@@ -200,6 +210,7 @@ async def get_or_create_session(
     if bot is not None:
         openudang_server = create_openudang_mcp_server(
             bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
+            db=db, config=config, job_queue=job_queue,
         )
         options.mcp_servers = {"openudang": openudang_server}
 
