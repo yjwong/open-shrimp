@@ -205,8 +205,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         "Voice transcription for scope %s: %s",
                         scope, transcription[:100],
                     )
+                    prompt = f"[Transcribed from voice note] {transcription}"
                     await _dispatch_to_agent(
-                        transcription, [], scope, config, db, context,
+                        prompt, [], scope, config, db, context,
                     )
                     return
                 else:
