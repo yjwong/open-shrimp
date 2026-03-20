@@ -51,9 +51,14 @@ async def can_use_tool(tool_name, tool_input, context):
         return PermissionResultDeny(message="User denied tool use.")
 ```
 
+## Versioning
+
+Both `open-udang` and `moonshine-stt` share a single version from the `VERSION` file at the repo root. Both `pyproject.toml` files use hatchling's dynamic version source to read from it. To bump the version, edit `VERSION` — both projects pick it up automatically.
+
 ## Project Structure
 
 ```
+VERSION                   # Single source of truth for version (shared)
 src/open_udang/
     __init__.py
     main.py          # Entry point, arg parsing, config loading
@@ -66,7 +71,16 @@ src/open_udang/
     tools.py          # MCP tool registration (edit_topic for forum topics)
     db.py             # SQLite session ID mapping, ChatScope definition
     markdown.py       # GFM -> Telegram MarkdownV2 conversion
+    stt.py            # Speech-to-text: download/invoke moonshine-stt binary
     service.py        # install/uninstall as systemd/launchd service
+moonshine-stt/            # Subproject: standalone STT binary (packaged via PyApp)
+    pyproject.toml
+    src/moonshine_stt/
+        main.py      # CLI entry point (transcribe / download subcommands)
+        audio.py     # PyAV: OGG/Opus/any -> 16kHz mono float32 PCM
+        model.py     # ONNX Runtime: Moonshine V1 four-file inference
+        tokenizer.py # tokens.txt -> decoded text
+        download.py  # Auto-download models from sherpa-onnx releases
 ```
 
 ## Config

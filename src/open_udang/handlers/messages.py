@@ -13,6 +13,7 @@ from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
 from open_udang.agent import FileAttachment, cleanup_attachments, prepare_prompt
+from open_udang.stt import transcribe as stt_transcribe
 from open_udang.client_manager import (
     CallbackContext,
     get_or_create_session,
@@ -104,6 +105,20 @@ async def _download_telegram_documents(
     return attachments
 
 
+async def _download_telegram_voice(
+    message: Any, bot: Bot
+) -> bytes | None:
+    """Download a voice note or video note from a Telegram message.
+
+    Returns the raw audio bytes, or None if the message has no voice/video note.
+    """
+    voice = message.voice or message.video_note
+    if not voice:
+        return None
+    file = await bot.get_file(voice.file_id)
+    return bytes(await file.download_as_bytearray())
+
+
 async def _download_all_attachments(
     messages: list[Any], bot: Bot
 ) -> list[FileAttachment]:
@@ -132,20 +147,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not message:
         return
 
-    # Must have text, caption, photo, document, or location
+    # Must have text, caption, photo, document, location, or voice
     has_text = bool(message.text)
     has_photo = bool(message.photo)
     has_document = bool(message.document)
     has_caption = bool(message.caption)
     has_location = bool(message.location)
+    has_voice = bool(message.voice or message.video_note)
 
     logger.info(
-        "message_handler: chat=%s has_text=%s has_photo=%s has_document=%s has_caption=%s has_location=%s media_group_id=%s",
-        message.chat_id, has_text, has_photo, has_document, has_caption, has_location, message.media_group_id,
+        "message_handler: chat=%s has_text=%s has_photo=%s has_document=%s has_caption=%s has_location=%s has_voice=%s media_group_id=%s",
+        message.chat_id, has_text, has_photo, has_document, has_caption, has_location, has_voice, message.media_group_id,
     )
 
-    if not has_text and not has_photo and not has_document and not has_location:
-        logger.info("message_handler: no text, photo, document, or location, ignoring")
+    if not has_text and not has_photo and not has_document and not has_location and not has_voice:
+        logger.info("message_handler: no text, photo, document, location, or voice, ignoring")
         return
 
     if not _is_authorized(update.effective_user and update.effective_user.id, config):
@@ -176,6 +192,36 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # If this message is part of a media group (album), batch it.
     if message.media_group_id and (has_photo or has_document):
         await _handle_media_group_message(update, context, message)
+        return
+
+    # Transcribe voice notes to text.
+    if has_voice:
+        try:
+            voice_data = await _download_telegram_voice(message, context.bot)
+            if voice_data:
+                transcription = await stt_transcribe(voice_data)
+                if transcription:
+                    logger.info(
+                        "Voice transcription for scope %s: %s",
+                        scope, transcription[:100],
+                    )
+                    await _dispatch_to_agent(
+                        transcription, [], scope, config, db, context,
+                    )
+                    return
+                else:
+                    logger.warning("Empty transcription for voice note in scope %s", scope)
+        except Exception:
+            logger.exception("Voice transcription failed for scope %s", scope)
+            try:
+                await context.bot.send_message(
+                    chat_id=scope.chat_id,
+                    text="Failed to transcribe voice note\\. Is moonshine\\-stt installed?",
+                    parse_mode="MarkdownV2",
+                    **_thread_kwargs(scope),
+                )
+            except Exception:
+                pass
         return
 
     # Extract text from either message.text or message.caption (for photos)

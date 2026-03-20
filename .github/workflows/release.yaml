@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-sdist:
-    name: Build sdist
+    name: Build sdists
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -28,38 +28,65 @@ jobs:
         working-directory: web/review-app
         run: npm ci && npm run build
 
-      - name: Build sdist
+      - name: Build open-udang sdist
         run: uv build --sdist
 
-      - name: Upload sdist
+      - name: Build moonshine-stt sdist
+        working-directory: moonshine-stt
+        run: uv build --sdist
+
+      - name: Upload open-udang sdist
         uses: actions/upload-artifact@v7
         with:
-          name: sdist
+          name: sdist-openudang
           path: dist/*.tar.gz
 
+      - name: Upload moonshine-stt sdist
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdist-moonshine-stt
+          path: moonshine-stt/dist/*.tar.gz
+
   build-binary:
-    name: Build binary (${{ matrix.target }})
+    name: Build ${{ matrix.artifact }}
     needs: build-sdist
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # open-udang
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
             artifact: openudang-linux-x86_64
+            sdist_artifact: sdist-openudang
+            exec_code: "from open_udang.main import main; main()"
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
             artifact: openudang-linux-aarch64
+            sdist_artifact: sdist-openudang
+            exec_code: "from open_udang.main import main; main()"
           - os: macos-latest
-            target: aarch64-apple-darwin
             artifact: openudang-macos-aarch64
+            sdist_artifact: sdist-openudang
+            exec_code: "from open_udang.main import main; main()"
+          # moonshine-stt
+          - os: ubuntu-latest
+            artifact: moonshine-stt-linux-x86_64
+            sdist_artifact: sdist-moonshine-stt
+            exec_code: "from moonshine_stt.main import main; main()"
+          - os: ubuntu-24.04-arm
+            artifact: moonshine-stt-linux-aarch64
+            sdist_artifact: sdist-moonshine-stt
+            exec_code: "from moonshine_stt.main import main; main()"
+          - os: macos-latest
+            artifact: moonshine-stt-macos-aarch64
+            sdist_artifact: sdist-moonshine-stt
+            exec_code: "from moonshine_stt.main import main; main()"
 
     steps:
       - name: Download sdist
         uses: actions/download-artifact@v8
         with:
-          name: sdist
+          name: ${{ matrix.sdist_artifact }}
           path: dist
 
       - name: Install Rust
@@ -82,7 +109,7 @@ jobs:
         env:
           PYAPP_PROJECT_PATH: ${{ steps.sdist.outputs.filename }}
           PYAPP_PYTHON_VERSION: "3.11"
-          PYAPP_EXEC_CODE: "from open_udang.main import main; main()"
+          PYAPP_EXEC_CODE: ${{ matrix.exec_code }}
           PYAPP_DISTRIBUTION_EMBED: "1"
         run: cargo install pyapp --force --root dist/pyapp
 
@@ -115,4 +142,5 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/openudang-*
+            artifacts/moonshine-stt-*
             artifacts/*.tar.gz

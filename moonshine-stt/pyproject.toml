@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "moonshine-stt"
+dynamic = ["version"]
+description = "Lightweight CLI for speech-to-text using Moonshine ONNX models"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "av",
+    "numpy",
+    "onnxruntime",
+]
+
+[project.scripts]
+moonshine-stt = "moonshine_stt.main:main"
+
+[tool.hatch.version]
+path = "../VERSION"
+pattern = "(?P<version>.+)"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
