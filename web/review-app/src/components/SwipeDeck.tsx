@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { FileSummary, Hunk } from "../lib/types";
-import { stageHunk, unstageHunk, commitChanges, StaleHunkError } from "../lib/api";
+import { stageHunk, unstageHunk, skipHunk, commitChanges, StaleHunkError } from "../lib/api";
 import { HunkCard } from "./HunkCard";
 import { FilePicker } from "./FilePicker";
 import { ProgressBar } from "./ProgressBar";
@@ -133,6 +133,10 @@ export function SwipeDeck({
         try {
           if (currentHunk.staged) {
             await unstageHunk(currentHunk.id, chatId, dir);
+          } else if (currentHunk.is_new_file) {
+            // Clean up the intent-to-add index entry so the file
+            // goes back to being truly untracked in git status.
+            await skipHunk(currentHunk.id, chatId, dir);
           }
           setHistory((h) => [
             ...h,

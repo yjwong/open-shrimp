@@ -22,7 +22,7 @@ from open_udang.config import Config, ContextConfig
 from open_udang.db import get_active_context
 from open_udang.review.auth import AuthError, validate_init_data
 from open_udang.review.git_diff import Hunk, get_hunks
-from open_udang.review.git_stage import stage_hunk, unstage_hunk
+from open_udang.review.git_stage import stage_hunk, unstage_hunk, remove_intent_to_add
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +374,91 @@ async def unstage_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def skip_endpoint(request: Request) -> JSONResponse:
+    """POST /api/review/skip — skip a hunk, cleaning up intent-to-add for new files.
+
+    For new files that were marked with ``git add --intent-to-add`` during
+    hunk fetching, this removes the index entry so the file goes back to
+    being truly untracked.  For non-new files, this is a no-op (the skip
+    is purely a frontend concept).
+    """
+    try:
+        user_id = await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"error": "Invalid JSON body"}, status_code=400
+        )
+
+    hunk_id = body.get("hunk_id")
+    if not hunk_id:
+        return JSONResponse(
+            {"error": "hunk_id is required"}, status_code=400
+        )
+
+    chat_id = body.get("chat_id")
+    dir_index_raw = body.get("dir", 0)
+    try:
+        dir_index = int(dir_index_raw)
+    except (TypeError, ValueError):
+        dir_index = 0
+
+    context_name_hint = None
+    if chat_id is not None:
+        try:
+            chat_id = int(chat_id)
+            context_name_hint, _ = await _resolve_context(
+                request, chat_id, dir_index
+            )
+        except (ValueError, AuthError):
+            pass
+
+    hunk, context_name, resolved_chat_id, resolved_dir_index = _find_cached_hunk(
+        hunk_id, chat_id, context_name_hint, dir_index
+    )
+    if hunk is None:
+        return JSONResponse(
+            {"error": "Hunk not found. The diff may have changed — refresh to get current hunks."},
+            status_code=409,
+        )
+
+    # Only clean up intent-to-add for unstaged new files.
+    if not hunk.is_new_file or hunk.staged:
+        return JSONResponse({"ok": True})
+
+    # Resolve the working directory.
+    config: Config = request.app.state.config
+    if context_name not in config.contexts:
+        return JSONResponse(
+            {"error": f"Context '{context_name}' not found"},
+            status_code=404,
+        )
+    ctx = config.contexts[context_name]
+    dirs = _get_directories(ctx)
+    didx = resolved_dir_index if resolved_dir_index is not None else 0
+    if didx < 0 or didx >= len(dirs):
+        return JSONResponse(
+            {"error": f"Invalid directory index: {didx}"},
+            status_code=400,
+        )
+    directory = dirs[didx]
+
+    result = await remove_intent_to_add(directory, hunk)
+
+    if not result.ok:
+        # Not fatal — log but still return ok to the frontend.
+        logger.warning(
+            "Failed to remove intent-to-add for %s: %s",
+            hunk.file_path, result.error,
+        )
+
+    return JSONResponse({"ok": True})
+
+
 async def commit_endpoint(request: Request) -> JSONResponse:
     """POST /api/review/commit — request the bot to commit staged changes.
 
@@ -440,6 +525,7 @@ def create_review_app(config: Config, db: aiosqlite.Connection) -> Starlette:
         Route("/api/review/hunks", hunks_endpoint, methods=["GET"]),
         Route("/api/review/stage", stage_endpoint, methods=["POST"]),
         Route("/api/review/unstage", unstage_endpoint, methods=["POST"]),
+        Route("/api/review/skip", skip_endpoint, methods=["POST"]),
         Route("/api/review/commit", commit_endpoint, methods=["POST"]),
     ]
 

@@ -146,20 +146,44 @@ async def unstage_hunk(cwd: str, hunk: Hunk) -> StageResult:
         )
 
     # For new files, reverse-applying removes the file from the index
-    # entirely, making it fully untracked.  Re-add with --intent-to-add
-    # so the file stays visible in future diffs.
-    if hunk.is_new_file:
-        proc2 = await asyncio.create_subprocess_exec(
-            "git", "add", "--intent-to-add", "--", hunk.file_path,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr2 = await proc2.communicate()
-        if proc2.returncode != 0:
-            logger.warning(
-                "git add --intent-to-add failed after unstage: %s",
-                stderr2.decode().strip(),
-            )
+    # entirely, making it fully untracked.  We intentionally do NOT
+    # re-add with --intent-to-add here — the file should go back to
+    # being truly untracked so that `git status` shows it correctly.
+    # The next `get_hunks()` call will re-add --intent-to-add if needed.
+
+    return StageResult(ok=True)
+
+
+async def remove_intent_to_add(cwd: str, hunk: Hunk) -> StageResult:
+    """Remove an intent-to-add index entry for a new file.
+
+    When get_hunks() marks untracked files with ``git add --intent-to-add``
+    so they appear in diffs, those entries linger in the index.  This
+    function removes the entry via ``git rm --cached`` so the file goes
+    back to being truly untracked.
+
+    Only applicable to new files that have not been staged (i.e., still
+    in the intent-to-add state).
+
+    Args:
+        cwd: Working directory (must be inside a git repo).
+        hunk: The hunk representing the new file to clean up.
+
+    Returns:
+        StageResult indicating success or failure.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git", "rm", "--cached", "--", hunk.file_path,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        error_msg = stderr.decode().strip()
+        logger.warning("git rm --cached failed for %s: %s", hunk.file_path, error_msg)
+        # Not fatal — the file will just remain as intent-to-add.
+        return StageResult(ok=False, error=error_msg)
 
     return StageResult(ok=True)

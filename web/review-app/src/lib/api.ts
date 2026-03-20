@@ -72,6 +72,25 @@ export async function unstageHunk(hunkId: string, chatId: string, dir: string): 
   }
 }
 
+export async function skipHunk(hunkId: string, chatId: string, dir: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}/skip`, {
+    method: "POST",
+    headers: {
+      ...getAuthHeader(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir }),
+  });
+
+  if (response.status === 409) {
+    throw new StaleHunkError();
+  }
+
+  if (!response.ok) {
+    throw new Error(`Failed to skip hunk: ${response.status} ${response.statusText}`);
+  }
+}
+
 export async function commitChanges(chatId: string): Promise<void> {
   const response = await fetch(`${BASE_URL}/commit`, {
     method: "POST",
