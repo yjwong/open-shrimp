@@ -426,11 +426,15 @@ async def _run_scheduled_prompt(
         add_dirs=ctx_config.additional_directories,
         setting_sources=["project", "user", "local"],
         include_partial_messages=True,
-        system_prompt=(
-            f"You are running as a scheduled task named '{task.name}'. "
-            f"This is an automated execution — there is no human watching. "
-            f"Be concise and focused. Report findings clearly."
-        ),
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": (
+                f"You are running as a scheduled task named '{task.name}'. "
+                f"This is an automated execution — there is no human watching. "
+                f"Be concise and focused. Report findings clearly."
+            ),
+        },
     )
 
     client = ClaudeSDKClient(options=options)

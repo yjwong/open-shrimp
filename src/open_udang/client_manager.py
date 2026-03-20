@@ -185,13 +185,6 @@ async def get_or_create_session(
     )
 
     system_prompt_parts: list[str] = []
-    if context.additional_directories:
-        dirs_list = "\n".join(f"  - {d}" for d in context.additional_directories)
-        system_prompt_parts.append(
-            "You also have access to the following additional working "
-            "directories:\n" + dirs_list + "\n"
-            "You may read and search files in these directories as needed."
-        )
 
     if scope.thread_id is not None:
         system_prompt_parts.append(
@@ -204,7 +197,11 @@ async def get_or_create_session(
         )
 
     if system_prompt_parts:
-        options.system_prompt = "\n\n".join(system_prompt_parts)
+        options.system_prompt = {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": "\n\n".join(system_prompt_parts),
+        }
 
     # Register in-process MCP tools (send_file, send_photo, etc.) so the
     # agent can send files directly to the Telegram chat.

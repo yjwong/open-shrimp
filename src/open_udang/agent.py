@@ -237,17 +237,6 @@ async def run_agent(
         can_use_tool=can_use_tool,
     )
 
-    # Build a system prompt supplement that tells the agent about additional
-    # working directories so it knows they exist (--add-dir only grants
-    # permission, it doesn't inform the agent).
-    if context.additional_directories:
-        dirs_list = "\n".join(f"  - {d}" for d in context.additional_directories)
-        options.system_prompt = (
-            "You also have access to the following additional working "
-            "directories:\n" + dirs_list + "\n"
-            "You may read and search files in these directories as needed."
-        )
-
     # Save attachments to temp files and build the prompt with file references.
     attachment_paths: list[Path] = []
     if attachments:
