@@ -55,6 +55,7 @@ class CallbackContext:
     handle_user_questions: QuestionCallback | None = None
     is_edit_auto_approved: Callable[[], bool] | None = None
     notify_auto_approved_edit: EditNotifyCallback | None = None
+    is_tool_auto_approved: Callable[[str], bool] | None = None
 
 
 @dataclass
@@ -103,6 +104,7 @@ async def get_or_create_session(
             existing.callback_context.handle_user_questions = callback_context.handle_user_questions
             existing.callback_context.is_edit_auto_approved = callback_context.is_edit_auto_approved
             existing.callback_context.notify_auto_approved_edit = callback_context.notify_auto_approved_edit
+            existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
             logger.info(
                 "Reusing live client for scope %s context %s",
                 scope,
@@ -128,6 +130,7 @@ async def get_or_create_session(
         is_edit_auto_approved=_make_edit_approved_proxy(callback_context),
         notify_auto_approved_edit=_make_edit_notify_proxy(callback_context),
         chat_id=scope.chat_id,
+        is_tool_auto_approved=_make_tool_approved_proxy(callback_context),
     )
 
     def _log_stderr(line: str) -> None:
@@ -354,5 +357,16 @@ def _make_edit_notify_proxy(
         if ctx.notify_auto_approved_edit is None:
             return
         await ctx.notify_auto_approved_edit(tool_name, tool_input)
+
+    return _proxy
+
+
+def _make_tool_approved_proxy(
+    ctx: CallbackContext,
+) -> Callable[[str], bool]:
+    def _proxy(tool_name: str) -> bool:
+        if ctx.is_tool_auto_approved is None:
+            return False
+        return ctx.is_tool_auto_approved(tool_name)
 
     return _proxy

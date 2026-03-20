@@ -32,6 +32,7 @@ from open_udang.handlers.state import (
     _media_group_messages,
     _media_group_tasks,
     _MEDIA_GROUP_WAIT,
+    _tool_approved_sessions,
     _pending_other_input,
     _question_states,
     _running_tasks,
@@ -491,6 +492,7 @@ async def _start_agent_task(
                 handle_user_questions=handle_questions,
                 is_edit_auto_approved=lambda: (scope, ctx_name) in _edit_approved_sessions,
                 notify_auto_approved_edit=notify_edit,
+                is_tool_auto_approved=lambda tn: tn in _tool_approved_sessions.get((scope, ctx_name), set()),
             )
 
             session = await get_or_create_session(

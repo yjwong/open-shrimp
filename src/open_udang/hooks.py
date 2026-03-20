@@ -55,6 +55,10 @@ QuestionCallback = Callable[[list[dict[str, Any]]], Awaitable[dict[str, str]]]
 # auto-approved so the user can still see the diff without blocking.
 EditNotifyCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
+# Type for the per-tool auto-approval check: receives tool_name, returns
+# True if the user has opted into auto-approval for that tool this session.
+ToolAutoApprovedCallback = Callable[[str], bool]
+
 # Tools that access the filesystem, mapped to the input key(s) containing
 # the path to check. Each value is a list of keys to try (first match wins).
 _PATH_SCOPED_TOOLS: dict[str, list[str]] = {
@@ -121,6 +125,7 @@ def make_can_use_tool(
     is_edit_auto_approved: Callable[[], bool] | None = None,
     notify_auto_approved_edit: EditNotifyCallback | None = None,
     chat_id: int | None = None,
+    is_tool_auto_approved: ToolAutoApprovedCallback | None = None,
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext], Awaitable[PermissionResult]
 ]:
@@ -163,6 +168,10 @@ def make_can_use_tool(
             upload directory (``ATTACHMENT_TEMP_DIR/<chat_id>/``) is added
             to the approved directories so Read access to uploaded files is
             auto-approved.
+        is_tool_auto_approved: Optional callback that receives a tool name
+            and returns True if the user has opted into auto-approval for
+            that specific tool in the current session. Used for non-path-
+            scoped tools (e.g. WebFetch, WebSearch, Bash).
     """
     approved_dirs = [cwd] + (additional_directories or [])
     if chat_id is not None:
@@ -247,6 +256,16 @@ def make_can_use_tool(
                     tool_name,
                     tool_path,
                 )
+
+        # Per-tool session-scoped auto-approval (e.g. "Accept all WebFetch").
+        # Checked for all tools that reach the interactive approval stage,
+        # including mutating path tools that weren't caught by the
+        # accept-all-edits check above.
+        if is_tool_auto_approved and is_tool_auto_approved(tool_name):
+            logger.info(
+                "Auto-approved %s (per-tool session approval)", tool_name
+            )
+            return PermissionResultAllow()
 
         logger.info("Requesting approval for tool: %s", tool_name)
         # Generate a unique tool_use_id so that parallel approval requests

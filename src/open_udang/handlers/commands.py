@@ -27,6 +27,7 @@ from open_udang.handlers.state import (
     _model_overrides,
     _resume_selections,
     _running_tasks,
+    _tool_approved_sessions,
     _setup_queues,
 )
 from open_udang.handlers.utils import (
@@ -99,6 +100,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     old_ctx_name = await _get_context_name(scope, config, db)
     _edit_approved_sessions.discard((scope, old_ctx_name))
+    _tool_approved_sessions.pop((scope, old_ctx_name), None)
     _model_overrides.pop(scope, None)
     await close_session(scope)
 
@@ -135,6 +137,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await close_session(scope)
     await delete_session(db, scope, ctx_name)
     _edit_approved_sessions.discard((scope, ctx_name))
+    _tool_approved_sessions.pop((scope, ctx_name), None)
     _model_overrides.pop(scope, None)
     await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
     await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)

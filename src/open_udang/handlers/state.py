@@ -72,6 +72,14 @@ _approval_tool_names: dict[str, str] = {}
 _edit_approved_sessions: set[tuple[ChatScope, str]] = set()
 
 # ---------------------------------------------------------------------------
+# Per-session auto-approved tool names for non-path-scoped tools (e.g.
+# WebFetch, WebSearch, Bash).  When a tool name is in the set for a given
+# (scope, context_name), future uses of that tool are auto-approved without
+# prompting.  Cleared on /clear or context switch.
+# ---------------------------------------------------------------------------
+_tool_approved_sessions: dict[tuple[ChatScope, str], set[str]] = {}
+
+# ---------------------------------------------------------------------------
 # Per-scope model override: scope -> model name.  Set via /model command.
 # Cleared on /clear or context switch.  Takes precedence over context config.
 # ---------------------------------------------------------------------------

@@ -224,6 +224,16 @@ async def _send_approval_keyboard(
     if tool_name in ("Edit", "Write"):
         accept_all_data = f"accept_all_edits:{tool_use_id}"
         buttons.append(InlineKeyboardButton("Accept all edits", callback_data=accept_all_data))
+    # All tools (except Edit/Write which have the more specific "Accept all
+    # edits" button) get a generic "Accept all <tool>" option for session-
+    # scoped auto-approval of that specific tool type.
+    if tool_name not in ("Edit", "Write"):
+        accept_all_tool_data = f"accept_all_tool:{tool_use_id}:{tool_name}"
+        # Truncate callback_data to 64 bytes (Telegram limit)
+        if len(accept_all_tool_data.encode()) <= 64:
+            buttons.append(InlineKeyboardButton(
+                f"Accept all {tool_name}", callback_data=accept_all_tool_data,
+            ))
     buttons.append(InlineKeyboardButton("Deny", callback_data=deny_data))
 
     keyboard = InlineKeyboardMarkup([buttons])
@@ -247,6 +257,9 @@ async def _send_approval_keyboard(
     _approval_futures[deny_data] = future
     if tool_name in ("Edit", "Write"):
         _approval_futures[f"accept_all_edits:{tool_use_id}"] = future
+    accept_all_tool_key = f"accept_all_tool:{tool_use_id}:{tool_name}"
+    if tool_name not in ("Edit", "Write") and len(accept_all_tool_key.encode()) <= 64:
+        _approval_futures[accept_all_tool_key] = future
 
     try:
         return await future
@@ -254,6 +267,7 @@ async def _send_approval_keyboard(
         _approval_futures.pop(approve_data, None)
         _approval_futures.pop(deny_data, None)
         _approval_futures.pop(f"accept_all_edits:{tool_use_id}", None)
+        _approval_futures.pop(accept_all_tool_key, None)
         _pending_agent_inputs.pop(tool_use_id, None)
         _approval_tool_names.pop(tool_use_id, None)
 
@@ -370,6 +384,60 @@ async def handle_approval_callback(
             try:
                 original_md = query.message.text_markdown_v2 or query.message.text or ""
                 status = "\n\n\u2705 *Approved\\.* _All future edits auto\\-approved\\._"
+                await query.message.edit_text(
+                    text=original_md + status,
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    logger.exception("Failed to edit approval message")
+        return True
+
+    # Handle "Accept all <tool>" -- approve this tool and enable auto-approval
+    # for all future uses of that specific tool for this session.
+    if data.startswith("accept_all_tool:"):
+        future = _approval_futures.get(data)
+        if not future or future.done():
+            await query.answer("This approval has expired.")
+            return True
+
+        # Parse tool name from callback data: "accept_all_tool:<id>:<tool_name>"
+        parts = data.split(":", 2)
+        accepted_tool_name = parts[2] if len(parts) >= 3 else ""
+
+        # Determine the chat's active context to scope the flag
+        if query.message and accepted_tool_name:
+            from open_udang.handlers.state import _tool_approved_sessions
+
+            scope = chat_scope_from_message(query.message)
+            db: aiosqlite.Connection = context.bot_data["db"]
+            ctx_name, _ = await _get_context(scope, config, db)
+            _tool_approved_sessions.setdefault((scope, ctx_name), set()).add(
+                accepted_tool_name
+            )
+            logger.info(
+                "Accept-all-%s enabled for scope %s context %s",
+                accepted_tool_name,
+                scope,
+                ctx_name,
+            )
+
+        future.set_result(True)
+        escaped_tool = _escape_mdv2(accepted_tool_name)
+        await query.answer(
+            f"Approved. All future {accepted_tool_name} calls will be auto-approved."
+        )
+
+        if query.message:
+            try:
+                original_md = query.message.text_markdown_v2 or query.message.text or ""
+                status = (
+                    f"\n\n\u2705 *Approved\\.* _All future {escaped_tool} "
+                    f"calls auto\\-approved\\._"
+                )
                 await query.message.edit_text(
                     text=original_md + status,
                     parse_mode="MarkdownV2",
