@@ -129,12 +129,13 @@ async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
     # Register the agent dispatch callback so the review API (and other
     # components) can send prompts to the agent without needing a direct
     # reference to the bot Application.
+    from open_udang.db import ChatScope
     from open_udang.handlers.messages import _dispatch_to_agent
 
-    async def _dispatch(prompt: str, chat_id: int) -> None:
+    async def _dispatch(prompt: str, scope: ChatScope) -> None:
         # Build a minimal ContextTypes-compatible object.  _dispatch_to_agent
         # only uses context.bot, context.bot_data, and asyncio.create_task.
-        await _dispatch_to_agent(prompt, [], chat_id, config, db, app)
+        await _dispatch_to_agent(prompt, [], scope, config, db, app)
 
     register_dispatch(_dispatch)
 

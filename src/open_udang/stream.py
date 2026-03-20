@@ -72,6 +72,7 @@ class _DraftState:
     """Internal state for message drafting."""
 
     chat_id: int
+    thread_id: int | None = None
     # Raw GFM text accumulated so far (before conversion)
     raw_text: str = ""
     # Tool notifications collected for the current message
@@ -95,6 +96,13 @@ class _DraftState:
     tool_use_map: dict[str, tuple[str, dict[str, Any]]] = field(
         default_factory=dict
     )
+
+    @property
+    def _thread_kwargs(self) -> dict[str, Any]:
+        """Build message_thread_id kwargs for Telegram send methods."""
+        if self.thread_id is not None:
+            return {"message_thread_id": self.thread_id}
+        return {}
 
 
 def _format_tool_prefix(notifications: list[ToolNotification]) -> str:
@@ -140,6 +148,7 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
                 "draft_id": state.draft_id,
                 "text": text,
                 "parse_mode": "MarkdownV2",
+                **({"message_thread_id": state.thread_id} if state.thread_id is not None else {}),
             },
         )
         state.dirty = False
@@ -173,6 +182,7 @@ async def _finalize_message(bot: Bot, state: _DraftState) -> list[int]:
                 chat_id=state.chat_id,
                 text=chunk,
                 parse_mode="MarkdownV2",
+                **state._thread_kwargs,
             )
             message_ids.append(msg.message_id)
         except Exception:
@@ -182,6 +192,7 @@ async def _finalize_message(bot: Bot, state: _DraftState) -> list[int]:
                 msg = await bot.send_message(
                     chat_id=state.chat_id,
                     text=chunk,
+                    **state._thread_kwargs,
                 )
                 message_ids.append(msg.message_id)
             except Exception:
@@ -355,6 +366,7 @@ async def _send_bash_button(
                 chat_id=state.chat_id,
                 text=header_text + "\n_No output\\._",
                 parse_mode="MarkdownV2",
+                **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
         except Exception:
@@ -375,6 +387,7 @@ async def _send_bash_button(
             text=header_text,
             parse_mode="MarkdownV2",
             reply_markup=keyboard,
+            **state._thread_kwargs,
         )
         state.sent_message_ids.append(msg.message_id)
     except Exception:
@@ -443,6 +456,7 @@ async def _handle_assistant_error(
             chat_id=state.chat_id,
             text=text,
             parse_mode="MarkdownV2",
+            **state._thread_kwargs,
         )
     except Exception:
         logger.exception("Failed to send error message for %s", error)
@@ -450,6 +464,7 @@ async def _handle_assistant_error(
             await bot.send_message(
                 chat_id=state.chat_id,
                 text=msg_text,
+                **state._thread_kwargs,
             )
         except Exception:
             logger.exception("Failed to send plaintext error fallback")
@@ -629,6 +644,7 @@ async def stream_response(
                             chat_id=state.chat_id,
                             text=text,
                             parse_mode="MarkdownV2",
+                            **state._thread_kwargs,
                         )
                     except Exception:
                         logger.exception(
@@ -672,6 +688,7 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
             chat_id=state.chat_id,
             text=chunks[0],
             parse_mode="MarkdownV2",
+            **state._thread_kwargs,
         )
         state.sent_message_ids.append(msg.message_id)
     except Exception:
@@ -680,6 +697,7 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
             msg = await bot.send_message(
                 chat_id=state.chat_id,
                 text=chunks[0],
+                **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
         except Exception:

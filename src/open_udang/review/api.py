@@ -19,7 +19,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from open_udang.config import Config, ContextConfig
-from open_udang.db import get_active_context
+from open_udang.db import ChatScope, get_active_context
 from open_udang.review.auth import AuthError, validate_init_data
 from open_udang.review.git_diff import Hunk, get_hunks
 from open_udang.review.git_stage import stage_hunk, unstage_hunk, remove_intent_to_add
@@ -88,7 +88,8 @@ async def _resolve_context(
     config: Config = request.app.state.config
     db: aiosqlite.Connection = request.app.state.db
 
-    context_name = await get_active_context(db, chat_id)
+    # Review API operates on private chats only — thread_id is always None.
+    context_name = await get_active_context(db, ChatScope(chat_id))
     if context_name is None:
         context_name = config.default_context
 

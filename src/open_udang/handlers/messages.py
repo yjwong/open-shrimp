@@ -19,7 +19,7 @@ from open_udang.client_manager import (
     receive_events,
 )
 from open_udang.config import Config
-from open_udang.db import get_pinned_message_id, get_session_id, set_session_id
+from open_udang.db import ChatScope, get_pinned_message_id, get_session_id, set_session_id
 from open_udang.handlers.approval import _send_approval_keyboard, _send_auto_approved_diff
 from open_udang.handlers.questions import (
     _complete_other_input,
@@ -42,7 +42,9 @@ from open_udang.handlers.utils import (
     _is_authorized,
     _is_bot_addressed,
     _strip_mention,
+    _thread_kwargs,
     _update_pinned_status,
+    chat_scope_from_message,
 )
 from open_udang.stream import (
     _DraftState,
@@ -149,19 +151,20 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info("message_handler: unauthorized user %s", update.effective_user)
         return
 
+    scope = chat_scope_from_message(message)
+
     # Check if this is a text response to an "Other..." question prompt.
-    # If there's a pending "Other" input for this chat, resolve it inline
+    # If there's a pending "Other" input for this scope, resolve it inline
     # and don't dispatch to the agent.
-    chat_id_for_input = message.chat_id
-    if has_text and chat_id_for_input in _pending_other_input:
-        question_id = _pending_other_input.pop(chat_id_for_input, None)
+    if has_text and scope in _pending_other_input:
+        question_id = _pending_other_input.pop(scope, None)
         if question_id:
             state = _question_states.get(question_id)
             if state and not state.future.done():
                 custom_text = message.text or ""
                 state.waiting_for_other = False
                 await _complete_other_input(context.bot, state, custom_text)
-                logger.info("Resolved pending 'Other' input for chat %d", chat_id_for_input)
+                logger.info("Resolved pending 'Other' input for scope %s", scope)
                 return
 
     bot_username = (await context.bot.get_me()).username or ""
@@ -173,8 +176,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if message.media_group_id and (has_photo or has_document):
         await _handle_media_group_message(update, context, message)
         return
-
-    chat_id = message.chat_id
 
     # Extract text from either message.text or message.caption (for photos)
     raw_text = message.text or message.caption or ""
@@ -190,7 +191,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             location_text += f" (heading: {loc.heading}\u00b0)"
         # Prepend location to any existing prompt text
         prompt = f"{location_text}\n\n{prompt}" if prompt else location_text
-        logger.info("Location shared in chat %d: %s, %s", chat_id, loc.latitude, loc.longitude)
+        logger.info("Location shared in scope %s: %s, %s", scope, loc.latitude, loc.longitude)
 
     # For photos without a caption, use a default prompt
     if not prompt and has_photo:
@@ -205,11 +206,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if has_photo or has_document:
         attachments = await _download_all_attachments([message], context.bot)
         logger.info(
-            "Downloaded %d attachment(s) for chat %d (%d bytes)",
-            len(attachments), chat_id, sum(len(att.data) for att in attachments),
+            "Downloaded %d attachment(s) for scope %s (%d bytes)",
+            len(attachments), scope, sum(len(att.data) for att in attachments),
         )
 
-    await _dispatch_to_agent(prompt, attachments, chat_id, config, db, context)
+    await _dispatch_to_agent(prompt, attachments, scope, config, db, context)
 
 
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -238,12 +239,12 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     action = payload.get("action")
     if action == "commit":
-        chat_id = message.chat_id
+        scope = chat_scope_from_message(message)
         prompt = (
             "Please commit the currently staged changes. "
             "Generate an appropriate commit message based on the staged diff."
         )
-        await _dispatch_to_agent(prompt, [], chat_id, config, db, context)
+        await _dispatch_to_agent(prompt, [], scope, config, db, context)
     else:
         logger.warning("Unknown web_app_data action: %s", action)
 
@@ -287,7 +288,7 @@ async def _handle_media_group_message(
 
         config: Config = context.bot_data["config"]
         db: aiosqlite.Connection = context.bot_data["db"]
-        chat_id = messages[0].chat_id
+        scope = chat_scope_from_message(messages[0])
         bot_username = (await context.bot.get_me()).username or ""
 
         # Extract caption from the first message that has one.
@@ -312,11 +313,11 @@ async def _handle_media_group_message(
 
         attachments = await _download_all_attachments(messages, context.bot)
         logger.info(
-            "Media group %s complete: %d attachment(s) for chat %d (%d bytes)",
-            group_id, len(attachments), chat_id, sum(len(att.data) for att in attachments),
+            "Media group %s complete: %d attachment(s) for scope %s (%d bytes)",
+            group_id, len(attachments), scope, sum(len(att.data) for att in attachments),
         )
 
-        await _dispatch_to_agent(prompt, attachments, chat_id, config, db, context)
+        await _dispatch_to_agent(prompt, attachments, scope, config, db, context)
 
     _media_group_tasks[group_id] = asyncio.create_task(_process_group())
 
@@ -329,7 +330,7 @@ async def _handle_media_group_message(
 async def _dispatch_to_agent(
     prompt: str,
     attachments: list[FileAttachment],
-    chat_id: int,
+    scope: ChatScope,
     config: Config,
     db: aiosqlite.Connection,
     context: ContextTypes.DEFAULT_TYPE,
@@ -344,38 +345,39 @@ async def _dispatch_to_agent(
     ready.
     """
     # No task running -- start a new one.
-    if chat_id not in _running_tasks or _running_tasks[chat_id].done():
-        await _start_agent_task(prompt, attachments, chat_id, config, db, context)
+    if scope not in _running_tasks or _running_tasks[scope].done():
+        await _start_agent_task(prompt, attachments, scope, config, db, context)
         return
 
     # Task is running -- try to inject into the live session.
-    session = _injectable_sessions.get(chat_id)
+    session = _injectable_sessions.get(scope)
     if session is not None:
-        await _inject_message(session, prompt, attachments, chat_id, context.bot)
+        await _inject_message(session, prompt, attachments, scope, context.bot)
     else:
         # Session is still being set up -- queue for injection once ready.
-        if chat_id not in _setup_queues:
-            _setup_queues[chat_id] = []
-        _setup_queues[chat_id].append((prompt, attachments))
+        if scope not in _setup_queues:
+            _setup_queues[scope] = []
+        _setup_queues[scope].append((prompt, attachments))
         logger.info(
-            "Session not ready for chat %d, queued for injection (depth: %d)",
-            chat_id, len(_setup_queues[chat_id]),
+            "Session not ready for scope %s, queued for injection (depth: %d)",
+            scope, len(_setup_queues[scope]),
         )
         try:
             await context.bot.send_message(
-                chat_id=chat_id,
+                chat_id=scope.chat_id,
                 text="\u23f3 Setting up session\\.\\.\\. message will be injected shortly\\.",
                 parse_mode="MarkdownV2",
+                **_thread_kwargs(scope),
             )
         except Exception:
-            logger.debug("Failed to send setup-queue notification for chat %d", chat_id)
+            logger.debug("Failed to send setup-queue notification for scope %s", scope)
 
 
 async def _inject_message(
     session: Any,
     prompt: str,
     attachments: list[FileAttachment],
-    chat_id: int,
+    scope: ChatScope,
     bot: Bot,
 ) -> None:
     """Inject a user message into a live agent session.
@@ -385,27 +387,28 @@ async def _inject_message(
     iterator will pick up the resulting events naturally.
     """
     actual_prompt, attachment_paths = prepare_prompt(
-        prompt, attachments if attachments else None, chat_id=chat_id,
+        prompt, attachments if attachments else None, chat_id=scope.chat_id,
     )
 
     # Track attachment paths for cleanup in _run()'s finally block.
     if attachment_paths:
-        _injected_attachment_paths.setdefault(chat_id, []).extend(attachment_paths)
+        _injected_attachment_paths.setdefault(scope, []).extend(attachment_paths)
 
     try:
         await session.client.query(actual_prompt)
         logger.info(
-            "Injected message into live session for chat %d: %s",
-            chat_id, actual_prompt[:100],
+            "Injected message into live session for scope %s: %s",
+            scope, actual_prompt[:100],
         )
     except Exception:
-        logger.exception("Failed to inject message for chat %d", chat_id)
+        logger.exception("Failed to inject message for scope %s", scope)
         cleanup_attachments(attachment_paths)
         try:
             await bot.send_message(
-                chat_id=chat_id,
+                chat_id=scope.chat_id,
                 text="Failed to inject message into the running session\\.",
                 parse_mode="MarkdownV2",
+                **_thread_kwargs(scope),
             )
         except Exception:
             pass
@@ -419,25 +422,25 @@ async def _inject_message(
 async def _start_agent_task(
     prompt: str,
     attachments: list[FileAttachment],
-    chat_id: int,
+    scope: ChatScope,
     config: Config,
     db: aiosqlite.Connection,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Start a new agent task for *chat_id*.  Must only be called when no
-    task is currently running for this chat."""
+    """Start a new agent task for *scope*.  Must only be called when no
+    task is currently running for this scope."""
 
-    ctx_name, ctx_config = await _get_context(chat_id, config, db)
-    session_id = await get_session_id(db, chat_id, ctx_name)
+    ctx_name, ctx_config = await _get_context(scope, config, db)
+    session_id = await get_session_id(db, scope, ctx_name)
 
     # Ensure pinned status message exists (e.g. after a restart)
-    if not await get_pinned_message_id(db, chat_id):
-        await _update_pinned_status(context.bot, chat_id, ctx_name, ctx_config, db)
+    if not await get_pinned_message_id(db, scope):
+        await _update_pinned_status(context.bot, scope, ctx_name, ctx_config, db)
 
     async def _run() -> None:
-        draft_state = _DraftState(chat_id=chat_id)
+        draft_state = _DraftState(chat_id=scope.chat_id, thread_id=scope.thread_id)
         actual_prompt, attachment_paths = prepare_prompt(
-            prompt, attachments if attachments else None, chat_id=chat_id,
+            prompt, attachments if attachments else None, chat_id=scope.chat_id,
         )
         # Collect all attachment paths (original + injected) for cleanup.
         all_attachment_paths: list[Path] = list(attachment_paths)
@@ -448,15 +451,16 @@ async def _start_agent_task(
             ) -> bool:
                 await finalize_and_reset(context.bot, draft_state)
                 return await _send_approval_keyboard(
-                    context.bot, chat_id, tool_name, tool_input, tool_use_id,
+                    context.bot, scope.chat_id, tool_name, tool_input, tool_use_id,
                     cwd=ctx_config.directory,
+                    thread_id=scope.thread_id,
                 )
 
             async def handle_questions(
                 questions: list[dict[str, Any]],
             ) -> dict[str, str]:
                 return await _handle_ask_user_questions(
-                    context.bot, chat_id, questions, draft_state
+                    context.bot, scope, questions, draft_state
                 )
 
             async def notify_edit(
@@ -464,8 +468,9 @@ async def _start_agent_task(
             ) -> None:
                 await finalize_and_reset(context.bot, draft_state)
                 await _send_auto_approved_diff(
-                    context.bot, chat_id, tool_name, tool_input,
+                    context.bot, scope.chat_id, tool_name, tool_input,
                     cwd=ctx_config.directory,
+                    thread_id=scope.thread_id,
                 )
 
             # Mutable container for the latest todo list from TodoWrite.
@@ -477,19 +482,19 @@ async def _start_agent_task(
                 latest_todos.clear()
                 latest_todos.extend(todos)
                 await _update_pinned_status(
-                    context.bot, chat_id, ctx_name, ctx_config, db,
+                    context.bot, scope, ctx_name, ctx_config, db,
                     todos=todos if todos else None,
                 )
 
             cb_ctx = CallbackContext(
                 request_approval=request_approval,
                 handle_user_questions=handle_questions,
-                is_edit_auto_approved=lambda: (chat_id, ctx_name) in _edit_approved_sessions,
+                is_edit_auto_approved=lambda: (scope, ctx_name) in _edit_approved_sessions,
                 notify_auto_approved_edit=notify_edit,
             )
 
             session = await get_or_create_session(
-                chat_id=chat_id,
+                scope=scope,
                 context_name=ctx_name,
                 context=ctx_config,
                 session_id=session_id,
@@ -502,33 +507,33 @@ async def _start_agent_task(
 
             # Mark session as injectable so concurrent messages are
             # injected via client.query() instead of queued.
-            _injectable_sessions[chat_id] = session
+            _injectable_sessions[scope] = session
 
             # Drain any messages that arrived during the setup phase.
-            setup_queue = _setup_queues.pop(chat_id, [])
+            setup_queue = _setup_queues.pop(scope, [])
             for queued_prompt, queued_attachments in setup_queue:
                 queued_actual, queued_paths = prepare_prompt(
                     queued_prompt, queued_attachments if queued_attachments else None,
-                    chat_id=chat_id,
+                    chat_id=scope.chat_id,
                 )
                 all_attachment_paths.extend(queued_paths)
                 try:
                     await session.client.query(queued_actual)
                     logger.info(
-                        "Injected setup-queued message for chat %d: %s",
-                        chat_id, queued_actual[:100],
+                        "Injected setup-queued message for scope %s: %s",
+                        scope, queued_actual[:100],
                     )
                 except Exception:
                     logger.exception(
-                        "Failed to inject setup-queued message for chat %d",
-                        chat_id,
+                        "Failed to inject setup-queued message for scope %s",
+                        scope,
                     )
 
             while True:
                 events = receive_events(session)
                 result = await stream_response(
                     bot=context.bot,
-                    chat_id=chat_id,
+                    chat_id=scope.chat_id,
                     events=events,
                     draft_state=draft_state,
                     allowed_tools=ctx_config.allowed_tools,
@@ -537,11 +542,11 @@ async def _start_agent_task(
                 )
 
                 if result.session_id:
-                    await set_session_id(db, chat_id, ctx_name, result.session_id)
+                    await set_session_id(db, scope, ctx_name, result.session_id)
 
                 if result.usage:
                     await _update_pinned_status(
-                        context.bot, chat_id, ctx_name, ctx_config, db,
+                        context.bot, scope, ctx_name, ctx_config, db,
                         usage=result.usage,
                         total_cost_usd=result.total_cost_usd,
                         todos=latest_todos if latest_todos else None,
@@ -551,33 +556,34 @@ async def _start_agent_task(
                     break
 
         except asyncio.CancelledError:
-            logger.info("Agent task cancelled for chat %d", chat_id)
+            logger.info("Agent task cancelled for scope %s", scope)
         except Exception:
-            logger.exception("Agent task failed for chat %d", chat_id)
+            logger.exception("Agent task failed for scope %s", scope)
             try:
                 await context.bot.send_message(
-                    chat_id=chat_id,
+                    chat_id=scope.chat_id,
                     text="An error occurred while processing your request\\.",
                     parse_mode="MarkdownV2",
+                    **_thread_kwargs(scope),
                 )
             except Exception:
                 logger.exception("Failed to send error message")
         finally:
             # Collect injected attachment paths and clean up everything.
             all_attachment_paths.extend(
-                _injected_attachment_paths.pop(chat_id, [])
+                _injected_attachment_paths.pop(scope, [])
             )
             cleanup_attachments(all_attachment_paths)
-            _injectable_sessions.pop(chat_id, None)
-            _setup_queues.pop(chat_id, None)
+            _injectable_sessions.pop(scope, None)
+            _setup_queues.pop(scope, None)
             if draft_state.session_id:
                 try:
-                    await set_session_id(db, chat_id, ctx_name, draft_state.session_id)
+                    await set_session_id(db, scope, ctx_name, draft_state.session_id)
                 except Exception:
                     logger.debug(
-                        "Failed to save session on cleanup for chat %d", chat_id
+                        "Failed to save session on cleanup for scope %s", scope
                     )
-            _running_tasks.pop(chat_id, None)
+            _running_tasks.pop(scope, None)
 
     task = asyncio.create_task(_run())
-    _running_tasks[chat_id] = task
+    _running_tasks[scope] = task

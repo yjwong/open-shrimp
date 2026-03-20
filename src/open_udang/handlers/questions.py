@@ -10,6 +10,7 @@ from typing import Any
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from open_udang.config import Config
+from open_udang.db import ChatScope
 from open_udang.handlers.state import (
     _QuestionState,
     _pending_other_input,
@@ -74,7 +75,7 @@ def _format_question_text(question: dict[str, Any]) -> str:
 
 async def _send_question_keyboard(
     bot: Bot,
-    chat_id: int,
+    scope: ChatScope,
     question: dict[str, Any],
 ) -> str:
     """Present a question via inline keyboard and wait for the user's answer.
@@ -90,7 +91,7 @@ async def _send_question_keyboard(
 
     state = _QuestionState(
         question_id=question_id,
-        chat_id=chat_id,
+        scope=scope,
         options=options,
         multi_select=multi_select,
         future=future,
@@ -100,11 +101,16 @@ async def _send_question_keyboard(
     keyboard = _build_question_keyboard(state)
     text = _format_question_text(question)
 
+    thread_kwargs: dict[str, Any] = {}
+    if scope.thread_id is not None:
+        thread_kwargs["message_thread_id"] = scope.thread_id
+
     msg = await bot.send_message(
-        chat_id=chat_id,
+        chat_id=scope.chat_id,
         text=text,
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
+        **thread_kwargs,
     )
     state.message_id = msg.message_id
     state.original_text_md = text
@@ -117,7 +123,7 @@ async def _send_question_keyboard(
 
 async def _handle_ask_user_questions(
     bot: Bot,
-    chat_id: int,
+    scope: ChatScope,
     questions: list[dict[str, Any]],
     draft_state: _DraftState,
 ) -> dict[str, str]:
@@ -131,7 +137,7 @@ async def _handle_ask_user_questions(
     answers: dict[str, str] = {}
     for q in questions:
         question_text = q.get("question", "")
-        answer = await _send_question_keyboard(bot, chat_id, q)
+        answer = await _send_question_keyboard(bot, scope, q)
         answers[question_text] = answer
 
     return answers
@@ -288,7 +294,7 @@ async def _handle_question_callback(
 
         state.waiting_for_other = True
         state.other_query = query
-        _pending_other_input[state.chat_id] = question_id
+        _pending_other_input[state.scope] = question_id
 
         # Hide the keyboard and prompt the user to type their answer.
         if query.message:

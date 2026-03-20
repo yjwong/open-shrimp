@@ -18,33 +18,34 @@ from typing import Any
 # AgentSession is referenced by type only; the actual import happens at
 # usage sites in the handler modules.
 from open_udang.client_manager import AgentSession
+from open_udang.db import ChatScope
 
 # ---------------------------------------------------------------------------
-# Per-chat running asyncio task (for cancellation)
+# Per-scope running asyncio task (for cancellation)
 # ---------------------------------------------------------------------------
-_running_tasks: dict[int, asyncio.Task[Any]] = {}
+_running_tasks: dict[ChatScope, asyncio.Task[Any]] = {}
 
 # ---------------------------------------------------------------------------
-# Per-chat live session reference for message injection.
+# Per-scope live session reference for message injection.
 # Set once get_or_create_session + initial query() completes inside _run(),
 # cleared in the finally block.
 # ---------------------------------------------------------------------------
-_injectable_sessions: dict[int, AgentSession] = {}
+_injectable_sessions: dict[ChatScope, AgentSession] = {}
 
 # ---------------------------------------------------------------------------
-# Per-chat queue for messages that arrive during the brief setup phase
+# Per-scope queue for messages that arrive during the brief setup phase
 # (before the session is ready for injection).  Drained immediately once
 # the session becomes injectable.
 # ---------------------------------------------------------------------------
 from open_udang.agent import FileAttachment
 
-_setup_queues: dict[int, list[tuple[str, list[FileAttachment]]]] = {}
+_setup_queues: dict[ChatScope, list[tuple[str, list[FileAttachment]]]] = {}
 
 # ---------------------------------------------------------------------------
 # Attachment temp-file paths created by injected messages.  Cleaned up in
 # _run()'s finally block after the agent has finished processing.
 # ---------------------------------------------------------------------------
-_injected_attachment_paths: dict[int, list[Path]] = {}
+_injected_attachment_paths: dict[ChatScope, list[Path]] = {}
 
 # ---------------------------------------------------------------------------
 # Pending tool approval futures: callback_data -> asyncio.Future[bool]
@@ -66,15 +67,15 @@ _approval_tool_names: dict[str, str] = {}
 # ---------------------------------------------------------------------------
 # Sessions where the user has opted into "accept all edits" for mutating
 # file-access tools (Edit, Write) within the context working directory.
-# Keyed by (chat_id, context_name).  Cleared on /clear or context switch.
+# Keyed by (scope, context_name).  Cleared on /clear or context switch.
 # ---------------------------------------------------------------------------
-_edit_approved_sessions: set[tuple[int, str]] = set()
+_edit_approved_sessions: set[tuple[ChatScope, str]] = set()
 
 # ---------------------------------------------------------------------------
-# Per-chat model override: chat_id -> model name.  Set via /model command.
+# Per-scope model override: scope -> model name.  Set via /model command.
 # Cleared on /clear or context switch.  Takes precedence over context config.
 # ---------------------------------------------------------------------------
-_model_overrides: dict[int, str] = {}
+_model_overrides: dict[ChatScope, str] = {}
 
 # ---------------------------------------------------------------------------
 # Media group batching: media_group_id -> list of messages received so far.
@@ -95,7 +96,7 @@ class _QuestionState:
     """State for an active AskUserQuestion inline keyboard."""
 
     question_id: str
-    chat_id: int
+    scope: ChatScope
     options: list[dict[str, Any]]
     multi_select: bool
     future: asyncio.Future[str]
@@ -113,10 +114,10 @@ class _QuestionState:
 # Pending question states: question_id -> _QuestionState
 _question_states: dict[str, _QuestionState] = {}
 
-# Pending "Other" text input: chat_id -> question_id.
-# When message_handler sees a text message for a chat with a pending "Other"
+# Pending "Other" text input: scope -> question_id.
+# When message_handler sees a text message for a scope with a pending "Other"
 # input, it resolves the question instead of dispatching to the agent.
-_pending_other_input: dict[int, str] = {}
+_pending_other_input: dict[ChatScope, str] = {}
 
 # ---------------------------------------------------------------------------
 # Resume command state

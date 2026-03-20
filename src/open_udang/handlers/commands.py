@@ -18,7 +18,7 @@ from open_udang.client_manager import (
     get_session,
 )
 from open_udang.config import Config
-from open_udang.db import delete_session, get_session_id, set_session_id
+from open_udang.db import ChatScope, delete_session, get_session_id, set_session_id
 from open_udang.handlers.state import (
     _MCP_STATUS_EMOJI,
     _RESUME_LIST_LIMIT,
@@ -37,6 +37,7 @@ from open_udang.handlers.utils import (
     _get_locked_context,
     _is_authorized,
     _update_pinned_status,
+    chat_scope_from_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,13 +54,13 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    chat_id = message.chat_id
+    scope = chat_scope_from_message(message)
     args = message.text.split() if message.text else []
 
     if len(args) < 2:
         # List contexts
-        current = await _get_context_name(chat_id, config, db)
-        locked = _get_locked_context(chat_id, config)
+        current = await _get_context_name(scope, config, db)
+        locked = _get_locked_context(scope.chat_id, config)
         if locked:
             ctx = config.contexts[locked]
             escaped_name = _escape_mdv2(locked)
@@ -88,7 +89,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    locked = _get_locked_context(chat_id, config)
+    locked = _get_locked_context(scope.chat_id, config)
     if locked:
         await message.reply_text(
             f"This chat is locked to context `{locked}`\\.",
@@ -96,14 +97,14 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    old_ctx_name = await _get_context_name(chat_id, config, db)
-    _edit_approved_sessions.discard((chat_id, old_ctx_name))
-    _model_overrides.pop(chat_id, None)
-    await close_session(chat_id)
+    old_ctx_name = await _get_context_name(scope, config, db)
+    _edit_approved_sessions.discard((scope, old_ctx_name))
+    _model_overrides.pop(scope, None)
+    await close_session(scope)
 
     from open_udang.db import set_active_context
 
-    await set_active_context(db, chat_id, target)
+    await set_active_context(db, scope, target)
     ctx = config.contexts[target]
     desc = _escape_mdv2(ctx.description)
     target_escaped = _escape_mdv2(target)
@@ -111,7 +112,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Switched to context `{target_escaped}` \\- {desc}",
         parse_mode="MarkdownV2",
     )
-    await _update_pinned_status(context.bot, chat_id, target, ctx, db)
+    await _update_pinned_status(context.bot, scope, target, ctx, db)
 
 
 # ── /clear ──
@@ -125,18 +126,18 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    chat_id = message.chat_id
-    ctx_name, ctx = await _get_context(chat_id, config, db)
+    scope = chat_scope_from_message(message)
+    ctx_name, ctx = await _get_context(scope, config, db)
 
-    await _cancel_running(chat_id)
-    _injectable_sessions.pop(chat_id, None)
-    _setup_queues.pop(chat_id, None)
-    await close_session(chat_id)
-    await delete_session(db, chat_id, ctx_name)
-    _edit_approved_sessions.discard((chat_id, ctx_name))
-    _model_overrides.pop(chat_id, None)
+    await _cancel_running(scope)
+    _injectable_sessions.pop(scope, None)
+    _setup_queues.pop(scope, None)
+    await close_session(scope)
+    await delete_session(db, scope, ctx_name)
+    _edit_approved_sessions.discard((scope, ctx_name))
+    _model_overrides.pop(scope, None)
     await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
-    await _update_pinned_status(context.bot, chat_id, ctx_name, ctx, db)
+    await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
 
 
 # ── /status ──
@@ -150,17 +151,17 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    chat_id = message.chat_id
-    ctx_name, ctx = await _get_context(chat_id, config, db)
-    session_id = await get_session_id(db, chat_id, ctx_name)
-    running = chat_id in _running_tasks and not _running_tasks[chat_id].done()
-    injectable = chat_id in _injectable_sessions
-    setup_queued = len(_setup_queues.get(chat_id, []))
+    scope = chat_scope_from_message(message)
+    ctx_name, ctx = await _get_context(scope, config, db)
+    session_id = await get_session_id(db, scope, ctx_name)
+    running = scope in _running_tasks and not _running_tasks[scope].done()
+    injectable = scope in _injectable_sessions
+    setup_queued = len(_setup_queues.get(scope, []))
 
     lines = [
         f"*Context:* `{ctx_name}`",
         f"*Directory:* `{ctx.directory}`",
-        f"*Model:* `{ctx.model}`" + (" \\(override\\)" if chat_id in _model_overrides else ""),
+        f"*Model:* `{ctx.model}`" + (" \\(override\\)" if scope in _model_overrides else ""),
         f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
         f"*Running:* {'Yes' if running else 'No'}",
         f"*Injectable:* {'Yes' if injectable else 'No'}",
@@ -183,13 +184,13 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    chat_id = message.chat_id
-    had_running = chat_id in _running_tasks and not _running_tasks[chat_id].done()
-    setup_queued = len(_setup_queues.pop(chat_id, []))
+    scope = chat_scope_from_message(message)
+    had_running = scope in _running_tasks and not _running_tasks[scope].done()
+    setup_queued = len(_setup_queues.pop(scope, []))
 
     if had_running:
-        _injectable_sessions.pop(chat_id, None)
-        await _cancel_running(chat_id)
+        _injectable_sessions.pop(scope, None)
+        await _cancel_running(scope)
 
     if had_running:
         parts = ["Cancelled running task"]
@@ -218,10 +219,10 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    chat_id = message.chat_id
-    ctx_name = await _get_context_name(chat_id, config, db)
+    scope = chat_scope_from_message(message)
+    ctx_name = await _get_context_name(scope, config, db)
     ctx_default_model = config.contexts[ctx_name].model
-    current_override = _model_overrides.get(chat_id)
+    current_override = _model_overrides.get(scope)
     args = message.text.split() if message.text else []
 
     if len(args) < 2:
@@ -243,8 +244,8 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if target == "reset":
         if current_override:
-            del _model_overrides[chat_id]
-            await close_session(chat_id)
+            del _model_overrides[scope]
+            await close_session(scope)
             model_escaped = _escape_mdv2(ctx_default_model)
             await message.reply_text(
                 f"Model override cleared\\. Using context default: `{model_escaped}`",
@@ -258,8 +259,8 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     # Set override
-    _model_overrides[chat_id] = target
-    await close_session(chat_id)
+    _model_overrides[scope] = target
+    await close_session(scope)
     model_escaped = _escape_mdv2(target)
     await message.reply_text(
         f"Model overridden to `{model_escaped}`\\. "
@@ -286,8 +287,8 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    chat_id = message.chat_id
-    ctx_name, ctx = await _get_context(chat_id, config, db)
+    scope = chat_scope_from_message(message)
+    ctx_name, ctx = await _get_context(scope, config, db)
 
     args = message.text.split() if message.text else []
 
@@ -308,14 +309,14 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-        await close_session(chat_id)
-        await set_session_id(db, chat_id, ctx_name, match.session_id)
+        await close_session(scope)
+        await set_session_id(db, scope, ctx_name, match.session_id)
         summary = _escape_mdv2(match.summary or "No summary")
         await message.reply_text(
             f"Resumed session `{_escape_mdv2(match.session_id[:12])}...`\n_{summary}_",
             parse_mode="MarkdownV2",
         )
-        await _update_pinned_status(context.bot, chat_id, ctx_name, ctx, db)
+        await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
         return
 
     # List recent sessions for the current context
@@ -330,7 +331,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    current_session_id = await get_session_id(db, chat_id, ctx_name)
+    current_session_id = await get_session_id(db, scope, ctx_name)
 
     buttons: list[list[InlineKeyboardButton]] = []
     for s in sessions:
@@ -370,33 +371,33 @@ async def handle_resume_callback(
         await query.answer("This selection has expired.")
         return True
 
-    chat_id = query.message.chat_id if query.message else None
-    if chat_id is None:
+    if not query.message:
         await query.answer("Cannot determine chat.")
         return True
 
-    ctx_name, ctx = await _get_context(chat_id, config, db)
-    await close_session(chat_id)
-    await set_session_id(db, chat_id, ctx_name, session_id)
+    scope = chat_scope_from_message(query.message)
+
+    ctx_name, ctx = await _get_context(scope, config, db)
+    await close_session(scope)
+    await set_session_id(db, scope, ctx_name, session_id)
     await query.answer(f"Resumed session {session_id[:8]}...")
 
-    if query.message:
+    try:
+        summary_text = f"\u2705 Resumed session `{_escape_mdv2(session_id[:12])}\\.\\.\\.`"
+        await query.message.edit_text(
+            text=summary_text,
+            parse_mode="MarkdownV2",
+            reply_markup=None,
+        )
+    except Exception:
+        logger.exception("Failed to update resume message")
         try:
-            summary_text = f"\u2705 Resumed session `{_escape_mdv2(session_id[:12])}\\.\\.\\.`"
-            await query.message.edit_text(
-                text=summary_text,
-                parse_mode="MarkdownV2",
-                reply_markup=None,
-            )
+            await query.message.edit_reply_markup(reply_markup=None)
         except Exception:
-            logger.exception("Failed to update resume message")
-            try:
-                await query.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                logger.exception("Failed to remove resume keyboard")
+            logger.exception("Failed to remove resume keyboard")
 
     await _update_pinned_status(
-        context.bot, chat_id, ctx_name, ctx, db
+        context.bot, scope, ctx_name, ctx, db
     )
     # Clean up remaining selections from this listing
     expired = [k for k in _resume_selections if k.startswith("resume:")]
@@ -415,12 +416,12 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     config: Config = context.bot_data["config"]
     db: aiosqlite.Connection = context.bot_data["db"]
-    chat_id = update.effective_chat.id
+    scope = chat_scope_from_message(update.message)
 
     if not _is_authorized(update.effective_user.id, config):
         return
 
-    context_name, ctx = await _get_context(chat_id, config, db)
+    context_name, ctx = await _get_context(scope, config, db)
 
     # Build the Mini App URL.
     # Use the configured public URL if available, otherwise build from
@@ -447,7 +448,7 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     dirs = [ctx.directory] + (ctx.additional_directories or [])
 
     if len(dirs) == 1:
-        app_url = f"{base_url}/app/?chat_id={chat_id}"
+        app_url = f"{base_url}/app/?chat_id={scope.chat_id}"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 text="\U0001f4dd Open Review",
@@ -463,7 +464,7 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Multiple directories: one button per directory.
         rows = []
         for i, d in enumerate(dirs):
-            app_url = f"{base_url}/app/?chat_id={chat_id}&dir={i}"
+            app_url = f"{base_url}/app/?chat_id={scope.chat_id}&dir={i}"
             basename = d.rstrip("/").rsplit("/", 1)[-1]
             rows.append([InlineKeyboardButton(
                 text=f"\U0001f4c1 {basename}",
@@ -497,9 +498,9 @@ async def mcp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    chat_id = message.chat_id
+    scope = chat_scope_from_message(message)
 
-    session = get_session(chat_id)
+    session = get_session(scope)
     if session is None:
         await message.reply_text(
             "No active session\\. Send a message first to start a session, "

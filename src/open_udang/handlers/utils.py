@@ -6,11 +6,12 @@ import logging
 from typing import Any
 
 import aiosqlite
-from telegram import Bot, Update
+from telegram import Bot, Message, Update
 from telegram.error import BadRequest
 
 from open_udang.config import Config, ContextConfig
 from open_udang.db import (
+    ChatScope,
     get_active_context,
     get_pinned_message_id,
     set_active_context,
@@ -22,6 +23,12 @@ from open_udang.handlers.state import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def chat_scope_from_message(message: Message) -> ChatScope:
+    """Extract a ChatScope from a Telegram Message object."""
+    thread_id = getattr(message, "message_thread_id", None)
+    return ChatScope(chat_id=message.chat_id, thread_id=thread_id)
 
 
 def _escape_mdv2(text: str) -> str:
@@ -39,39 +46,39 @@ def _get_locked_context(chat_id: int, config: Config) -> str | None:
     return None
 
 
-async def _get_context_name(chat_id: int, config: Config, db: aiosqlite.Connection) -> str:
-    """Get the active context name for a chat (persisted in DB)."""
+async def _get_context_name(scope: ChatScope, config: Config, db: aiosqlite.Connection) -> str:
+    """Get the active context name for a scope (persisted in DB)."""
     # If locked, always use that context regardless of what's saved
-    locked = _get_locked_context(chat_id, config)
+    locked = _get_locked_context(scope.chat_id, config)
     if locked:
-        await set_active_context(db, chat_id, locked)
+        await set_active_context(db, scope, locked)
         return locked
 
-    saved = await get_active_context(db, chat_id)
+    saved = await get_active_context(db, scope)
     if saved and saved in config.contexts:
         return saved
 
     # Check if this chat has a default context configured
     for name, ctx in config.contexts.items():
-        if chat_id in ctx.default_for_chats:
-            await set_active_context(db, chat_id, name)
+        if scope.chat_id in ctx.default_for_chats:
+            await set_active_context(db, scope, name)
             return name
 
-    await set_active_context(db, chat_id, config.default_context)
+    await set_active_context(db, scope, config.default_context)
     return config.default_context
 
 
 async def _get_context(
-    chat_id: int, config: Config, db: aiosqlite.Connection
+    scope: ChatScope, config: Config, db: aiosqlite.Connection
 ) -> tuple[str, ContextConfig]:
-    """Get context name and config for a chat.
+    """Get context name and config for a scope.
 
-    If a per-chat model override is active (via ``/model``), returns a
+    If a per-scope model override is active (via ``/model``), returns a
     shallow copy of the context config with the overridden model.
     """
-    name = await _get_context_name(chat_id, config, db)
+    name = await _get_context_name(scope, config, db)
     ctx = config.contexts[name]
-    override = _model_overrides.get(chat_id)
+    override = _model_overrides.get(scope)
     if override:
         from dataclasses import replace
         ctx = replace(ctx, model=override)
@@ -87,6 +94,7 @@ def _is_bot_addressed(update: Update, bot_username: str) -> bool:
     """Check if the bot is @mentioned or replied to in a group chat.
 
     In private chats, always returns True.
+    In forum topics, always returns True (treat as private-chat-like).
     """
     message = update.effective_message
     if message is None:
@@ -94,6 +102,10 @@ def _is_bot_addressed(update: Update, bot_username: str) -> bool:
 
     chat = update.effective_chat
     if chat is None or chat.type == "private":
+        return True
+
+    # In forum topics, respond to all messages (like private chat behavior).
+    if getattr(chat, "is_forum", False) and getattr(message, "message_thread_id", None):
         return True
 
     # Check if replying to the bot
@@ -123,8 +135,8 @@ def _strip_mention(text: str, bot_username: str) -> str:
     return text.strip()
 
 
-async def _cancel_running(chat_id: int) -> None:
-    """Cancel any running agent task for a chat.
+async def _cancel_running(scope: ChatScope) -> None:
+    """Cancel any running agent task for a scope.
 
     Sends an interrupt to the persistent CLI client (if any) so it stops
     processing, then cancels the asyncio task.  The persistent client
@@ -135,24 +147,24 @@ async def _cancel_running(chat_id: int) -> None:
     from open_udang.client_manager import get_session
     from open_udang.handlers.state import _running_tasks
 
-    session = get_session(chat_id)
+    session = get_session(scope)
     if session is not None:
         try:
             await session.client.interrupt()
-            logger.info("Sent interrupt to CLI for chat %d", chat_id)
+            logger.info("Sent interrupt to CLI for scope %s", scope)
         except Exception:
             logger.debug(
-                "Failed to send interrupt for chat %d", chat_id, exc_info=True
+                "Failed to send interrupt for scope %s", scope, exc_info=True
             )
 
-    task = _running_tasks.pop(chat_id, None)
+    task = _running_tasks.pop(scope, None)
     if task and not task.done():
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
-        logger.info("Cancelled running task for chat %d", chat_id)
+        logger.info("Cancelled running task for scope %s", scope)
 
 
 def _format_token_count(count: int) -> str:
@@ -231,9 +243,16 @@ def _build_status_text(
     return "\n".join(lines)
 
 
+def _thread_kwargs(scope: ChatScope) -> dict[str, Any]:
+    """Build message_thread_id kwargs for Telegram send methods."""
+    if scope.thread_id is not None:
+        return {"message_thread_id": scope.thread_id}
+    return {}
+
+
 async def _update_pinned_status(
     bot: Bot,
-    chat_id: int,
+    scope: ChatScope,
     ctx_name: str,
     ctx: ContextConfig,
     db: aiosqlite.Connection,
@@ -241,17 +260,17 @@ async def _update_pinned_status(
     total_cost_usd: float | None = None,
     todos: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Send or update the pinned status message for a chat."""
+    """Send or update the pinned status message for a scope."""
     text = _build_status_text(
         ctx_name, ctx, usage=usage, total_cost_usd=total_cost_usd, todos=todos,
     )
-    existing_msg_id = await get_pinned_message_id(db, chat_id)
+    existing_msg_id = await get_pinned_message_id(db, scope)
 
     # Try to edit the existing pinned message
     if existing_msg_id:
         try:
             await bot.edit_message_text(
-                chat_id=chat_id,
+                chat_id=scope.chat_id,
                 message_id=existing_msg_id,
                 text=text,
                 parse_mode="MarkdownV2",
@@ -261,29 +280,30 @@ async def _update_pinned_status(
             if "message is not modified" in str(exc).lower():
                 return
             logger.debug(
-                "Could not edit pinned message %d in chat %d, will send new one",
+                "Could not edit pinned message %d in scope %s, will send new one",
                 existing_msg_id,
-                chat_id,
+                scope,
             )
         except Exception:
             logger.debug(
-                "Could not edit pinned message %d in chat %d, will send new one",
+                "Could not edit pinned message %d in scope %s, will send new one",
                 existing_msg_id,
-                chat_id,
+                scope,
             )
 
     # Send a new message and pin it
     try:
         msg = await bot.send_message(
-            chat_id=chat_id,
+            chat_id=scope.chat_id,
             text=text,
             parse_mode="MarkdownV2",
+            **_thread_kwargs(scope),
         )
-        await set_pinned_message_id(db, chat_id, msg.message_id)
+        await set_pinned_message_id(db, scope, msg.message_id)
         await bot.pin_chat_message(
-            chat_id=chat_id,
+            chat_id=scope.chat_id,
             message_id=msg.message_id,
             disable_notification=True,
         )
     except Exception:
-        logger.exception("Failed to send/pin status message in chat %d", chat_id)
+        logger.exception("Failed to send/pin status message in scope %s", scope)

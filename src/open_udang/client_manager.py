@@ -1,6 +1,6 @@
 """Persistent Claude Agent SDK client manager for OpenUdang.
 
-Manages long-lived ClaudeSDKClient instances keyed by chat_id, so the CLI
+Manages long-lived ClaudeSDKClient instances keyed by ChatScope, so the CLI
 subprocess stays alive across multiple messages in the same conversation.
 This avoids the "Continue from where you left off." injection that the CLI
 performs when it detects an interrupted turn on session resume.
@@ -29,6 +29,7 @@ from telegram import Bot
 
 from open_udang.agent import AgentEvent
 from open_udang.config import ContextConfig
+from open_udang.db import ChatScope
 from open_udang.hooks import (
     ApprovalCallback,
     EditNotifyCallback,
@@ -58,7 +59,7 @@ class CallbackContext:
 
 @dataclass
 class AgentSession:
-    """A long-lived SDK client associated with a chat."""
+    """A long-lived SDK client associated with a chat scope."""
 
     client: ClaudeSDKClient
     session_id: str | None = None
@@ -67,11 +68,11 @@ class AgentSession:
     container_wrapper_path: str | None = None
 
 
-_active_sessions: dict[int, AgentSession] = {}
+_active_sessions: dict[ChatScope, AgentSession] = {}
 
 
 async def get_or_create_session(
-    chat_id: int,
+    scope: ChatScope,
     context_name: str,
     context: ContextConfig,
     session_id: str | None,
@@ -80,12 +81,12 @@ async def get_or_create_session(
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
-    If a session already exists for *chat_id* with the same context,
+    If a session already exists for *scope* with the same context,
     return it (after updating the callback context).  Otherwise create a
     fresh ``ClaudeSDKClient``, connect, and store it.
 
     Args:
-        chat_id: Telegram chat ID.
+        scope: ChatScope identifying the chat/thread.
         context_name: Name of the active context.
         context: Context configuration (directory, model, etc.).
         session_id: Session ID for ``--resume`` (only used when creating
@@ -95,7 +96,7 @@ async def get_or_create_session(
     Returns:
         An ``AgentSession`` with a connected client ready for ``query()``.
     """
-    existing = _active_sessions.get(chat_id)
+    existing = _active_sessions.get(scope)
     if existing is not None:
         if existing.context_name == context_name:
             existing.callback_context.request_approval = callback_context.request_approval
@@ -103,19 +104,19 @@ async def get_or_create_session(
             existing.callback_context.is_edit_auto_approved = callback_context.is_edit_auto_approved
             existing.callback_context.notify_auto_approved_edit = callback_context.notify_auto_approved_edit
             logger.info(
-                "Reusing live client for chat %d context %s",
-                chat_id,
+                "Reusing live client for scope %s context %s",
+                scope,
                 context_name,
             )
             return existing
         else:
             logger.info(
-                "Context changed for chat %d (%s -> %s), closing old client",
-                chat_id,
+                "Context changed for scope %s (%s -> %s), closing old client",
+                scope,
                 existing.context_name,
                 context_name,
             )
-            await close_session(chat_id)
+            await close_session(scope)
 
     from open_udang.hooks import make_can_use_tool
 
@@ -126,7 +127,7 @@ async def get_or_create_session(
         handle_user_questions=_make_questions_proxy(callback_context),
         is_edit_auto_approved=_make_edit_approved_proxy(callback_context),
         notify_auto_approved_edit=_make_edit_notify_proxy(callback_context),
-        chat_id=chat_id,
+        chat_id=scope.chat_id,
     )
 
     def _log_stderr(line: str) -> None:
@@ -178,21 +179,23 @@ async def get_or_create_session(
     # Register in-process MCP tools (send_file, send_photo, etc.) so the
     # agent can send files directly to the Telegram chat.
     if bot is not None:
-        openudang_server = create_openudang_mcp_server(bot=bot, chat_id=chat_id)
+        openudang_server = create_openudang_mcp_server(
+            bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
+        )
         options.mcp_servers = {"openudang": openudang_server}
 
     if session_id:
         options.resume = session_id
         logger.info(
-            "Creating new client for chat %d: resuming session %s in %s",
-            chat_id,
+            "Creating new client for scope %s: resuming session %s in %s",
+            scope,
             session_id,
             context.directory,
         )
     else:
         logger.info(
-            "Creating new client for chat %d: new session in %s",
-            chat_id,
+            "Creating new client for scope %s: new session in %s",
+            scope,
             context.directory,
         )
 
@@ -206,9 +209,9 @@ async def get_or_create_session(
         # rebuilt, or the .jsonl was deleted).  Fall back to a fresh
         # session instead of surfacing a cryptic error.
         logger.warning(
-            "Failed to resume session %s for chat %d – starting fresh",
+            "Failed to resume session %s for scope %s – starting fresh",
             session_id,
-            chat_id,
+            scope,
         )
         session_id = None
         options.resume = None
@@ -222,39 +225,39 @@ async def get_or_create_session(
         callback_context=callback_context,
         container_wrapper_path=wrapper_path,
     )
-    _active_sessions[chat_id] = session
+    _active_sessions[scope] = session
     return session
 
 
-async def close_session(chat_id: int) -> None:
-    """Close and remove the session for *chat_id*, if any."""
-    session = _active_sessions.pop(chat_id, None)
+async def close_session(scope: ChatScope) -> None:
+    """Close and remove the session for *scope*, if any."""
+    session = _active_sessions.pop(scope, None)
     if session is None:
         return
     try:
         await session.client.disconnect()
-        logger.info("Closed client for chat %d", chat_id)
+        logger.info("Closed client for scope %s", scope)
     except Exception:
-        logger.debug("Error closing client for chat %d", chat_id, exc_info=True)
+        logger.debug("Error closing client for scope %s", scope, exc_info=True)
     if session.container_wrapper_path:
         cleanup_wrapper(session.container_wrapper_path)
 
 
 async def close_all_sessions() -> None:
     """Close all active sessions (for shutdown)."""
-    chat_ids = list(_active_sessions.keys())
-    for chat_id in chat_ids:
-        await close_session(chat_id)
+    scopes = list(_active_sessions.keys())
+    for scope in scopes:
+        await close_session(scope)
 
 
-def get_session(chat_id: int) -> AgentSession | None:
-    """Return the active session for *chat_id*, or None."""
-    return _active_sessions.get(chat_id)
+def get_session(scope: ChatScope) -> AgentSession | None:
+    """Return the active session for *scope*, or None."""
+    return _active_sessions.get(scope)
 
 
-def has_session(chat_id: int) -> bool:
-    """Return True if *chat_id* has a live session."""
-    return chat_id in _active_sessions
+def has_session(scope: ChatScope) -> bool:
+    """Return True if *scope* has a live session."""
+    return scope in _active_sessions
 
 
 async def query_and_stream(

@@ -155,6 +155,7 @@ async def _send_auto_approved_diff(
     tool_name: str,
     tool_input: dict[str, Any],
     cwd: str | None = None,
+    thread_id: int | None = None,
 ) -> None:
     """Send a read-only diff message for an auto-approved edit.
 
@@ -171,11 +172,16 @@ async def _send_auto_approved_diff(
 
     text += f"\n\u2705 _Auto\\-approved_"
 
+    thread_kwargs: dict[str, Any] = {}
+    if thread_id is not None:
+        thread_kwargs["message_thread_id"] = thread_id
+
     try:
         await bot.send_message(
             chat_id=chat_id,
             text=text,
             parse_mode="MarkdownV2",
+            **thread_kwargs,
         )
     except Exception:
         logger.exception("Failed to send auto-approved diff notification")
@@ -188,6 +194,7 @@ async def _send_approval_keyboard(
     tool_input: dict[str, Any],
     tool_use_id: str,
     cwd: str | None = None,
+    thread_id: int | None = None,
 ) -> bool:
     """Send an inline keyboard for tool approval and wait for response."""
     if tool_name == "Edit":
@@ -221,11 +228,16 @@ async def _send_approval_keyboard(
 
     keyboard = InlineKeyboardMarkup([buttons])
 
+    thread_kwargs: dict[str, Any] = {}
+    if thread_id is not None:
+        thread_kwargs["message_thread_id"] = thread_id
+
     await bot.send_message(
         chat_id=chat_id,
         text=text,
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
+        **thread_kwargs,
     )
 
     # Create a future and wait for the callback
@@ -264,8 +276,9 @@ async def handle_approval_callback(
     """
     import aiosqlite
 
+    from open_udang.db import ChatScope
     from open_udang.handlers.state import _edit_approved_sessions
-    from open_udang.handlers.utils import _get_context
+    from open_udang.handlers.utils import _get_context, chat_scope_from_message
     from open_udang.stream import _bash_output_store
 
     # Handle "Show prompt" expansion for Agent tool
@@ -339,14 +352,14 @@ async def handle_approval_callback(
             return True
 
         # Determine the chat's active context to scope the flag
-        chat_id = query.message.chat_id if query.message else None
-        if chat_id is not None:
+        if query.message:
+            scope = chat_scope_from_message(query.message)
             db: aiosqlite.Connection = context.bot_data["db"]
-            ctx_name, _ = await _get_context(chat_id, config, db)
-            _edit_approved_sessions.add((chat_id, ctx_name))
+            ctx_name, _ = await _get_context(scope, config, db)
+            _edit_approved_sessions.add((scope, ctx_name))
             logger.info(
-                "Accept-all-edits enabled for chat %d context %s",
-                chat_id,
+                "Accept-all-edits enabled for scope %s context %s",
+                scope,
                 ctx_name,
             )
 

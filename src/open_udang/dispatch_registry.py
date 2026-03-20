@@ -13,14 +13,16 @@ from __future__ import annotations
 import logging
 from typing import Callable, Awaitable
 
+from open_udang.db import ChatScope
+
 logger = logging.getLogger(__name__)
 
 # The registered dispatch callback:
-#   async def dispatch(prompt: str, chat_id: int) -> None
-_dispatch_fn: Callable[[str, int], Awaitable[None]] | None = None
+#   async def dispatch(prompt: str, scope: ChatScope) -> None
+_dispatch_fn: Callable[[str, ChatScope], Awaitable[None]] | None = None
 
 
-def register_dispatch(fn: Callable[[str, int], Awaitable[None]]) -> None:
+def register_dispatch(fn: Callable[[str, ChatScope], Awaitable[None]]) -> None:
     """Register the dispatch callback (called by the bot at startup)."""
     global _dispatch_fn
     _dispatch_fn = fn
@@ -30,8 +32,11 @@ def register_dispatch(fn: Callable[[str, int], Awaitable[None]]) -> None:
 async def dispatch(prompt: str, chat_id: int) -> None:
     """Dispatch a prompt to the agent for the given chat.
 
+    Wraps the bare ``chat_id`` in a ``ChatScope`` (thread_id=None) since
+    callers like the review API only operate on private chats.
+
     Raises RuntimeError if no callback has been registered yet.
     """
     if _dispatch_fn is None:
         raise RuntimeError("Agent dispatch not registered — bot may not be running")
-    await _dispatch_fn(prompt, chat_id)
+    await _dispatch_fn(prompt, ChatScope(chat_id))

@@ -44,19 +44,27 @@ def _guess_mime(path: str) -> str | None:
 def create_openudang_mcp_server(
     bot: Bot,
     chat_id: int,
+    thread_id: int | None = None,
 ) -> McpSdkServerConfig:
     """Create an in-process MCP server with OpenUdang-specific tools.
 
-    The returned server is bound to a specific *bot* and *chat_id* so tool
-    handlers can send files directly to the correct Telegram chat.
+    The returned server is bound to a specific *bot*, *chat_id*, and
+    optional *thread_id* so tool handlers can send files directly to the
+    correct Telegram chat or forum thread.
 
     Args:
         bot: Telegram Bot instance.
         chat_id: Telegram chat ID to send files to.
+        thread_id: Optional message_thread_id for forum topics.
 
     Returns:
         An ``McpSdkServerConfig`` ready for ``ClaudeAgentOptions.mcp_servers``.
     """
+
+    # Build common kwargs for message_thread_id support.
+    _thread_kwargs: dict[str, Any] = {}
+    if thread_id is not None:
+        _thread_kwargs["message_thread_id"] = thread_id
 
     @tool(
         "send_file",
@@ -145,6 +153,7 @@ def create_openudang_mcp_server(
                         chat_id=chat_id,
                         photo=f,
                         caption=caption,
+                        **_thread_kwargs,
                     )
                 else:
                     await bot.send_document(
@@ -152,6 +161,7 @@ def create_openudang_mcp_server(
                         document=f,
                         filename=filename,
                         caption=caption,
+                        **_thread_kwargs,
                     )
             method = "photo" if use_photo else "document"
             logger.info("Sent %s %s to chat %d", method, path, chat_id)
