@@ -172,7 +172,66 @@ def create_openudang_mcp_server(
                 f"Error sending file: {exc}", is_error=True,
             )
 
+    # --- set_topic_title (forum topics only) ---
+    # Only register this tool when the chat is a forum topic, so Claude
+    # can set/update the thread title.
+    tools_list: list[Any] = [send_file]
+
+    if thread_id is not None:
+
+        @tool(
+            "set_topic_title",
+            "Set or update the title of the current Telegram forum topic. "
+            "Use this after your first response to set a concise title that "
+            "summarizes the conversation topic, and again later if the topic "
+            "changes significantly. Maximum 128 characters.",
+            {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "The title for the forum topic. Should be a short, "
+                            "descriptive summary (max 128 characters)."
+                        ),
+                    },
+                },
+                "required": ["title"],
+            },
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        async def set_topic_title(args: dict[str, Any]) -> dict[str, Any]:
+            title = args.get("title", "").strip()
+            if not title:
+                return _text_result(
+                    "Error: title is required.", is_error=True,
+                )
+            if len(title) > 128:
+                title = title[:128]
+
+            try:
+                await bot.edit_forum_topic(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    name=title,
+                )
+                logger.info(
+                    "Set topic title to %r in chat %d thread %d",
+                    title, chat_id, thread_id,
+                )
+                return _text_result(f"Topic title set to: {title}")
+            except Exception as exc:
+                logger.exception(
+                    "Failed to set topic title in chat %d thread %d",
+                    chat_id, thread_id,
+                )
+                return _text_result(
+                    f"Error setting topic title: {exc}", is_error=True,
+                )
+
+        tools_list.append(set_topic_title)
+
     return create_sdk_mcp_server(
         name="openudang",
-        tools=[send_file],
+        tools=tools_list,
     )

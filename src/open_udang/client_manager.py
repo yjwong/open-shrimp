@@ -137,6 +137,8 @@ async def get_or_create_session(
     # alongside whatever the user configured.
     allowed_tools = list(context.allowed_tools or [])
     allowed_tools.append("mcp__openudang__send_file")
+    if scope.thread_id is not None:
+        allowed_tools.append("mcp__openudang__set_topic_title")
 
     # When containerized, generate a wrapper script that runs the Claude
     # CLI inside Docker.  The wrapper is pointed at via cli_path; all other
@@ -168,13 +170,25 @@ async def get_or_create_session(
         cli_path=cli_path,
     )
 
+    system_prompt_parts: list[str] = []
     if context.additional_directories:
         dirs_list = "\n".join(f"  - {d}" for d in context.additional_directories)
-        options.system_prompt = (
+        system_prompt_parts.append(
             "You also have access to the following additional working "
             "directories:\n" + dirs_list + "\n"
             "You may read and search files in these directories as needed."
         )
+
+    if scope.thread_id is not None:
+        system_prompt_parts.append(
+            "This conversation is in a Telegram forum topic. "
+            "After your first response, use the set_topic_title tool to set "
+            "a concise title (max 128 chars) summarizing the conversation. "
+            "If the topic changes significantly later, update the title again."
+        )
+
+    if system_prompt_parts:
+        options.system_prompt = "\n\n".join(system_prompt_parts)
 
     # Register in-process MCP tools (send_file, send_photo, etc.) so the
     # agent can send files directly to the Telegram chat.
