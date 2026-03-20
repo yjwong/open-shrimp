@@ -197,13 +197,14 @@ def _register_task_with_jobqueue(
                 month=parts[3],
                 day_of_week=parts[4],
             )
-            # python-telegram-bot's JobQueue doesn't expose CronTrigger
-            # directly, but the underlying APScheduler scheduler does.
-            job_queue.scheduler.add_job(
+            # Use run_custom to register cron jobs through PTB's JobQueue
+            # wrapper.  Direct scheduler.add_job() bypasses PTB's args
+            # wrapping, which causes get_jobs_by_name() to crash with
+            # "tuple index out of range" when it calls from_aps_job().
+            job_queue.run_custom(
                 _job_callback,
-                trigger=trigger,
+                job_kwargs={"trigger": trigger},
                 name=job_name,
-                kwargs={"context": None},
             )
 
         elif task.schedule_type == "once":
