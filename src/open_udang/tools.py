@@ -313,6 +313,7 @@ def create_openudang_mcp_server(
             ScheduledTask,
             create_scheduled_task,
             delete_scheduled_task,
+            delete_scheduled_task_by_id,
             list_scheduled_tasks,
         )
         from open_udang.scheduler import (
@@ -432,8 +433,16 @@ def create_openudang_mcp_server(
                 logger.exception("Failed to create scheduled task")
                 return _text_result(f"Error creating task: {exc}", is_error=True)
 
-            # Register with JobQueue.
-            _register_task_with_jobqueue(job_queue, task, bot, db, config)
+            # Register with JobQueue. If registration fails, roll back
+            # the DB insert to avoid orphaned tasks that never fire.
+            registered = _register_task_with_jobqueue(job_queue, task, bot, db, config)
+            if not registered:
+                await delete_scheduled_task_by_id(db, task.id)
+                return _text_result(
+                    "Error: failed to register task with scheduler. "
+                    "The task was not created.",
+                    is_error=True,
+                )
 
             type_desc = {
                 "interval": f"every {schedule_expr}",

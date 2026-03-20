@@ -146,6 +146,8 @@ def validate_schedule(schedule_type: str, schedule_expr: str) -> None:
             if dt.tzinfo is None:
                 # Treat naive datetimes as UTC.
                 dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
         except ValueError as exc:
             raise ValueError(
                 f"Invalid datetime for one-shot schedule: {schedule_expr!r}. "
@@ -208,6 +210,8 @@ def _register_task_with_jobqueue(
             dt = datetime.fromisoformat(task.schedule_expr)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
 
             # Skip one-shot tasks whose time has passed.
             if dt <= datetime.now(timezone.utc):
@@ -501,6 +505,8 @@ async def reload_tasks(
                 dt = datetime.fromisoformat(task.schedule_expr)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
+                else:
+                    dt = dt.astimezone(timezone.utc)
                 if dt <= datetime.now(timezone.utc):
                     await delete_scheduled_task_by_id(db, task.id)
                     logger.info(
