@@ -172,64 +172,130 @@ def create_openudang_mcp_server(
                 f"Error sending file: {exc}", is_error=True,
             )
 
-    # --- set_topic_title (forum topics only) ---
+    # --- edit_topic (forum topics only) ---
     # Only register this tool when the chat is a forum topic, so Claude
-    # can set/update the thread title.
+    # can set/update the thread title and/or icon.
     tools_list: list[Any] = [send_file]
 
     if thread_id is not None:
+        # Cache for emoji -> custom_emoji_id mapping, populated lazily.
+        _emoji_map: dict[str, str] | None = None
+
+        async def _get_emoji_map() -> dict[str, str]:
+            nonlocal _emoji_map
+            if _emoji_map is None:
+                stickers = await bot.get_forum_topic_icon_stickers()
+                _emoji_map = {
+                    s.emoji: s.custom_emoji_id
+                    for s in stickers
+                    if s.emoji and s.custom_emoji_id
+                }
+                logger.info(
+                    "Loaded %d forum topic icon stickers", len(_emoji_map),
+                )
+            return _emoji_map
 
         @tool(
-            "set_topic_title",
-            "Set or update the title of the current Telegram forum topic. "
-            "Use this after your first response to set a concise title that "
-            "summarizes the conversation topic, and again later if the topic "
-            "changes significantly. Maximum 128 characters.",
+            "edit_topic",
+            "Set or update the title and/or icon of the current Telegram "
+            "forum topic. Use this after your first response to set a "
+            "concise title (max 128 chars) summarizing the conversation. "
+            "If the topic changes significantly later, update the title "
+            "again. Optionally set an icon using a standard emoji (e.g. "
+            '"📝", "🔥", "💬", "🤖"). Pass an empty string for icon '
+            "to remove it.",
             {
                 "type": "object",
                 "properties": {
                     "title": {
                         "type": "string",
                         "description": (
-                            "The title for the forum topic. Should be a short, "
-                            "descriptive summary (max 128 characters)."
+                            "The title for the forum topic. Should be a "
+                            "short, descriptive summary (max 128 characters)."
+                        ),
+                    },
+                    "icon": {
+                        "type": "string",
+                        "description": (
+                            "A standard emoji to use as the topic icon "
+                            '(e.g. "📝", "🔥", "🤖"). Pass an empty '
+                            "string to remove the icon. If omitted, the "
+                            "current icon is kept."
                         ),
                     },
                 },
-                "required": ["title"],
             },
             annotations=ToolAnnotations(readOnlyHint=True),
         )
-        async def set_topic_title(args: dict[str, Any]) -> dict[str, Any]:
-            title = args.get("title", "").strip()
-            if not title:
-                return _text_result(
-                    "Error: title is required.", is_error=True,
-                )
-            if len(title) > 128:
+        async def edit_topic(args: dict[str, Any]) -> dict[str, Any]:
+            title = args.get("title", "").strip() or None
+            icon = args.get("icon")
+
+            if title is not None and len(title) > 128:
                 title = title[:128]
+
+            if title is None and icon is None:
+                return _text_result(
+                    "Error: at least one of title or icon is required.",
+                    is_error=True,
+                )
+
+            # Resolve emoji to custom_emoji_id.
+            icon_custom_emoji_id: str | None = None
+            if icon is not None:
+                if icon == "":
+                    # Empty string = remove icon.
+                    icon_custom_emoji_id = ""
+                else:
+                    emoji_map = await _get_emoji_map()
+                    icon_custom_emoji_id = emoji_map.get(icon)
+                    if icon_custom_emoji_id is None:
+                        # List some available options for the agent.
+                        sample = list(emoji_map.keys())[:20]
+                        return _text_result(
+                            f"Error: emoji {icon!r} is not available as a "
+                            f"topic icon. Some available emoji: "
+                            f"{' '.join(sample)}",
+                            is_error=True,
+                        )
+
+            # Build kwargs — only pass what was requested.
+            edit_kwargs: dict[str, Any] = {}
+            if title is not None:
+                edit_kwargs["name"] = title
+            if icon_custom_emoji_id is not None:
+                edit_kwargs["icon_custom_emoji_id"] = icon_custom_emoji_id
 
             try:
                 await bot.edit_forum_topic(
                     chat_id=chat_id,
                     message_thread_id=thread_id,
-                    name=title,
+                    **edit_kwargs,
                 )
-                logger.info(
-                    "Set topic title to %r in chat %d thread %d",
-                    title, chat_id, thread_id,
-                )
-                return _text_result(f"Topic title set to: {title}")
             except Exception as exc:
                 logger.exception(
-                    "Failed to set topic title in chat %d thread %d",
+                    "Failed to edit topic in chat %d thread %d",
                     chat_id, thread_id,
                 )
                 return _text_result(
-                    f"Error setting topic title: {exc}", is_error=True,
+                    f"Error editing topic: {exc}", is_error=True,
                 )
 
-        tools_list.append(set_topic_title)
+            parts = []
+            if title is not None:
+                parts.append(f"title={title!r}")
+            if icon is not None:
+                parts.append(
+                    f"icon={icon!r}" if icon else "icon removed",
+                )
+            summary = ", ".join(parts)
+            logger.info(
+                "Edited topic (%s) in chat %d thread %d",
+                summary, chat_id, thread_id,
+            )
+            return _text_result(f"Topic updated: {summary}")
+
+        tools_list.append(edit_topic)
 
     return create_sdk_mcp_server(
         name="openudang",

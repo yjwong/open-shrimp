@@ -138,7 +138,7 @@ async def get_or_create_session(
     allowed_tools = list(context.allowed_tools or [])
     allowed_tools.append("mcp__openudang__send_file")
     if scope.thread_id is not None:
-        allowed_tools.append("mcp__openudang__set_topic_title")
+        allowed_tools.append("mcp__openudang__edit_topic")
 
     # When containerized, generate a wrapper script that runs the Claude
     # CLI inside Docker.  The wrapper is pointed at via cli_path; all other
@@ -182,9 +182,11 @@ async def get_or_create_session(
     if scope.thread_id is not None:
         system_prompt_parts.append(
             "This conversation is in a Telegram forum topic. "
-            "After your first response, use the set_topic_title tool to set "
-            "a concise title (max 128 chars) summarizing the conversation. "
-            "If the topic changes significantly later, update the title again."
+            "After your first response, use the edit_topic tool to set "
+            "a concise title (max 128 chars) summarizing the conversation, "
+            "and optionally an icon using a standard emoji (e.g. 📝, 🔥, "
+            "🤖, 💬). If the topic changes significantly later, update "
+            "the title again."
         )
 
     if system_prompt_parts:
