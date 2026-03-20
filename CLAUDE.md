@@ -14,14 +14,15 @@ Telegram bot for remote Claude access via the Agent SDK. A personal, self-hosted
 Telegram <-> OpenUdang (Python, async) <-> Claude Agent SDK
                 |
                 +-- Config (YAML: contexts, ACL)
-                +-- Session store (SQLite: chat -> session_id mapping)
+                +-- Session store (SQLite: chat/thread -> session_id mapping)
                 +-- PreToolUse hooks (tool approval)
 ```
 
 ### Core Concepts
 
 - **Context**: A working directory + CLAUDE.md. Switch with `/context <name>`. Each context has its own model, auto-approve list, and tools.
-- **Session**: A persistent Claude conversation. The Agent SDK handles persistence as `.jsonl` files under `~/.claude/projects/<encoded-cwd>/`. OpenUdang maps `(chat_id, context_name) -> session_id` in SQLite.
+- **ChatScope**: A `(chat_id, thread_id)` pair that identifies a unique conversation scope. In private/group chats, `thread_id` is `None`. In forum topics, each topic thread has its own `thread_id`, so multiple topics in the same chat get independent contexts and sessions.
+- **Session**: A persistent Claude conversation. The Agent SDK handles persistence as `.jsonl` files under `~/.claude/projects/<encoded-cwd>/`. OpenUdang maps `(chat_id, thread_id, context_name) -> session_id` in SQLite.
 - **Tool approval**: Uses the SDK's `allowedTools` for auto-approved tools (patterns like `Bash(git *)`) and a `canUseTool` callback for everything else. Read-only file tools (Read, Glob, Grep) are auto-approved within the context working directory. Mutating tools (Edit, Write) always require explicit approval via Telegram inline keyboard, even within cwd, unless the user opts into "accept all edits" for the session. The callback sends Telegram inline keyboards and `await`s the user's response.
 - **Containerization**: Optional per-context Docker isolation via `containerize: true`. The Claude CLI runs inside a container with only the project directory bind-mounted (at the same host path). Session storage is isolated under `~/.config/openudang/containers/<context>/`, mounted as `~/.claude` inside the container. The container runs as the host user's uid/gid to avoid root-owned files. The SDK's `cli_path` is pointed at a generated wrapper script that invokes `docker run`; all other SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.
 
@@ -62,7 +63,8 @@ src/open_udang/
     stream.py         # Stream bridge: SDK messages -> sendMessageDraft
     config.py         # Config loading and validation (YAML)
     container.py      # Docker container wrapper for isolated CLI execution
-    db.py             # SQLite session ID mapping
+    tools.py          # MCP tool registration (edit_topic for forum topics)
+    db.py             # SQLite session ID mapping, ChatScope definition
     markdown.py       # GFM -> Telegram MarkdownV2 conversion
     service.py        # install/uninstall as systemd/launchd service
 ```
@@ -85,6 +87,7 @@ Key fields:
 - **Long messages**: Telegram max is 4096 chars. Auto-split at paragraph/code block boundaries. Finalize current draft, start new one.
 - **Group chats**: Only respond to @mentions and replies. Check `message.entities` for bot mention or `message.reply_to_message`.
 - **Inline keyboards**: Use `InlineKeyboardMarkup` for tool approval buttons. Handle via `CallbackQueryHandler`.
+- **Forum topics**: Full support for Telegram forum (threaded) chats. Each forum topic gets its own independent ChatScope — separate context, session, and state. The bot responds to all messages in forum topics (no @mention required). In forum topics, an `edit_topic` MCP tool is auto-registered so Claude can set descriptive topic titles with optional emoji icons.
 - **Parse mode**: Use `MarkdownV2` parse mode. Escape special characters: `_*[]()~>#+-=|{}.!`
 
 ## Commands

@@ -76,6 +76,7 @@ You're away from your desk but need Claude to fix a bug, review a diff, or scaff
 - **Stream responses in real-time.** Responses stream directly into Telegram using `sendMessageDraft` — no waiting for the full response to generate.
 - **Multiple projects, one bot.** Switch between project contexts on the fly with `/context`. Each context has its own working directory, CLAUDE.md, model, and tool permissions.
 - **Persistent sessions.** Pick up where you left off. Sessions survive restarts, and you can `/resume` any previous conversation.
+- **Forum topic support.** Use Telegram forum channels to organize conversations — each topic thread gets its own independent Claude session. Run parallel tasks in the same chat without them stepping on each other. Claude auto-titles each topic for easy navigation.
 - **Group chat ready.** Add the bot to a team chat. It responds to @mentions and replies, so it stays out of the way until you need it.
 - **Locked down by default.** User allowlist, path-scoped file access, and granular tool approval. The agent can't silently read your `~/.ssh` or write outside your project.
 
@@ -193,6 +194,7 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 | `/model [name]` | Show or override the model for this chat |
 | `/resume` | List and resume a previous session |
 | `/review` | Open the mobile code review UI |
+| `/mcp` | List and manage MCP servers |
 
 ## How Tool Approval Works
 
