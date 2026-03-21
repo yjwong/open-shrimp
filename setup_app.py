@@ -1,12 +1,18 @@
 """py2app build configuration for OpenUdang.app.
 
-Build a self-contained macOS .app bundle:
+Build a self-contained macOS .app bundle.  Setuptools auto-discovers
+``pyproject.toml`` in the working directory and conflicts with the
+hatchling build backend, so hide it before running::
 
+    mv pyproject.toml pyproject.toml.bak
     python setup_app.py py2app
+    mv pyproject.toml.bak pyproject.toml
 
-For a development (alias) build that symlinks into the source tree:
+For a development (alias) build that symlinks into the source tree::
 
+    mv pyproject.toml pyproject.toml.bak
     python setup_app.py py2app -A
+    mv pyproject.toml.bak pyproject.toml
 """
 
 from pathlib import Path

@@ -152,7 +152,10 @@ jobs:
           uv pip install --system '.[macos]'
 
       - name: Build .app bundle
-        run: python setup_app.py py2app
+        run: |
+          mv pyproject.toml pyproject.toml.bak
+          python setup_app.py py2app
+          mv pyproject.toml.bak pyproject.toml
 
       - name: Create DMG
         run: |
