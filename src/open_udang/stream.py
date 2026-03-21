@@ -439,14 +439,28 @@ _ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
 
 async def _handle_assistant_error(
     bot: Bot, state: _DraftState, error: str,
+    error_detail: str | None = None,
 ) -> None:
     """Send a user-friendly error message for AssistantMessage errors."""
-    logger.warning("AssistantMessage error for chat %d: %s", state.chat_id, error)
+    if error_detail:
+        logger.warning(
+            "AssistantMessage error for chat %d: %s (%s)",
+            state.chat_id, error, error_detail,
+        )
+    else:
+        logger.warning(
+            "AssistantMessage error for chat %d: %s",
+            state.chat_id, error,
+        )
 
     msg_text = _ASSISTANT_ERROR_MESSAGES.get(
         error,
         f"⚠️ **Error:** {error}",
     )
+    # Append the detail from the SDK (e.g. "Prompt is too long") so
+    # the user knows *why* the request was rejected.
+    if error_detail:
+        msg_text += f"\n\n> {error_detail}"
 
     await finalize_and_reset(bot, state)
     try:
@@ -520,7 +534,17 @@ async def stream_response(
                 # Check for SDK-level errors (auth failures, billing,
                 # rate limits, etc.) and surface them to the user.
                 if event.error:
-                    await _handle_assistant_error(bot, state, event.error)
+                    # Extract error detail from content blocks (the SDK
+                    # puts the human-readable reason in a TextBlock, e.g.
+                    # "Prompt is too long").
+                    error_detail = None
+                    for block in event.content:
+                        if isinstance(block, TextBlock) and block.text:
+                            error_detail = block.text
+                            break
+                    await _handle_assistant_error(
+                        bot, state, event.error, error_detail,
+                    )
 
                 # Mark this turn's text as complete. When the next
                 # turn's StreamEvent deltas arrive, we'll insert a
