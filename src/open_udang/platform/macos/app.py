@@ -194,13 +194,36 @@ class OpenUdangApp(rumps.App):
 # ── LaunchAgent management ──
 
 
+def _get_app_executable() -> Path:
+    """Return the executable path for the LaunchAgent plist.
+
+    Inside a ``.app`` bundle, ``sys.argv[0]`` points to the Python script
+    under ``Contents/Resources/``, which isn't directly executable by launchd.
+    Detect the bundle and return the ``Contents/MacOS/<name>`` binary instead.
+    Outside a bundle (e.g. running via the console script), fall back to
+    ``sys.executable``.
+    """
+    script = Path(sys.argv[0]).resolve()
+    # py2app layout: <Name>.app/Contents/Resources/<script>.py
+    resources_dir = script.parent
+    contents_dir = resources_dir.parent
+    if (
+        resources_dir.name == "Resources"
+        and contents_dir.name == "Contents"
+        and contents_dir.parent.suffix == ".app"
+    ):
+        # The bundle executable name matches CFBundleName
+        bundle_name = contents_dir.parent.stem  # e.g. "OpenUdang"
+        macos_bin = contents_dir / "MacOS" / bundle_name
+        if macos_bin.exists():
+            return macos_bin
+    # Not in a bundle — use the Python executable directly
+    return Path(sys.executable).resolve()
+
+
 def _install_launch_agent() -> None:
     """Write a LaunchAgent plist that launches the .app at login."""
-    # Resolve the path to the current executable — works whether running
-    # from a .app bundle or via ``openudang-app`` console script.
-    executable = sys.executable
-    # If inside a .app bundle, use the bundle's MacOS binary
-    app_path = Path(sys.argv[0]).resolve()
+    app_path = _get_app_executable()
 
     plist = dedent(f"""\
         <?xml version="1.0" encoding="UTF-8"?>
