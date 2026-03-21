@@ -140,26 +140,19 @@ def _is_dangerous_rm_target(path: str) -> bool:
     return False
 
 
-def _is_safe_bash_for_accept_edits(
-    command: str, approved_dirs: list[str]
+def _is_single_subcommand_safe(
+    subcommand: str, approved_dirs: list[str]
 ) -> bool:
-    """Return True if *command* is safe to auto-approve in accept-all-edits mode.
+    """Check whether a single (non-compound) subcommand is safe.
 
-    Checks:
-    1. The base command is in the allowlist.
-    2. All path arguments resolve to within the approved directories.
-    3. Rejects shell expansion characters (``$``, ``~``, backticks).
-    4. For rm/rmdir, additionally rejects dangerous targets (``/``, home,
-       top-level dirs, ``*``).
-
-    If any check fails, returns False so the command falls through to
-    the interactive approval prompt.
+    Returns True only if the base command is in the allowlist and all
+    path arguments resolve to within the approved directories.
     """
-    base = _extract_bash_base_command(command)
+    base = _extract_bash_base_command(subcommand)
     if base is None or base not in _ACCEPT_EDITS_BASH_COMMANDS:
         return False
 
-    path_args = _extract_bash_path_args(command)
+    path_args = _extract_bash_path_args(subcommand)
 
     for arg in path_args:
         # Reject shell expansion characters — we can't reliably resolve
@@ -172,8 +165,6 @@ def _is_safe_bash_for_accept_edits(
             return False
 
     # Validate that all path arguments resolve to within approved dirs.
-    # Commands with no path args (e.g. bare "touch" which is unlikely but
-    # harmless) pass through — the command itself will fail or be a no-op.
     for arg in path_args:
         # Glob patterns (containing * or ?) can't be reliably resolved —
         # reject them for write operations.
@@ -190,19 +181,70 @@ def _is_safe_bash_for_accept_edits(
     return True
 
 
+def _is_safe_bash_for_accept_edits(
+    command: str, approved_dirs: list[str]
+) -> bool:
+    """Return True if *command* is safe to auto-approve in accept-all-edits mode.
+
+    Uses tree-sitter to split compound commands (``&&``, ``||``, ``;``)
+    into individual subcommands and validates each one independently.
+    Every subcommand must pass the allowlist and path checks, and
+    compound command safety rules (cd + write, cd + git, multiple cd,
+    subcommand cap) must pass.
+
+    If any check fails, returns False so the command falls through to
+    the interactive approval prompt.
+    """
+    from open_udang.bash_parse import (
+        TooComplexError,
+        check_compound_safety,
+        split_subcommands,
+    )
+
+    try:
+        subcommands = split_subcommands(command)
+    except TooComplexError:
+        return False
+
+    if not subcommands:
+        return False
+
+    # Compound command safety checks (cd+write, cd+git, multiple cd, cap).
+    safety_reason = check_compound_safety(subcommands)
+    if safety_reason is not None:
+        return False
+
+    # Every subcommand must individually pass the allowlist + path check.
+    return all(
+        _is_single_subcommand_safe(sub, approved_dirs)
+        for sub in subcommands
+    )
+
+
 def matches_approval_rule(
     rule: ApprovalRule,
     tool_name: str,
     tool_input: dict[str, Any],
 ) -> bool:
-    """Return True if *rule* matches the given tool invocation."""
+    """Return True if *rule* matches the given tool invocation.
+
+    For Bash pattern rules (e.g. ``git *``), compound commands are
+    **not** matched — prefix/wildcard allow rules skip compound
+    commands to prevent ``git *``
+    from auto-approving ``git status && rm -rf /``.  Blanket rules
+    (``pattern is None``) still match compound commands.
+    """
     if rule.tool_name != tool_name:
         return False
     if rule.pattern is None:
         return True
-    # For Bash, match the pattern against the full command string.
+    # For Bash, match the pattern against the full command string,
+    # but skip compound commands for safety.
     if tool_name == "Bash":
         command = tool_input.get("command", "")
+        from open_udang.bash_parse import is_compound_command
+        if is_compound_command(command):
+            return False
         return fnmatch.fnmatch(command, rule.pattern)
     # For other tools, pattern is currently unused — treat as match.
     return True

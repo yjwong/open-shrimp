@@ -6,7 +6,7 @@ Telegram bot for remote Claude access via the Agent SDK. A personal, self-hosted
 
 - **PRD**: `docs/prd.md` - full requirements, architecture, feasibility assessment
 - **Language**: Python 3.11+, managed with `uv`
-- **Key deps**: `claude-agent-sdk`, `python-telegram-bot[httpx]`, `aiosqlite`, `pyyaml`
+- **Key deps**: `claude-agent-sdk`, `python-telegram-bot[httpx,job-queue]`, `aiosqlite`, `pyyaml`, `tree-sitter`, `tree-sitter-bash`
 
 ## Architecture
 
@@ -66,6 +66,7 @@ src/open_udang/
     bot.py            # Telegram bot setup, handlers, long polling
     agent.py          # Claude Agent SDK wrapper, session management
     hooks.py          # canUseTool callback, tool approval logic
+    bash_parse.py     # tree-sitter bash command parsing and security checks
     stream.py         # Stream bridge: SDK messages -> sendMessageDraft
     config.py         # Config loading and validation (YAML)
     container.py      # Docker container wrapper for isolated CLI execution

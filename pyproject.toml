@@ -17,6 +17,8 @@ dependencies = [
     "mistune>=3.0,<4.0",
     "starlette",
     "uvicorn[standard]",
+    "tree-sitter>=0.23,<1.0",
+    "tree-sitter-bash>=0.23,<1.0",
 ]
 
 [project.scripts]
