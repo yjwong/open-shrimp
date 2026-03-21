@@ -600,10 +600,11 @@ async def _start_agent_task(
                 if result.session_id:
                     await set_session_id(db, scope, ctx_name, result.session_id)
 
-                if result.model_usage:
+                if result.model_usage or result.turn_usage:
                     await _update_pinned_status(
                         context.bot, scope, ctx_name, ctx_config, db,
                         model_usage=result.model_usage,
+                        turn_usage=result.turn_usage,
                         todos=latest_todos if latest_todos else None,
                     )
 

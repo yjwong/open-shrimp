@@ -53,6 +53,10 @@ class StreamResult:
 
     session_id: str | None = None
     model_usage: dict[str, Any] | None = None
+    #: Per-turn token usage from the last AssistantMessage (API ``usage``
+    #: object).  Contains ``input_tokens``, ``output_tokens``,
+    #: ``cache_creation_input_tokens``, ``cache_read_input_tokens``.
+    turn_usage: dict[str, Any] | None = None
     num_turns: int = 0
     duration_ms: int = 0
 
@@ -530,6 +534,11 @@ async def stream_response(
 
         async for event in events:
             if isinstance(event, AssistantMessage):
+                # Capture per-turn token usage (patched via sdk_patch).
+                turn_usage = getattr(event, "usage", None)
+                if turn_usage:
+                    result.turn_usage = turn_usage
+
                 # Check for SDK-level errors (auth failures, billing,
                 # rate limits, etc.) and surface them to the user.
                 if event.error:

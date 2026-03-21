@@ -1,9 +1,13 @@
-"""Monkey-patch the Python Agent SDK to expose modelUsage on ResultMessage.
+"""Monkey-patch the Python Agent SDK to expose extra fields the CLI sends.
 
-The CLI sends ``modelUsage`` in result messages but the Python SDK's
-``message_parser.parse_message`` discards it.  This module patches both
-``ResultMessage`` (adding a ``model_usage`` field) and the parser so the
-field is populated.
+The CLI sends fields that the Python SDK's ``message_parser.parse_message``
+discards:
+
+- ``modelUsage`` on result messages (cumulative token counts, context window).
+- ``usage`` on assistant messages (per-turn token counts from the API).
+
+This module patches both ``ResultMessage`` and ``AssistantMessage`` to
+expose these fields, and wraps the parser to populate them.
 
 Import this module early (before any agent queries) for the patch to
 take effect::
@@ -17,51 +21,66 @@ import dataclasses
 import logging
 from typing import Any
 
-from claude_agent_sdk import ResultMessage
+from claude_agent_sdk import AssistantMessage, ResultMessage
 from claude_agent_sdk._internal import message_parser
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Step 1: Add model_usage field to ResultMessage dataclass.
-# ---------------------------------------------------------------------------
 
-# Add the field descriptor to the dataclass.  We use dataclasses internals
-# to append a field with a default value to an already-frozen class.
-_new_field = dataclasses.field(default=None)
-_new_field.name = "model_usage"
-_new_field._field_type = dataclasses._FIELD  # type: ignore[attr-defined]
-ResultMessage.__dataclass_fields__["model_usage"] = _new_field  # type: ignore[attr-defined]
-
-# Patch __init__ to accept and store model_usage.
-_original_init = ResultMessage.__init__
+def _add_optional_field(cls: type, name: str) -> None:
+    """Add an optional field (default None) to a dataclass at runtime."""
+    new_field = dataclasses.field(default=None)
+    new_field.name = name
+    new_field._field_type = dataclasses._FIELD  # type: ignore[attr-defined]
+    cls.__dataclass_fields__[name] = new_field  # type: ignore[attr-defined]
 
 
-def _patched_init(self: ResultMessage, *args: Any, **kwargs: Any) -> None:
-    model_usage = kwargs.pop("model_usage", None)
-    _original_init(self, *args, **kwargs)
-    self.model_usage = model_usage  # type: ignore[attr-defined]
+def _wrap_init(cls: type, field_name: str) -> None:
+    """Wrap __init__ to accept and store an extra kwarg."""
+    original_init = cls.__init__
 
+    def patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        value = kwargs.pop(field_name, None)
+        original_init(self, *args, **kwargs)
+        setattr(self, field_name, value)
 
-ResultMessage.__init__ = _patched_init  # type: ignore[assignment]
+    cls.__init__ = patched_init  # type: ignore[assignment]
+
 
 # ---------------------------------------------------------------------------
-# Step 2: Patch parse_message to extract modelUsage from raw data.
+# Step 1: Add model_usage field to ResultMessage.
+# ---------------------------------------------------------------------------
+_add_optional_field(ResultMessage, "model_usage")
+_wrap_init(ResultMessage, "model_usage")
+
+# ---------------------------------------------------------------------------
+# Step 2: Add usage field to AssistantMessage (per-turn token counts).
+# ---------------------------------------------------------------------------
+_add_optional_field(AssistantMessage, "usage")
+_wrap_init(AssistantMessage, "usage")
+
+# ---------------------------------------------------------------------------
+# Step 3: Patch parse_message to extract the extra fields from raw data.
 # ---------------------------------------------------------------------------
 
 _original_parse_message = message_parser.parse_message
 
 
 def _patched_parse_message(data: dict[str, Any]) -> Any:
-    """Wrapper that extracts modelUsage and passes it to ResultMessage."""
+    """Wrapper that extracts extra fields the SDK normally discards."""
     result = _original_parse_message(data)
-    if isinstance(result, ResultMessage) and isinstance(data, dict):
-        model_usage = data.get("modelUsage")
-        if model_usage is not None:
-            result.model_usage = model_usage  # type: ignore[attr-defined]
+    if isinstance(data, dict):
+        if isinstance(result, ResultMessage):
+            model_usage = data.get("modelUsage")
+            if model_usage is not None:
+                result.model_usage = model_usage  # type: ignore[attr-defined]
+        elif isinstance(result, AssistantMessage):
+            usage = data.get("message", {}).get("usage")
+            if usage is not None:
+                result.usage = usage  # type: ignore[attr-defined]
     return result
 
 
 message_parser.parse_message = _patched_parse_message
 
-logger.debug("sdk_patch: ResultMessage.model_usage patch applied")
+logger.debug("sdk_patch: ResultMessage.model_usage + AssistantMessage.usage patches applied")
