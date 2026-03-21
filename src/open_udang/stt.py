@@ -15,10 +15,12 @@ import stat
 import tempfile
 from pathlib import Path
 
+from platformdirs import user_data_path
+
 logger = logging.getLogger(__name__)
 
 # Directory where we download moonshine-stt if not found in $PATH.
-_BIN_DIR = Path.home() / ".config" / "openudang" / "bin"
+_BIN_DIR = user_data_path("openudang") / "bin"
 
 # GitHub release URL — uses the same repo as OpenUdang.
 _REPO = "yjwong/open-udang"

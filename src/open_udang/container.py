@@ -21,13 +21,15 @@ import stat
 import tempfile
 from pathlib import Path
 
+from platformdirs import user_data_path
+
 logger = logging.getLogger(__name__)
 
 # Docker image name used for containerized contexts.
 CONTAINER_IMAGE = "openudang-claude:latest"
 
 # Base directory for per-context container state (session storage, etc.).
-CONTAINER_STATE_DIR = Path.home() / ".config" / "openudang" / "containers"
+CONTAINER_STATE_DIR = user_data_path("openudang") / "containers"
 
 
 def _ensure_state_dir(context_name: str) -> Path:

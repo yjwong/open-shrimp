@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from platformdirs import user_config_path
 
 
-DEFAULT_CONFIG_PATH = Path.home() / ".config" / "openudang" / "config.yaml"
+DEFAULT_CONFIG_PATH = user_config_path("openudang") / "config.yaml"
 
 
 @dataclass
@@ -146,7 +147,7 @@ def load_config(path: str | None = None) -> Config:
     """Load and validate config from a YAML file.
 
     Args:
-        path: Path to config file. Defaults to ~/.config/openudang/config.yaml.
+        path: Path to config file. Defaults to platform-specific config directory.
 
     Returns:
         Parsed and validated Config.

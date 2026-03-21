@@ -14,10 +14,12 @@ import stat
 import sys
 from pathlib import Path
 
+from platformdirs import user_data_path
+
 logger = logging.getLogger(__name__)
 
 # Directory where we download cloudflared if not found in $PATH.
-_BIN_DIR = Path.home() / ".config" / "openudang" / "bin"
+_BIN_DIR = user_data_path("openudang") / "bin"
 
 # GitHub release URL template for cloudflared binaries.
 _DOWNLOAD_BASE = "https://github.com/cloudflare/cloudflared/releases/latest/download"
