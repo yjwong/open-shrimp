@@ -194,7 +194,7 @@ def _build_status_text(
     escaped_name = _escape_mdv2(ctx_name)
     escaped_desc = _escape_mdv2(ctx.description)
     escaped_dir = _escape_mdv2(ctx.directory)
-    escaped_model = _escape_mdv2(ctx.model)
+    escaped_model = _escape_mdv2(ctx.model or "CLI default")
     lines = [
         f"\U0001f4cc *Active context:* `{escaped_name}`",
         f"{escaped_desc}",

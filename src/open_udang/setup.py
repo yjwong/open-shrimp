@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import glob as globmod
 import os
 import random
@@ -28,11 +29,49 @@ def _path_completer(text: str, state: int) -> str | None:
     return matches[state] if state < len(matches) else None
 
 
-_MODELS: tuple[tuple[str, str], ...] = (
-    ("claude-sonnet-4-6", "recommended, fast and capable"),
-    ("claude-opus-4-6", "most capable, slower"),
-    ("claude-haiku-4-5", "fastest, least capable"),
+_MODELS: tuple[tuple[str | None, str], ...] = (
+    (None, "use CLI default (recommended)"),
+    ("sonnet", "fast and capable"),
+    ("opus", "most capable, slower"),
+    ("haiku", "fastest, least capable"),
 )
+
+# Models that may support the [1m] (1M context) variant.
+_1M_CANDIDATES = {"sonnet", "opus"}
+
+
+def _check_1m_available(model: str) -> bool:
+    """Probe whether a model supports the [1m] variant via the SDK.
+
+    Sends a minimal query with max_turns=1 and checks if the CLI
+    rejects it with an invalid_request error.
+    """
+    from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+    from claude_agent_sdk.types import AssistantMessage
+
+    candidate = f"{model}[1m]"
+
+    async def _probe() -> bool:
+        options = ClaudeAgentOptions(model=candidate, max_turns=1)
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query("hi")
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantMessage):
+                        if getattr(msg, "error", None) == "invalid_request":
+                            return False
+        except Exception:
+            return False
+        return True
+
+    # Unset CLAUDECODE to avoid nested-session guard if running inside
+    # Claude Code (e.g. during development).
+    old = os.environ.pop("CLAUDECODE", None)
+    try:
+        return asyncio.run(_probe())
+    finally:
+        if old is not None:
+            os.environ["CLAUDECODE"] = old
 
 
 def _prompt(
@@ -158,7 +197,8 @@ def _prompt_context() -> tuple[str, dict[str, Any]]:
     # Model selection
     print("\nSelect a model:")
     for i, (model_name, model_desc) in enumerate(_MODELS, 1):
-        print(f"  {i}. {model_name} ({model_desc})")
+        display = model_name or "CLI default"
+        print(f"  {i}. {display} ({model_desc})")
     print(f"  {len(_MODELS) + 1}. Enter a custom model name")
 
     def _validate_model_choice(value: str) -> str | None:
@@ -176,15 +216,25 @@ def _prompt_context() -> tuple[str, dict[str, Any]]:
     else:
         model = _prompt("Custom model name")
 
+    # Check if the selected model supports the [1m] (1M context) variant.
+    if model in _1M_CANDIDATES:
+        print(f"\n  Checking if {model}[1m] (1M context) is available...", end=" ", flush=True)
+        if _check_1m_available(model):
+            model = f"{model}[1m]"
+            print(f"yes! Using {model}.")
+        else:
+            print("not available, using standard context window.")
+
     # Resolve the directory so we store an absolute path.
     resolved_dir = str(Path(directory).expanduser().resolve())
 
     context_dict: dict[str, Any] = {
         "directory": resolved_dir,
         "description": description,
-        "model": model,
         "allowed_tools": ["LSP", "AskUserQuestion"],
     }
+    if model is not None:
+        context_dict["model"] = model
     return name, context_dict
 
 

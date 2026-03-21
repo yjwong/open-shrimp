@@ -164,7 +164,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lines = [
         f"*Context:* `{ctx_name}`",
         f"*Directory:* `{ctx.directory}`",
-        f"*Model:* `{ctx.model}`" + (" \\(override\\)" if scope in _model_overrides else ""),
+        f"*Model:* `{ctx.model or 'CLI default'}`" + (" \\(override\\)" if scope in _model_overrides else ""),
         f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
         f"*Running:* {'Yes' if running else 'No'}",
         f"*Injectable:* {'Yes' if injectable else 'No'}",
@@ -233,11 +233,11 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if current_override:
             text = (
                 f"*Model:* `{current_override}` \\(override\\)\n"
-                f"*Context default:* `{ctx_default_model}`\n\n"
+                f"*Context default:* `{ctx_default_model or 'CLI default'}`\n\n"
                 f"Use `/model reset` to revert\\."
             )
         else:
-            text = f"*Model:* `{ctx_default_model}` \\(context default\\)"
+            text = f"*Model:* `{ctx_default_model or 'CLI default'}` \\(context default\\)"
         for ch in ".-/":
             text = text.replace(ch, f"\\{ch}")
         await message.reply_text(text, parse_mode="MarkdownV2")
@@ -249,7 +249,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if current_override:
             del _model_overrides[scope]
             await close_session(scope)
-            model_escaped = _escape_mdv2(ctx_default_model)
+            model_escaped = _escape_mdv2(ctx_default_model or "CLI default")
             await message.reply_text(
                 f"Model override cleared\\. Using context default: `{model_escaped}`",
                 parse_mode="MarkdownV2",

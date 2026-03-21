@@ -11,7 +11,7 @@ contexts:
   default:
     directory: /home/you/Documents/your-project
     description: "Default context"
-    model: claude-sonnet-4-6
+    # model: sonnet  # Optional. Short names: sonnet, opus, haiku. Omit to use CLI default.
     allowed_tools:
       - LSP
       - AskUserQuestion

@@ -19,8 +19,8 @@ class TelegramConfig:
 class ContextConfig:
     directory: str
     description: str
-    model: str
     allowed_tools: list[str]
+    model: str | None = None
     additional_directories: list[str] = field(default_factory=list)
     default_for_chats: list[int] = field(default_factory=list)
     locked_for_chats: list[int] = field(default_factory=list)
@@ -74,7 +74,7 @@ def _validate_raw(raw: dict) -> None:
     for name, ctx in contexts.items():
         if not isinstance(ctx, dict):
             raise ValueError(f"Context '{name}' must be a mapping")
-        for field_name in ("directory", "description", "model", "allowed_tools"):
+        for field_name in ("directory", "description", "allowed_tools"):
             if field_name not in ctx:
                 raise ValueError(
                     f"Context '{name}' missing required field: {field_name}"
@@ -109,8 +109,8 @@ def _parse(raw: dict) -> Config:
         contexts[name] = ContextConfig(
             directory=ctx["directory"],
             description=ctx["description"],
-            model=ctx["model"],
             allowed_tools=ctx["allowed_tools"],
+            model=ctx.get("model"),
             additional_directories=ctx.get("additional_directories", []),
             default_for_chats=ctx.get("default_for_chats", []),
             locked_for_chats=ctx.get("locked_for_chats", []),
