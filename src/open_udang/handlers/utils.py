@@ -207,10 +207,11 @@ def _build_status_text(
         # Use per-model usage from modelUsage (patched via sdk_patch).
         # Sum across all models (usually just one).
         total_input = sum(m.get("inputTokens", 0) for m in model_usage.values())
-        total_output = sum(m.get("outputTokens", 0) for m in model_usage.values())
         total_cache_read = sum(m.get("cacheReadInputTokens", 0) for m in model_usage.values())
         total_cache_creation = sum(m.get("cacheCreationInputTokens", 0) for m in model_usage.values())
-        total_tokens = total_input + total_output + total_cache_read + total_cache_creation
+        # Output tokens don't occupy the context window — they represent
+        # what the model generated, not what's in the conversation context.
+        total_tokens = total_input + total_cache_read + total_cache_creation
 
         # Use the context window from the primary model.  The CLI reports
         # this per-model; pick the first (usually the only) model.
