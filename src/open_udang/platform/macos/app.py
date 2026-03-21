@@ -74,10 +74,6 @@ class OpenUdangApp(rumps.App):
 
     # ── Lifecycle ──
 
-    @rumps.events.on_screen_sleep
-    def _on_sleep(self) -> None:  # pragma: no cover
-        pass  # keep bot running through sleep
-
     def _did_finish_launching(self) -> None:
         """Called once the run loop is active.  Auto-start if config exists."""
         if Path(DEFAULT_CONFIG_PATH).exists():
