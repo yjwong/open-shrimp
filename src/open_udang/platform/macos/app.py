@@ -133,7 +133,7 @@ class OpenUdangApp(rumps.App):
             self._bot_error = str(exc)
             logger.exception("Bot thread crashed")
             # Schedule status update on the main (rumps) thread
-            rumps.Timer(0, lambda _: self._set_status(f"Error: {self._bot_error}")).start()
+            rumps.Timer(lambda _: self._set_status(f"Error: {self._bot_error}"), 0).start()
         finally:
             loop.close()
             self._bot_loop = None
@@ -255,7 +255,7 @@ def main() -> None:
     app = OpenUdangApp()
     # rumps doesn't expose applicationDidFinishLaunching directly;
     # use a zero-delay timer to fire once the run loop is active.
-    rumps.Timer(0, lambda _: app._did_finish_launching()).start()
+    rumps.Timer(lambda _: app._did_finish_launching(), 0).start()
     app.run()
 
 
