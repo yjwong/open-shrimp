@@ -52,8 +52,7 @@ class StreamResult:
     """Result from stream_response() with session and usage info."""
 
     session_id: str | None = None
-    usage: dict[str, Any] | None = None
-    total_cost_usd: float | None = None
+    model_usage: dict[str, Any] | None = None
     num_turns: int = 0
     duration_ms: int = 0
 
@@ -637,8 +636,7 @@ async def stream_response(
             elif isinstance(event, ResultMessage):
                 result.session_id = event.session_id
                 state.session_id = event.session_id
-                result.usage = event.usage
-                result.total_cost_usd = event.total_cost_usd
+                result.model_usage = getattr(event, "model_usage", None)
                 result.num_turns = event.num_turns
                 result.duration_ms = event.duration_ms
 

@@ -187,8 +187,7 @@ _TODO_STATUS_EMOJI: dict[str, str] = {
 def _build_status_text(
     ctx_name: str,
     ctx: ContextConfig,
-    usage: dict[str, int] | None = None,
-    total_cost_usd: float | None = None,
+    model_usage: dict[str, Any] | None = None,
     todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the pinned status message text in MarkdownV2."""
@@ -204,23 +203,37 @@ def _build_status_text(
         f"\U0001f916 `{escaped_model}`",
     ]
 
-    if usage:
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        cache_read = usage.get("cache_read_input_tokens", 0)
-        cache_creation = usage.get("cache_creation_input_tokens", 0)
+    if model_usage:
+        # Use per-model usage from modelUsage (patched via sdk_patch).
+        # Sum across all models (usually just one).
+        total_input = sum(m.get("inputTokens", 0) for m in model_usage.values())
+        total_output = sum(m.get("outputTokens", 0) for m in model_usage.values())
+        total_cache_read = sum(m.get("cacheReadInputTokens", 0) for m in model_usage.values())
+        total_cache_creation = sum(m.get("cacheCreationInputTokens", 0) for m in model_usage.values())
+        total_tokens = total_input + total_output + total_cache_read + total_cache_creation
 
-        total_tokens = input_tokens + output_tokens + cache_read + cache_creation
+        # Use the context window from the primary model.  The CLI reports
+        # this per-model; pick the first (usually the only) model.
+        first_model = next(iter(model_usage.values()))
+        context_window = first_model.get("contextWindow", _DEFAULT_CONTEXT_LIMIT)
+
+        # Work around CLI bug #35214: contextWindow reports 200k for 1M models.
+        _KNOWN_1M_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6"}
+        for model_name in model_usage:
+            if any(known in model_name for known in _KNOWN_1M_MODELS):
+                context_window = max(context_window, 1_000_000)
+
         total_str = _escape_mdv2(_format_token_count(total_tokens))
-        limit_str = _escape_mdv2(_format_token_count(_DEFAULT_CONTEXT_LIMIT))
-        pct = min(total_tokens / _DEFAULT_CONTEXT_LIMIT * 100, 100)
+        limit_str = _escape_mdv2(_format_token_count(context_window))
+        pct = min(total_tokens / context_window * 100, 100) if context_window > 0 else 0
         pct_str = _escape_mdv2(f"{pct:.0f}%")
 
         lines.append("")
         lines.append(f"\U0001f4ca *Context:* {total_str} / {limit_str} \\({pct_str}\\)")
 
-        if total_cost_usd is not None:
-            cost_str = _escape_mdv2(f"${total_cost_usd:.4f}")
+        total_cost = sum(m.get("costUSD", 0) for m in model_usage.values())
+        if total_cost > 0:
+            cost_str = _escape_mdv2(f"${total_cost:.4f}")
             lines.append(f"\U0001f4b0 *Cost:* {cost_str}")
 
     if todos:
@@ -256,13 +269,12 @@ async def _update_pinned_status(
     ctx_name: str,
     ctx: ContextConfig,
     db: aiosqlite.Connection,
-    usage: dict[str, int] | None = None,
-    total_cost_usd: float | None = None,
+    model_usage: dict[str, Any] | None = None,
     todos: list[dict[str, Any]] | None = None,
 ) -> None:
     """Send or update the pinned status message for a scope."""
     text = _build_status_text(
-        ctx_name, ctx, usage=usage, total_cost_usd=total_cost_usd, todos=todos,
+        ctx_name, ctx, model_usage=model_usage, todos=todos,
     )
     existing_msg_id = await get_pinned_message_id(db, scope)
 
