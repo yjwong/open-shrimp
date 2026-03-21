@@ -217,12 +217,6 @@ def _build_status_text(
         first_model = next(iter(model_usage.values()))
         context_window = first_model.get("contextWindow", _DEFAULT_CONTEXT_LIMIT)
 
-        # Work around CLI bug #35214: contextWindow reports 200k for 1M models.
-        _KNOWN_1M_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6"}
-        for model_name in model_usage:
-            if any(known in model_name for known in _KNOWN_1M_MODELS):
-                context_window = max(context_window, 1_000_000)
-
         total_str = _escape_mdv2(_format_token_count(total_tokens))
         limit_str = _escape_mdv2(_format_token_count(context_window))
         pct = min(total_tokens / context_window * 100, 100) if context_window > 0 else 0
