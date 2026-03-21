@@ -47,6 +47,7 @@ OPTIONS: dict = {
         "telegram",
         "httpx",
         "httpcore",
+        "anyio",
         "aiosqlite",
         "yaml",
         "mistune",
