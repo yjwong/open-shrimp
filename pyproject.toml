@@ -22,8 +22,14 @@ dependencies = [
     "platformdirs>=4.0",
 ]
 
+[project.optional-dependencies]
+macos = ["rumps>=0.4"]
+
 [project.scripts]
 openudang = "open_udang.main:main"
+
+[project.gui-scripts]
+openudang-app = "open_udang.platform.macos.app:main"
 
 [tool.hatch.build.targets.sdist.force-include]
 "web/review-app/dist" = "web/review-app/dist"

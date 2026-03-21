@@ -69,7 +69,13 @@ async def _run_http_server(config: "Config", db: "aiosqlite.Connection") -> None
     await server.serve()
 
 
-async def _async_main(config_path: str) -> None:
+async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = None) -> None:
+    """Run the bot and HTTP server until *stop_event* is set.
+
+    This is the shared async entry point used by both the CLI (``main()``)
+    and the macOS menu-bar app.  When *stop_event* is ``None`` (the CLI
+    path), SIGTERM/SIGINT handlers are installed automatically.
+    """
     config = load_config(config_path)
     logger.info("Config loaded from %s", config_path)
     logger.info("Contexts: %s", ", ".join(config.contexts.keys()))
@@ -93,11 +99,11 @@ async def _async_main(config_path: str) -> None:
             )
 
     # Set up graceful shutdown
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop_event.set)
+    if stop_event is None:
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop_event.set)
 
     bot_task = asyncio.create_task(run_bot(config, db))
     http_task = asyncio.create_task(_run_http_server(config, db))
@@ -121,6 +127,10 @@ async def _async_main(config_path: str) -> None:
 
     await db.close()
     logger.info("Shutdown complete")
+
+
+async def _async_main(config_path: str) -> None:
+    await run_bot_async(config_path)
 
 
 def main() -> None:
