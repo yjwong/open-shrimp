@@ -86,10 +86,10 @@ class OpenUdangApp(rumps.App):
         from open_udang.platform.macos.app_setup import run_setup_wizard
 
         self._set_status("Setup…")
-        if run_setup_wizard():
-            self._start_bot()
-        else:
-            self._set_status("No config")
+        run_setup_wizard(
+            on_complete=lambda: self._start_bot(),
+            on_cancel=lambda: self._set_status("No config"),
+        )
 
     # ── Bot lifecycle ──
 
@@ -277,8 +277,11 @@ def main() -> None:
 
     app = OpenUdangApp()
     # rumps doesn't expose applicationDidFinishLaunching directly;
-    # use a zero-delay timer to fire once the run loop is active.
-    rumps.Timer(lambda _: app._did_finish_launching(), 0).start()
+    # use a one-shot timer to fire once the run loop is active.
+    def _once(timer: rumps.Timer) -> None:
+        timer.stop()
+        app._did_finish_launching()
+    rumps.Timer(_once, 0).start()
     app.run()
 
 
