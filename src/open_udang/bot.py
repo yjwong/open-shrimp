@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from telegram import BotCommand, Update
 from telegram.ext import (
@@ -23,7 +24,7 @@ from telegram.ext import (
 import aiosqlite
 
 from open_udang.client_manager import close_all_sessions
-from open_udang.config import Config
+from open_udang.config import Config, load_config
 from open_udang.dispatch_registry import register_dispatch
 from open_udang.handlers.approval import handle_approval_callback
 from open_udang.handlers.commands import (
@@ -81,6 +82,57 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     logger.debug("Unhandled callback data: %s", data)
 
 
+# ── Config hot-reload ──
+
+
+async def _watch_config(config_path: str, bot_data: dict, interval: float = 5.0) -> None:
+    """Poll the config file for changes and hot-reload into bot_data.
+
+    Fields like ``telegram.token`` and ``review.*`` require a full restart;
+    changes to those are logged as warnings but still applied so that the
+    next restart picks them up.
+    """
+    path = Path(config_path)
+    last_mtime = path.stat().st_mtime
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            mtime = path.stat().st_mtime
+            if mtime == last_mtime:
+                continue
+            last_mtime = mtime
+
+            new_config = load_config(config_path)
+            old_config: Config = bot_data["config"]
+
+            # Warn about fields that need a restart to take full effect.
+            if new_config.telegram.token != old_config.telegram.token:
+                logger.warning(
+                    "Config reload: telegram.token changed — restart required"
+                )
+            if new_config.review != old_config.review:
+                logger.warning(
+                    "Config reload: review.* changed — restart required to take effect"
+                )
+
+            bot_data["config"] = new_config
+
+            # Log context-level changes.
+            old_names = set(old_config.contexts)
+            new_names = set(new_config.contexts)
+            added = new_names - old_names
+            removed = old_names - new_names
+            if added:
+                logger.info("Config reload: added contexts: %s", added)
+            if removed:
+                logger.info("Config reload: removed contexts: %s", removed)
+            if not added and not removed:
+                logger.info("Config reloaded")
+        except Exception:
+            logger.exception("Config reload failed, keeping current config")
+
+
 # ── Application setup ──
 
 
@@ -122,7 +174,9 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     return app
 
 
-async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
+async def run_bot(
+    config: Config, db: aiosqlite.Connection, config_path: str | None = None
+) -> None:
     """Start the bot with long polling."""
     app = build_application(config, db)
     logger.info("Starting bot with long polling")
@@ -137,7 +191,8 @@ async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
     async def _dispatch(prompt: str, scope: ChatScope) -> None:
         # Build a minimal ContextTypes-compatible object.  _dispatch_to_agent
         # only uses context.bot, context.bot_data, and asyncio.create_task.
-        await _dispatch_to_agent(prompt, [], scope, config, db, app)
+        # Read config from bot_data so hot-reloaded config is used.
+        await _dispatch_to_agent(prompt, [], scope, app.bot_data["config"], db, app)
 
     register_dispatch(_dispatch)
 
@@ -168,6 +223,11 @@ async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
             "Install python-telegram-bot[job-queue] to enable."
         )
 
+    # Start config file watcher for live reloading.
+    watcher_task = None
+    if config_path:
+        watcher_task = asyncio.create_task(_watch_config(config_path, app.bot_data))
+
     # Keep running until stopped
     stop_event = asyncio.Event()
     try:
@@ -175,6 +235,8 @@ async def run_bot(config: Config, db: aiosqlite.Connection) -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        if watcher_task:
+            watcher_task.cancel()
         await close_all_sessions()
         await app.updater.stop()
         await app.stop()

@@ -105,7 +105,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop_event.set)
 
-    bot_task = asyncio.create_task(run_bot(config, db))
+    bot_task = asyncio.create_task(run_bot(config, db, config_path=config_path))
     http_task = asyncio.create_task(_run_http_server(config, db))
 
     await stop_event.wait()
