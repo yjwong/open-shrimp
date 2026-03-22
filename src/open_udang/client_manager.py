@@ -12,6 +12,7 @@ client.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -288,10 +289,11 @@ async def close_session(scope: ChatScope) -> None:
     if session is None:
         return
     try:
-        await session.client.disconnect()
+        async with asyncio.timeout(5):
+            await session.client.disconnect()
         logger.info("Closed client for scope %s", scope)
-    except Exception:
-        logger.debug("Error closing client for scope %s", scope, exc_info=True)
+    except (Exception, TimeoutError):
+        logger.debug("Error/timeout closing client for scope %s", scope, exc_info=True)
     if session.container_wrapper_path:
         if sys.platform == "darwin":
             sandbox_cleanup_wrapper(session.container_wrapper_path)
