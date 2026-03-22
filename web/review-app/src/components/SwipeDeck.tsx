@@ -13,6 +13,7 @@ interface SwipeDeckProps {
   files: FileSummary[];
   chatId: string;
   dir: string;
+  threadId: string | null;
   onRefresh: () => void;
   onNeedMore?: () => void;
 }
@@ -29,6 +30,7 @@ export function SwipeDeck({
   files,
   chatId,
   dir,
+  threadId,
   onRefresh,
   onNeedMore,
 }: SwipeDeckProps) {
@@ -75,7 +77,7 @@ export function SwipeDeck({
         try {
           // If we staged the hunk, unstage it
           if (lastDecision.action === "staged" && !lastDecision.wasAlreadyStaged) {
-            await unstageHunk(lastDecision.hunkId, chatId, dir);
+            await unstageHunk(lastDecision.hunkId, chatId, dir, threadId);
           }
 
           setHistory((h) => h.slice(0, -1));
@@ -103,7 +105,7 @@ export function SwipeDeck({
         setIsProcessing(true);
         try {
           if (!currentHunk.staged) {
-            await stageHunk(currentHunk.id, chatId, dir);
+            await stageHunk(currentHunk.id, chatId, dir, threadId);
           }
           setHistory((h) => [
             ...h,
@@ -132,11 +134,11 @@ export function SwipeDeck({
         setIsProcessing(true);
         try {
           if (currentHunk.staged) {
-            await unstageHunk(currentHunk.id, chatId, dir);
+            await unstageHunk(currentHunk.id, chatId, dir, threadId);
           } else if (currentHunk.is_new_file) {
             // Clean up the intent-to-add index entry so the file
             // goes back to being truly untracked in git status.
-            await skipHunk(currentHunk.id, chatId, dir);
+            await skipHunk(currentHunk.id, chatId, dir, threadId);
           }
           setHistory((h) => [
             ...h,
@@ -319,7 +321,7 @@ export function SwipeDeck({
 
   const handleCommit = useCallback(async () => {
     try {
-      await commitChanges(chatId);
+      await commitChanges(chatId, threadId);
       // Close the Mini App after successfully dispatching the commit.
       window.Telegram?.WebApp?.close();
     } catch (err) {

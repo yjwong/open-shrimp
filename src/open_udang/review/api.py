@@ -68,7 +68,8 @@ async def _authenticate(request: Request) -> int:
 
 
 async def _resolve_context(
-    request: Request, chat_id: int, dir_index: int = 0
+    request: Request, chat_id: int, dir_index: int = 0,
+    thread_id: int | None = None,
 ) -> tuple[str, str]:
     """Resolve the active context and directory for a chat.
 
@@ -77,6 +78,7 @@ async def _resolve_context(
         chat_id: Telegram chat ID.
         dir_index: Zero-based directory index (0 = main directory,
             1+ = additional_directories).
+        thread_id: Optional Telegram message thread ID (for forum topics).
 
     Returns:
         (context_name, working_directory).
@@ -88,8 +90,7 @@ async def _resolve_context(
     config: Config = request.app.state.config
     db: aiosqlite.Connection = request.app.state.db
 
-    # Review API operates on private chats only — thread_id is always None.
-    context_name = await get_active_context(db, ChatScope(chat_id))
+    context_name = await get_active_context(db, ChatScope(chat_id, thread_id))
     if context_name is None:
         context_name = config.default_context
 
@@ -122,13 +123,15 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
     offset = int(request.query_params.get("offset", "0"))
     limit = int(request.query_params.get("limit", "20"))
     dir_index = int(request.query_params.get("dir", "0"))
+    thread_id_raw = request.query_params.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
     include_untracked = request.query_params.get(
         "include_untracked", "true"
     ).lower() in ("true", "1", "yes")
 
     try:
         context_name, directory = await _resolve_context(
-            request, chat_id, dir_index
+            request, chat_id, dir_index, thread_id
         )
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
@@ -251,12 +254,15 @@ async def stage_endpoint(request: Request) -> JSONResponse:
     except (TypeError, ValueError):
         dir_index = 0
 
+    thread_id_raw = body.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
     context_name_hint = None
     if chat_id is not None:
         try:
             chat_id = int(chat_id)
             context_name_hint, _ = await _resolve_context(
-                request, chat_id, dir_index
+                request, chat_id, dir_index, thread_id
             )
         except (ValueError, AuthError):
             pass
@@ -327,12 +333,15 @@ async def unstage_endpoint(request: Request) -> JSONResponse:
     except (TypeError, ValueError):
         dir_index = 0
 
+    thread_id_raw = body.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
     context_name_hint = None
     if chat_id is not None:
         try:
             chat_id = int(chat_id)
             context_name_hint, _ = await _resolve_context(
-                request, chat_id, dir_index
+                request, chat_id, dir_index, thread_id
             )
         except (ValueError, AuthError):
             pass
@@ -408,12 +417,15 @@ async def skip_endpoint(request: Request) -> JSONResponse:
     except (TypeError, ValueError):
         dir_index = 0
 
+    thread_id_raw = body.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
     context_name_hint = None
     if chat_id is not None:
         try:
             chat_id = int(chat_id)
             context_name_hint, _ = await _resolve_context(
-                request, chat_id, dir_index
+                request, chat_id, dir_index, thread_id
             )
         except (ValueError, AuthError):
             pass
@@ -486,6 +498,9 @@ async def commit_endpoint(request: Request) -> JSONResponse:
             {"error": "chat_id is required (integer)"}, status_code=400
         )
 
+    thread_id_raw = body.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
     from open_udang.dispatch_registry import dispatch as dispatch_to_agent
 
     prompt = (
@@ -493,7 +508,7 @@ async def commit_endpoint(request: Request) -> JSONResponse:
         "Generate an appropriate commit message based on the staged diff."
     )
     try:
-        await dispatch_to_agent(prompt, chat_id)
+        await dispatch_to_agent(prompt, chat_id, thread_id)
     except RuntimeError as e:
         logger.error("commit_endpoint: %s", e)
         return JSONResponse(

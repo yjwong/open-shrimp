@@ -17,6 +17,7 @@ interface UseHunksResult {
 export function useHunks(
   chatId: string | null,
   dir: string,
+  threadId: string | null = null,
 ): UseHunksResult {
   const [hunks, setHunks] = useState<Hunk[]>([]);
   const [totalHunks, setTotalHunks] = useState(0);
@@ -60,7 +61,7 @@ export function useHunks(
       allLoadedRef.current = false;
 
       try {
-        const result = await fetchHunks(chatId!, dir, 0, PAGE_SIZE);
+        const result = await fetchHunks(chatId!, dir, 0, PAGE_SIZE, threadId);
         if (!cancelled) {
           setHunks(result.hunks);
           setTotalHunks(result.total_hunks);
@@ -86,7 +87,7 @@ export function useHunks(
     return () => {
       cancelled = true;
     };
-  }, [chatId, dir, refreshKey]);
+  }, [chatId, dir, threadId, refreshKey]);
 
   const loadMore = useCallback(() => {
     if (!chatId || loadingMoreRef.current || allLoadedRef.current) return;
@@ -94,7 +95,7 @@ export function useHunks(
     loadingMoreRef.current = true;
     const offset = nextOffsetRef.current;
 
-    fetchHunks(chatId, dir, offset, PAGE_SIZE)
+    fetchHunks(chatId, dir, offset, PAGE_SIZE, threadId)
       .then((result) => {
         setHunks((prev) => [...prev, ...result.hunks]);
         setTotalHunks(result.total_hunks);
@@ -110,7 +111,7 @@ export function useHunks(
       .finally(() => {
         loadingMoreRef.current = false;
       });
-  }, [chatId, dir]);
+  }, [chatId, dir, threadId]);
 
   return { hunks, totalHunks, files, loading, error, refresh, loadMore };
 }

@@ -2,20 +2,18 @@ import { useMemo } from "react";
 import { useHunks } from "./hooks/useHunks";
 import { SwipeDeck } from "./components/SwipeDeck";
 
-function getChatId(): string | null {
+function getParams() {
   const params = new URLSearchParams(window.location.search);
-  return params.get("chat_id");
-}
-
-function getDir(): string {
-  const params = new URLSearchParams(window.location.search);
-  return params.get("dir") ?? "0";
+  return {
+    chatId: params.get("chat_id"),
+    dir: params.get("dir") ?? "0",
+    threadId: params.get("thread_id"),
+  };
 }
 
 export default function App() {
-  const chatId = useMemo(() => getChatId(), []);
-  const dir = useMemo(() => getDir(), []);
-  const { hunks, totalHunks, files, loading, error, refresh, loadMore } = useHunks(chatId, dir);
+  const { chatId, dir, threadId } = useMemo(() => getParams(), []);
+  const { hunks, totalHunks, files, loading, error, refresh, loadMore } = useHunks(chatId, dir, threadId);
 
   if (loading) {
     return (
@@ -50,6 +48,7 @@ export default function App() {
       files={files}
       chatId={chatId!}
       dir={dir}
+      threadId={threadId}
       onRefresh={refresh}
       onNeedMore={loadMore}
     />

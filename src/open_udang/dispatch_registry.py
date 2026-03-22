@@ -29,14 +29,13 @@ def register_dispatch(fn: Callable[[str, ChatScope], Awaitable[None]]) -> None:
     logger.info("Agent dispatch callback registered")
 
 
-async def dispatch(prompt: str, chat_id: int) -> None:
+async def dispatch(prompt: str, chat_id: int, thread_id: int | None = None) -> None:
     """Dispatch a prompt to the agent for the given chat.
 
-    Wraps the bare ``chat_id`` in a ``ChatScope`` (thread_id=None) since
-    callers like the review API only operate on private chats.
+    Wraps ``chat_id`` and optional ``thread_id`` in a ``ChatScope``.
 
     Raises RuntimeError if no callback has been registered yet.
     """
     if _dispatch_fn is None:
         raise RuntimeError("Agent dispatch not registered — bot may not be running")
-    await _dispatch_fn(prompt, ChatScope(chat_id))
+    await _dispatch_fn(prompt, ChatScope(chat_id, thread_id))

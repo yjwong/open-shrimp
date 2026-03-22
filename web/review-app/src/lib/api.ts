@@ -15,6 +15,7 @@ export async function fetchHunks(
   dir: string,
   offset: number = 0,
   limit: number = 20,
+  threadId: string | null = null,
 ): Promise<HunkResult> {
   const params = new URLSearchParams({
     chat_id: chatId,
@@ -22,6 +23,9 @@ export async function fetchHunks(
     offset: String(offset),
     limit: String(limit),
   });
+  if (threadId !== null) {
+    params.set("thread_id", threadId);
+  }
 
   const response = await fetch(`${BASE_URL}/hunks?${params}`, {
     headers: getAuthHeader(),
@@ -34,14 +38,14 @@ export async function fetchHunks(
   return response.json() as Promise<HunkResult>;
 }
 
-export async function stageHunk(hunkId: string, chatId: string, dir: string): Promise<void> {
+export async function stageHunk(hunkId: string, chatId: string, dir: string, threadId: string | null = null): Promise<void> {
   const response = await fetch(`${BASE_URL}/stage`, {
     method: "POST",
     headers: {
       ...getAuthHeader(),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir }),
+    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir, ...(threadId !== null && { thread_id: threadId }) }),
   });
 
   if (response.status === 409) {
@@ -53,14 +57,14 @@ export async function stageHunk(hunkId: string, chatId: string, dir: string): Pr
   }
 }
 
-export async function unstageHunk(hunkId: string, chatId: string, dir: string): Promise<void> {
+export async function unstageHunk(hunkId: string, chatId: string, dir: string, threadId: string | null = null): Promise<void> {
   const response = await fetch(`${BASE_URL}/unstage`, {
     method: "POST",
     headers: {
       ...getAuthHeader(),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir }),
+    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir, ...(threadId !== null && { thread_id: threadId }) }),
   });
 
   if (response.status === 409) {
@@ -72,14 +76,14 @@ export async function unstageHunk(hunkId: string, chatId: string, dir: string): 
   }
 }
 
-export async function skipHunk(hunkId: string, chatId: string, dir: string): Promise<void> {
+export async function skipHunk(hunkId: string, chatId: string, dir: string, threadId: string | null = null): Promise<void> {
   const response = await fetch(`${BASE_URL}/skip`, {
     method: "POST",
     headers: {
       ...getAuthHeader(),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir }),
+    body: JSON.stringify({ hunk_id: hunkId, chat_id: chatId, dir, ...(threadId !== null && { thread_id: threadId }) }),
   });
 
   if (response.status === 409) {
@@ -91,14 +95,14 @@ export async function skipHunk(hunkId: string, chatId: string, dir: string): Pro
   }
 }
 
-export async function commitChanges(chatId: string): Promise<void> {
+export async function commitChanges(chatId: string, threadId: string | null = null): Promise<void> {
   const response = await fetch(`${BASE_URL}/commit`, {
     method: "POST",
     headers: {
       ...getAuthHeader(),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ chat_id: chatId }),
+    body: JSON.stringify({ chat_id: chatId, ...(threadId !== null && { thread_id: threadId }) }),
   });
 
   if (!response.ok) {

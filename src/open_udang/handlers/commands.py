@@ -449,9 +449,10 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     escaped_context = _escape_mdv2(context_name)
     dirs = [ctx.directory] + (ctx.additional_directories or [])
+    thread_param = f"&thread_id={scope.thread_id}" if scope.thread_id is not None else ""
 
     if len(dirs) == 1:
-        app_url = f"{base_url}/app/?chat_id={scope.chat_id}"
+        app_url = f"{base_url}/app/?chat_id={scope.chat_id}{thread_param}"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 text="\U0001f4dd Open Review",
@@ -467,7 +468,7 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Multiple directories: one button per directory.
         rows = []
         for i, d in enumerate(dirs):
-            app_url = f"{base_url}/app/?chat_id={scope.chat_id}&dir={i}"
+            app_url = f"{base_url}/app/?chat_id={scope.chat_id}&dir={i}{thread_param}"
             basename = d.rstrip("/").rsplit("/", 1)[-1]
             rows.append([InlineKeyboardButton(
                 text=f"\U0001f4c1 {basename}",
