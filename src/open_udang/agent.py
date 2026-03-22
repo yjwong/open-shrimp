@@ -237,6 +237,7 @@ async def run_agent(
         include_partial_messages=True,
         stderr=_log_stderr,
         can_use_tool=can_use_tool,
+        max_buffer_size=10 * 1024 * 1024,  # 10MB
     )
 
     # Save attachments to temp files and build the prompt with file references.

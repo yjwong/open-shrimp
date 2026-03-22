@@ -182,6 +182,7 @@ async def get_or_create_session(
         stderr=_log_stderr,
         can_use_tool=can_use_tool,
         cli_path=cli_path,
+        max_buffer_size=10 * 1024 * 1024,  # 10MB
     )
 
     system_prompt_parts: list[str] = []

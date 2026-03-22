@@ -426,6 +426,7 @@ async def _run_scheduled_prompt(
         add_dirs=ctx_config.additional_directories,
         setting_sources=["project", "user", "local"],
         include_partial_messages=True,
+        max_buffer_size=10 * 1024 * 1024,  # 10MB
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
