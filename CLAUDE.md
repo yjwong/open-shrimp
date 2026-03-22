@@ -76,6 +76,10 @@ src/open_udang/
     markdown.py       # GFM -> Telegram MarkdownV2 conversion
     stt.py            # Speech-to-text: download/invoke moonshine-stt binary
     service.py        # install/uninstall as systemd/launchd service
+    terminal/
+        api.py       # SSE tail + read endpoints for background task output
+web/terminal-app/         # Terminal Mini App frontend (TypeScript, xterm.js)
+    src/main.ts      # Entry point: xterm.js terminal, SSE streaming
 moonshine-stt/            # Subproject: standalone STT binary (packaged via PyApp)
     pyproject.toml
     src/moonshine_stt/
@@ -105,6 +109,7 @@ Key fields:
 - **Group chats**: Only respond to @mentions and replies. Check `message.entities` for bot mention or `message.reply_to_message`.
 - **Inline keyboards**: Use `InlineKeyboardMarkup` for tool approval buttons. Handle via `CallbackQueryHandler`.
 - **Forum topics**: Full support for Telegram forum (threaded) chats. Each forum topic gets its own independent ChatScope — separate context, session, and state. The bot responds to all messages in forum topics (no @mention required). In forum topics, an `edit_topic` MCP tool is auto-registered so Claude can set descriptive topic titles with optional emoji icons.
+- **Terminal Mini App**: When a Bash tool runs with `run_in_background`, the tool result message includes a "View output" `web_app` button that opens an xterm.js-based terminal viewer. The viewer loads existing output via `/api/terminal/read`, then streams new output via SSE at `/api/terminal/tail`. Task output files are discovered under `/tmp/claude-<uid>/`. Served at `/terminal/`.
 - **Parse mode**: Use `MarkdownV2` parse mode. Escape special characters: `_*[]()~>#+-=|{}.!`
 
 ## Commands
