@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import aiosqlite
+from platformdirs import user_data_path
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def _thread_id_to_db(thread_id: int | None) -> int:
     return thread_id if thread_id is not None else 0
 
 
-DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "openudang" / "sessions.db"
+DEFAULT_DB_PATH = user_data_path("openudang") / "sessions.db"
 
 _CREATE_SESSIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS sessions (
