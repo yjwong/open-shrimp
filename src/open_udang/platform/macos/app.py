@@ -32,23 +32,51 @@ class OpenUdangApp(rumps.App):
     """Menu bar application that manages the OpenUdang Telegram bot."""
 
     @staticmethod
-    def _find_menubar_icon() -> str | None:
-        """Locate the menu bar icon, handling both source and .app bundle layouts."""
+    def _find_icon(name: str) -> Path | None:
+        """Locate a resource file, handling both source and .app bundle layouts."""
         # In a py2app bundle, resources land in Contents/Resources/ directly.
         # In source, they're under platform/macos/resources/.
-        candidates = [
-            Path(__file__).parent / "resources" / "menubar-icon.png",  # source
-            Path(__file__).parent / "menubar-icon.png",  # .app bundle
-        ]
-        for p in candidates:
-            if p.exists():
-                return str(p)
+        for directory in (
+            Path(__file__).parent / "resources",  # source tree
+            Path(__file__).parent,  # .app bundle
+        ):
+            path = directory / name
+            if path.exists():
+                return path
         return None
+
+    @staticmethod
+    def _make_menubar_icon() -> "NSImage | None":  # type: ignore[name-defined]  # noqa: F821
+        """Build an NSImage with 1x and 2x representations for retina support."""
+        from AppKit import NSImage, NSImageRep  # type: ignore[import-not-found]
+
+        icon_1x = OpenUdangApp._find_icon("menubar-icon.png")
+        if icon_1x is None:
+            return None
+
+        image = NSImage.alloc().initWithSize_((20, 20))
+        image.setTemplate_(True)
+
+        # Add the 1x representation
+        rep_1x = NSImageRep.imageRepWithContentsOfFile_(str(icon_1x))
+        if rep_1x:
+            rep_1x.setSize_((20, 20))
+            image.addRepresentation_(rep_1x)
+
+        # Add the 2x representation if available
+        icon_2x = OpenUdangApp._find_icon("menubar-icon@2x.png")
+        if icon_2x:
+            rep_2x = NSImageRep.imageRepWithContentsOfFile_(str(icon_2x))
+            if rep_2x:
+                rep_2x.setSize_((20, 20))
+                image.addRepresentation_(rep_2x)
+
+        return image
 
     def __init__(self) -> None:
         super().__init__(
             "OpenUdang",
-            icon=self._find_menubar_icon(),
+            icon=None,
             template=True,
             quit_button=None,  # We add our own Quit item for cleanup
         )
@@ -90,6 +118,13 @@ class OpenUdangApp(rumps.App):
 
     def _did_finish_launching(self) -> None:
         """Called once the run loop is active.  Auto-start if config exists."""
+        # Apply the retina-aware menu bar icon now that the NSStatusItem exists.
+        icon = self._make_menubar_icon()
+        if icon is not None:
+            self._icon_nsimage = icon
+            self._nsapp.setStatusBarIcon()
+            self.title = None
+
         if Path(DEFAULT_CONFIG_PATH).exists():
             self._start_bot()
         else:
