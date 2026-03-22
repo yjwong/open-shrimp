@@ -261,7 +261,7 @@ def build_cli_wrapper(
         prefix=f"openudang-sandbox-{context_name}-",
         suffix=".sb",
     )
-    with os.fdopen(profile_fd, "w") as f:
+    with os.fdopen(profile_fd, "w", encoding="utf-8") as f:
         f.write(profile)
 
     script = (
@@ -277,7 +277,7 @@ def build_cli_wrapper(
         prefix=f"openudang-sandbox-{context_name}-",
         suffix=".sh",
     )
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(script)
     os.chmod(wrapper_path, stat.S_IRWXU)
 
@@ -294,7 +294,7 @@ def cleanup_wrapper(wrapper_path: str) -> None:
     """Remove a previously generated wrapper script and its profile."""
     # The profile path is embedded in the wrapper — extract and clean it up.
     try:
-        with open(wrapper_path) as f:
+        with open(wrapper_path, encoding="utf-8") as f:
             content = f.read()
         # Extract profile path from: sandbox-exec -f "<profile_path>"
         for line in content.splitlines():
