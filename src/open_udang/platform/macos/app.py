@@ -31,13 +31,24 @@ _LOG_DIR = Path.home() / "Library" / "Logs" / "OpenUdang"
 class OpenUdangApp(rumps.App):
     """Menu bar application that manages the OpenUdang Telegram bot."""
 
-    _RESOURCES_DIR = Path(__file__).parent / "resources"
-    _MENUBAR_ICON = str(_RESOURCES_DIR / "menubar-icon.png")
+    @staticmethod
+    def _find_menubar_icon() -> str | None:
+        """Locate the menu bar icon, handling both source and .app bundle layouts."""
+        # In a py2app bundle, resources land in Contents/Resources/ directly.
+        # In source, they're under platform/macos/resources/.
+        candidates = [
+            Path(__file__).parent / "resources" / "menubar-icon.png",  # source
+            Path(__file__).parent / "menubar-icon.png",  # .app bundle
+        ]
+        for p in candidates:
+            if p.exists():
+                return str(p)
+        return None
 
     def __init__(self) -> None:
         super().__init__(
             "OpenUdang",
-            icon=self._MENUBAR_ICON,
+            icon=self._find_menubar_icon(),
             template=True,
             quit_button=None,  # We add our own Quit item for cleanup
         )
