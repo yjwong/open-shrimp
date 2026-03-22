@@ -28,6 +28,10 @@ jobs:
         working-directory: web/review-app
         run: npm ci && npm run build
 
+      - name: Build terminal app frontend
+        working-directory: web/terminal-app
+        run: npm ci && npm run build
+
       - name: Build open-udang sdist
         run: uv build --sdist
 
@@ -144,6 +148,10 @@ jobs:
 
       - name: Build review app frontend
         working-directory: web/review-app
+        run: npm ci && npm run build
+
+      - name: Build terminal app frontend
+        working-directory: web/terminal-app
         run: npm ci && npm run build
 
       - name: Install dependencies
