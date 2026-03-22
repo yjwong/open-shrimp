@@ -31,10 +31,13 @@ _LOG_DIR = Path.home() / "Library" / "Logs" / "OpenUdang"
 class OpenUdangApp(rumps.App):
     """Menu bar application that manages the OpenUdang Telegram bot."""
 
+    _RESOURCES_DIR = Path(__file__).parent / "resources"
+    _MENUBAR_ICON = str(_RESOURCES_DIR / "menubar-icon.png")
+
     def __init__(self) -> None:
         super().__init__(
             "OpenUdang",
-            icon=None,  # Uses title text as fallback; icon set in Phase 3
+            icon=self._MENUBAR_ICON,
             template=True,
             quit_button=None,  # We add our own Quit item for cleanup
         )
@@ -183,12 +186,10 @@ class OpenUdangApp(rumps.App):
 
     def _set_status(self, status: str) -> None:
         self._status_item.title = f"Status: {status}"
-        if status == "Running":
-            self.title = "\U0001F990"  # shrimp emoji as menu bar icon placeholder
-        elif "Error" in status:
-            self.title = "\u26a0\ufe0f"  # warning
-        else:
-            self.title = "OpenUdang"
+        # Clear the title so only the icon is shown in the menu bar.
+        # rumps displays the title *next to* the icon; setting it to None
+        # keeps the menu bar clean.
+        self.title = None
 
 
 # ── LaunchAgent management ──
