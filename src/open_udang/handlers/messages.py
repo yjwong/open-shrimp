@@ -587,11 +587,12 @@ async def _start_agent_task(
 
             while True:
                 events = receive_events(session)
-                # Build terminal Mini App base URL for background
-                # task "View output" buttons.
-                terminal_url = None
+                # Build terminal base URL for background task
+                # "View output" buttons.
                 if config.review.public_url:
-                    terminal_url = config.review.public_url.rstrip("/")
+                    terminal_url: str | None = config.review.public_url.rstrip("/")
+                else:
+                    terminal_url = f"https://{config.review.host}:{config.review.port}"
 
                 result = await stream_response(
                     bot=context.bot,

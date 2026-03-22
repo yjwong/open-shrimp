@@ -1,9 +1,6 @@
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 
-// ── Telegram WebApp auth ──
+// ── Globals ──
 
 declare global {
   interface Window {
@@ -13,124 +10,171 @@ declare global {
         close: () => void;
         ready: () => void;
         expand: () => void;
+        viewportHeight: number;
+        viewportStableHeight: number;
+        onEvent: (event: string, cb: () => void) => void;
       };
     };
   }
 }
 
-function getAuthHeader(): Record<string, string> {
-  const initData = window.Telegram?.WebApp?.initData;
-  if (!initData) {
-    return {};
+const loadingEl = document.getElementById("loading")!;
+
+function showError(msg: string): void {
+  loadingEl.style.color = "#f7768e";
+  loadingEl.textContent = msg;
+}
+
+function showStatus(msg: string): void {
+  loadingEl.textContent = msg;
+}
+
+// ── Main (wrapped in try-catch for visible errors) ──
+
+main().catch((e) => showError(`Fatal: ${e}`));
+
+async function main(): Promise<void> {
+  showStatus("Initializing...");
+
+  // Telegram SDK
+  try {
+    window.Telegram?.WebApp?.ready();
+    window.Telegram?.WebApp?.expand();
+  } catch {
+    // Not in Telegram.
   }
-  return { Authorization: `tg-init-data ${initData}` };
-}
 
-// ── Parse query params ──
+  const params = new URLSearchParams(window.location.search);
+  const taskId = params.get("task_id");
 
-const params = new URLSearchParams(window.location.search);
-const taskId = params.get("task_id");
+  if (!taskId) {
+    showError("No task_id provided.");
+    return;
+  }
 
-// ── Setup ──
+  showStatus(`Loading xterm.js...`);
 
-const container = document.getElementById("terminal-container")!;
+  // Dynamic import so we can catch load errors.
+  const { Terminal } = await import("@xterm/xterm");
+  const { FitAddon } = await import("@xterm/addon-fit");
 
-document.body.style.margin = "0";
-document.body.style.padding = "0";
-document.body.style.overflow = "hidden";
-document.body.style.backgroundColor = "#1a1b26";
-container.style.width = "100vw";
-container.style.height = "100vh";
+  showStatus("Creating terminal...");
 
-try {
-  window.Telegram?.WebApp?.ready();
-  window.Telegram?.WebApp?.expand();
-} catch {
-  // Not in Telegram.
-}
+  const container = document.getElementById("terminal-container")!;
 
-// ── Terminal setup ──
+  // Inject styles.
+  const style = document.createElement("style");
+  style.textContent = `
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #1a1b26;
+    }
+    #terminal-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+    }
+    #loading {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      padding: 16px;
+      color: #a9b1d6;
+      background: #1a1b26;
+      font-family: monospace;
+      font-size: 13px;
+      z-index: 9999;
+    }
+  `;
+  document.head.appendChild(style);
 
-const term = new Terminal({
-  cursorBlink: false,
-  cursorStyle: "bar",
-  disableStdin: true,
-  scrollback: 10000,
-  fontSize: 13,
-  fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", monospace',
-  theme: {
-    background: "#1a1b26",
-    foreground: "#a9b1d6",
-    cursor: "#a9b1d6",
-    selectionBackground: "#33467c",
-    black: "#32344a",
-    red: "#f7768e",
-    green: "#9ece6a",
-    yellow: "#e0af68",
-    blue: "#7aa2f7",
-    magenta: "#ad8ee6",
-    cyan: "#449dab",
-    white: "#787c99",
-    brightBlack: "#444b6a",
-    brightRed: "#ff7a93",
-    brightGreen: "#b9f27c",
-    brightYellow: "#ff9e64",
-    brightBlue: "#7da6ff",
-    brightMagenta: "#bb9af7",
-    brightCyan: "#0db9d7",
-    brightWhite: "#acb0d0",
-  },
-});
+  const term = new Terminal({
+    convertEol: true,
+    cursorBlink: false,
+    cursorStyle: "bar",
+    disableStdin: true,
+    scrollback: 10000,
+    fontSize: 13,
+    fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", monospace',
+    theme: {
+      background: "#1a1b26",
+      foreground: "#a9b1d6",
+      cursor: "#a9b1d6",
+      selectionBackground: "#33467c",
+      black: "#32344a",
+      red: "#f7768e",
+      green: "#9ece6a",
+      yellow: "#e0af68",
+      blue: "#7aa2f7",
+      magenta: "#ad8ee6",
+      cyan: "#449dab",
+      white: "#787c99",
+      brightBlack: "#444b6a",
+      brightRed: "#ff7a93",
+      brightGreen: "#b9f27c",
+      brightYellow: "#ff9e64",
+      brightBlue: "#7da6ff",
+      brightMagenta: "#bb9af7",
+      brightCyan: "#0db9d7",
+      brightWhite: "#acb0d0",
+    },
+  });
 
-const fitAddon = new FitAddon();
-term.loadAddon(fitAddon);
+  const fitAddon = new FitAddon();
+  term.loadAddon(fitAddon);
 
-const unicode11Addon = new Unicode11Addon();
-term.loadAddon(unicode11Addon);
-term.unicode.activeVersion = "11";
+  showStatus("Opening terminal...");
+  term.open(container);
 
-term.open(container);
-fitAddon.fit();
+  // Remove loading indicator now that the terminal is open.
+  loadingEl.remove();
 
-window.addEventListener("resize", () => fitAddon.fit());
+  requestAnimationFrame(() => fitAddon.fit());
+  window.addEventListener("resize", () => fitAddon.fit());
 
-// ── Main ──
+  try {
+    window.Telegram?.WebApp?.onEvent("viewportChanged", () => {
+      fitAddon.fit();
+    });
+  } catch {
+    // ignore
+  }
 
-if (!taskId) {
-  term.writeln("\x1b[31mNo task_id provided.\x1b[0m");
-} else {
-  startTailing(taskId);
-}
+  // ── Start tailing ──
 
-async function startTailing(id: string): Promise<void> {
-  term.writeln(
-    `\x1b[1;34m● Tailing task \x1b[1;37m${id}\x1b[0m`
-  );
+  term.writeln(`\x1b[1;34m● Tailing task \x1b[1;37m${taskId}\x1b[0m`);
   term.writeln("");
 
-  // First, read existing content in one shot.
+  // Read existing content.
   let offset = 0;
   try {
     const readResp = await fetch(
-      `/api/terminal/read?task_id=${encodeURIComponent(id)}`,
+      `/api/terminal/read?task_id=${encodeURIComponent(taskId)}`,
       { headers: getAuthHeader() }
     );
     if (readResp.ok) {
-      const readData = (await readResp.json()) as {
+      const data = (await readResp.json()) as {
         content: string;
         size: number;
       };
-      if (readData.content) {
-        term.write(readData.content);
-        offset = readData.size;
+      if (data.content) {
+        term.write(data.content);
+        offset = data.size;
       }
+    } else {
+      const err = await readResp.text();
+      term.writeln(`\x1b[31mRead error (${readResp.status}): ${err}\x1b[0m`);
     }
-  } catch {
-    // Fall through to SSE which will read from beginning.
+  } catch (e) {
+    term.writeln(`\x1b[31mRead failed: ${e}\x1b[0m`);
   }
 
-  // Stream new output via SSE (using fetch for auth headers).
-  const url = `/api/terminal/tail?task_id=${encodeURIComponent(id)}&offset=${offset}`;
+  // Stream new output via fetch-based SSE.
+  const url = `/api/terminal/tail?task_id=${encodeURIComponent(taskId)}&offset=${offset}`;
 
   try {
     const resp = await fetch(url, {
@@ -142,7 +186,7 @@ async function startTailing(id: string): Promise<void> {
 
     if (!resp.ok) {
       const text = await resp.text();
-      term.writeln(`\x1b[31mError: ${text}\x1b[0m`);
+      term.writeln(`\x1b[31mStream error (${resp.status}): ${text}\x1b[0m`);
       return;
     }
 
@@ -161,7 +205,6 @@ async function startTailing(id: string): Promise<void> {
 
       buffer += decoder.decode(value, { stream: true });
 
-      // Parse SSE events from buffer.
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 
@@ -180,9 +223,7 @@ async function startTailing(id: string): Promise<void> {
           }
         } else if (line.startsWith("event: done")) {
           term.writeln("");
-          term.writeln(
-            "\x1b[1;32m● Task output stream ended.\x1b[0m"
-          );
+          term.writeln("\x1b[1;32m● Task output stream ended.\x1b[0m");
           return;
         }
       }
@@ -193,4 +234,12 @@ async function startTailing(id: string): Promise<void> {
   } catch (e) {
     term.writeln(`\x1b[31mStream error: ${e}\x1b[0m`);
   }
+}
+
+function getAuthHeader(): Record<string, string> {
+  const initData = window.Telegram?.WebApp?.initData;
+  if (!initData) {
+    return {};
+  }
+  return { Authorization: `tg-init-data ${initData}` };
 }

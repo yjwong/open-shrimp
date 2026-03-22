@@ -348,9 +348,8 @@ def _extract_background_task_id(
 ) -> str | None:
     """Extract background task ID from a Bash tool result.
 
-    When ``run_in_background`` is set, the output contains a line like:
-    ``Command running in background with ID: brf4e7jzw. Output is being
-    written to: /tmp/claude-1000/.../tasks/brf4e7jzw.output``
+    When ``run_in_background`` is set, the tool result contains a line
+    like ``Command running in background with ID: brf4e7jzw.``
 
     Returns the task ID if found, otherwise None.
     """
@@ -360,10 +359,6 @@ def _extract_background_task_id(
     m = re.search(r"background with ID:\s*(\S+)", output)
     if m:
         return m.group(1).rstrip(".")
-    # Fallback: look for the output file path.
-    m = re.search(r"/tasks/([a-zA-Z0-9_-]+)\.output", output)
-    if m:
-        return m.group(1)
     return None
 
 
