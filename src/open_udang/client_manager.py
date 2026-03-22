@@ -35,7 +35,16 @@ from open_udang.hooks import (
     EditNotifyCallback,
     QuestionCallback,
 )
-from open_udang.container import build_cli_wrapper, cleanup_wrapper
+import sys
+
+from open_udang.container import (
+    build_cli_wrapper as docker_build_cli_wrapper,
+    cleanup_wrapper as docker_cleanup_wrapper,
+)
+from open_udang.sandbox import (
+    build_cli_wrapper as sandbox_build_cli_wrapper,
+    cleanup_wrapper as sandbox_cleanup_wrapper,
+)
 from open_udang.tools import create_openudang_mcp_server
 
 logger = logging.getLogger(__name__)
@@ -155,22 +164,37 @@ async def get_or_create_session(
         ])
 
     # When containerized, generate a wrapper script that runs the Claude
-    # CLI inside Docker.  The wrapper is pointed at via cli_path; all other
-    # SDK machinery (stdin/stdout streaming, canUseTool, MCP) is unchanged.
+    # CLI in an isolated environment.  On macOS we use sandbox-exec (since
+    # Docker runs a Linux VM and would break the native Claude CLI binary);
+    # on Linux we use Docker.  The wrapper is pointed at via cli_path; all
+    # other SDK machinery (stdin/stdout streaming, canUseTool, MCP) is
+    # unchanged.
     wrapper_path: str | None = None
     cli_path: str | None = None
     if context.containerize:
-        wrapper_path = build_cli_wrapper(
-            context_name=context_name,
-            project_dir=context.directory,
-            additional_directories=context.additional_directories or None,
-        )
+        if sys.platform == "darwin":
+            wrapper_path = sandbox_build_cli_wrapper(
+                context_name=context_name,
+                project_dir=context.directory,
+                additional_directories=context.additional_directories or None,
+            )
+            logger.info(
+                "Sandboxed context '%s': using sandbox-exec wrapper %s",
+                context_name,
+                wrapper_path,
+            )
+        else:
+            wrapper_path = docker_build_cli_wrapper(
+                context_name=context_name,
+                project_dir=context.directory,
+                additional_directories=context.additional_directories or None,
+            )
+            logger.info(
+                "Containerized context '%s': using Docker wrapper %s",
+                context_name,
+                wrapper_path,
+            )
         cli_path = wrapper_path
-        logger.info(
-            "Containerized context '%s': using wrapper %s",
-            context_name,
-            wrapper_path,
-        )
 
     options = ClaudeAgentOptions(
         cwd=context.directory,
@@ -269,7 +293,10 @@ async def close_session(scope: ChatScope) -> None:
     except Exception:
         logger.debug("Error closing client for scope %s", scope, exc_info=True)
     if session.container_wrapper_path:
-        cleanup_wrapper(session.container_wrapper_path)
+        if sys.platform == "darwin":
+            sandbox_cleanup_wrapper(session.container_wrapper_path)
+        else:
+            docker_cleanup_wrapper(session.container_wrapper_path)
 
 
 async def close_all_sessions() -> None:
