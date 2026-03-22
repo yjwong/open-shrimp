@@ -542,6 +542,11 @@ def create_review_app(config: Config, db: aiosqlite.Connection) -> Starlette:
             _dist_dir,
         )
 
+    # Add terminal Mini App routes.
+    from open_udang.terminal.api import create_terminal_routes
+
+    routes.extend(create_terminal_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db

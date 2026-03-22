@@ -587,6 +587,12 @@ async def _start_agent_task(
 
             while True:
                 events = receive_events(session)
+                # Build terminal Mini App base URL for background
+                # task "View output" buttons.
+                terminal_url = None
+                if config.review.public_url:
+                    terminal_url = config.review.public_url.rstrip("/")
+
                 result = await stream_response(
                     bot=context.bot,
                     chat_id=scope.chat_id,
@@ -595,6 +601,7 @@ async def _start_agent_task(
                     allowed_tools=ctx_config.allowed_tools,
                     cwd=ctx_config.directory,
                     on_todo_update=on_todo_update,
+                    terminal_base_url=terminal_url,
                 )
 
                 if result.session_id:

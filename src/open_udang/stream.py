@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,7 +26,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 from claude_agent_sdk.types import StreamEvent, TaskNotificationMessage
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from open_udang.agent import AgentEvent
 from open_udang.markdown import gfm_to_telegram
@@ -341,17 +342,46 @@ def _format_bash_output(
     return f"{header_block}\n{output_block}"
 
 
+def _extract_background_task_id(
+    tool_input: dict[str, Any],
+    content: str | list[dict[str, Any]] | None,
+) -> str | None:
+    """Extract background task ID from a Bash tool result.
+
+    When ``run_in_background`` is set, the output contains a line like:
+    ``Command running in background with ID: brf4e7jzw. Output is being
+    written to: /tmp/claude-1000/.../tasks/brf4e7jzw.output``
+
+    Returns the task ID if found, otherwise None.
+    """
+    if not tool_input.get("run_in_background"):
+        return None
+    output = _extract_bash_output_text(content)
+    m = re.search(r"background with ID:\s*(\S+)", output)
+    if m:
+        return m.group(1).rstrip(".")
+    # Fallback: look for the output file path.
+    m = re.search(r"/tasks/([a-zA-Z0-9_-]+)\.output", output)
+    if m:
+        return m.group(1)
+    return None
+
+
 async def _send_bash_button(
     bot: Bot,
     state: _DraftState,
     tool_input: dict[str, Any],
     content: str | list[dict[str, Any]] | None,
+    terminal_base_url: str | None = None,
 ) -> None:
     """Send a compact Bash message with a 'Show output' inline button.
 
     Finalizes any in-progress draft first to preserve message ordering,
     then sends a standalone message showing the command with an inline
     keyboard button to reveal the output on demand.
+
+    For background tasks, also includes a 'View output' Mini App button
+    that opens a live terminal viewer.
     """
     # Finalize any in-progress draft so the bash button appears in order.
     await finalize_and_reset(bot, state)
@@ -360,10 +390,13 @@ async def _send_bash_button(
     header_chunks = gfm_to_telegram(header)
     header_text = header_chunks[0] if header_chunks else ""
 
+    # Check if this is a background task with a terminal viewer available.
+    bg_task_id = _extract_background_task_id(tool_input, content)
+
     # Check if there's any actual output to show.
     output_text = _extract_bash_output_text(content).strip()
-    if not output_text:
-        # No output — send the header without a button.
+    if not output_text and not bg_task_id:
+        # No output and not a background task — send header only.
         try:
             msg = await bot.send_message(
                 chat_id=state.chat_id,
@@ -376,13 +409,28 @@ async def _send_bash_button(
             logger.exception("Failed to send bash header (no output)")
         return
 
-    # Store the full formatted output for later retrieval.
-    callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
-    _bash_output_store[callback_id] = _format_bash_output(tool_input, content)
+    # Build keyboard buttons.
+    buttons: list[InlineKeyboardButton] = []
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📋 Show output", callback_data=callback_id)]]
-    )
+    # "Show output" callback button (for inline reveal).
+    if output_text:
+        callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
+        _bash_output_store[callback_id] = _format_bash_output(tool_input, content)
+        buttons.append(
+            InlineKeyboardButton("📋 Show output", callback_data=callback_id)
+        )
+
+    # "View output" Mini App button (for live terminal tail).
+    if bg_task_id and terminal_base_url:
+        app_url = f"{terminal_base_url}/terminal/?task_id={bg_task_id}"
+        buttons.append(
+            InlineKeyboardButton(
+                "📺 View output",
+                web_app=WebAppInfo(url=app_url),
+            )
+        )
+
+    keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
 
     try:
         msg = await bot.send_message(
@@ -495,6 +543,7 @@ async def stream_response(
     allowed_tools: list[str] | None = None,
     cwd: str | None = None,
     on_todo_update: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
+    terminal_base_url: str | None = None,
 ) -> StreamResult:
     """Stream Agent SDK events to Telegram as draft messages.
 
@@ -615,6 +664,7 @@ async def stream_response(
                                 await _send_bash_button(
                                     bot, state, tool_input,
                                     block.content,
+                                    terminal_base_url=terminal_base_url,
                                 )
 
             elif isinstance(event, StreamEvent):
