@@ -408,7 +408,9 @@ async def _send_bash_button(
     buttons: list[InlineKeyboardButton] = []
 
     # "Show output" callback button (for inline reveal).
-    if output_text:
+    # Skip for background tasks — the inline output is just the
+    # "running in background" message which isn't useful.
+    if output_text and not bg_task_id:
         callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
         _bash_output_store[callback_id] = _format_bash_output(tool_input, content)
         buttons.append(
