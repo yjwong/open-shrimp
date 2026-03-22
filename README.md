@@ -13,7 +13,7 @@ OpenUdang puts a full Claude coding agent in Telegram — complete with file edi
 *Udang* is Malay for "prawn" — small, personal, gets the job done.
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#commands">Commands</a> · <a href="#code-review">Code Review</a> · <a href="#voice-notes">Voice Notes</a> · <a href="#deployment">Deployment</a>
+  <a href="#quick-start">Quick Start</a> · <a href="#commands">Commands</a> · <a href="#code-review">Code Review</a> · <a href="#scheduled-tasks">Scheduled Tasks</a> · <a href="#voice-notes">Voice Notes</a> · <a href="#macos-app">macOS App</a> · <a href="#deployment">Deployment</a>
 </p>
 
 <div align="center">
@@ -79,7 +79,11 @@ You're away from your desk but need Claude to fix a bug, review a diff, or scaff
 - **Persistent sessions.** Pick up where you left off. Sessions survive restarts, and you can `/resume` any previous conversation.
 - **Forum topic support.** Use Telegram forum channels to organize conversations — each topic thread gets its own independent Claude session. Run parallel tasks in the same chat without them stepping on each other. Claude auto-titles each topic for easy navigation.
 - **Group chat ready.** Add the bot to a team chat. It responds to @mentions and replies, so it stays out of the way until you need it.
+- **Schedule recurring tasks.** Tell Claude to check your repo every morning, monitor a CI pipeline, or run a one-shot task later — all via natural language. Tasks run in isolated sessions automatically.
+- **Claude can send you files.** Ask Claude to generate something and it sends the file right to the chat — images, logs, exports, whatever.
+- **Watch background tasks.** When Claude runs a long command in the background, tap "View output" to open a live terminal viewer right in Telegram.
 - **Locked down by default.** User allowlist, path-scoped file access, and granular tool approval. The agent can't silently read your `~/.ssh` or write outside your project.
+- **Config hot-reload.** Edit your config file and changes are picked up automatically — no restart needed.
 
 ## Code Review
 
@@ -93,20 +97,37 @@ Send a voice message instead of typing. OpenUdang automatically transcribes it u
 
 The `moonshine-stt` binary is auto-downloaded on first use. No setup required.
 
+## Scheduled Tasks
+
+Set up recurring or one-shot tasks that Claude runs automatically. Just describe what you want in natural language — "check for broken tests every morning at 9am", "summarize the git log every Friday", or "run this migration in 30 minutes".
+
+Claude manages schedules via built-in tools. Use `/schedule` to see what's active or remove tasks. Scheduled tasks run in isolated sessions with read-only access, so they can report but not modify your code without a follow-up conversation.
+
 ## Container Isolation
 
 You can run each context inside a Docker container by setting `containerize: true` in your config. The Claude CLI runs inside the container with only the project directory bind-mounted — so it can't touch anything else on the host.
 
 Session state is stored separately per context under `~/.config/openudang/containers/`, so containerized contexts don't interfere with each other or your host `~/.claude`.
 
-> **Note:** Container isolation is Linux only for now. macOS support is not yet available.
+On Linux, this uses Docker. On macOS, it uses Apple's `sandbox-exec` for native binary-level isolation — no Docker required.
+
+## macOS App
+
+On macOS, OpenUdang is also available as a menu bar app. Download the `.dmg` from [Releases](https://github.com/yjwong/open-udang/releases), drag to Applications, and launch — no terminal needed.
+
+- Lives in the menu bar (shrimp icon) with no Dock icon
+- First-run setup wizard walks you through configuration with native macOS dialogs
+- Start/stop the bot, open config, view logs — all from the menu bar
+- "Start at Login" toggle for automatic launch
+
+> **Note:** The macOS app is currently unsigned. On first launch, macOS will block it — right-click the app and choose "Open" to bypass Gatekeeper, or go to System Settings → Privacy & Security and click "Open Anyway".
 
 ## Quick Start
 
 ### Prerequisites
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated (via `claude` login or an [Anthropic API key](https://console.anthropic.com/))
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- A Telegram bot token from [@BotFather](https://t.me/BotFather) — we strongly recommend enabling **Threaded Mode** (Settings → Bot Settings → Threads Settings → Threaded Mode). This lets each conversation run in its own forum topic with an independent Claude session.
 
 ### Option 1: Download Binary (recommended)
 
@@ -202,6 +223,7 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 | `/resume` | List and resume a previous session |
 | `/review` | Open the mobile code review UI |
 | `/mcp` | List and manage MCP servers |
+| `/schedule` | List and manage scheduled tasks |
 
 ## How Tool Approval Works
 
