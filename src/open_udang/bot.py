@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 
 from telegram import BotCommand, Update
 from telegram.ext import (
@@ -85,24 +84,19 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 # ── Config hot-reload ──
 
 
-async def _watch_config(config_path: str, bot_data: dict, interval: float = 5.0) -> None:
-    """Poll the config file for changes and hot-reload into bot_data.
+async def _watch_config(config_path: str, bot_data: dict) -> None:
+    """Watch the config file for changes and hot-reload into bot_data.
 
-    Fields like ``telegram.token`` and ``review.*`` require a full restart;
-    changes to those are logged as warnings but still applied so that the
-    next restart picks them up.
+    Uses ``watchfiles`` (inotify on Linux, FSEvents on macOS) for
+    efficient, near-instant change detection.  Fields like
+    ``telegram.token`` and ``review.*`` require a full restart; changes
+    to those are logged as warnings but still applied so that the next
+    restart picks them up.
     """
-    path = Path(config_path)
-    last_mtime = path.stat().st_mtime
+    from watchfiles import awatch
 
-    while True:
-        await asyncio.sleep(interval)
+    async for _changes in awatch(config_path):
         try:
-            mtime = path.stat().st_mtime
-            if mtime == last_mtime:
-                continue
-            last_mtime = mtime
-
             new_config = load_config(config_path)
             old_config: Config = bot_data["config"]
 
