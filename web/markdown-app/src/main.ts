@@ -106,16 +106,29 @@ async function main(): Promise<void> {
   hljs.default.registerLanguage("yml", langModules[5]!.default);
   hljs.default.registerLanguage("toml", langModules[18]!.default);
 
+  const mermaidExtension: import("marked").MarkedExtension = {
+    renderer: {
+      code({ text, lang }: { text: string; lang?: string }) {
+        if (lang === "mermaid") {
+          return `<pre class="mermaid">${text}</pre>`;
+        }
+        return false; // Fall through to default renderer.
+      },
+    },
+  };
+
   const marked = new Marked(
     markedHighlight({
       langPrefix: "hljs language-",
       highlight(code: string, lang: string) {
+        if (lang === "mermaid") return code; // Handled by mermaid extension.
         if (lang && hljs.default.getLanguage(lang)) {
           return hljs.default.highlight(code, { language: lang }).value;
         }
         return hljs.default.highlightAuto(code).value;
       },
-    })
+    }),
+    mermaidExtension
   );
 
   // Fetch the markdown content.
@@ -147,6 +160,24 @@ async function main(): Promise<void> {
   // Show rendered content.
   loadingEl.remove();
   contentEl.innerHTML = html;
+
+  // Render mermaid diagrams (lazy-loaded only when needed).
+  if (contentEl.querySelector(".mermaid")) {
+    const mermaid = (await import("mermaid")).default;
+    const tp = window.Telegram?.WebApp?.themeParams;
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "dark",
+      themeVariables: tp ? {
+        primaryColor: tp.button_color ?? "#7aa2f7",
+        primaryTextColor: tp.button_text_color ?? "#c9d1d9",
+        lineColor: tp.hint_color ?? "#8b949e",
+        secondaryColor: tp.secondary_bg_color ?? "#161b22",
+        tertiaryColor: tp.bg_color ?? "#1a1b26",
+      } : undefined,
+    });
+    await mermaid.run({ nodes: contentEl.querySelectorAll(".mermaid") });
+  }
 
   // Set page title.
   document.title = data.filename;

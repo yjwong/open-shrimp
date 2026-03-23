@@ -9,9 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "highlight.js": "^11.11.0",
     "marked": "^15.0.0",
     "marked-highlight": "^2.2.0",
-    "highlight.js": "^11.11.0"
+    "mermaid": "^11.13.0"
   },
   "devDependencies": {
     "typescript": "~5.7.0",
