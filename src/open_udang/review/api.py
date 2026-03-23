@@ -509,7 +509,10 @@ async def commit_endpoint(request: Request) -> JSONResponse:
         "Generate an appropriate commit message based on the staged diff."
     )
     try:
-        await dispatch_to_agent(prompt, chat_id, thread_id)
+        await dispatch_to_agent(
+            prompt, chat_id, thread_id,
+            placeholder="\u23f3 Committing staged changes\\.\\.\\.",
+        )
     except RuntimeError as e:
         logger.error("commit_endpoint: %s", e)
         return JSONResponse(

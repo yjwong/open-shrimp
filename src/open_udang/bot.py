@@ -182,11 +182,14 @@ async def run_bot(
     from open_udang.db import ChatScope
     from open_udang.handlers.messages import _dispatch_to_agent
 
-    async def _dispatch(prompt: str, scope: ChatScope) -> None:
+    async def _dispatch(prompt: str, scope: ChatScope, placeholder: str | None = None) -> None:
         # Build a minimal ContextTypes-compatible object.  _dispatch_to_agent
         # only uses context.bot, context.bot_data, and asyncio.create_task.
         # Read config from bot_data so hot-reloaded config is used.
-        await _dispatch_to_agent(prompt, [], scope, app.bot_data["config"], db, app)
+        await _dispatch_to_agent(
+            prompt, [], scope, app.bot_data["config"], db, app,
+            placeholder=placeholder,
+        )
 
     register_dispatch(_dispatch)
 

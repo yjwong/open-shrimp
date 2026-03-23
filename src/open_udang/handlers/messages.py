@@ -383,6 +383,8 @@ async def _dispatch_to_agent(
     config: Config,
     db: aiosqlite.Connection,
     context: ContextTypes.DEFAULT_TYPE,
+    *,
+    placeholder: str | None = None,
 ) -> None:
     """Dispatch a message to the agent.
 
@@ -392,9 +394,23 @@ async def _dispatch_to_agent(
     boundary (matching Claude Code's behavior).  If the session is still
     being set up, queue the message for injection once the session is
     ready.
+
+    If *placeholder* is given and a new task must be started (cold
+    start), a short feedback message is sent to the chat immediately
+    so the user doesn't see silence while the session initialises.
     """
     # No task running -- start a new one.
     if scope not in _running_tasks or _running_tasks[scope].done():
+        if placeholder:
+            try:
+                await context.bot.send_message(
+                    chat_id=scope.chat_id,
+                    text=placeholder,
+                    parse_mode="MarkdownV2",
+                    **_thread_kwargs(scope),
+                )
+            except Exception:
+                logger.debug("Failed to send placeholder for scope %s", scope)
         await _start_agent_task(prompt, attachments, scope, config, db, context)
         return
 
