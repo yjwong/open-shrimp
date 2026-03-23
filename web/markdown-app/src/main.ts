@@ -177,10 +177,161 @@ async function main(): Promise<void> {
       } : undefined,
     });
     await mermaid.run({ nodes: contentEl.querySelectorAll(".mermaid") });
+
+    // Wrap each rendered diagram with a container and fullscreen button.
+    contentEl.querySelectorAll<HTMLPreElement>("pre.mermaid").forEach((pre) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "mermaid-wrapper";
+
+      const btn = document.createElement("button");
+      btn.className = "mermaid-fullscreen-btn";
+      btn.textContent = "Fullscreen";
+      btn.addEventListener("click", () => openMermaidFullscreen(pre));
+
+      pre.parentNode!.insertBefore(wrapper, pre);
+      wrapper.appendChild(pre);
+      wrapper.appendChild(btn);
+    });
   }
 
   // Set page title.
   document.title = data.filename;
+}
+
+function openMermaidFullscreen(pre: HTMLPreElement): void {
+  const svg = pre.querySelector("svg");
+  if (!svg) return;
+
+  const overlay = document.createElement("div");
+  overlay.className = "mermaid-overlay";
+
+  const viewport = document.createElement("div");
+  viewport.className = "mermaid-viewport";
+
+  const container = document.createElement("div");
+  container.className = "mermaid-zoom-container";
+  container.innerHTML = svg.outerHTML;
+
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "mermaid-close-btn";
+  closeBtn.textContent = "\u00d7";
+
+  viewport.appendChild(container);
+  overlay.appendChild(viewport);
+  overlay.appendChild(closeBtn);
+  document.body.appendChild(overlay);
+
+  // Zoom/pan state.
+  let scale = 1;
+  let translateX = 0;
+  let translateY = 0;
+  let startDist = 0;
+  let startScale = 1;
+  let isPanning = false;
+  let panStartX = 0;
+  let panStartY = 0;
+  let startTranslateX = 0;
+  let startTranslateY = 0;
+
+  function applyTransform(): void {
+    container.style.transform =
+      `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+  }
+
+  // Mouse wheel zoom.
+  viewport.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    scale = Math.min(Math.max(scale * delta, 0.2), 10);
+    applyTransform();
+  }, { passive: false });
+
+  // Touch: pinch-to-zoom + pan.
+  viewport.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) {
+      startDist = Math.hypot(
+        e.touches[1]!.clientX - e.touches[0]!.clientX,
+        e.touches[1]!.clientY - e.touches[0]!.clientY
+      );
+      startScale = scale;
+    } else if (e.touches.length === 1) {
+      isPanning = true;
+      panStartX = e.touches[0]!.clientX;
+      panStartY = e.touches[0]!.clientY;
+      startTranslateX = translateX;
+      startTranslateY = translateY;
+    }
+  });
+
+  viewport.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    if (e.touches.length === 2) {
+      const dist = Math.hypot(
+        e.touches[1]!.clientX - e.touches[0]!.clientX,
+        e.touches[1]!.clientY - e.touches[0]!.clientY
+      );
+      scale = Math.min(Math.max(startScale * (dist / startDist), 0.2), 10);
+      applyTransform();
+    } else if (e.touches.length === 1 && isPanning) {
+      translateX = startTranslateX + (e.touches[0]!.clientX - panStartX);
+      translateY = startTranslateY + (e.touches[0]!.clientY - panStartY);
+      applyTransform();
+    }
+  }, { passive: false });
+
+  viewport.addEventListener("touchend", () => {
+    isPanning = false;
+  });
+
+  // Mouse drag to pan.
+  viewport.addEventListener("mousedown", (e) => {
+    isPanning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    startTranslateX = translateX;
+    startTranslateY = translateY;
+    viewport.style.cursor = "grabbing";
+  });
+
+  viewport.addEventListener("mousemove", (e) => {
+    if (!isPanning) return;
+    translateX = startTranslateX + (e.clientX - panStartX);
+    translateY = startTranslateY + (e.clientY - panStartY);
+    applyTransform();
+  });
+
+  viewport.addEventListener("mouseup", () => {
+    isPanning = false;
+    viewport.style.cursor = "grab";
+  });
+
+  // Double-tap/click to reset.
+  let lastTap = 0;
+  viewport.addEventListener("click", () => {
+    const now = Date.now();
+    if (now - lastTap < 300) {
+      scale = 1;
+      translateX = 0;
+      translateY = 0;
+      applyTransform();
+    }
+    lastTap = now;
+  });
+
+  // Close.
+  function close(): void {
+    overlay.remove();
+  }
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  document.addEventListener("keydown", function handler(e) {
+    if (e.key === "Escape") {
+      close();
+      document.removeEventListener("keydown", handler);
+    }
+  });
 }
 
 function getAuthHeader(): Record<string, string> {
@@ -320,6 +471,86 @@ function getStyles(): string {
     /* Task lists */
     input[type="checkbox"] {
       margin-right: 0.5em;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid-wrapper {
+      position: relative;
+      margin-bottom: 16px;
+    }
+    .mermaid-wrapper pre.mermaid {
+      overflow-x: auto;
+      text-align: center;
+    }
+    .mermaid-fullscreen-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      padding: 4px 10px;
+      background: ${secondaryBg};
+      color: ${hint};
+      border: 1px solid ${hint}44;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .mermaid-wrapper:hover .mermaid-fullscreen-btn,
+    .mermaid-wrapper:active .mermaid-fullscreen-btn {
+      opacity: 1;
+    }
+    .mermaid-fullscreen-btn:hover {
+      color: ${fg};
+      border-color: ${hint}88;
+    }
+
+    /* Fullscreen overlay */
+    .mermaid-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: ${bg}f0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .mermaid-viewport {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      cursor: grab;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .mermaid-zoom-container {
+      transform-origin: center center;
+      will-change: transform;
+    }
+    .mermaid-zoom-container svg {
+      max-width: 90vw;
+      max-height: 90vh;
+    }
+    .mermaid-close-btn {
+      position: absolute;
+      top: 12px;
+      right: 16px;
+      width: 36px;
+      height: 36px;
+      background: ${secondaryBg};
+      color: ${fg};
+      border: 1px solid ${hint}44;
+      border-radius: 50%;
+      font-size: 20px;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .mermaid-close-btn:hover {
+      background: ${hint}44;
     }
   `;
 }
