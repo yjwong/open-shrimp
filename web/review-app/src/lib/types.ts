@@ -12,6 +12,7 @@ export interface Hunk {
   is_new_file: boolean;
   is_deleted_file: boolean;
   is_binary: boolean;
+  is_empty: boolean;
   hunk_header: string;
   lines: HunkLine[];
   staged: boolean;

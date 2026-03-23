@@ -52,6 +52,7 @@ def _hunk_to_dict(hunk: Hunk) -> dict[str, Any]:
         "lines": [dataclasses.asdict(line) for line in hunk.lines],
         "staged": hunk.staged,
         "is_binary": hunk.is_binary,
+        "is_empty": hunk.is_empty,
     }
 
 

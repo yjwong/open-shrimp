@@ -76,6 +76,7 @@ class Hunk:
     lines: list[HunkLine]
     staged: bool
     is_binary: bool
+    is_empty: bool = False
 
 
 @dataclass
@@ -187,6 +188,31 @@ def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
         # Skip --- and +++ lines.
         while i < len(lines) and (lines[i].startswith("---") or lines[i].startswith("+++")):
             i += 1
+
+        # Check for empty file (no hunk headers follow).
+        # This happens for new empty files like __init__.py where git produces
+        # a diff header but no @@ hunks.
+        if i >= len(lines) or not _HUNK_HEADER_RE.match(lines[i]):
+            # Could be an empty file or we've hit the next diff header.
+            # Only emit a hunk if the file is genuinely new or deleted
+            # (otherwise it's just a mode change or similar with no content diff).
+            if is_new_file or is_deleted_file:
+                hunk_header = "(empty file)"
+                hunk_lines: list[HunkLine] = []
+                hunk_id = generate_hunk_id(file_path, hunk_header, hunk_lines)
+                hunks.append(Hunk(
+                    id=hunk_id,
+                    file_path=file_path,
+                    language=detect_language(file_path),
+                    is_new_file=is_new_file,
+                    is_deleted_file=is_deleted_file,
+                    hunk_header=hunk_header,
+                    lines=hunk_lines,
+                    staged=staged,
+                    is_binary=False,
+                    is_empty=True,
+                ))
+            continue
 
         # Parse hunks for this file.
         while i < len(lines):

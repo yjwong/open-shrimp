@@ -12,7 +12,7 @@ export function HunkCard({ hunk }: HunkCardProps) {
   useEffect(() => {
     let cancelled = false;
 
-    if (hunk.is_binary || hunk.lines.length === 0) {
+    if (hunk.is_binary || hunk.is_empty || hunk.lines.length === 0) {
       setLines([]);
       return;
     }
@@ -36,6 +36,21 @@ export function HunkCard({ hunk }: HunkCardProps) {
         <div className="hunk-card-binary">
           <div className="binary-icon">📦</div>
           <div>Binary file changed</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (hunk.is_empty) {
+    return (
+      <div className="hunk-card">
+        <div className={`hunk-card-header${hunk.staged ? " staged" : ""}`}>
+          <span className="hunk-card-filepath">{hunk.file_path}</span>
+          {hunk.staged && <span className="hunk-card-badge">Staged</span>}
+        </div>
+        <div className="hunk-card-binary">
+          <div className="binary-icon">📄</div>
+          <div>Empty file</div>
         </div>
       </div>
     );
