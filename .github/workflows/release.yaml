@@ -32,6 +32,10 @@ jobs:
         working-directory: web/terminal-app
         run: npm ci && npm run build
 
+      - name: Build markdown preview app frontend
+        working-directory: web/markdown-app
+        run: npm ci && npm run build
+
       - name: Build open-udang sdist
         run: uv build --sdist
 
@@ -152,6 +156,10 @@ jobs:
 
       - name: Build terminal app frontend
         working-directory: web/terminal-app
+        run: npm ci && npm run build
+
+      - name: Build markdown preview app frontend
+        working-directory: web/markdown-app
         run: npm ci && npm run build
 
       - name: Install dependencies

@@ -13,7 +13,7 @@ from typing import Any
 
 from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,25 @@ def create_openudang_mcp_server(
 
         filename = os.path.basename(path)
 
+        # Build a "Preview" WebApp button for markdown files.
+        reply_markup = None
+        if filename.lower().endswith(".md") and config is not None:
+            base_url = None
+            if config.review.public_url:
+                base_url = config.review.public_url.rstrip("/")
+            elif config.review.host and config.review.port:
+                base_url = f"https://{config.review.host}:{config.review.port}"
+            if base_url:
+                from urllib.parse import quote
+
+                preview_url = f"{base_url}/preview/?path={quote(path, safe='')}"
+                reply_markup = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "📖 Preview",
+                        web_app=WebAppInfo(url=preview_url),
+                    ),
+                ]])
+
         try:
             with open(path, "rb") as f:
                 if use_photo:
@@ -170,6 +189,7 @@ def create_openudang_mcp_server(
                         document=f,
                         filename=filename,
                         caption=caption,
+                        reply_markup=reply_markup,
                         **_thread_kwargs,
                     )
             method = "photo" if use_photo else "document"

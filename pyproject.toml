@@ -35,10 +35,12 @@ openudang-app = "open_udang.platform.macos.app:main"
 [tool.hatch.build.targets.sdist.force-include]
 "web/review-app/dist" = "web/review-app/dist"
 "web/terminal-app/dist" = "web/terminal-app/dist"
+"web/markdown-app/dist" = "web/markdown-app/dist"
 
 [tool.hatch.build.targets.wheel.force-include]
 "web/review-app/dist" = "open_udang/review/static"
 "web/terminal-app/dist" = "open_udang/terminal/static"
+"web/markdown-app/dist" = "open_udang/preview/static"
 
 [tool.hatch.version]
 path = "VERSION"

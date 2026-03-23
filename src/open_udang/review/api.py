@@ -562,6 +562,11 @@ def create_review_app(config: Config, db: aiosqlite.Connection) -> Starlette:
 
     routes.extend(create_terminal_routes())
 
+    # Add markdown preview Mini App routes.
+    from open_udang.preview.api import create_preview_routes
+
+    routes.extend(create_preview_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db
