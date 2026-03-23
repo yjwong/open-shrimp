@@ -752,19 +752,91 @@ async def stream_response(
     return result
 
 
+def _find_gfm_split(gfm: str) -> int | None:
+    """Find a position in raw GFM where the converted output fits in one message.
+
+    Binary-searches over paragraph (``\\n\\n``) boundaries, falling back to
+    single-newline boundaries.  Returns the split offset in *gfm*, or
+    ``None`` if the entire text already fits in a single chunk.
+    """
+    if len(gfm_to_telegram(gfm)) <= 1:
+        return None
+
+    # Collect candidate split points: paragraph breaks first, then line breaks.
+    candidates: list[int] = []
+    idx = 0
+    while True:
+        pos = gfm.find("\n\n", idx)
+        if pos == -1:
+            break
+        candidates.append(pos + 2)
+        idx = pos + 2
+
+    if not candidates:
+        idx = 0
+        while True:
+            pos = gfm.find("\n", idx)
+            if pos == -1:
+                break
+            candidates.append(pos + 1)
+            idx = pos + 1
+
+    if not candidates:
+        return None
+
+    # Binary search for the largest prefix that converts to one chunk.
+    lo, hi = 0, len(candidates) - 1
+    best: int | None = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        split_pos = candidates[mid]
+        if len(gfm_to_telegram(gfm[:split_pos])) <= 1:
+            best = split_pos
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    return best
+
+
 async def _finalize_current(bot: Bot, state: _DraftState) -> None:
-    """Finalize the current draft (first chunk) and keep overflow for next."""
+    """Finalize the current draft and keep overflow GFM for the next message.
+
+    Splits at the raw GFM level so that the remainder can seed the next draft
+    without losing any content.
+    """
     full_text = _build_full_text(state)
     chunks = gfm_to_telegram(full_text)
 
     if not chunks:
         return
 
+    if len(chunks) <= 1:
+        # Nothing to split — shouldn't normally be called in this case,
+        # but be defensive.
+        return
+
+    # Find a split point in the raw GFM (including tool prefix) so that
+    # everything before it converts to a single MarkdownV2 chunk.
+    split_pos = _find_gfm_split(full_text)
+
+    if split_pos is None or split_pos <= 0:
+        # Can't find a clean GFM split — fall back to sending chunks[0]
+        # from the already-converted output (loses overflow, but this is
+        # the rare edge case where the text has no newline boundaries).
+        prefix_text = chunks[0]
+        remainder_gfm = ""
+    else:
+        prefix_gfm = full_text[:split_pos]
+        remainder_gfm = full_text[split_pos:]
+        converted = gfm_to_telegram(prefix_gfm)
+        prefix_text = converted[0] if converted else chunks[0]
+
     # Send the first chunk as a finalized message
     try:
         msg = await bot.send_message(
             chat_id=state.chat_id,
-            text=chunks[0],
+            text=prefix_text,
             parse_mode="MarkdownV2",
             **state._thread_kwargs,
         )
@@ -774,20 +846,19 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
         try:
             msg = await bot.send_message(
                 chat_id=state.chat_id,
-                text=chunks[0],
+                text=prefix_text,
                 **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
         except Exception:
             logger.exception("Failed to send plaintext fallback")
 
-    # Reset state: keep remaining text for the next message
-    # We can't perfectly reconstruct the raw GFM that maps to chunks[1:],
-    # so we reset and re-accumulate from the agent
-    state.raw_text = ""
+    # Keep the remainder as raw GFM for the next message.
+    # Tool notifications were part of the prefix, so clear them.
+    state.raw_text = remainder_gfm
     state.tool_notifications = []
     state.draft_id = random.randint(1, 2**31 - 1)
-    state.dirty = False
+    state.dirty = bool(remainder_gfm.strip())
     state.turn_complete = False
 
 
