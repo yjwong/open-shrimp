@@ -103,6 +103,131 @@ async def read_endpoint(request: Request) -> JSONResponse:
     })
 
 
+async def submit_review_endpoint(request: Request) -> JSONResponse:
+    """POST /api/preview/submit-review — submit document review comments.
+
+    Formats the comments into a prompt and dispatches it to the agent
+    for the given chat via the dispatch registry.
+
+    Expects JSON body::
+
+        {
+            "chat_id": <int>,
+            "thread_id": <int|null>,
+            "path": <str>,
+            "comments": [{"block_text": <str>, "comment": <str>}, ...]
+        }
+    """
+    try:
+        await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    # Validate chat_id.
+    try:
+        chat_id = int(body["chat_id"])
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse(
+            {"error": "chat_id is required (integer)"}, status_code=400
+        )
+
+    # Validate thread_id (optional).
+    thread_id_raw = body.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
+    # Validate path.
+    path_str = body.get("path", "")
+    if not path_str or not isinstance(path_str, str):
+        return JSONResponse(
+            {"error": "path is required (string)"}, status_code=400
+        )
+
+    file_path = Path(path_str)
+    if not file_path.is_absolute():
+        return JSONResponse(
+            {"error": "path must be absolute"}, status_code=400
+        )
+
+    config: Config = request.app.state.config
+    if not _is_within_context_directories(file_path, config):
+        return JSONResponse(
+            {"error": "path is outside configured context directories"},
+            status_code=403,
+        )
+
+    # Validate comments.
+    comments = body.get("comments")
+    if not isinstance(comments, list) or not comments:
+        return JSONResponse(
+            {"error": "comments must be a non-empty array"}, status_code=400
+        )
+
+    if len(comments) > 50:
+        return JSONResponse(
+            {"error": "too many comments (max 50)"}, status_code=400
+        )
+
+    # Build the prompt.
+    prompt_parts = [
+        f"The user has reviewed the document at `{path_str}` and left "
+        f"the following comments:"
+    ]
+
+    for i, entry in enumerate(comments, 1):
+        if not isinstance(entry, dict):
+            return JSONResponse(
+                {"error": f"comment {i} must be an object"}, status_code=400
+            )
+
+        block_text = str(entry.get("block_text", ""))[:200]
+        comment_text = str(entry.get("comment", ""))
+        if not comment_text:
+            return JSONResponse(
+                {"error": f"comment {i} has empty comment text"}, status_code=400
+            )
+        if len(comment_text) > 2000:
+            return JSONResponse(
+                {"error": f"comment {i} text too long (max 2000 chars)"},
+                status_code=400,
+            )
+
+        prompt_parts.append(f"\n### Comment {i}")
+        if block_text:
+            prompt_parts.append(f"> {block_text}")
+        prompt_parts.append(f"\n{comment_text}")
+
+    prompt = "\n".join(prompt_parts)
+
+    # Dispatch.
+    from open_udang.dispatch_registry import dispatch as dispatch_to_agent
+
+    try:
+        await dispatch_to_agent(
+            prompt, chat_id, thread_id,
+            placeholder="Reviewing document feedback\\.\\.\\.",
+        )
+    except RuntimeError as e:
+        logger.error("submit_review_endpoint: %s", e)
+        return JSONResponse(
+            {"error": "Review dispatch not available — bot may not be running"},
+            status_code=503,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to dispatch review for chat %d", chat_id
+        )
+        return JSONResponse(
+            {"error": "Failed to dispatch review"}, status_code=500
+        )
+
+    return JSONResponse({"ok": True})
+
+
 def create_preview_routes() -> list[Route | Mount]:
     """Create the routes for the preview API and Mini App frontend.
 
@@ -119,6 +244,7 @@ def create_preview_routes() -> list[Route | Mount]:
 
     routes: list[Route | Mount] = [
         Route("/api/preview/read", read_endpoint, methods=["GET"]),
+        Route("/api/preview/submit-review", submit_review_endpoint, methods=["POST"]),
     ]
 
     if _dist_dir.is_dir():
