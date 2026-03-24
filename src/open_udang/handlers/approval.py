@@ -241,6 +241,7 @@ async def _send_auto_approved_diff(
             chat_id=chat_id,
             text=text,
             parse_mode="MarkdownV2",
+            disable_notification=True,
             **thread_kwargs,
         )
     except Exception:

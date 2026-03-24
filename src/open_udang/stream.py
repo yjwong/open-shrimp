@@ -166,8 +166,14 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
             logger.exception("Failed to send draft message")
 
 
-async def _finalize_message(bot: Bot, state: _DraftState) -> list[int]:
+async def _finalize_message(
+    bot: Bot, state: _DraftState, *, silent: bool = True,
+) -> list[int]:
     """Finalize the draft by sending the full message.
+
+    Args:
+        silent: If True, send with ``disable_notification=True`` so the
+            user's device doesn't buzz for intermediate messages.
 
     Returns list of sent message IDs.
     """
@@ -179,6 +185,10 @@ async def _finalize_message(bot: Bot, state: _DraftState) -> list[int]:
     if not chunks:
         return []
 
+    notif_kwargs: dict[str, Any] = {}
+    if silent:
+        notif_kwargs["disable_notification"] = True
+
     message_ids: list[int] = []
     for chunk in chunks:
         try:
@@ -187,6 +197,7 @@ async def _finalize_message(bot: Bot, state: _DraftState) -> list[int]:
                 text=chunk,
                 parse_mode="MarkdownV2",
                 **state._thread_kwargs,
+                **notif_kwargs,
             )
             message_ids.append(msg.message_id)
         except Exception:
@@ -197,6 +208,7 @@ async def _finalize_message(bot: Bot, state: _DraftState) -> list[int]:
                     chat_id=state.chat_id,
                     text=chunk,
                     **state._thread_kwargs,
+                    **notif_kwargs,
                 )
                 message_ids.append(msg.message_id)
             except Exception:
@@ -397,6 +409,7 @@ async def _send_bash_button(
                 chat_id=state.chat_id,
                 text=header_text + "\n_No output\\._",
                 parse_mode="MarkdownV2",
+                disable_notification=True,
                 **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
@@ -435,6 +448,7 @@ async def _send_bash_button(
             text=header_text,
             parse_mode="MarkdownV2",
             reply_markup=keyboard,
+            disable_notification=True,
             **state._thread_kwargs,
         )
         state.sent_message_ids.append(msg.message_id)
@@ -442,14 +456,19 @@ async def _send_bash_button(
         logger.exception("Failed to send bash button message")
 
 
-async def finalize_and_reset(bot: Bot, state: _DraftState) -> None:
+async def finalize_and_reset(
+    bot: Bot, state: _DraftState, *, silent: bool = True,
+) -> None:
     """Finalize the current draft and reset state for a new message.
 
     Call this before sending an out-of-band message (e.g. tool approval
     keyboard) to ensure correct message ordering in Telegram.
+
+    Args:
+        silent: If True, send the finalized message silently (no notification).
     """
     if state.raw_text.strip() or state.tool_notifications:
-        msg_ids = await _finalize_message(bot, state)
+        msg_ids = await _finalize_message(bot, state, silent=silent)
         state.sent_message_ids.extend(msg_ids)
     state.raw_text = ""
     state.tool_notifications = []
@@ -722,6 +741,7 @@ async def stream_response(
                             chat_id=state.chat_id,
                             text=text,
                             parse_mode="MarkdownV2",
+                            disable_notification=True,
                             **state._thread_kwargs,
                         )
                     except Exception:
@@ -737,9 +757,9 @@ async def stream_response(
             except asyncio.CancelledError:
                 pass
 
-        # Final send of any remaining text
+        # Final send of any remaining text — notify since the task is done.
         if state.raw_text.strip() or state.tool_notifications:
-            msg_ids = await _finalize_message(bot, state)
+            msg_ids = await _finalize_message(bot, state, silent=False)
             state.sent_message_ids.extend(msg_ids)
 
         # Reset for the next stream_response() iteration.
@@ -832,12 +852,13 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
         converted = gfm_to_telegram(prefix_gfm)
         prefix_text = converted[0] if converted else chunks[0]
 
-    # Send the first chunk as a finalized message
+    # Send the first chunk as a finalized message (silently — intermediate).
     try:
         msg = await bot.send_message(
             chat_id=state.chat_id,
             text=prefix_text,
             parse_mode="MarkdownV2",
+            disable_notification=True,
             **state._thread_kwargs,
         )
         state.sent_message_ids.append(msg.message_id)
@@ -847,6 +868,7 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
             msg = await bot.send_message(
                 chat_id=state.chat_id,
                 text=prefix_text,
+                disable_notification=True,
                 **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
