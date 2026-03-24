@@ -112,6 +112,7 @@ def _build_sandbox_profile(
     rules: list[str] = [
         "(version 1)",
         "(deny default)",
+        '(import "dyld-support.sb")',
         "",
         "; --- Process execution ---",
         "(allow process-fork)",
