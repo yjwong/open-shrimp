@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.min.css";
 import { initTelegram, getAuthHeader } from "./telegram";
+import { injectStyles } from "./styles";
 import type { DocumentData } from "./types";
 
 export default function App() {
@@ -12,6 +13,7 @@ export default function App() {
 
   useEffect(() => {
     initTelegram();
+    injectStyles();
     const params = new URLSearchParams(window.location.search);
     const filePath = params.get("path");
     if (!filePath) {
