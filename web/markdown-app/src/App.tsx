@@ -6,6 +6,7 @@ import "highlight.js/styles/github-dark.min.css";
 import { initTelegram, getAuthHeader } from "./telegram";
 import { injectStyles } from "./styles";
 import CodeBlock from "./components/CodeBlock";
+import CopyMarkdownButton from "./components/CopyMarkdownButton";
 import type { DocumentData } from "./types";
 
 export default function App() {
@@ -46,16 +47,19 @@ export default function App() {
   }
 
   return (
-    <div id="content">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
-        components={{
-          code: CodeBlock,
-        }}
-      >
-        {data.content}
-      </ReactMarkdown>
-    </div>
+    <>
+      <div id="content">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
+          components={{
+            code: CodeBlock,
+          }}
+        >
+          {data.content}
+        </ReactMarkdown>
+      </div>
+      <CopyMarkdownButton content={data.content} />
+    </>
   );
 }
