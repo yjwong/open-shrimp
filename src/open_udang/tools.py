@@ -166,7 +166,10 @@ def create_openudang_mcp_server(
             if base_url:
                 from urllib.parse import quote
 
-                preview_url = f"{base_url}/preview/?path={quote(path, safe='')}"
+                preview_params = f"path={quote(path, safe='')}&chat_id={chat_id}"
+                if thread_id is not None:
+                    preview_params += f"&thread_id={thread_id}"
+                preview_url = f"{base_url}/preview/?{preview_params}"
                 reply_markup = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
                         "📖 Preview",
