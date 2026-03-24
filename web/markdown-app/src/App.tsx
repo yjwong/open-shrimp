@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.min.css";
 import { initTelegram, getAuthHeader } from "./telegram";
 import { injectStyles } from "./styles";
+import CodeBlock from "./components/CodeBlock";
 import type { DocumentData } from "./types";
 
 export default function App() {
@@ -49,6 +50,9 @@ export default function App() {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
+        components={{
+          code: CodeBlock,
+        }}
       >
         {data.content}
       </ReactMarkdown>
