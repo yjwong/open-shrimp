@@ -226,6 +226,207 @@ export function injectStyles(): void {
       border-color: ${hint}88;
       background: ${hint}22;
     }
+
+    /* Review toolbar */
+    .review-toolbar {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+      z-index: 100;
+    }
+
+    .review-toggle-btn {
+      padding: 8px 16px;
+      background: ${secondaryBg};
+      color: ${hint};
+      border: 1px solid ${hint}44;
+      border-radius: 20px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .review-toggle-btn:hover {
+      color: ${fg};
+      border-color: ${hint}88;
+      background: ${hint}22;
+    }
+    .review-toggle-btn.active {
+      background: ${link}22;
+      color: ${link};
+      border-color: ${link}66;
+    }
+
+    .comment-badge {
+      background: ${link};
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 10px;
+      min-width: 18px;
+      text-align: center;
+    }
+
+    .submit-review-btn {
+      padding: 8px 16px;
+      background: ${link};
+      color: #fff;
+      border: none;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      transition: opacity 0.15s;
+    }
+    .submit-review-btn:hover {
+      opacity: 0.9;
+    }
+
+    /* Commentable blocks */
+    .commentable-block {
+      position: relative;
+      transition: background 0.15s;
+      border-radius: 4px;
+      padding: 2px 4px;
+      margin: -2px -4px;
+    }
+    .commentable-block--active {
+      cursor: pointer;
+    }
+    .commentable-block--active:hover {
+      background: ${hint}11;
+    }
+
+    .comment-editor {
+      margin-top: 8px;
+      margin-bottom: 8px;
+      padding: 8px;
+      background: ${secondaryBg};
+      border: 1px solid ${hint}44;
+      border-radius: 6px;
+    }
+    .comment-textarea {
+      width: 100%;
+      min-height: 60px;
+      padding: 8px;
+      background: ${bg};
+      color: ${fg};
+      border: 1px solid ${hint}33;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 13px;
+      resize: vertical;
+    }
+    .comment-textarea:focus {
+      outline: none;
+      border-color: ${link};
+    }
+    .comment-editor-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+      justify-content: flex-end;
+    }
+    .comment-btn {
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      border: none;
+    }
+    .comment-btn-save {
+      background: ${link};
+      color: #fff;
+    }
+    .comment-btn-save:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .comment-btn-cancel {
+      background: ${hint}33;
+      color: ${fg};
+    }
+    .comment-btn-edit {
+      background: ${hint}33;
+      color: ${fg};
+    }
+    .comment-btn-delete {
+      background: #f7768e33;
+      color: #f7768e;
+    }
+
+    .comment-indicator {
+      margin-top: 6px;
+      margin-bottom: 6px;
+      padding: 6px 10px;
+      background: ${link}11;
+      border-left: 3px solid ${link};
+      border-radius: 0 4px 4px 0;
+      cursor: pointer;
+      font-size: 12px;
+      color: ${hint};
+    }
+    .comment-indicator:hover {
+      background: ${link}22;
+    }
+    .comment-indicator-preview {
+      display: block;
+      line-height: 1.4;
+    }
+    .comment-indicator-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    /* Submit dialog */
+    .submit-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9998;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .submit-dialog {
+      background: ${secondaryBg};
+      border: 1px solid ${hint}44;
+      border-radius: 12px;
+      padding: 20px;
+      max-width: 360px;
+      width: 100%;
+    }
+    .submit-dialog-title {
+      margin: 0 0 8px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .submit-dialog-summary {
+      margin: 0 0 16px;
+      font-size: 14px;
+      color: ${hint};
+    }
+    .submit-dialog-error {
+      margin: 0 0 12px;
+      font-size: 13px;
+      color: #f7768e;
+    }
+    .submit-dialog-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
   `;
   document.head.appendChild(style);
 }
