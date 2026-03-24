@@ -194,6 +194,31 @@ async function main(): Promise<void> {
     });
   }
 
+  // Add copy-as-markdown button.
+  const copyBtn = document.createElement("button");
+  copyBtn.id = "copy-md-btn";
+  copyBtn.textContent = "Copy as Markdown";
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(data.content);
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => { copyBtn.textContent = "Copy as Markdown"; }, 1500);
+    } catch {
+      // Fallback for environments without clipboard API.
+      const ta = document.createElement("textarea");
+      ta.value = data.content;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => { copyBtn.textContent = "Copy as Markdown"; }, 1500);
+    }
+  });
+  document.body.appendChild(copyBtn);
+
   // Set page title.
   document.title = data.filename;
 }
@@ -551,6 +576,28 @@ function getStyles(): string {
     }
     .mermaid-close-btn:hover {
       background: ${hint}44;
+    }
+
+    /* Copy as Markdown button */
+    #copy-md-btn {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      padding: 8px 16px;
+      background: ${secondaryBg};
+      color: ${hint};
+      border: 1px solid ${hint}44;
+      border-radius: 20px;
+      font-size: 13px;
+      cursor: pointer;
+      z-index: 100;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    #copy-md-btn:hover {
+      color: ${fg};
+      border-color: ${hint}88;
+      background: ${hint}22;
     }
   `;
 }
