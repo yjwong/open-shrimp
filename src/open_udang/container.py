@@ -48,10 +48,59 @@ def check_docker_available() -> bool:
     return shutil.which("docker") is not None
 
 
+# Shell script that starts rootless Docker daemon inside the container,
+# waits for it to be ready, then execs the Claude CLI.
+_DIND_ENTRYPOINT = r"""#!/bin/bash
+set -eu
+
+# Ensure the current uid exists in /etc/passwd — rootless Docker's
+# newuidmap/newgidmap require a valid passwd entry.
+MY_UID=$(id -u)
+MY_GID=$(id -g)
+if ! getent passwd "$MY_UID" > /dev/null 2>&1; then
+    echo "claude:x:${MY_UID}:${MY_GID}::/home/claude:/bin/bash" >> /etc/passwd
+fi
+if ! getent group "$MY_GID" > /dev/null 2>&1; then
+    echo "claude:x:${MY_GID}:" >> /etc/group
+fi
+
+# Register subordinate uid/gid ranges for the current (non-root) user.
+echo "claude:100000:65536" > /etc/subuid
+echo "claude:100000:65536" > /etc/subgid
+
+# XDG_RUNTIME_DIR is required by rootless dockerd.
+export XDG_RUNTIME_DIR="/tmp/runtime-${MY_UID}"
+mkdir -p "$XDG_RUNTIME_DIR"
+
+# Patch dockerd-rootless.sh to tolerate sysctl failures (ip_forward is
+# already set via the container's --sysctl flag).
+sed 's/sysctl -w \(.*\)$/sysctl -w \1 || true/' /usr/bin/dockerd-rootless.sh \
+    > /tmp/dockerd-rootless.sh
+chmod +x /tmp/dockerd-rootless.sh
+
+# Start rootless Docker daemon (no iptables in nested containers).
+SKIP_IPTABLES=1 /tmp/dockerd-rootless.sh --iptables=false \
+    > /tmp/dockerd.log 2>&1 &
+
+# Wait for Docker to be ready (up to 30s).
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+for _i in $(seq 1 30); do
+    if docker info > /dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+# Hand off to the Claude CLI.
+exec "$@"
+"""
+
+
 def build_cli_wrapper(
     context_name: str,
     project_dir: str,
     additional_directories: list[str] | None = None,
+    docker_in_docker: bool = False,
 ) -> str:
     """Generate a wrapper script that runs the Claude CLI inside Docker.
 
@@ -70,6 +119,9 @@ def build_cli_wrapper(
         project_dir: Absolute path to the project directory on the host.
         additional_directories: Optional extra directories to bind-mount
             (read-write, same path inside and outside).
+        docker_in_docker: When True, start a rootless Docker daemon
+            inside the container so the agent can run docker commands.
+            Adds ``--cap-add SYS_ADMIN`` and relaxed seccomp/AppArmor.
 
     Returns:
         Absolute path to the generated wrapper script.
@@ -99,12 +151,49 @@ def build_cli_wrapper(
         )
     for extra_dir in additional_directories or []:
         docker_args.append(f"-v {extra_dir}:{extra_dir}")
+
+    # When DinD is enabled, write an entrypoint script into the state
+    # directory (persists across sessions) and mount it into the
+    # container.  Also add the capabilities and security-opt flags
+    # needed for rootless Docker.
+    entrypoint_path: Path | None = None
+    if docker_in_docker:
+        docker_args.extend([
+            "--cap-add SYS_ADMIN",
+            "--cap-add NET_ADMIN",
+            "--security-opt seccomp=unconfined",
+            "--security-opt apparmor=unconfined",
+            "--security-opt systempaths=unconfined",
+            "--device /dev/net/tun",
+            "--sysctl net.ipv4.ip_forward=1",
+        ])
+        # Persist the inner Docker's image/container storage across sessions.
+        docker_data_dir = state_dir / "docker-data"
+        docker_data_dir.mkdir(exist_ok=True)
+        docker_args.append(
+            f"-v {docker_data_dir}:/home/claude/.local/share/docker"
+        )
+        # Write the DinD entrypoint script alongside the state dir.
+        entrypoint_path = state_dir / "dind-entrypoint.sh"
+        entrypoint_path.write_text(_DIND_ENTRYPOINT)
+        entrypoint_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
+                              | stat.S_IROTH | stat.S_IXOTH)
+        docker_args.append(
+            f"-v {entrypoint_path}:/usr/local/bin/dind-entrypoint.sh:ro"
+        )
+
     docker_args.extend([
         f"-w {project_dir}",
         f"--name openudang-{context_name}-$$",
         CONTAINER_IMAGE,
-        '/usr/local/bin/claude "$@"',
     ])
+
+    if docker_in_docker:
+        docker_args.append(
+            '/usr/local/bin/dind-entrypoint.sh /usr/local/bin/claude "$@"'
+        )
+    else:
+        docker_args.append('/usr/local/bin/claude "$@"')
 
     docker_cmd = " \\\n  ".join(docker_args)
     script = (
@@ -126,8 +215,9 @@ def build_cli_wrapper(
     os.chmod(wrapper_path, stat.S_IRWXU)
 
     logger.info(
-        "Generated Docker wrapper for context '%s': %s",
+        "Generated Docker wrapper for context '%s'%s: %s",
         context_name,
+        " (DinD)" if docker_in_docker else "",
         wrapper_path,
     )
     return wrapper_path

@@ -26,6 +26,7 @@ class ContextConfig:
     default_for_chats: list[int] = field(default_factory=list)
     locked_for_chats: list[int] = field(default_factory=list)
     containerize: bool = False
+    docker_in_docker: bool = False
 
 
 @dataclass
@@ -94,6 +95,13 @@ def _validate_raw(raw: dict) -> None:
                     f"be strings, got: {d!r}"
                 )
 
+    # docker_in_docker requires containerize
+    for name, ctx in contexts.items():
+        if ctx.get("docker_in_docker") and not ctx.get("containerize"):
+            raise ValueError(
+                f"Context '{name}': docker_in_docker requires containerize: true"
+            )
+
     # default_context references a defined context
     default = raw["default_context"]
     if default not in contexts:
@@ -116,6 +124,7 @@ def _parse(raw: dict) -> Config:
             default_for_chats=ctx.get("default_for_chats", []),
             locked_for_chats=ctx.get("locked_for_chats", []),
             containerize=bool(ctx.get("containerize", False)),
+            docker_in_docker=bool(ctx.get("docker_in_docker", False)),
         )
 
     # Parse optional review config.

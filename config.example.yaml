@@ -50,6 +50,10 @@ contexts:
     #                      # at the same path) and its own session storage.
     #                      # Requires: docker build -f Dockerfile.claude \
     #                      #   -t openudang-claude:latest .
+    # docker_in_docker: true  # Enable rootless Docker inside the container.
+    #                          # The agent can run docker build/run/compose etc.
+    #                          # Requires containerize: true.
+    #                          # Adds --cap-add SYS_ADMIN (reduced isolation).
 
 default_context: default
 

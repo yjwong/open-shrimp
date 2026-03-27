@@ -189,6 +189,7 @@ async def get_or_create_session(
                 context_name=context_name,
                 project_dir=context.directory,
                 additional_directories=context.additional_directories or None,
+                docker_in_docker=context.docker_in_docker,
             )
             logger.info(
                 "Containerized context '%s': using Docker wrapper %s",
