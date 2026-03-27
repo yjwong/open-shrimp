@@ -17,7 +17,7 @@ from open_udang.client_manager import (
     close_session,
     get_session,
 )
-from open_udang.config import Config
+from open_udang.config import Config, ContextConfig
 from open_udang.db import ChatScope, delete_session, get_session_id, set_session_id
 from open_udang.handlers.state import (
     _MCP_STATUS_EMOJI,
@@ -272,6 +272,55 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+def _list_sessions_for_context(
+    ctx_name: str, ctx: ContextConfig, **kwargs: Any,
+) -> "list[Any]":
+    """Call ``list_sessions`` respecting containerized session storage.
+
+    For containerized contexts the session ``.jsonl`` files live under the
+    per-context state directory (bind-mounted as ``~/.claude`` inside the
+    container), not the host's ``~/.claude``.  We scan that directory
+    directly using the SDK's internal helpers to avoid mutating global
+    process state (``CLAUDE_CONFIG_DIR``).
+    """
+    from claude_agent_sdk import list_sessions
+    from claude_agent_sdk._internal.sessions import (
+        MAX_SANITIZED_LENGTH,
+        _apply_sort_and_limit,
+        _canonicalize_path,
+        _read_sessions_from_dir,
+        _sanitize_path,
+    )
+    from platformdirs import user_data_path
+
+    if ctx.containerize:
+        state_dir = user_data_path("openudang") / "containers" / ctx_name
+        projects_dir = state_dir / "projects"
+        canonical = _canonicalize_path(ctx.directory)
+        sanitized = _sanitize_path(canonical)
+        candidate = projects_dir / sanitized
+        project_dir = None
+        if candidate.is_dir():
+            project_dir = candidate
+        elif len(sanitized) > MAX_SANITIZED_LENGTH:
+            # Prefix scan for long paths (hash mismatch tolerance).
+            prefix = sanitized[:MAX_SANITIZED_LENGTH]
+            try:
+                for entry in projects_dir.iterdir():
+                    if entry.is_dir() and entry.name.startswith(prefix + "-"):
+                        project_dir = entry
+                        break
+            except OSError:
+                pass
+
+        if project_dir is None:
+            return []
+        sessions = _read_sessions_from_dir(project_dir, canonical)
+        return _apply_sort_and_limit(sessions, kwargs.get("limit"))
+
+    return list_sessions(directory=ctx.directory, **kwargs)
+
+
 # ── /resume ──
 
 
@@ -282,8 +331,6 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         /resume          - Show recent sessions for the current context
         /resume <id>     - Resume a session by ID (prefix match supported)
     """
-    from claude_agent_sdk import list_sessions
-
     config: Config = context.bot_data["config"]
     db: aiosqlite.Connection = context.bot_data["db"]
     message = update.effective_message
@@ -298,7 +345,9 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if len(args) >= 2:
         # Direct resume by session ID (or prefix)
         target = args[1]
-        sessions = await asyncio.to_thread(list_sessions, directory=ctx.directory)
+        sessions = await asyncio.to_thread(
+            _list_sessions_for_context, ctx_name, ctx,
+        )
         match = None
         for s in sessions:
             if s.session_id == target or s.session_id.startswith(target):
@@ -324,7 +373,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # List recent sessions for the current context
     sessions = await asyncio.to_thread(
-        list_sessions, directory=ctx.directory, limit=_RESUME_LIST_LIMIT
+        _list_sessions_for_context, ctx_name, ctx, limit=_RESUME_LIST_LIMIT,
     )
 
     if not sessions:
