@@ -186,26 +186,24 @@ def _is_safe_bash_for_accept_edits(
 ) -> bool:
     """Return True if *command* is safe to auto-approve in accept-all-edits mode.
 
-    Uses tree-sitter to split compound commands (``&&``, ``||``, ``;``)
-    into individual subcommands and validates each one independently.
-    Every subcommand must pass the allowlist and path checks, and
-    compound command safety rules (cd + write, cd + git, multiple cd,
-    subcommand cap) must pass.
+    Uses tree-sitter to parse compound commands into structured
+    ParsedCommand objects with resolved arguments.  Every command must
+    pass the allowlist and path checks, and compound command safety
+    rules (cd + write, cd + git, multiple cd, subcommand cap) must pass.
 
     If any check fails, returns False so the command falls through to
     the interactive approval prompt.
     """
     from open_udang.bash_parse import (
-        TooComplexError,
         check_compound_safety,
-        split_subcommands,
+        parse_command,
     )
 
-    try:
-        subcommands = split_subcommands(command)
-    except TooComplexError:
+    result = parse_command(command)
+    if result.kind != "simple":
         return False
 
+    subcommands = [cmd.text for cmd in result.commands]
     if not subcommands:
         return False
 
