@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -326,13 +327,56 @@ async def _get_untracked_files(cwd: str) -> list[str]:
     return [f for f in stdout.strip().split("\n") if f]
 
 
-async def _add_intent_to_add(cwd: str, files: list[str]) -> None:
-    """Mark untracked files with --intent-to-add so they appear in diffs."""
+def _is_binary_file(path: Path, sample_size: int = 8192) -> bool:
+    """Check if a file is binary by looking for null bytes in the first chunk.
+
+    Uses the same heuristic as git: a file is binary if it contains a
+    null byte in the first ``sample_size`` bytes.
+    """
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" in f.read(sample_size)
+    except OSError:
+        return False
+
+
+async def _diff_untracked_files(cwd: str, files: list[str]) -> str:
+    """Generate unified diff output for untracked files without touching the index.
+
+    Binary files are detected cheaply (first 8KB null-byte check) and get
+    a synthetic diff header — avoiding the cost of git reading the entire
+    file.  Text files are diffed via ``git diff --no-index`` as usual.
+    """
     if not files:
-        return
-    _, stderr, rc = await _run_git(cwd, "add", "--intent-to-add", "--", *files)
-    if rc != 0:
-        logger.warning("git add --intent-to-add failed: %s", stderr.strip())
+        return ""
+
+    text_files: list[str] = []
+    binary_diffs: list[str] = []
+    for file_path in files:
+        if _is_binary_file(Path(cwd) / file_path):
+            binary_diffs.append(
+                f"diff --git a/{file_path} b/{file_path}\n"
+                f"new file mode 100644\n"
+                f"Binary files /dev/null and b/{file_path} differ\n"
+            )
+        else:
+            text_files.append(file_path)
+
+    # Diff text files concurrently via git.
+    async def _diff_one(file_path: str) -> str:
+        stdout, _, rc = await _run_git(
+            cwd, "diff", "--no-index", "--no-color", "-U3", "--",
+            "/dev/null", file_path,
+        )
+        # --no-index exits 1 when there are differences (not an error).
+        if rc not in (0, 1):
+            logger.warning("git diff --no-index failed for %s (rc=%d)", file_path, rc)
+            return ""
+        return stdout
+
+    text_diffs = await asyncio.gather(*[_diff_one(f) for f in text_files])
+    all_diffs = binary_diffs + [d for d in text_diffs if d]
+    return "\n".join(all_diffs)
 
 
 async def get_hunks(
@@ -343,8 +387,9 @@ async def get_hunks(
 ) -> HunkResult:
     """Get paginated diff hunks from a git working directory.
 
-    Combines both staged and unstaged changes. Optionally includes
-    untracked files via --intent-to-add.
+    Combines staged changes, unstaged changes, and (optionally) untracked
+    files.  Untracked files are diffed via ``git diff --no-index`` which
+    is read-only and does not mutate the git index.
 
     Args:
         cwd: Working directory (must be inside a git repo).
@@ -367,30 +412,39 @@ async def get_hunks(
             f"Directory is not inside a git repository: {cwd}"
         )
 
-    # Handle untracked files first.
+    # Run tracked diffs (staged + unstaged) and untracked file diffs
+    # concurrently.  Untracked files are diffed via --no-index which is
+    # purely read-only — no index mutations needed.
+    unstaged_task = asyncio.ensure_future(_run_git(cwd, "diff", "--no-color", "-U3"))
+    staged_task = asyncio.ensure_future(_run_git(cwd, "diff", "--cached", "--no-color", "-U3"))
+
+    untracked_task: asyncio.Task[str] | None = None
     if include_untracked:
         untracked = await _get_untracked_files(cwd)
         if untracked:
-            await _add_intent_to_add(cwd, untracked)
+            untracked_task = asyncio.ensure_future(
+                _diff_untracked_files(cwd, untracked)
+            )
 
-    # Run both diffs concurrently.
-    unstaged_task = _run_git(cwd, "diff", "--no-color", "-U3")
-    staged_task = _run_git(cwd, "diff", "--cached", "--no-color", "-U3")
-    (unstaged_out, unstaged_err, unstaged_rc), (staged_out, staged_err, staged_rc) = (
-        await asyncio.gather(unstaged_task, staged_task)
-    )
+    (unstaged_out, unstaged_err, unstaged_rc) = await unstaged_task
+    (staged_out, staged_err, staged_rc) = await staged_task
+
+    untracked_diff = ""
+    if untracked_task is not None:
+        untracked_diff = await untracked_task
 
     if unstaged_rc != 0:
         logger.warning("git diff failed: %s", unstaged_err.strip())
     if staged_rc != 0:
         logger.warning("git diff --cached failed: %s", staged_err.strip())
 
-    # Parse both diffs.
+    # Parse all diffs.
     unstaged_hunks = parse_diff(unstaged_out, staged=False)
     staged_hunks = parse_diff(staged_out, staged=True)
+    untracked_hunks = parse_diff(untracked_diff, staged=False) if untracked_diff else []
 
-    # Combine: staged hunks first, then unstaged.
-    all_hunks = staged_hunks + unstaged_hunks
+    # Combine: staged first, then unstaged (tracked), then untracked.
+    all_hunks = staged_hunks + unstaged_hunks + untracked_hunks
     total = len(all_hunks)
 
     # Apply pagination.
