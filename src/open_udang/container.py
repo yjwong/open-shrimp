@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -354,22 +355,47 @@ def build_cli_wrapper(
     # exposing the rest of ~/.claude.
     host_credentials = Path.home() / ".claude" / ".credentials.json"
 
-    # Build the full docker run command as a list of arguments, then
-    # join them with line-continuation backslashes for readability.
-    docker_args = [
-        "exec docker run --rm -i",
-        f"--user {uid}:{gid}",
-        "-e HOME=/home/claude",
-        "-e ANTHROPIC_API_KEY",
-        f"-v {project_dir}:{project_dir}",
-        f"-v {state_dir}:/home/claude/.claude",
+    # Forward the host's git identity into the container so that
+    # git commit/tag commands work without extra configuration.
+    # Each entry is a "KEY=VALUE" string passed via docker's -e flag.
+    git_env_args: list[str] = []
+    for git_key, env_vars in [
+        ("user.name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
+        ("user.email", ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL")),
+    ]:
+        try:
+            value = subprocess.check_output(
+                ["git", "config", "--global", git_key],
+                text=True,
+            ).strip()
+            if value:
+                for env_var in env_vars:
+                    git_env_args.append(f"{env_var}={value}")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+    # Build the docker run argv as a proper list (one element per
+    # argument) so the generated script can use a bash array — no
+    # shell-escaping headaches for values with spaces or special chars.
+    docker_argv: list[str] = [
+        "docker", "run", "--rm", "-i",
+        "--user", f"{uid}:{gid}",
+        "-e", "HOME=/home/claude",
+        "-e", "ANTHROPIC_API_KEY",
     ]
+    for env_arg in git_env_args:
+        docker_argv.extend(["-e", env_arg])
+    docker_argv.extend([
+        "-v", f"{project_dir}:{project_dir}",
+        "-v", f"{state_dir}:/home/claude/.claude",
+    ])
     if host_credentials.exists():
-        docker_args.append(
-            f"-v {host_credentials}:/home/claude/.claude/.credentials.json:ro"
-        )
+        docker_argv.extend([
+            "-v",
+            f"{host_credentials}:/home/claude/.claude/.credentials.json:ro",
+        ])
     for extra_dir in additional_directories or []:
-        docker_args.append(f"-v {extra_dir}:{extra_dir}")
+        docker_argv.extend(["-v", f"{extra_dir}:{extra_dir}"])
 
     # When DinD is enabled, write an entrypoint script into the state
     # directory (persists across sessions) and mount it into the
@@ -380,49 +406,58 @@ def build_cli_wrapper(
     #   - Custom seccomp profile: default + keyctl + pivot_root (for inner runc)
     entrypoint_path: Path | None = None
     if docker_in_docker:
-        docker_args.extend([
-            "--cap-add SYS_ADMIN",
-            "--security-opt apparmor=unconfined",
-            "--security-opt systempaths=unconfined",
-            f"--security-opt seccomp={_find_seccomp_profile()}",
-            "--device /dev/net/tun",
-            "--sysctl net.ipv4.ip_forward=1",
+        docker_argv.extend([
+            "--cap-add", "SYS_ADMIN",
+            "--security-opt", "apparmor=unconfined",
+            "--security-opt", "systempaths=unconfined",
+            "--security-opt", f"seccomp={_find_seccomp_profile()}",
+            "--device", "/dev/net/tun",
+            "--sysctl", "net.ipv4.ip_forward=1",
         ])
         # Persist the inner Docker's image/container storage across sessions.
         docker_data_dir = state_dir / "docker-data"
         docker_data_dir.mkdir(exist_ok=True)
-        docker_args.append(
-            f"-v {docker_data_dir}:/home/claude/.local/share/docker"
-        )
+        docker_argv.extend([
+            "-v", f"{docker_data_dir}:/home/claude/.local/share/docker",
+        ])
         # Write the DinD entrypoint script alongside the state dir.
         entrypoint_path = state_dir / "dind-entrypoint.sh"
         entrypoint_path.write_text(_DIND_ENTRYPOINT)
         entrypoint_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
                               | stat.S_IROTH | stat.S_IXOTH)
-        docker_args.append(
-            f"-v {entrypoint_path}:/usr/local/bin/dind-entrypoint.sh:ro"
-        )
+        docker_argv.extend([
+            "-v",
+            f"{entrypoint_path}:/usr/local/bin/dind-entrypoint.sh:ro",
+        ])
 
-    docker_args.extend([
-        f"-w {project_dir}",
-        f"--name openudang-{context_name}-$$",
-        image_name,
-    ])
+    docker_argv.extend(["-w", project_dir])
 
+    # Emit the argv as a bash array so each element is properly quoted.
+    # --name and the image/command are appended separately: --name needs
+    # shell expansion ($$) and the image + trailing "$@" are static.
+    quoted_elements = " \\\n  ".join(shlex.quote(a) for a in docker_argv)
+
+    # Build the tail: --name (with $$), image, and command.
+    container_name = f"openudang-{context_name}"
     if docker_in_docker:
-        docker_args.append(
-            '/usr/local/bin/dind-entrypoint.sh /usr/local/bin/claude "$@"'
+        tail_cmd = (
+            "/usr/local/bin/dind-entrypoint.sh"
+            " /usr/local/bin/claude"
         )
     else:
-        docker_args.append('/usr/local/bin/claude "$@"')
+        tail_cmd = "/usr/local/bin/claude"
 
-    docker_cmd = " \\\n  ".join(docker_args)
     script = (
         f"#!/bin/bash\n"
         f"# Auto-generated by OpenUdang for containerized context "
         f"'{context_name}'.\n"
         f"# Do not edit — this file is recreated on each session.\n"
-        f"{docker_cmd}\n"
+        f"DOCKER_ARGS=(\n  {quoted_elements}\n)\n"
+        f'exec "${{DOCKER_ARGS[@]}}"'
+        f' --name "{container_name}-$$"'
+        f" {shlex.quote(image_name)}"
+        f" {tail_cmd}"
+        f' "$@"\n'
     )
 
     # Write to a temp file that persists for the session lifetime.
