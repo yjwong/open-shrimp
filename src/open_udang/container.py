@@ -119,81 +119,120 @@ def _find_seccomp_profile() -> Path:
         return persistent
 
 
-def ensure_image() -> None:
+def ensure_image(
+    image_name: str = CONTAINER_IMAGE,
+    dockerfile: str | None = None,
+) -> None:
     """Ensure the container image exists, building it if necessary.
 
-    Checks for ``openudang-claude:latest`` via ``docker image inspect``.
-    If missing, locates the Claude CLI binary, copies it into a temp
-    build context alongside the bundled ``Dockerfile.claude``, and runs
-    ``docker build``.
+    When *dockerfile* is ``None`` (the default), builds the base
+    ``openudang-claude`` image from the bundled ``Dockerfile.claude``.
+    When a custom *dockerfile* path is provided, builds from that file
+    instead — the Claude CLI binary is still copied into the build
+    context as ``claude`` and available via the ``CLAUDE_CLI`` build arg.
+
+    Args:
+        image_name: Docker image tag to build/check.
+        dockerfile: Optional path to a custom Dockerfile.  When set,
+            the build context is the directory containing the
+            Dockerfile (so ``COPY`` instructions work relative to it).
 
     Raises:
         RuntimeError: If the Claude CLI binary cannot be found or if
             the Docker build fails.
     """
     result = subprocess.run(
-        ["docker", "image", "inspect", CONTAINER_IMAGE],
+        ["docker", "image", "inspect", image_name],
         capture_output=True,
     )
     if result.returncode == 0:
-        logger.info("Container image %s already exists", CONTAINER_IMAGE)
+        logger.info("Container image %s already exists", image_name)
         return
 
-    logger.info("Container image %s not found, building...", CONTAINER_IMAGE)
+    logger.info("Container image %s not found, building...", image_name)
 
     cli_binary = find_claude_binary()
     logger.info("Using Claude CLI binary: %s", cli_binary)
 
-    # Locate Dockerfile.claude: try repo root first (dev/editable installs),
-    # then fall back to importlib.resources (installed wheels/PyApp).
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    repo_dockerfile = repo_root / "Dockerfile.claude"
-    if repo_dockerfile.is_file():
-        dockerfile_text = repo_dockerfile.read_text()
-    else:
-        dockerfile_text = (
-            _pkg_files("open_udang").joinpath("Dockerfile.claude").read_text()
-        )
-
-    with tempfile.TemporaryDirectory(prefix="openudang-build-") as build_dir:
-        build_path = Path(build_dir)
-
-        # Copy CLI binary into build context as "claude"
-        shutil.copy2(cli_binary, build_path / "claude")
-
-        # Write Dockerfile into build context
-        (build_path / "Dockerfile").write_text(dockerfile_text)
-
-        # Build the image, streaming output to the logger at INFO level
-        # so users can see build progress.
-        process = subprocess.Popen(
-            [
-                "docker", "build",
-                "-t", CONTAINER_IMAGE,
-                "--build-arg", "CLAUDE_CLI=claude",
-                ".",
-            ],
-            cwd=build_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        output_lines: list[str] = []
-        assert process.stdout is not None
-        for line in process.stdout:
-            line = line.rstrip()
-            output_lines.append(line)
-            logger.info("docker build: %s", line)
-        returncode = process.wait()
-
-        if returncode != 0:
-            output = "\n".join(output_lines)
+    if dockerfile is not None:
+        # Custom Dockerfile: use its parent directory as the build
+        # context, copying the CLI binary in alongside it.
+        dockerfile_path = Path(dockerfile).resolve()
+        if not dockerfile_path.is_file():
             raise RuntimeError(
-                f"Failed to build container image {CONTAINER_IMAGE}. "
-                f"Docker build output:\n{output}"
+                f"Custom Dockerfile not found: {dockerfile_path}"
+            )
+        build_dir_path = dockerfile_path.parent
+        # Copy CLI binary into the build context (if not already there).
+        cli_dest = build_dir_path / "claude"
+        if not cli_dest.exists() or not cli_dest.samefile(Path(cli_binary)):
+            shutil.copy2(cli_binary, cli_dest)
+        _docker_build(
+            image_name=image_name,
+            build_dir=str(build_dir_path),
+            dockerfile_name=dockerfile_path.name,
+        )
+    else:
+        # Default: bundled Dockerfile.claude in a temp build context.
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        repo_dockerfile = repo_root / "Dockerfile.claude"
+        if repo_dockerfile.is_file():
+            dockerfile_text = repo_dockerfile.read_text()
+        else:
+            dockerfile_text = (
+                _pkg_files("open_udang")
+                .joinpath("Dockerfile.claude")
+                .read_text()
             )
 
-    logger.info("Successfully built container image %s", CONTAINER_IMAGE)
+        with tempfile.TemporaryDirectory(
+            prefix="openudang-build-"
+        ) as build_dir:
+            build_path = Path(build_dir)
+            shutil.copy2(cli_binary, build_path / "claude")
+            (build_path / "Dockerfile").write_text(dockerfile_text)
+            _docker_build(image_name=image_name, build_dir=build_dir)
+
+    logger.info("Successfully built container image %s", image_name)
+
+
+def _docker_build(
+    image_name: str,
+    build_dir: str,
+    dockerfile_name: str = "Dockerfile",
+) -> None:
+    """Run ``docker build`` and stream output to the logger.
+
+    Raises:
+        RuntimeError: If the build fails.
+    """
+    process = subprocess.Popen(
+        [
+            "docker", "build",
+            "-t", image_name,
+            "-f", dockerfile_name,
+            "--build-arg", "CLAUDE_CLI=claude",
+            ".",
+        ],
+        cwd=build_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output_lines: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        line = line.rstrip()
+        output_lines.append(line)
+        logger.info("docker build: %s", line)
+    returncode = process.wait()
+
+    if returncode != 0:
+        output = "\n".join(output_lines)
+        raise RuntimeError(
+            f"Failed to build container image {image_name}. "
+            f"Docker build output:\n{output}"
+        )
 
 
 def _ensure_state_dir(context_name: str) -> Path:
@@ -272,6 +311,7 @@ def build_cli_wrapper(
     project_dir: str,
     additional_directories: list[str] | None = None,
     docker_in_docker: bool = False,
+    image_name: str = CONTAINER_IMAGE,
 ) -> str:
     """Generate a wrapper script that runs the Claude CLI inside Docker.
 
@@ -361,7 +401,7 @@ def build_cli_wrapper(
     docker_args.extend([
         f"-w {project_dir}",
         f"--name openudang-{context_name}-$$",
-        CONTAINER_IMAGE,
+        image_name,
     ])
 
     if docker_in_docker:

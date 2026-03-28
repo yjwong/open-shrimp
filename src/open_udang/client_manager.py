@@ -146,7 +146,7 @@ async def get_or_create_session(
         notify_auto_approved_edit=_make_edit_notify_proxy(callback_context),
         chat_id=scope.chat_id,
         is_tool_auto_approved=_make_tool_approved_proxy(callback_context),
-        is_containerized=context.containerize,
+        is_containerized=context.container is not None and context.container.enabled,
     )
 
     def _log_stderr(line: str) -> None:
@@ -174,7 +174,8 @@ async def get_or_create_session(
     # unchanged.
     wrapper_path: str | None = None
     cli_path: str | None = None
-    if context.containerize:
+    is_containerized = context.container is not None and context.container.enabled
+    if is_containerized:
         if sys.platform == "darwin":
             wrapper_path = sandbox_build_cli_wrapper(
                 context_name=context_name,
@@ -189,9 +190,18 @@ async def get_or_create_session(
         else:
             # Check if the image needs building — send user feedback
             # before the potentially slow build.
+            assert context.container is not None
+            custom_dockerfile = context.container.dockerfile
+            docker_in_docker = context.container.docker_in_docker
+            image_name = (
+                f"openudang-claude:{context_name}"
+                if custom_dockerfile
+                else CONTAINER_IMAGE
+            )
+
             import subprocess as _subprocess
             inspect_result = _subprocess.run(
-                ["docker", "image", "inspect", CONTAINER_IMAGE],
+                ["docker", "image", "inspect", image_name],
                 capture_output=True,
             )
             if inspect_result.returncode != 0 and bot is not None:
@@ -206,12 +216,16 @@ async def get_or_create_session(
                 )
 
             def _build_wrapper() -> str:
-                docker_ensure_image()
+                docker_ensure_image(
+                    image_name=image_name,
+                    dockerfile=custom_dockerfile,
+                )
                 return docker_build_cli_wrapper(
                     context_name=context_name,
                     project_dir=context.directory,
                     additional_directories=context.additional_directories or None,
-                    docker_in_docker=context.docker_in_docker,
+                    docker_in_docker=docker_in_docker,
+                    image_name=image_name,
                 )
 
             wrapper_path = await asyncio.to_thread(_build_wrapper)

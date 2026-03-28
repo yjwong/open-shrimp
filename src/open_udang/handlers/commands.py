@@ -293,7 +293,7 @@ def _list_sessions_for_context(
     )
     from platformdirs import user_data_path
 
-    if ctx.containerize:
+    if ctx.container is not None and ctx.container.enabled:
         state_dir = user_data_path("openudang") / "containers" / ctx_name
         projects_dir = state_dir / "projects"
         canonical = _canonicalize_path(ctx.directory)

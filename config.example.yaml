@@ -44,16 +44,20 @@ contexts:
     #   - -1001234567890  # Sets initial context for this group chat
     # locked_for_chats:
     #   - -1001234567890  # Locks this group chat to this context (cannot switch)
-    # containerize: true  # Run the Claude CLI inside a Docker container.
-    #                      # Provides strong filesystem isolation — the agent
-    #                      # can only access the project directory (bind-mounted
-    #                      # at the same path) and its own session storage.
-    #                      # Requires: docker build -f Dockerfile.claude \
-    #                      #   -t openudang-claude:latest .
-    # docker_in_docker: true  # Enable rootless Docker inside the container.
-    #                          # The agent can run docker build/run/compose etc.
-    #                          # Requires containerize: true.
-    #                          # Adds --cap-add SYS_ADMIN (reduced isolation).
+    # container:                   # Run the Claude CLI inside a Docker container.
+    #   enabled: true              # Default true when container key is present.
+    #                              # Provides strong filesystem isolation — the agent
+    #                              # can only access the project directory (bind-mounted
+    #                              # at the same path) and its own session storage.
+    #   docker_in_docker: true     # Enable rootless Docker inside the container.
+    #                              # The agent can run docker build/run/compose etc.
+    #                              # Adds --cap-add SYS_ADMIN (reduced isolation).
+    #   dockerfile: /path/to/Dockerfile.claude  # Custom Dockerfile for this context.
+    #                              # Use to install dev tools (Go, Node, Rust, etc.).
+    #                              # Should typically FROM openudang-claude:latest.
+    #                              # Build context is the Dockerfile's parent dir.
+    #                              # The Claude CLI binary is copied in as "claude"
+    #                              # (available via CLAUDE_CLI build arg).
 
 default_context: default
 

@@ -17,6 +17,13 @@ class TelegramConfig:
 
 
 @dataclass
+class ContainerConfig:
+    enabled: bool = True
+    docker_in_docker: bool = False
+    dockerfile: str | None = None
+
+
+@dataclass
 class ContextConfig:
     directory: str
     description: str
@@ -25,8 +32,7 @@ class ContextConfig:
     additional_directories: list[str] = field(default_factory=list)
     default_for_chats: list[int] = field(default_factory=list)
     locked_for_chats: list[int] = field(default_factory=list)
-    containerize: bool = False
-    docker_in_docker: bool = False
+    container: ContainerConfig | None = None
 
 
 @dataclass
@@ -95,12 +101,21 @@ def _validate_raw(raw: dict) -> None:
                     f"be strings, got: {d!r}"
                 )
 
-    # docker_in_docker requires containerize
+    # Validate container config
     for name, ctx in contexts.items():
-        if ctx.get("docker_in_docker") and not ctx.get("containerize"):
-            raise ValueError(
-                f"Context '{name}': docker_in_docker requires containerize: true"
-            )
+        container = ctx.get("container")
+        if container is not None:
+            if not isinstance(container, (dict, bool)):
+                raise ValueError(
+                    f"Context '{name}': container must be a mapping or boolean"
+                )
+            if isinstance(container, dict):
+                dockerfile = container.get("dockerfile")
+                if dockerfile is not None and not isinstance(dockerfile, str):
+                    raise ValueError(
+                        f"Context '{name}': container.dockerfile must be "
+                        f"a string"
+                    )
 
     # default_context references a defined context
     default = raw["default_context"]
@@ -115,6 +130,22 @@ def _parse(raw: dict) -> Config:
     """Parse validated raw dict into Config dataclass."""
     contexts = {}
     for name, ctx in raw["contexts"].items():
+        # Parse container config: presence of the key implies enabled.
+        container_raw = ctx.get("container")
+        container: ContainerConfig | None = None
+        if container_raw is not None:
+            if isinstance(container_raw, dict):
+                container = ContainerConfig(
+                    enabled=bool(container_raw.get("enabled", True)),
+                    docker_in_docker=bool(
+                        container_raw.get("docker_in_docker", False)
+                    ),
+                    dockerfile=container_raw.get("dockerfile"),
+                )
+            else:
+                # e.g. `container: true` as shorthand
+                container = ContainerConfig(enabled=bool(container_raw))
+
         contexts[name] = ContextConfig(
             directory=ctx["directory"],
             description=ctx["description"],
@@ -123,8 +154,7 @@ def _parse(raw: dict) -> Config:
             additional_directories=ctx.get("additional_directories", []),
             default_for_chats=ctx.get("default_for_chats", []),
             locked_for_chats=ctx.get("locked_for_chats", []),
-            containerize=bool(ctx.get("containerize", False)),
-            docker_in_docker=bool(ctx.get("docker_in_docker", False)),
+            container=container,
         )
 
     # Parse optional review config.
