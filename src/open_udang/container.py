@@ -155,6 +155,11 @@ def ensure_image(
     logger.info("Using Claude CLI binary: %s", cli_binary)
 
     if dockerfile is not None:
+        # Ensure the base image exists before building a custom image
+        # that likely depends on it (e.g. FROM openudang-claude:latest).
+        if image_name != CONTAINER_IMAGE:
+            ensure_image(image_name=CONTAINER_IMAGE, dockerfile=None)
+
         # Custom Dockerfile: use its parent directory as the build
         # context, copying the CLI binary in alongside it.
         dockerfile_path = Path(dockerfile).resolve()
