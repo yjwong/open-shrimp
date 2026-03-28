@@ -18,10 +18,65 @@ import logging
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
+from importlib.resources import files as _pkg_files
 from pathlib import Path
 
 from platformdirs import user_data_path
+
+def find_claude_binary() -> str:
+    """Find the Claude CLI binary on disk.
+
+    Resolution order:
+    1. Bundled binary inside the claude_agent_sdk package
+    2. System PATH via shutil.which
+    3. Common installation locations
+
+    Returns:
+        Absolute path to the Claude CLI binary.
+
+    Raises:
+        RuntimeError: If no binary is found on disk.
+    """
+    # 1. Bundled binary in the SDK package.
+    try:
+        import claude_agent_sdk
+        bundled = (
+            Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+        )
+        if bundled.exists() and bundled.is_file():
+            return str(bundled)
+    except (ImportError, AttributeError):
+        pass
+
+    # 2. System PATH.
+    system_claude = shutil.which("claude")
+    if system_claude:
+        return system_claude
+
+    # 3. Common install locations.
+    home = Path.home()
+    for location in [
+        home / ".npm-global/bin/claude",
+        Path("/usr/local/bin/claude"),
+        home / ".local/bin/claude",
+        home / "node_modules/.bin/claude",
+        home / ".yarn/bin/claude",
+        home / ".claude/local/claude",
+    ]:
+        if location.exists() and location.is_file():
+            return str(location)
+
+    raise RuntimeError(
+        "Could not find the Claude CLI binary. Searched: "
+        "claude_agent_sdk bundled binary, system PATH, "
+        "~/.npm-global/bin/claude, /usr/local/bin/claude, "
+        "~/.local/bin/claude, ~/node_modules/.bin/claude, "
+        "~/.yarn/bin/claude, ~/.claude/local/claude. "
+        "Install claude-agent-sdk or ensure 'claude' is on your PATH."
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +89,83 @@ CONTAINER_STATE_DIR = user_data_path("openudang") / "containers"
 # Custom seccomp profile for DinD: Docker's default + keyctl (inner runc
 # session keyrings) + pivot_root (inner container rootfs setup).
 _DIND_SECCOMP_PROFILE = Path(__file__).resolve().parent.parent.parent / "seccomp-dind.json"
+
+
+def ensure_image() -> None:
+    """Ensure the container image exists, building it if necessary.
+
+    Checks for ``openudang-claude:latest`` via ``docker image inspect``.
+    If missing, locates the Claude CLI binary, copies it into a temp
+    build context alongside the bundled ``Dockerfile.claude``, and runs
+    ``docker build``.
+
+    Raises:
+        RuntimeError: If the Claude CLI binary cannot be found or if
+            the Docker build fails.
+    """
+    result = subprocess.run(
+        ["docker", "image", "inspect", CONTAINER_IMAGE],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        logger.info("Container image %s already exists", CONTAINER_IMAGE)
+        return
+
+    logger.info("Container image %s not found, building...", CONTAINER_IMAGE)
+
+    cli_binary = find_claude_binary()
+    logger.info("Using Claude CLI binary: %s", cli_binary)
+
+    # Locate Dockerfile.claude: try repo root first (dev/editable installs),
+    # then fall back to importlib.resources (installed wheels/PyApp).
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_dockerfile = repo_root / "Dockerfile.claude"
+    if repo_dockerfile.is_file():
+        dockerfile_text = repo_dockerfile.read_text()
+    else:
+        dockerfile_text = (
+            _pkg_files("open_udang").joinpath("Dockerfile.claude").read_text()
+        )
+
+    with tempfile.TemporaryDirectory(prefix="openudang-build-") as build_dir:
+        build_path = Path(build_dir)
+
+        # Copy CLI binary into build context as "claude"
+        shutil.copy2(cli_binary, build_path / "claude")
+
+        # Write Dockerfile into build context
+        (build_path / "Dockerfile").write_text(dockerfile_text)
+
+        # Build the image, streaming output to the logger at INFO level
+        # so users can see build progress.
+        process = subprocess.Popen(
+            [
+                "docker", "build",
+                "-t", CONTAINER_IMAGE,
+                "--build-arg", "CLAUDE_CLI=claude",
+                ".",
+            ],
+            cwd=build_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        output_lines: list[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.rstrip()
+            output_lines.append(line)
+            logger.info("docker build: %s", line)
+        returncode = process.wait()
+
+        if returncode != 0:
+            output = "\n".join(output_lines)
+            raise RuntimeError(
+                f"Failed to build container image {CONTAINER_IMAGE}. "
+                f"Docker build output:\n{output}"
+            )
+
+    logger.info("Successfully built container image %s", CONTAINER_IMAGE)
 
 
 def _ensure_state_dir(context_name: str) -> Path:

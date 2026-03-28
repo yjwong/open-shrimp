@@ -39,8 +39,10 @@ from open_udang.hooks import (
 import sys
 
 from open_udang.container import (
+    CONTAINER_IMAGE,
     build_cli_wrapper as docker_build_cli_wrapper,
     cleanup_wrapper as docker_cleanup_wrapper,
+    ensure_image as docker_ensure_image,
 )
 from open_udang.sandbox import (
     build_cli_wrapper as sandbox_build_cli_wrapper,
@@ -185,12 +187,34 @@ async def get_or_create_session(
                 wrapper_path,
             )
         else:
-            wrapper_path = docker_build_cli_wrapper(
-                context_name=context_name,
-                project_dir=context.directory,
-                additional_directories=context.additional_directories or None,
-                docker_in_docker=context.docker_in_docker,
+            # Check if the image needs building — send user feedback
+            # before the potentially slow build.
+            import subprocess as _subprocess
+            inspect_result = _subprocess.run(
+                ["docker", "image", "inspect", CONTAINER_IMAGE],
+                capture_output=True,
             )
+            if inspect_result.returncode != 0 and bot is not None:
+                await bot.send_message(
+                    chat_id=scope.chat_id,
+                    message_thread_id=scope.thread_id,
+                    text=(
+                        "Building container image for the first time, "
+                        "this may take a few minutes\\.\\.\\."
+                    ),
+                    parse_mode="MarkdownV2",
+                )
+
+            def _build_wrapper() -> str:
+                docker_ensure_image()
+                return docker_build_cli_wrapper(
+                    context_name=context_name,
+                    project_dir=context.directory,
+                    additional_directories=context.additional_directories or None,
+                    docker_in_docker=context.docker_in_docker,
+                )
+
+            wrapper_path = await asyncio.to_thread(_build_wrapper)
             logger.info(
                 "Containerized context '%s': using Docker wrapper %s",
                 context_name,

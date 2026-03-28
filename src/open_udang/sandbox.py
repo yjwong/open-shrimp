@@ -28,44 +28,7 @@ from platformdirs import user_data_path
 logger = logging.getLogger(__name__)
 
 
-def _find_claude_binary() -> str:
-    """Find the Claude CLI binary, mirroring the SDK's resolution order.
-
-    1. Bundled binary inside the claude_agent_sdk package
-    2. System PATH via shutil.which
-    3. Common installation locations
-    """
-    # 1. Bundled binary in the SDK package.
-    try:
-        import claude_agent_sdk
-        bundled = (
-            Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
-        )
-        if bundled.exists() and bundled.is_file():
-            return str(bundled)
-    except (ImportError, AttributeError):
-        pass
-
-    # 2. System PATH.
-    system_claude = shutil.which("claude")
-    if system_claude:
-        return system_claude
-
-    # 3. Common install locations.
-    home = Path.home()
-    for location in [
-        home / ".npm-global/bin/claude",
-        Path("/usr/local/bin/claude"),
-        home / ".local/bin/claude",
-        home / "node_modules/.bin/claude",
-        home / ".yarn/bin/claude",
-        home / ".claude/local/claude",
-    ]:
-        if location.exists() and location.is_file():
-            return str(location)
-
-    # Last resort — hope it's on PATH at runtime.
-    return "claude"
+from open_udang.container import find_claude_binary as _find_claude_binary
 
 # Base directory for per-context sandbox state (session storage, etc.).
 SANDBOX_STATE_DIR = user_data_path("openudang") / "containers"
