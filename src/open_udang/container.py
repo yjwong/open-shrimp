@@ -88,7 +88,35 @@ CONTAINER_STATE_DIR = user_data_path("openudang") / "containers"
 
 # Custom seccomp profile for DinD: Docker's default + keyctl (inner runc
 # session keyrings) + pivot_root (inner container rootfs setup).
-_DIND_SECCOMP_PROFILE = Path(__file__).resolve().parent.parent.parent / "seccomp-dind.json"
+def _find_seccomp_profile() -> Path:
+    """Locate the DinD seccomp profile.
+
+    Tries the repo root first (dev/editable installs), then falls back to
+    importlib.resources (installed wheels/PyApp).  The profile must be
+    written to a real file on disk because ``docker run --security-opt
+    seccomp=`` requires a filesystem path.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_profile = repo_root / "seccomp-dind.json"
+    if repo_profile.is_file():
+        return repo_profile
+
+    # Installed wheel / PyApp — extract via importlib.resources.
+    pkg_profile = _pkg_files("open_udang").joinpath("seccomp-dind.json")
+    # importlib.resources may return a MultiplexedPath or similar; we need
+    # a real filesystem path for docker's --security-opt.
+    if hasattr(pkg_profile, "is_file") and pkg_profile.is_file():
+        return Path(str(pkg_profile))
+
+    # As a last resort try importlib.resources.as_file for zip-backed resources.
+    from importlib.resources import as_file
+    with as_file(pkg_profile) as p:
+        # Copy to a persistent temp location so docker can read it after
+        # the context manager exits.
+        persistent = Path(tempfile.gettempdir()) / "openudang-seccomp-dind.json"
+        if not persistent.exists():
+            shutil.copy2(p, persistent)
+        return persistent
 
 
 def ensure_image() -> None:
@@ -311,7 +339,7 @@ def build_cli_wrapper(
             "--cap-add SYS_ADMIN",
             "--security-opt apparmor=unconfined",
             "--security-opt systempaths=unconfined",
-            f"--security-opt seccomp={_DIND_SECCOMP_PROFILE}",
+            f"--security-opt seccomp={_find_seccomp_profile()}",
             "--device /dev/net/tun",
             "--sysctl net.ipv4.ip_forward=1",
         ])
