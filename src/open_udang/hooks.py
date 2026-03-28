@@ -399,6 +399,20 @@ def make_can_use_tool(
                 ),
             )
 
+        # Containerized contexts: auto-approve all read-only path tools
+        # (Read, Glob, Grep) regardless of path, since Docker isolation
+        # provides the safety boundary — consistent with Bash being
+        # fully auto-approved in containerized contexts.
+        if (
+            is_containerized
+            and tool_name in _PATH_SCOPED_TOOLS
+            and tool_name not in _MUTATING_PATH_TOOLS
+        ):
+            logger.info(
+                "Auto-approved %s in containerized context", tool_name
+            )
+            return PermissionResultAllow()
+
         # Path-scoped approval for file-access tools.
         # Read-only tools (Read, Glob, Grep) are auto-approved when within
         # an approved directory (cwd + additional_directories).  Mutating
