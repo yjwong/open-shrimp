@@ -11,6 +11,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from open_udang.handlers.state import (
     _approval_futures,
+    _approval_metadata,
     _approval_tool_names,
     _pending_agent_inputs,
 )
@@ -272,6 +273,11 @@ async def _send_approval_keyboard(
     approve_data = f"approve:{tool_use_id}"
     deny_data = f"deny:{tool_use_id}"
     _approval_tool_names[tool_use_id] = tool_name
+    _approval_metadata[tool_use_id] = {
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "chat_id": chat_id,
+    }
 
     # Build keyboard rows -- primary actions on top, session-scoped on bottom.
     # Row 1: [Approve] [Deny] (and optional [Show prompt] for Agent)
@@ -321,13 +327,14 @@ async def _send_approval_keyboard(
     if thread_id is not None:
         thread_kwargs["message_thread_id"] = thread_id
 
-    await bot.send_message(
+    sent_msg = await bot.send_message(
         chat_id=chat_id,
         text=text,
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
         **thread_kwargs,
     )
+    _approval_metadata[tool_use_id]["message_id"] = sent_msg.message_id
 
     # Create a future and wait for the callback
     loop = asyncio.get_running_loop()
@@ -360,6 +367,83 @@ async def _send_approval_keyboard(
             _approval_futures.pop(accept_prefix_key, None)
         _pending_agent_inputs.pop(tool_use_id, None)
         _approval_tool_names.pop(tool_use_id, None)
+        _approval_metadata.pop(tool_use_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Auto-resolve parallel pending approvals after "accept all" actions
+# ---------------------------------------------------------------------------
+
+
+async def _auto_resolve_pending_approvals(
+    bot: Bot,
+    rule: ApprovalRule | None,
+    is_edit_rule: bool,
+    chat_id: int,
+) -> None:
+    """Resolve all pending approval futures that match a newly created rule.
+
+    Called after an "accept all" action to automatically approve parallel
+    tool calls that are still waiting for user input.
+
+    Args:
+        bot: Telegram bot instance for editing messages.
+        rule: The approval rule to match against (for tool rules).
+            None when is_edit_rule is True.
+        is_edit_rule: True for "accept all edits" (matches Edit/Write).
+        chat_id: Only resolve approvals in this chat.
+    """
+    from open_udang.hooks import matches_approval_rule
+
+    # Snapshot the metadata keys to avoid mutating dict during iteration.
+    for tool_use_id, meta in list(_approval_metadata.items()):
+        if meta.get("chat_id") != chat_id:
+            continue
+
+        t_name = meta["tool_name"]
+        t_input = meta["tool_input"]
+        msg_id = meta.get("message_id")
+
+        # Check if this pending approval matches the new rule.
+        matched = False
+        if is_edit_rule and t_name in ("Edit", "Write"):
+            matched = True
+        elif rule is not None and matches_approval_rule(rule, t_name, t_input):
+            matched = True
+
+        if not matched:
+            continue
+
+        # Find and resolve the future for this tool_use_id.
+        approve_key = f"approve:{tool_use_id}"
+        future = _approval_futures.get(approve_key)
+        if future is None or future.done():
+            continue
+
+        future.set_result(True)
+        logger.info(
+            "Auto-resolved pending approval for %s (tool_use_id=%s)",
+            t_name,
+            tool_use_id,
+        )
+
+        # Update the Telegram message to show auto-approved status.
+        if msg_id:
+            try:
+                escaped_tool = _escape_mdv2(t_name)
+                icon = '\u2705'
+                compact = f"{icon} *{escaped_tool}* \u2014 Auto\\-approved\\."
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=compact,
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to edit auto-resolved approval message"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +569,13 @@ async def handle_approval_callback(
                     await query.message.edit_reply_markup(reply_markup=None)
                 except Exception:
                     logger.exception("Failed to edit approval message")
+
+        # Auto-resolve other pending parallel approvals for Edit/Write.
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is not None:
+            await _auto_resolve_pending_approvals(
+                query.get_bot(), rule=None, is_edit_rule=True, chat_id=chat_id,
+            )
         return True
 
     # Handle "Accept all <prefix>" for Bash commands — approve this tool and
@@ -537,6 +628,13 @@ async def handle_approval_callback(
                     await query.message.edit_reply_markup(reply_markup=None)
                 except Exception:
                     logger.exception("Failed to edit approval message")
+
+        # Auto-resolve other pending parallel Bash approvals matching this prefix.
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is not None and prefix:
+            await _auto_resolve_pending_approvals(
+                query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
+            )
         return True
 
     # Handle "Accept all <tool>" -- approve this tool and enable auto-approval
@@ -590,6 +688,13 @@ async def handle_approval_callback(
                     await query.message.edit_reply_markup(reply_markup=None)
                 except Exception:
                     logger.exception("Failed to edit approval message")
+
+        # Auto-resolve other pending parallel approvals for this tool.
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is not None and accepted_tool_name:
+            await _auto_resolve_pending_approvals(
+                query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
+            )
         return True
 
     # Handle approve/deny

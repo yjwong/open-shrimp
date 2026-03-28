@@ -65,6 +65,13 @@ _pending_agent_inputs: dict[str, dict[str, Any]] = {}
 _approval_tool_names: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
+# Extended metadata for pending approvals: tool_use_id -> dict with
+# tool_name, tool_input, chat_id, and message_id.  Used to auto-resolve
+# parallel pending approvals when an "accept all" action is taken.
+# ---------------------------------------------------------------------------
+_approval_metadata: dict[str, dict[str, Any]] = {}
+
+# ---------------------------------------------------------------------------
 # Sessions where the user has opted into "accept all edits" for mutating
 # file-access tools (Edit, Write) within the context working directory.
 # Keyed by (scope, context_name).  Cleared on /clear or context switch.
