@@ -20,6 +20,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from open_udang.config import Config
+from open_udang.container import CONTAINER_STATE_DIR
 from open_udang.review.auth import AuthError, validate_init_data
 
 logger = logging.getLogger(__name__)
@@ -31,38 +32,57 @@ _TASK_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _CLAUDE_TMP_BASE = Path(f"/tmp/claude-{os.getuid()}")
 
 
-def _find_task_output_file(task_id: str) -> Path | None:
-    """Find the output file for a background task by ID.
+def _search_tmp_base(base: Path, filename: str) -> Path | None:
+    """Search a Claude CLI tmp base directory for a task output file.
 
-    Searches all project directories and session subdirectories under
-    the Claude CLI tmp directory.  Returns the first match, or None.
+    Looks for ``<base>/<project>/tasks/<filename>`` and
+    ``<base>/<project>/<session>/tasks/<filename>``.
     """
-    if not _TASK_ID_RE.match(task_id):
+    if not base.is_dir():
         return None
 
-    if not _CLAUDE_TMP_BASE.is_dir():
-        return None
-
-    filename = f"{task_id}.output"
-
-    # Search: /tmp/claude-<uid>/<project>/tasks/<id>.output
-    # and:    /tmp/claude-<uid>/<project>/<session>/tasks/<id>.output
-    for project_dir in _CLAUDE_TMP_BASE.iterdir():
+    for project_dir in base.iterdir():
         if not project_dir.is_dir():
             continue
 
-        # Direct tasks/ subdirectory
         candidate = project_dir / "tasks" / filename
         if candidate.is_file():
             return candidate
 
-        # Session subdirectories
         for sub in project_dir.iterdir():
             if not sub.is_dir():
                 continue
             candidate = sub / "tasks" / filename
             if candidate.is_file():
                 return candidate
+
+    return None
+
+
+def _find_task_output_file(task_id: str) -> Path | None:
+    """Find the output file for a background task by ID.
+
+    Searches the host Claude CLI tmp directory and all container state
+    directories (where containerized contexts write their tmp files).
+    """
+    if not _TASK_ID_RE.match(task_id):
+        return None
+
+    filename = f"{task_id}.output"
+
+    # Search the host tmp directory first.
+    result = _search_tmp_base(_CLAUDE_TMP_BASE, filename)
+    if result:
+        return result
+
+    # Search container state directories: each has a tmp/ subdirectory
+    # that is bind-mounted as /tmp/claude-<uid>/ inside the container.
+    if CONTAINER_STATE_DIR.is_dir():
+        for context_dir in CONTAINER_STATE_DIR.iterdir():
+            tmp_dir = context_dir / "tmp"
+            result = _search_tmp_base(tmp_dir, filename)
+            if result:
+                return result
 
     return None
 

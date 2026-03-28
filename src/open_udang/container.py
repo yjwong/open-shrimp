@@ -385,9 +385,14 @@ def build_cli_wrapper(
     ]
     for env_arg in git_env_args:
         docker_argv.extend(["-e", env_arg])
+    # Mount Claude CLI tmp dir inside the container so background task
+    # outputs are written to the host-visible state directory.
+    claude_tmp_dir = state_dir / "tmp"
+    claude_tmp_dir.mkdir(exist_ok=True)
     docker_argv.extend([
         "-v", f"{project_dir}:{project_dir}",
         "-v", f"{state_dir}:/home/claude/.claude",
+        "-v", f"{claude_tmp_dir}:/tmp/claude-{uid}",
     ])
     if host_credentials.exists():
         docker_argv.extend([
