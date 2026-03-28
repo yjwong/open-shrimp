@@ -31,6 +31,10 @@ CONTAINER_IMAGE = "openudang-claude:latest"
 # Base directory for per-context container state (session storage, etc.).
 CONTAINER_STATE_DIR = user_data_path("openudang") / "containers"
 
+# Custom seccomp profile for DinD: Docker's default + keyctl (inner runc
+# session keyrings) + pivot_root (inner container rootfs setup).
+_DIND_SECCOMP_PROFILE = Path(__file__).resolve().parent.parent.parent / "seccomp-dind.json"
+
 
 def _ensure_state_dir(context_name: str) -> Path:
     """Create and return the container state directory for a context.
@@ -78,6 +82,13 @@ sed 's/sysctl -w \(.*\)$/sysctl -w \1 || true/' /usr/bin/dockerd-rootless.sh \
     > /tmp/dockerd-rootless.sh
 chmod +x /tmp/dockerd-rootless.sh
 
+# Disable slirp4netns's internal sandbox and seccomp — these try to
+# create mount namespaces/apply seccomp filters which are blocked by the
+# outer container's security profile.  The outer container already
+# provides isolation.
+export DOCKERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SANDBOX=false
+export DOCKERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SECCOMP=false
+
 # Start rootless Docker daemon (no iptables in nested containers).
 SKIP_IPTABLES=1 /tmp/dockerd-rootless.sh --iptables=false \
     > /tmp/dockerd.log 2>&1 &
@@ -121,7 +132,10 @@ def build_cli_wrapper(
             (read-write, same path inside and outside).
         docker_in_docker: When True, start a rootless Docker daemon
             inside the container so the agent can run docker commands.
-            Adds ``--cap-add SYS_ADMIN`` and relaxed seccomp/AppArmor.
+            Uses rootless Docker with fuse-overlayfs and slirp4netns.
+            Adds ``CAP_SYS_ADMIN``, ``apparmor=unconfined``,
+            ``systempaths=unconfined``, and a custom seccomp profile
+            (Docker default + ``keyctl`` + ``pivot_root``).
 
     Returns:
         Absolute path to the generated wrapper script.
@@ -154,16 +168,18 @@ def build_cli_wrapper(
 
     # When DinD is enabled, write an entrypoint script into the state
     # directory (persists across sessions) and mount it into the
-    # container.  Also add the capabilities and security-opt flags
-    # needed for rootless Docker.
+    # container.  Rootless Docker needs:
+    #   - CAP_SYS_ADMIN: for user namespaces and mount inside the container
+    #   - apparmor=unconfined: docker-default blocks mount/newuidmap
+    #   - systempaths=unconfined: allows mounting proc/sys in nested userns
+    #   - Custom seccomp profile: default + keyctl + pivot_root (for inner runc)
     entrypoint_path: Path | None = None
     if docker_in_docker:
         docker_args.extend([
             "--cap-add SYS_ADMIN",
-            "--cap-add NET_ADMIN",
-            "--security-opt seccomp=unconfined",
             "--security-opt apparmor=unconfined",
             "--security-opt systempaths=unconfined",
+            f"--security-opt seccomp={_DIND_SECCOMP_PROFILE}",
             "--device /dev/net/tun",
             "--sysctl net.ipv4.ip_forward=1",
         ])
