@@ -391,6 +391,7 @@ async def get_or_create_session(
                 "args": [
                     "@playwright/mcp",
                     "--headless",
+                    "--browser", "chromium",
                     "--caps", "pdf,testing",
                 ],
             }
