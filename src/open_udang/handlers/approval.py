@@ -7,7 +7,7 @@ import difflib
 import logging
 from typing import Any
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from open_udang.handlers.state import (
     _approval_futures,
@@ -192,6 +192,28 @@ def _format_agent_approval(tool_input: dict[str, Any], expanded: bool = False) -
     return "\n\n".join(parts)
 
 
+def _format_plan_approval(tool_input: dict[str, Any]) -> str:
+    """Format an ExitPlanMode tool call for the approval prompt.
+
+    Shows a compact header — the full plan content is viewed via the
+    Mini App "View plan" button.
+    """
+    plan = tool_input.get("plan", "")
+    # Show a brief preview of the plan title (first heading or first line).
+    preview = ""
+    for line in plan.splitlines():
+        stripped = line.strip().lstrip("# ").strip()
+        if stripped:
+            preview = stripped
+            break
+    if len(preview) > 80:
+        preview = preview[:77] + "..."
+    header = "\U0001f4cb *Plan*"
+    if preview:
+        header += f": {_escape_mdv2(preview)}"
+    return header
+
+
 def _format_generic_approval(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Format a generic tool call for the approval prompt."""
     summary_parts = [f"*Tool:* `{tool_name}`"]
@@ -257,6 +279,7 @@ async def _send_approval_keyboard(
     tool_use_id: str,
     cwd: str | None = None,
     thread_id: int | None = None,
+    base_url: str | None = None,
 ) -> bool:
     """Send an inline keyboard for tool approval and wait for response."""
     if tool_name == "Edit":
@@ -267,6 +290,8 @@ async def _send_approval_keyboard(
         text = _format_write_approval(tool_input, cwd=cwd)
     elif tool_name == "Agent":
         text = _format_agent_approval(tool_input, expanded=False)
+    elif tool_name == "ExitPlanMode":
+        text = _format_plan_approval(tool_input)
     else:
         text = _format_generic_approval(tool_name, tool_input)
 
@@ -307,10 +332,10 @@ async def _send_approval_keyboard(
                 session_row.append(InlineKeyboardButton(
                     f"Accept all {prefix}", callback_data=accept_prefix_data,
                 ))
-    # All tools (except Edit/Write which have the more specific "Accept all
-    # edits" button) get a generic "Accept all <tool>" option for session-
-    # scoped auto-approval of that specific tool type.
-    if tool_name not in ("Edit", "Write"):
+    # All tools (except Edit/Write and ExitPlanMode) get a generic
+    # "Accept all <tool>" option for session-scoped auto-approval.
+    _no_accept_all = ("Edit", "Write", "ExitPlanMode")
+    if tool_name not in _no_accept_all:
         accept_all_tool_data = f"accept_all_tool:{tool_use_id}:{tool_name}"
         # Truncate callback_data to 64 bytes (Telegram limit)
         if len(accept_all_tool_data.encode()) <= 64:
@@ -319,6 +344,20 @@ async def _send_approval_keyboard(
             ))
 
     rows = [primary_row]
+    # ExitPlanMode: add "View plan" as its own row (web_app buttons need space).
+    if tool_name == "ExitPlanMode" and base_url:
+        plan = tool_input.get("plan", "")
+        if plan:
+            from open_udang.preview.api import store_ephemeral_content
+
+            content_id = store_ephemeral_content("Plan", plan)
+            app_url = (
+                f"{base_url}/preview/"
+                f"?content_id={content_id}"
+            )
+            rows.append([InlineKeyboardButton(
+                "\U0001f4cb View plan", web_app=WebAppInfo(url=app_url),
+            )])
     if session_row:
         rows.append(session_row)
     keyboard = InlineKeyboardMarkup(rows)

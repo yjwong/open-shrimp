@@ -8,6 +8,7 @@ import { injectStyles } from "./styles";
 import { submitReview } from "./api";
 import CodeBlock from "./components/CodeBlock";
 import CommentableBlock from "./components/CommentableBlock";
+import CopyMarkdownButton from "./components/CopyMarkdownButton";
 import ReviewToolbar from "./components/ReviewToolbar";
 import SubmitDialog from "./components/SubmitDialog";
 import { ReviewProvider, useReview } from "./context/ReviewContext";
@@ -40,21 +41,27 @@ function AppInner() {
 
   const params = new URLSearchParams(window.location.search);
   const filePath = params.get("path");
+  const contentId = params.get("content_id");
   const chatId = Number(params.get("chat_id"));
   const threadIdParam = params.get("thread_id");
   const threadId = threadIdParam ? Number(threadIdParam) : null;
+  const readOnly = !!contentId;
 
   useEffect(() => {
     initTelegram();
     injectStyles();
-    if (!filePath) {
-      setError("No path provided.");
+
+    let url: string;
+    if (contentId) {
+      url = `/api/preview/content/${encodeURIComponent(contentId)}`;
+    } else if (filePath) {
+      url = `/api/preview/read?path=${encodeURIComponent(filePath)}`;
+    } else {
+      setError("No path or content_id provided.");
       return;
     }
 
-    fetch(`/api/preview/read?path=${encodeURIComponent(filePath)}`, {
-      headers: getAuthHeader(),
-    })
+    fetch(url, { headers: getAuthHeader() })
       .then(async (resp) => {
         if (!resp.ok) {
           const text = await resp.text();
@@ -103,16 +110,24 @@ function AppInner() {
           {data.content}
         </ReactMarkdown>
       </div>
-      <ReviewToolbar
-        onSubmit={() => setShowSubmitDialog(true)}
-        copyContent={!reviewMode ? data.content : undefined}
-      />
-      {showSubmitDialog && (
-        <SubmitDialog
-          comments={comments}
-          onConfirm={handleSubmit}
-          onCancel={() => setShowSubmitDialog(false)}
-        />
+      {readOnly ? (
+        <div className="review-toolbar">
+          <CopyMarkdownButton content={data.content} />
+        </div>
+      ) : (
+        <>
+          <ReviewToolbar
+            onSubmit={() => setShowSubmitDialog(true)}
+            copyContent={!reviewMode ? data.content : undefined}
+          />
+          {showSubmitDialog && (
+            <SubmitDialog
+              comments={comments}
+              onConfirm={handleSubmit}
+              onCancel={() => setShowSubmitDialog(false)}
+            />
+          )}
+        </>
       )}
     </>
   );

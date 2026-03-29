@@ -1,14 +1,18 @@
 """HTTP API routes for the markdown preview Mini App.
 
 Provides an endpoint for reading markdown files within configured context
-directories, and serves the preview frontend.
+directories, and serves the preview frontend.  Also supports ephemeral
+content (e.g. plan text from ExitPlanMode) served by ID.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from pathlib import Path
+from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -19,6 +23,33 @@ from open_udang.config import Config
 from open_udang.review.auth import AuthError, validate_init_data
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Ephemeral content store — serves markdown content by ID for the Mini App.
+# Entries expire after _CONTENT_TTL seconds and are lazily purged.
+# ---------------------------------------------------------------------------
+
+_CONTENT_TTL = 3600  # 1 hour
+
+# {content_id: {"title": str, "content": str, "created": float}}
+_content_store: dict[str, dict[str, Any]] = {}
+
+
+def store_ephemeral_content(title: str, content: str) -> str:
+    """Store markdown content and return a unique ID for retrieval."""
+    # Lazy purge of expired entries.
+    now = time.monotonic()
+    expired = [k for k, v in _content_store.items() if now - v["created"] > _CONTENT_TTL]
+    for k in expired:
+        del _content_store[k]
+
+    content_id = uuid.uuid4().hex[:12]
+    _content_store[content_id] = {
+        "title": title,
+        "content": content,
+        "created": now,
+    }
+    return content_id
 
 
 def _is_within_context_directories(path: Path, config: Config) -> bool:
@@ -100,6 +131,28 @@ async def read_endpoint(request: Request) -> JSONResponse:
         "path": str(resolved),
         "filename": resolved.name,
         "content": content,
+    })
+
+
+async def content_endpoint(request: Request) -> JSONResponse:
+    """GET /api/preview/content/{content_id} — read ephemeral content by ID."""
+    try:
+        await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    content_id = request.path_params.get("content_id", "")
+    entry = _content_store.get(content_id)
+    if not entry:
+        return JSONResponse({"error": "content not found or expired"}, status_code=404)
+
+    if time.monotonic() - entry["created"] > _CONTENT_TTL:
+        _content_store.pop(content_id, None)
+        return JSONResponse({"error": "content expired"}, status_code=404)
+
+    return JSONResponse({
+        "filename": entry["title"],
+        "content": entry["content"],
     })
 
 
@@ -244,6 +297,7 @@ def create_preview_routes() -> list[Route | Mount]:
 
     routes: list[Route | Mount] = [
         Route("/api/preview/read", read_endpoint, methods=["GET"]),
+        Route("/api/preview/content/{content_id}", content_endpoint, methods=["GET"]),
         Route("/api/preview/submit-review", submit_review_endpoint, methods=["POST"]),
     ]
 

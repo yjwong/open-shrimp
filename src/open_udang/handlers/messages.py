@@ -511,6 +511,11 @@ async def _start_agent_task(
         all_attachment_paths: list[Path] = list(attachment_paths)
 
         try:
+            if config.review.public_url:
+                _base_url: str | None = config.review.public_url.rstrip("/")
+            else:
+                _base_url = f"https://{config.review.host}:{config.review.port}"
+
             async def request_approval(
                 tool_name: str, tool_input: dict[str, Any], tool_use_id: str
             ) -> bool:
@@ -519,6 +524,7 @@ async def _start_agent_task(
                     context.bot, scope.chat_id, tool_name, tool_input, tool_use_id,
                     cwd=ctx_config.directory,
                     thread_id=scope.thread_id,
+                    base_url=_base_url,
                 )
 
             async def handle_questions(
