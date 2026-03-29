@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Without this, Firefox ignores all virtual keyboard input from wlrctl.
 COPY computer-use/seat-keyboard.c /tmp/build/seat-keyboard.c
 COPY computer-use/virtual-keyboard-unstable-v1.xml /tmp/build/virtual-keyboard-unstable-v1.xml
+COPY computer-use/input-method-unstable-v2.xml /tmp/build/input-method-unstable-v2.xml
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libc6-dev \
@@ -43,8 +44,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && wayland-scanner private-code \
         virtual-keyboard-unstable-v1.xml \
         virtual-keyboard-unstable-v1-protocol.c \
+    && wayland-scanner client-header \
+        input-method-unstable-v2.xml \
+        input-method-unstable-v2-client-protocol.h \
+    && wayland-scanner private-code \
+        input-method-unstable-v2.xml \
+        input-method-unstable-v2-protocol.c \
     && gcc -Wall -o /usr/local/bin/seat-keyboard \
-        seat-keyboard.c virtual-keyboard-unstable-v1-protocol.c \
+        seat-keyboard.c \
+        virtual-keyboard-unstable-v1-protocol.c \
+        input-method-unstable-v2-protocol.c \
         $(pkg-config --cflags --libs wayland-client) \
     && apt-get purge -y gcc libc6-dev libwayland-dev pkg-config \
     && apt-get autoremove -y \

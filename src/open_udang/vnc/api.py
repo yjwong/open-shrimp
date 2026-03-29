@@ -10,12 +10,14 @@ import asyncio
 import logging
 from pathlib import Path
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
 from open_udang.config import Config
-from open_udang.container import get_vnc_port
+from open_udang.container import get_text_input_active, get_vnc_port
 from open_udang.review.auth import AuthError, validate_init_data
 
 logger = logging.getLogger(__name__)
@@ -115,6 +117,37 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         logger.info("VNC proxy disconnected: context=%s", context_name)
 
 
+async def text_input_state_endpoint(request: Request) -> JSONResponse:
+    """GET /api/vnc/text-input-state — text field focus state from container.
+
+    Returns {"active": true/false} indicating whether a text input field
+    is currently focused inside the computer-use container.  Used by the
+    noVNC mobile client to auto-show/hide the soft keyboard.
+    """
+    config: Config = request.app.state.config
+    token = request.query_params.get("token", "")
+    context_name = request.query_params.get("context", "")
+
+    try:
+        await validate_init_data(
+            f"tg-init-data {token}",
+            config.telegram.token,
+            config.allowed_users,
+        )
+    except AuthError:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if not context_name or context_name not in config.contexts:
+        return JSONResponse({"error": "Unknown context"}, status_code=400)
+
+    ctx = config.contexts[context_name]
+    if ctx.container is None or not ctx.container.computer_use:
+        return JSONResponse({"error": "Not a computer_use context"}, status_code=400)
+
+    active = await asyncio.to_thread(get_text_input_active, context_name)
+    return JSONResponse({"active": active})
+
+
 def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
     """Create the routes for the VNC API and Mini App frontend.
 
@@ -131,6 +164,7 @@ def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
 
     routes: list[Route | Mount | WebSocketRoute] = [
         WebSocketRoute("/api/vnc/ws", vnc_ws_endpoint),
+        Route("/api/vnc/text-input-state", text_input_state_endpoint),
     ]
 
     if _dist_dir.is_dir():

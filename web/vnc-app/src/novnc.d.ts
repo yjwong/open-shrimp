@@ -20,6 +20,7 @@ declare module "@novnc/novnc" {
     showDotCursor: boolean;
     background: string;
     disconnect(): void;
+    sendKey(keysym: number, code: string | null, down?: boolean): void;
     focus(): void;
     blur(): void;
   }

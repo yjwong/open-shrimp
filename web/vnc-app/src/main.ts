@@ -29,6 +29,32 @@ function showStatus(msg: string): void {
   loadingEl.textContent = msg;
 }
 
+// ── X11 keysym helpers ──
+
+// Common special keys: DOM key name -> X11 keysym.
+const SPECIAL_KEYSYMS: Record<string, number> = {
+  Backspace: 0xff08,
+  Tab: 0xff09,
+  Enter: 0xff0d,
+  Escape: 0xff1b,
+  Delete: 0xffff,
+  Home: 0xff50,
+  End: 0xff57,
+  ArrowLeft: 0xff51,
+  ArrowUp: 0xff52,
+  ArrowRight: 0xff53,
+  ArrowDown: 0xff54,
+};
+
+/** Convert a single character to an X11 keysym. */
+function charToKeysym(ch: string): number {
+  const cp = ch.codePointAt(0)!;
+  // Latin-1 maps directly.
+  if (cp >= 0x20 && cp <= 0xff) return cp;
+  // Unicode BMP and beyond: X11 convention is 0x01000000 | codepoint.
+  return 0x01000000 | cp;
+}
+
 // ── Main ──
 
 main().catch((e) => showError(`Fatal: ${e}`));
@@ -88,7 +114,7 @@ async function main(): Promise<void> {
 
   rfb.addEventListener("connect", () => {
     loadingEl.remove();
-    buildToolbar(toolbarEl, rfb, isMobile);
+    buildToolbar(toolbarEl, rfb, isMobile, context, initData);
   });
 
   rfb.addEventListener("disconnect", (ev: Event) => {
@@ -112,12 +138,112 @@ async function main(): Promise<void> {
   });
 }
 
+// ── Mobile keyboard input via hidden textarea ──
+
+function setupKeyboardInput(rfb: RFBType): {
+  show: () => void;
+  hide: () => void;
+  isVisible: () => boolean;
+} {
+  const textarea = document.createElement("textarea");
+  textarea.autocapitalize = "off";
+  textarea.setAttribute("autocorrect", "off");
+  textarea.setAttribute("autocomplete", "off");
+  textarea.spellcheck = false;
+  // Position offscreen but keep it focusable.
+  Object.assign(textarea.style, {
+    position: "fixed",
+    left: "-9999px",
+    top: "50%",
+    width: "1px",
+    height: "1px",
+    opacity: "0",
+    fontSize: "16px", // Prevent iOS zoom on focus.
+  });
+  document.body.appendChild(textarea);
+
+  let visible = false;
+
+  // Handle text input from the mobile keyboard.
+  textarea.addEventListener("input", () => {
+    const text = textarea.value;
+    textarea.value = "";
+    if (rfb.viewOnly) return;
+    for (const ch of text) {
+      rfb.sendKey(charToKeysym(ch), null);
+    }
+  });
+
+  // Handle special keys (Backspace, Enter, etc.).
+  textarea.addEventListener("keydown", (e: KeyboardEvent) => {
+    const keysym = SPECIAL_KEYSYMS[e.key];
+    if (keysym && !rfb.viewOnly) {
+      e.preventDefault();
+      rfb.sendKey(keysym, null);
+    }
+  });
+
+  return {
+    show() {
+      visible = true;
+      textarea.focus();
+    },
+    hide() {
+      visible = false;
+      textarea.blur();
+    },
+    isVisible: () => visible,
+  };
+}
+
+// ── Text-input state polling ──
+
+function startTextInputPolling(
+  context: string,
+  initData: string,
+  rfb: RFBType,
+  keyboard: ReturnType<typeof setupKeyboardInput>,
+  kbdBtn: HTMLButtonElement,
+): () => void {
+  let lastActive = false;
+  const url =
+    `/api/vnc/text-input-state` +
+    `?context=${encodeURIComponent(context)}` +
+    `&token=${encodeURIComponent(initData)}`;
+
+  const poll = async () => {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) return;
+      const data = (await resp.json()) as { active: boolean };
+      if (data.active !== lastActive) {
+        lastActive = data.active;
+        if (data.active && !rfb.viewOnly) {
+          keyboard.show();
+          kbdBtn.classList.add("active");
+        } else {
+          keyboard.hide();
+          kbdBtn.classList.remove("active");
+        }
+      }
+    } catch {
+      // Ignore transient fetch errors.
+    }
+  };
+
+  const intervalId = setInterval(poll, 1500);
+  poll(); // Initial check.
+  return () => clearInterval(intervalId);
+}
+
 // ── Toolbar ──
 
 function buildToolbar(
   toolbar: HTMLElement,
   rfb: RFBType,
   isMobile: boolean,
+  context: string,
+  initData: string,
 ): void {
   // Inject styles.
   const style = document.createElement("style");
@@ -221,6 +347,32 @@ function buildToolbar(
     updateQuality();
   });
   toolbar.appendChild(qualityBtn);
+
+  // Keyboard toggle (mobile only).
+  if (isMobile) {
+    const keyboard = setupKeyboardInput(rfb);
+    const kbdBtn = document.createElement("button");
+    kbdBtn.textContent = "Kbd";
+    kbdBtn.addEventListener("click", () => {
+      if (keyboard.isVisible()) {
+        keyboard.hide();
+        kbdBtn.classList.remove("active");
+      } else {
+        // Ensure interactive mode when opening keyboard.
+        if (rfb.viewOnly) {
+          rfb.viewOnly = false;
+          viewOnlyBtn.textContent = "Interactive";
+          viewOnlyBtn.classList.add("active");
+        }
+        keyboard.show();
+        kbdBtn.classList.add("active");
+      }
+    });
+    toolbar.appendChild(kbdBtn);
+
+    // Start polling for text-input state to auto-show/hide keyboard.
+    startTextInputPolling(context, initData, rfb, keyboard, kbdBtn);
+  }
 
   // Spacer.
   const spacer = document.createElement("div");

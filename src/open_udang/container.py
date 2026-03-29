@@ -342,6 +342,22 @@ def get_screenshots_dir(context_name: str) -> Path:
     return CONTAINER_STATE_DIR / context_name / "screenshots"
 
 
+def get_text_input_active(context_name: str) -> bool:
+    """Check if a text input field is focused inside a computer-use container.
+
+    Reads /tmp/text-input-state written by seat-keyboard's input-method-v2
+    monitor.  Returns True if a text field is active, False otherwise.
+    """
+    name = _container_name(context_name)
+    result = subprocess.run(
+        ["docker", "exec", name, "cat", "/tmp/text-input-state"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "1"
+
+
 def get_vnc_port(context_name: str) -> int | None:
     """Return the host-mapped VNC port for a computer-use container, or None.
 
