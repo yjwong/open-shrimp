@@ -55,6 +55,161 @@ function charToKeysym(ch: string): number {
   return 0x01000000 | cp;
 }
 
+// ── Pinch-to-zoom ──
+
+function setupPinchZoom(
+  container: HTMLElement,
+  rfb: RFBType,
+): {
+  reset: () => void;
+  getScale: () => number;
+} {
+  let scale = 1;
+  let translateX = 0;
+  let translateY = 0;
+
+  // Pinch tracking state.
+  let initialPinchDistance = 0;
+  let initialScale = 1;
+  let pinchMidX = 0;
+  let pinchMidY = 0;
+  let initialTranslateX = 0;
+  let initialTranslateY = 0;
+
+  const MIN_SCALE = 1;
+  const MAX_SCALE = 5;
+
+  function applyTransform(): void {
+    // Clamp translation so we don't pan outside the content.
+    if (scale <= 1) {
+      translateX = 0;
+      translateY = 0;
+    } else {
+      // Use the container's own dimensions (CSS layout size, unaffected
+      // by our transform since transform doesn't change layout).
+      const w = container.offsetWidth;
+      const h = container.offsetHeight;
+      const maxTx = (w * (scale - 1)) / 2;
+      const maxTy = (h * (scale - 1)) / 2;
+      translateX = Math.max(-maxTx, Math.min(maxTx, translateX));
+      translateY = Math.max(-maxTy, Math.min(maxTy, translateY));
+    }
+    container.style.transformOrigin = "center center";
+    container.style.transform =
+      `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+  }
+
+  // Patch noVNC's display coordinate conversion to account for our CSS
+  // scale. The chain is: clientToElement (uses getBoundingClientRect on
+  // canvas) -> absX/absY (divides by display._scale). With our CSS
+  // transform, getBoundingClientRect returns the *transformed* rect, so
+  // element-relative coordinates from clientToElement are scaled by our
+  // CSS factor. We patch absX/absY to divide that out.
+  const display = (rfb as unknown as { _display: {
+    absX: (x: number) => number;
+    absY: (y: number) => number;
+  } })._display;
+  const origAbsX = display.absX.bind(display);
+  const origAbsY = display.absY.bind(display);
+  display.absX = (x: number) => origAbsX(x / scale);
+  display.absY = (y: number) => origAbsY(y / scale);
+
+  function getTouchDistance(t1: Touch, t2: Touch): number {
+    const dx = t1.clientX - t2.clientX;
+    const dy = t1.clientY - t2.clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  container.addEventListener(
+    "touchstart",
+    (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        const t1 = e.touches[0]!;
+        const t2 = e.touches[1]!;
+        initialPinchDistance = getTouchDistance(t1, t2);
+        initialScale = scale;
+        pinchMidX = (t1.clientX + t2.clientX) / 2;
+        pinchMidY = (t1.clientY + t2.clientY) / 2;
+        initialTranslateX = translateX;
+        initialTranslateY = translateY;
+      }
+    },
+    { passive: false },
+  );
+
+  container.addEventListener(
+    "touchmove",
+    (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        const t1 = e.touches[0]!;
+        const t2 = e.touches[1]!;
+        const currentDistance = getTouchDistance(t1, t2);
+        const ratio = currentDistance / initialPinchDistance;
+        scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, initialScale * ratio));
+
+        // Pan: track how the midpoint has moved.
+        const currentMidX = (t1.clientX + t2.clientX) / 2;
+        const currentMidY = (t1.clientY + t2.clientY) / 2;
+        translateX = initialTranslateX + (currentMidX - pinchMidX);
+        translateY = initialTranslateY + (currentMidY - pinchMidY);
+
+        applyTransform();
+      }
+    },
+    { passive: false },
+  );
+
+  // Allow single-finger pan when zoomed in.
+  let panStartX = 0;
+  let panStartY = 0;
+  let panInitialTx = 0;
+  let panInitialTy = 0;
+  let isPanning = false;
+
+  container.addEventListener(
+    "touchstart",
+    (e: TouchEvent) => {
+      if (e.touches.length === 1 && scale > 1) {
+        isPanning = true;
+        panStartX = e.touches[0]!.clientX;
+        panStartY = e.touches[0]!.clientY;
+        panInitialTx = translateX;
+        panInitialTy = translateY;
+      }
+    },
+    { passive: true },
+  );
+
+  container.addEventListener(
+    "touchmove",
+    (e: TouchEvent) => {
+      if (e.touches.length === 1 && isPanning && scale > 1) {
+        e.preventDefault();
+        translateX = panInitialTx + (e.touches[0]!.clientX - panStartX);
+        translateY = panInitialTy + (e.touches[0]!.clientY - panStartY);
+        applyTransform();
+      }
+    },
+    { passive: false },
+  );
+
+  container.addEventListener("touchend", () => {
+    isPanning = false;
+  });
+
+  return {
+    reset() {
+      scale = 1;
+      translateX = 0;
+      translateY = 0;
+      applyTransform();
+    },
+    getScale: () => scale,
+  };
+}
+
 // ── Main ──
 
 main().catch((e) => showError(`Fatal: ${e}`));
@@ -104,17 +259,20 @@ async function main(): Promise<void> {
   const rfb = new RFB(container, wsUrl);
   rfb.scaleViewport = true;
   rfb.clipViewport = isMobile;
-  rfb.dragViewport = isMobile;
+  rfb.dragViewport = false; // We handle pan via pinch-zoom instead.
   rfb.viewOnly = isMobile;
   rfb.qualityLevel = isMobile ? 4 : 6;
   rfb.compressionLevel = isMobile ? 6 : 2;
   rfb.background = "#1a1b26";
 
+  // Set up pinch-to-zoom on mobile.
+  const pinchZoom = isMobile ? setupPinchZoom(container, rfb) : null;
+
   // ── Events ──
 
   rfb.addEventListener("connect", () => {
     loadingEl.remove();
-    buildToolbar(toolbarEl, rfb, isMobile, context, initData);
+    buildToolbar(toolbarEl, rfb, isMobile, context, initData, pinchZoom);
   });
 
   rfb.addEventListener("disconnect", (ev: Event) => {
@@ -278,6 +436,7 @@ function buildToolbar(
   isMobile: boolean,
   context: string,
   initData: string,
+  pinchZoom: { reset: () => void; getScale: () => number } | null,
 ): void {
   // Inject styles.
   const style = document.createElement("style");
@@ -406,6 +565,16 @@ function buildToolbar(
 
     // Stream text-input state to auto-show/hide keyboard.
     startTextInputSSE(context, initData, rfb, keyboard, kbdBtn);
+  }
+
+  // Zoom reset button (mobile only).
+  if (isMobile && pinchZoom) {
+    const zoomBtn = document.createElement("button");
+    zoomBtn.textContent = "1:1";
+    zoomBtn.addEventListener("click", () => {
+      pinchZoom.reset();
+    });
+    toolbar.appendChild(zoomBtn);
   }
 
   // Spacer.
