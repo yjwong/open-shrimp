@@ -1,0 +1,84 @@
+# Container image for computer use (GUI interaction) contexts.
+#
+# Extends the base openudang-claude image with a headless Wayland
+# compositor (labwc), input injection (wlrctl), screenshot capture
+# (grim), VNC server (wayvnc), and a web browser (Firefox ESR).
+#
+# Build:
+#   docker build -f Dockerfile.computer-use -t openudang-computer-use:latest .
+
+FROM openudang-claude:latest
+
+# Wayland compositor + tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    labwc \
+    wlrctl \
+    grim \
+    wayvnc \
+    foot \
+    # Browser
+    firefox-esr \
+    # Fonts for readable screenshots
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    fonts-noto \
+    # Misc runtime deps
+    dbus-x11 \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build seat-keyboard: persistent virtual keyboard daemon so the Wayland
+# seat advertises keyboard capability on headless setups (no physical kbd).
+# Without this, Firefox ignores all virtual keyboard input from wlrctl.
+COPY computer-use/seat-keyboard.c /tmp/build/seat-keyboard.c
+COPY computer-use/virtual-keyboard-unstable-v1.xml /tmp/build/virtual-keyboard-unstable-v1.xml
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libc6-dev \
+    libwayland-dev \
+    pkg-config \
+    && cd /tmp/build \
+    && wayland-scanner client-header \
+        virtual-keyboard-unstable-v1.xml \
+        virtual-keyboard-unstable-v1-client-protocol.h \
+    && wayland-scanner private-code \
+        virtual-keyboard-unstable-v1.xml \
+        virtual-keyboard-unstable-v1-protocol.c \
+    && gcc -Wall -o /usr/local/bin/seat-keyboard \
+        seat-keyboard.c virtual-keyboard-unstable-v1-protocol.c \
+        $(pkg-config --cflags --libs wayland-client) \
+    && apt-get purge -y gcc libc6-dev libwayland-dev pkg-config \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* /tmp/build
+
+# Pre-create directories for labwc config and screenshots.
+RUN mkdir -p /home/claude/.config/labwc /tmp/screenshots \
+    && chmod -R 777 /home/claude/.config /tmp/screenshots
+
+# Copy labwc configuration.
+COPY computer-use/rc.xml /home/claude/.config/labwc/rc.xml
+COPY computer-use/autostart /home/claude/.config/labwc/autostart
+
+# Copy entrypoint script.
+COPY computer-use/entrypoint.sh /usr/local/bin/computer-use-entrypoint.sh
+RUN chmod +x /usr/local/bin/computer-use-entrypoint.sh
+
+# Firefox profile: skip first-run UI.
+RUN mkdir -p /home/claude/.mozilla/firefox/default \
+    && echo '[General]' > /home/claude/.mozilla/firefox/profiles.ini \
+    && echo 'StartWithLastProfile=1' >> /home/claude/.mozilla/firefox/profiles.ini \
+    && echo '' >> /home/claude/.mozilla/firefox/profiles.ini \
+    && echo '[Profile0]' >> /home/claude/.mozilla/firefox/profiles.ini \
+    && echo 'Name=default' >> /home/claude/.mozilla/firefox/profiles.ini \
+    && echo 'IsRelative=1' >> /home/claude/.mozilla/firefox/profiles.ini \
+    && echo 'Path=default' >> /home/claude/.mozilla/firefox/profiles.ini \
+    && echo 'Default=1' >> /home/claude/.mozilla/firefox/profiles.ini \
+    && printf 'user_pref("browser.shell.checkDefaultBrowser", false);\n\
+user_pref("datareporting.policy.dataSubmissionEnabled", false);\n\
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);\n\
+user_pref("browser.aboutwelcome.enabled", false);\n\
+user_pref("browser.startup.homepage_override.mstone", "ignore");\n\
+user_pref("startup.homepage_welcome_url", "");\n\
+user_pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);\n' \
+    > /home/claude/.mozilla/firefox/default/user.js \
+    && chmod -R 777 /home/claude/.mozilla

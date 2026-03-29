@@ -96,6 +96,9 @@ logger = logging.getLogger(__name__)
 # Docker image name used for containerized contexts.
 CONTAINER_IMAGE = "openudang-claude:latest"
 
+# Docker image name for computer-use (GUI) contexts.
+COMPUTER_USE_IMAGE = "openudang-computer-use:latest"
+
 # Base directory for per-context container state (session storage, etc.).
 CONTAINER_STATE_DIR = user_data_path("openudang") / "containers"
 
@@ -214,6 +217,71 @@ def ensure_image(
     logger.info("Successfully built container image %s", image_name)
 
 
+def ensure_computer_use_image(
+    image_name: str = COMPUTER_USE_IMAGE,
+) -> None:
+    """Ensure the computer-use container image exists, building if necessary.
+
+    Builds the base ``openudang-claude`` image first (if needed), then
+    layers ``Dockerfile.computer-use`` on top with labwc, wlrctl, grim,
+    wayvnc, and Firefox ESR.
+    """
+    result = subprocess.run(
+        ["docker", "image", "inspect", image_name],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        logger.info("Computer-use image %s already exists", image_name)
+        return
+
+    # Ensure the base image exists first.
+    ensure_image(image_name=CONTAINER_IMAGE, dockerfile=None)
+
+    logger.info("Computer-use image %s not found, building...", image_name)
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_dockerfile = repo_root / "Dockerfile.computer-use"
+    computer_use_dir = repo_root / "computer-use"
+
+    if repo_dockerfile.is_file() and computer_use_dir.is_dir():
+        # Build from the repo root so COPY computer-use/* works.
+        _docker_build(
+            image_name=image_name,
+            build_dir=str(repo_root),
+            dockerfile_name="Dockerfile.computer-use",
+        )
+    else:
+        # Installed wheel / PyApp — extract assets to a temp dir.
+        with tempfile.TemporaryDirectory(
+            prefix="openudang-computer-use-build-"
+        ) as build_dir:
+            build_path = Path(build_dir)
+            pkg = _pkg_files("open_udang")
+
+            # Copy Dockerfile.
+            dockerfile_text = pkg.joinpath(
+                "Dockerfile.computer-use"
+            ).read_text()
+            (build_path / "Dockerfile.computer-use").write_text(
+                dockerfile_text
+            )
+
+            # Copy computer-use assets.
+            cu_dir = build_path / "computer-use"
+            cu_dir.mkdir()
+            for asset_name in ("entrypoint.sh", "rc.xml", "autostart"):
+                asset = pkg.joinpath("computer-use", asset_name)
+                (cu_dir / asset_name).write_text(asset.read_text())
+
+            _docker_build(
+                image_name=image_name,
+                build_dir=str(build_path),
+                dockerfile_name="Dockerfile.computer-use",
+            )
+
+    logger.info("Successfully built computer-use image %s", image_name)
+
+
 def _docker_build(
     image_name: str,
     build_dir: str,
@@ -267,6 +335,11 @@ def _ensure_state_dir(context_name: str) -> Path:
 def check_docker_available() -> bool:
     """Return True if Docker is available on the host."""
     return shutil.which("docker") is not None
+
+
+def get_screenshots_dir(context_name: str) -> Path:
+    """Return the host-side screenshots directory for a computer-use context."""
+    return CONTAINER_STATE_DIR / context_name / "screenshots"
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +597,7 @@ def _build_docker_run_argv(
     project_dir: str,
     additional_directories: list[str] | None = None,
     docker_in_docker: bool = False,
+    computer_use: bool = False,
     image_name: str = CONTAINER_IMAGE,
 ) -> tuple[list[str], str]:
     """Build the ``docker run -d`` argv for creating a persistent container.
@@ -606,12 +680,32 @@ def _build_docker_run_argv(
             f"{entrypoint_path}:/usr/local/bin/dind-entrypoint.sh:ro",
         ])
 
+    if computer_use:
+        # Headless Wayland compositor environment.
+        docker_argv.extend([
+            "-e", "WLR_BACKENDS=headless",
+            "-e", "WLR_RENDERER=pixman",
+            "-e", "WLR_HEADLESS_OUTPUTS=1",
+            "-e", "WAYLAND_DISPLAY=wayland-0",
+            "-e", f"XDG_RUNTIME_DIR=/tmp/runtime-{uid}",
+        ])
+        # Bind-mount screenshots directory for host access.
+        screenshots_dir = state_dir / "screenshots"
+        screenshots_dir.mkdir(exist_ok=True)
+        docker_argv.extend([
+            "-v", f"{screenshots_dir}:/tmp/screenshots",
+        ])
+        # Expose VNC port (dynamic mapping to avoid conflicts).
+        docker_argv.extend(["-p", "5900"])
+
     docker_argv.extend(["-w", project_dir])
 
     # Image and keep-alive command.
     docker_argv.append(image_name)
     if docker_in_docker:
         docker_argv.append("/usr/local/bin/dind-entrypoint.sh")
+    elif computer_use:
+        docker_argv.append("/usr/local/bin/computer-use-entrypoint.sh")
     else:
         docker_argv.extend(["sleep", "infinity"])
 
@@ -623,6 +717,7 @@ def ensure_container_running(
     project_dir: str,
     additional_directories: list[str] | None = None,
     docker_in_docker: bool = False,
+    computer_use: bool = False,
     image_name: str = CONTAINER_IMAGE,
 ) -> str:
     """Ensure a persistent container is running for the given context.
@@ -654,6 +749,7 @@ def ensure_container_running(
         project_dir=project_dir,
         additional_directories=additional_directories,
         docker_in_docker=docker_in_docker,
+        computer_use=computer_use,
         image_name=image_name,
     )
 
@@ -672,6 +768,10 @@ def ensure_container_running(
     # For DinD, wait for the inner Docker daemon to be ready.
     if docker_in_docker:
         _wait_for_dind(name)
+
+    # For computer-use, wait for the Wayland compositor.
+    if computer_use:
+        _wait_for_compositor(name)
 
     return name
 
@@ -701,11 +801,38 @@ def _wait_for_dind(container_name: str, timeout: int = 30) -> None:
     )
 
 
+def _wait_for_compositor(container_name: str, timeout: int = 15) -> None:
+    """Wait for labwc to create the Wayland socket inside the container."""
+    import time
+
+    uid = os.getuid()
+    wayland_socket = f"/tmp/runtime-{uid}/wayland-0"
+    for i in range(timeout * 5):  # Check every 0.2s
+        result = subprocess.run(
+            ["docker", "exec", container_name, "test", "-S", wayland_socket],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            logger.info(
+                "Compositor ready in container %s after %.1fs",
+                container_name,
+                i * 0.2,
+            )
+            return
+        time.sleep(0.2)
+    logger.warning(
+        "Compositor not ready in container %s after %ds",
+        container_name,
+        timeout,
+    )
+
+
 def build_cli_wrapper(
     context_name: str,
     project_dir: str,
     additional_directories: list[str] | None = None,
     docker_in_docker: bool = False,
+    computer_use: bool = False,
     image_name: str = CONTAINER_IMAGE,
 ) -> str:
     """Generate a wrapper script that runs the Claude CLI via ``docker exec``.
@@ -735,6 +862,7 @@ def build_cli_wrapper(
         project_dir=project_dir,
         additional_directories=additional_directories,
         docker_in_docker=docker_in_docker,
+        computer_use=computer_use,
         image_name=image_name,
     )
     quoted_run_args = " \\\n  ".join(shlex.quote(a) for a in docker_run_argv)
@@ -757,6 +885,20 @@ def build_cli_wrapper(
             f'    done\n'
         )
         dind_exec_env = f" -e DOCKER_HOST={shlex.quote(docker_host)}"
+
+    compositor_wait = ""
+    if computer_use:
+        wayland_socket = f"/tmp/runtime-{uid}/wayland-0"
+        compositor_wait = (
+            f'\n    # Wait for Wayland compositor to be ready.\n'
+            f'    for _i in $(seq 1 75); do\n'
+            f'      if docker exec {shlex.quote(container_name)}'
+            f' test -S {shlex.quote(wayland_socket)}; then\n'
+            f'        break\n'
+            f'      fi\n'
+            f'      sleep 0.2\n'
+            f'    done\n'
+        )
 
     script = (
         f"#!/bin/bash\n"
@@ -783,7 +925,8 @@ def build_cli_wrapper(
         f'            exit 1\n'
         f'        fi\n'
         f'    }}'
-        f'{dind_wait}\n'
+        f'{dind_wait}'
+        f'{compositor_wait}\n'
         f'fi\n'
         f'\n'
         f'exec docker exec -i \\\n'
@@ -803,7 +946,7 @@ def build_cli_wrapper(
     logger.info(
         "Generated Docker exec wrapper for context '%s'%s: %s",
         context_name,
-        " (DinD)" if docker_in_docker else "",
+        " (DinD)" if docker_in_docker else " (computer-use)" if computer_use else "",
         wrapper_path,
     )
     return wrapper_path

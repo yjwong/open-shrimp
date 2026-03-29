@@ -39,11 +39,14 @@ from open_udang.hooks import (
 import sys
 
 from open_udang.container import (
+    COMPUTER_USE_IMAGE,
     CONTAINER_IMAGE,
     build_cli_wrapper as docker_build_cli_wrapper,
     cleanup_wrapper as docker_cleanup_wrapper,
+    ensure_computer_use_image as docker_ensure_computer_use_image,
     ensure_container_running as docker_ensure_container,
     ensure_image as docker_ensure_image,
+    get_screenshots_dir,
 )
 from open_udang.sandbox import (
     build_cli_wrapper as sandbox_build_cli_wrapper,
@@ -166,6 +169,16 @@ async def get_or_create_session(
             "mcp__openudang__list_schedules",
             "mcp__openudang__delete_schedule",
         ])
+    # Auto-approve computer use tools when enabled.
+    if (context.container is not None and context.container.computer_use):
+        allowed_tools.extend([
+            "mcp__openudang__computer_screenshot",
+            "mcp__openudang__computer_click",
+            "mcp__openudang__computer_type",
+            "mcp__openudang__computer_key",
+            "mcp__openudang__computer_scroll",
+            "mcp__openudang__computer_toplevel",
+        ])
 
     # When containerized, generate a wrapper script that runs the Claude
     # CLI in an isolated environment.  On macOS we use sandbox-exec (since
@@ -194,11 +207,14 @@ async def get_or_create_session(
             assert context.container is not None
             custom_dockerfile = context.container.dockerfile
             docker_in_docker = context.container.docker_in_docker
-            image_name = (
-                f"openudang-claude:{context_name}"
-                if custom_dockerfile
-                else CONTAINER_IMAGE
-            )
+            computer_use = context.container.computer_use
+
+            if computer_use:
+                image_name = COMPUTER_USE_IMAGE
+            elif custom_dockerfile:
+                image_name = f"openudang-claude:{context_name}"
+            else:
+                image_name = CONTAINER_IMAGE
 
             import subprocess as _subprocess
             inspect_result = _subprocess.run(
@@ -217,15 +233,21 @@ async def get_or_create_session(
                 )
 
             def _ensure_and_build_wrapper() -> str:
-                docker_ensure_image(
-                    image_name=image_name,
-                    dockerfile=custom_dockerfile,
-                )
+                if computer_use:
+                    docker_ensure_computer_use_image(
+                        image_name=image_name,
+                    )
+                else:
+                    docker_ensure_image(
+                        image_name=image_name,
+                        dockerfile=custom_dockerfile,
+                    )
                 docker_ensure_container(
                     context_name=context_name,
                     project_dir=context.directory,
                     additional_directories=context.additional_directories or None,
                     docker_in_docker=docker_in_docker,
+                    computer_use=computer_use,
                     image_name=image_name,
                 )
                 return docker_build_cli_wrapper(
@@ -233,6 +255,7 @@ async def get_or_create_session(
                     project_dir=context.directory,
                     additional_directories=context.additional_directories or None,
                     docker_in_docker=docker_in_docker,
+                    computer_use=computer_use,
                     image_name=image_name,
                 )
 
@@ -269,6 +292,31 @@ async def get_or_create_session(
             "the title again."
         )
 
+    # Determine computer-use container name and screenshots dir for MCP.
+    _cu_container: str | None = None
+    _cu_screenshots_dir: str | None = None
+    if (
+        context.container is not None
+        and context.container.computer_use
+        and is_containerized
+        and sys.platform != "darwin"
+    ):
+        from open_udang.container import _container_name
+        _cu_container = _container_name(context_name)
+        _cu_screenshots_dir = str(get_screenshots_dir(context_name))
+
+        system_prompt_parts.append(
+            "This context has computer use (GUI interaction) enabled. "
+            "You have access to a headless 1280x720 Linux desktop with "
+            "a Wayland compositor (labwc), a web browser (Firefox ESR), "
+            "and a terminal (foot). Use the computer_screenshot tool to "
+            "see the screen, computer_click to click at coordinates, "
+            "computer_type to type text, computer_key for special keys "
+            "and combos, computer_scroll to scroll, and computer_toplevel "
+            "to switch between windows. Always take a screenshot first to "
+            "understand the current state before interacting."
+        )
+
     if system_prompt_parts:
         options.system_prompt = {
             "type": "preset",
@@ -282,6 +330,8 @@ async def get_or_create_session(
         openudang_server = create_openudang_mcp_server(
             bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
             db=db, config=config, job_queue=job_queue,
+            computer_use_container=_cu_container,
+            screenshots_dir=_cu_screenshots_dir,
         )
         options.mcp_servers = {"openudang": openudang_server}
 

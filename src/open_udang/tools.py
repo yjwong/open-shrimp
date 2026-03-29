@@ -6,9 +6,12 @@ the Telegram Bot instance for sending files, images, etc.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
+import subprocess
+import time
 from typing import Any
 
 from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
@@ -48,6 +51,8 @@ def create_openudang_mcp_server(
     db: Any | None = None,
     config: Any | None = None,
     job_queue: Any | None = None,
+    computer_use_container: str | None = None,
+    screenshots_dir: str | None = None,
 ) -> McpSdkServerConfig:
     """Create an in-process MCP server with OpenUdang-specific tools.
 
@@ -58,6 +63,10 @@ def create_openudang_mcp_server(
     When *db*, *config*, and *job_queue* are provided, scheduling tools
     (create_schedule, list_schedules, delete_schedule) are also registered.
 
+    When *computer_use_container* and *screenshots_dir* are provided,
+    computer use tools (screenshot, click, type, key, scroll, toplevel)
+    are registered for GUI interaction inside the container.
+
     Args:
         bot: Telegram Bot instance.
         chat_id: Telegram chat ID to send files to.
@@ -65,6 +74,8 @@ def create_openudang_mcp_server(
         db: Optional aiosqlite connection for scheduled task persistence.
         config: Optional Config for context validation.
         job_queue: Optional JobQueue for registering scheduled jobs.
+        computer_use_container: Docker container name for computer-use.
+        screenshots_dir: Host-side directory for screenshots.
 
     Returns:
         An ``McpSdkServerConfig`` ready for ``ClaudeAgentOptions.mcp_servers``.
@@ -563,6 +574,364 @@ def create_openudang_mcp_server(
             return _text_result(f"Scheduled task '{name}' deleted successfully.")
 
         tools_list.extend([create_schedule, list_schedules, delete_schedule])
+
+    # --- Computer use tools (GUI interaction in containerized contexts) ---
+    if computer_use_container is not None and screenshots_dir is not None:
+        _uid = os.getuid()
+        _wayland_env = [
+            "-e", f"XDG_RUNTIME_DIR=/tmp/runtime-{_uid}",
+            "-e", "WAYLAND_DISPLAY=wayland-0",
+        ]
+
+        async def _exec_in_container(
+            cmd: list[str],
+            timeout_secs: float = 10.0,
+        ) -> tuple[int, str, str]:
+            """Run a command inside the computer-use container."""
+            docker_cmd = (
+                ["docker", "exec"]
+                + _wayland_env
+                + [computer_use_container]
+                + cmd
+            )
+            result = await asyncio.to_thread(
+                subprocess.run,
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_secs,
+            )
+            return result.returncode, result.stdout, result.stderr
+
+        @tool(
+            "computer_screenshot",
+            "Take a screenshot of the current screen. The screen is a "
+            "headless 1280x720 Linux desktop with a Wayland compositor. "
+            "Returns the file path of the screenshot. Use the Read tool "
+            "to view the screenshot image. Always take a screenshot first "
+            "to understand the current state before interacting.",
+            {
+                "type": "object",
+                "properties": {},
+            },
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        async def computer_screenshot(args: dict[str, Any]) -> dict[str, Any]:
+            ts = int(time.time() * 1000)
+            container_path = f"/tmp/screenshots/screenshot-{ts}.png"
+            host_path = os.path.join(screenshots_dir, f"screenshot-{ts}.png")
+
+            try:
+                rc, stdout, stderr = await _exec_in_container(
+                    ["grim", container_path],
+                )
+                if rc != 0:
+                    return _text_result(
+                        f"Error taking screenshot: {stderr.strip()}",
+                        is_error=True,
+                    )
+            except subprocess.TimeoutExpired:
+                return _text_result(
+                    "Error: screenshot timed out", is_error=True,
+                )
+
+            # Send screenshot to Telegram for user observability.
+            try:
+                if os.path.isfile(host_path):
+                    with open(host_path, "rb") as f:
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=f,
+                            caption="Screenshot",
+                            **_thread_kwargs,
+                        )
+            except Exception:
+                logger.debug(
+                    "Failed to send screenshot to Telegram", exc_info=True
+                )
+
+            return _text_result(
+                f"Screenshot saved to {container_path}. "
+                f"Use the Read tool to view the image."
+            )
+
+        @tool(
+            "computer_click",
+            "Click at a specific position on the screen. Moves the pointer "
+            "to (x, y) and performs a click. Screen size is 1280x720.",
+            {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "integer",
+                        "description": "X coordinate (0-1279).",
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Y coordinate (0-719).",
+                    },
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": (
+                            "Mouse button to click. Default: left."
+                        ),
+                    },
+                },
+                "required": ["x", "y"],
+            },
+        )
+        async def computer_click(args: dict[str, Any]) -> dict[str, Any]:
+            x = args.get("x", 0)
+            y = args.get("y", 0)
+            button = args.get("button", "left")
+
+            if not (0 <= x < 1280 and 0 <= y < 720):
+                return _text_result(
+                    f"Error: coordinates ({x}, {y}) out of range "
+                    f"(screen is 1280x720).",
+                    is_error=True,
+                )
+
+            button_map = {"left": "left", "right": "right", "middle": "middle"}
+            btn = button_map.get(button, "left")
+
+            try:
+                # Move pointer to absolute position then click.
+                rc, _, stderr = await _exec_in_container([
+                    "sh", "-c",
+                    f"wlrctl pointer move {x} {y} && "
+                    f"wlrctl pointer click {btn}",
+                ])
+                if rc != 0:
+                    return _text_result(
+                        f"Error clicking: {stderr.strip()}", is_error=True,
+                    )
+            except subprocess.TimeoutExpired:
+                return _text_result("Error: click timed out", is_error=True)
+
+            return _text_result(f"Clicked {btn} at ({x}, {y}).")
+
+        @tool(
+            "computer_type",
+            "Type text into the currently focused window. The text is sent "
+            "as keyboard input character by character.",
+            {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The text to type.",
+                    },
+                },
+                "required": ["text"],
+            },
+        )
+        async def computer_type(args: dict[str, Any]) -> dict[str, Any]:
+            text = args.get("text", "")
+            if not text:
+                return _text_result("Error: text is required.", is_error=True)
+
+            try:
+                rc, _, stderr = await _exec_in_container([
+                    "wlrctl", "keyboard", "type", text,
+                ])
+                if rc != 0:
+                    return _text_result(
+                        f"Error typing: {stderr.strip()}", is_error=True,
+                    )
+            except subprocess.TimeoutExpired:
+                return _text_result("Error: type timed out", is_error=True)
+
+            preview = text[:50] + ("..." if len(text) > 50 else "")
+            return _text_result(f"Typed: {preview!r}")
+
+        @tool(
+            "computer_key",
+            "Press a key or key combination. Supports special keys like "
+            "Return, Tab, Escape, BackSpace, and modifier combos like "
+            "ctrl+a, alt+F4, super+d. Modifiers: ctrl, alt, shift, super.",
+            {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "Key or combo to press, e.g. 'Return', 'ctrl+a', "
+                            "'alt+F4', 'Tab'."
+                        ),
+                    },
+                },
+                "required": ["key"],
+            },
+        )
+        async def computer_key(args: dict[str, Any]) -> dict[str, Any]:
+            key = args.get("key", "")
+            if not key:
+                return _text_result("Error: key is required.", is_error=True)
+
+            # Map named keys to the ASCII control characters that
+            # wlrctl's custom keymap assigns to those keycodes.
+            # See wlrctl ascii_raw_keymap.c: <BKSP>=8, <TAB>=9,
+            # <RTRN>=10, <ESC>=27, <SPCE>=32.
+            _named_key_chars: dict[str, str] = {
+                "return": "\n",
+                "enter": "\n",
+                "tab": "\t",
+                "escape": "\x1b",
+                "backspace": "\x08",
+                "space": " ",
+            }
+
+            parts = key.split("+")
+            if len(parts) > 1:
+                # Modifier combo: "ctrl+a" -> modifiers ctrl, key a
+                modifiers = ",".join(parts[:-1])
+                key_name = parts[-1]
+                # Resolve the key part if it's a named key.
+                char = _named_key_chars.get(key_name.lower(), key_name)
+                cmd = [
+                    "wlrctl", "keyboard", "type", char,
+                    "modifiers", modifiers,
+                ]
+            else:
+                char = _named_key_chars.get(key.lower())
+                if char is not None:
+                    # Named key — send the mapped control character.
+                    cmd = ["wlrctl", "keyboard", "type", char]
+                else:
+                    # Single character — just type it.
+                    cmd = ["wlrctl", "keyboard", "type", key]
+
+            try:
+                rc, _, stderr = await _exec_in_container(cmd)
+                if rc != 0:
+                    return _text_result(
+                        f"Error pressing key: {stderr.strip()}",
+                        is_error=True,
+                    )
+            except subprocess.TimeoutExpired:
+                return _text_result(
+                    "Error: key press timed out", is_error=True,
+                )
+
+            return _text_result(f"Pressed key: {args.get('key', '')}")
+
+        @tool(
+            "computer_scroll",
+            "Scroll at a specific position on the screen. Moves the pointer "
+            "to (x, y) and scrolls in the given direction.",
+            {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "integer",
+                        "description": "X coordinate (0-1279).",
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Y coordinate (0-719).",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down", "left", "right"],
+                        "description": "Scroll direction.",
+                    },
+                    "amount": {
+                        "type": "integer",
+                        "description": (
+                            "Number of scroll steps. Default: 3."
+                        ),
+                    },
+                },
+                "required": ["x", "y", "direction"],
+            },
+        )
+        async def computer_scroll(args: dict[str, Any]) -> dict[str, Any]:
+            x = args.get("x", 0)
+            y = args.get("y", 0)
+            direction = args.get("direction", "down")
+            amount = args.get("amount", 3)
+
+            if not (0 <= x < 1280 and 0 <= y < 720):
+                return _text_result(
+                    f"Error: coordinates ({x}, {y}) out of range.",
+                    is_error=True,
+                )
+
+            # wlrctl pointer scroll takes dx/dy values.
+            scroll_map = {
+                "up": (0, -amount),
+                "down": (0, amount),
+                "left": (-amount, 0),
+                "right": (amount, 0),
+            }
+            dx, dy = scroll_map.get(direction, (0, amount))
+
+            try:
+                rc, _, stderr = await _exec_in_container([
+                    "sh", "-c",
+                    f"wlrctl pointer move {x} {y} && "
+                    f"wlrctl pointer scroll {dx} {dy}",
+                ])
+                if rc != 0:
+                    return _text_result(
+                        f"Error scrolling: {stderr.strip()}", is_error=True,
+                    )
+            except subprocess.TimeoutExpired:
+                return _text_result("Error: scroll timed out", is_error=True)
+
+            return _text_result(
+                f"Scrolled {direction} by {amount} at ({x}, {y})."
+            )
+
+        @tool(
+            "computer_toplevel",
+            "Focus a window by name or part of its title. Use this to "
+            "switch between applications (e.g. 'Firefox', 'foot').",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Window title or app name to focus "
+                            "(case-insensitive substring match)."
+                        ),
+                    },
+                },
+                "required": ["name"],
+            },
+        )
+        async def computer_toplevel(args: dict[str, Any]) -> dict[str, Any]:
+            name = args.get("name", "")
+            if not name:
+                return _text_result("Error: name is required.", is_error=True)
+
+            try:
+                rc, _, stderr = await _exec_in_container([
+                    "wlrctl", "toplevel", "focus", name,
+                ])
+                if rc != 0:
+                    return _text_result(
+                        f"Error focusing window: {stderr.strip()}",
+                        is_error=True,
+                    )
+            except subprocess.TimeoutExpired:
+                return _text_result(
+                    "Error: focus timed out", is_error=True,
+                )
+
+            return _text_result(f"Focused window matching: {name!r}")
+
+        tools_list.extend([
+            computer_screenshot,
+            computer_click,
+            computer_type,
+            computer_key,
+            computer_scroll,
+            computer_toplevel,
+        ])
 
     return create_sdk_mcp_server(
         name="openudang",

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Minimal labwc configuration for headless computer-use contexts. -->
+<labwc_config>
+  <core>
+    <gap>0</gap>
+  </core>
+
+  <theme>
+    <name></name>
+    <!-- Minimal decorations to maximize usable screen area. -->
+    <titlebar>
+      <height>20</height>
+    </titlebar>
+    <font name="sans" size="10" />
+  </theme>
+
+  <!-- No keybindings needed — input comes via wlrctl. -->
+  <keyboard />
+  <mouse />
+</labwc_config>

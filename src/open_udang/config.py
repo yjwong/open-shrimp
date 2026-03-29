@@ -21,6 +21,7 @@ class ContainerConfig:
     enabled: bool = True
     docker_in_docker: bool = False
     dockerfile: str | None = None
+    computer_use: bool = False
 
 
 @dataclass
@@ -141,6 +142,9 @@ def _parse(raw: dict) -> Config:
                         container_raw.get("docker_in_docker", False)
                     ),
                     dockerfile=container_raw.get("dockerfile"),
+                    computer_use=bool(
+                        container_raw.get("computer_use", False)
+                    ),
                 )
             else:
                 # e.g. `container: true` as shorthand
