@@ -332,6 +332,7 @@ async def get_or_create_session(
             db=db, config=config, job_queue=job_queue,
             computer_use_container=_cu_container,
             screenshots_dir=_cu_screenshots_dir,
+            context_name=context_name,
         )
         options.mcp_servers = {"openudang": openudang_server}
 

@@ -551,6 +551,53 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+# ── /vnc ──
+
+
+async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /vnc -- open the VNC Mini App for the current context's desktop."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    scope = chat_scope_from_message(update.message)
+
+    if not _is_authorized(update.effective_user.id, config):
+        return
+
+    context_name, ctx = await _get_context(scope, config, db)
+
+    # Check that the context has computer_use enabled.
+    if ctx.container is None or not ctx.container.computer_use:
+        await update.message.reply_text(
+            f"Context `{_escape_mdv2(context_name)}` does not have computer use enabled\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    # Build the Mini App URL.
+    if config.review.public_url:
+        base_url = config.review.public_url.rstrip("/")
+    else:
+        base_url = f"https://{config.review.host}:{config.review.port}"
+
+    vnc_url = f"{base_url}/vnc/?context={context_name}"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text="View desktop",
+            web_app=WebAppInfo(url=vnc_url),
+        )]
+    ])
+
+    escaped_context = _escape_mdv2(context_name)
+    await update.message.reply_text(
+        f"Desktop for *{escaped_context}*",
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard,
+    )
+
+
 # ── /mcp ──
 
 

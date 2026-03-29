@@ -342,6 +342,30 @@ def get_screenshots_dir(context_name: str) -> Path:
     return CONTAINER_STATE_DIR / context_name / "screenshots"
 
 
+def get_vnc_port(context_name: str) -> int | None:
+    """Return the host-mapped VNC port for a computer-use container, or None.
+
+    The computer-use container exposes port 5900 with dynamic host mapping.
+    This function queries Docker for the actual mapped host port.
+    """
+    name = _container_name(context_name)
+    result = subprocess.run(
+        ["docker", "port", name, "5900"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    # Output is like "0.0.0.0:32768" or "[::]:32768\n0.0.0.0:32768".
+    for line in result.stdout.strip().splitlines():
+        port_str = line.rsplit(":", 1)[-1]
+        try:
+            return int(port_str)
+        except ValueError:
+            continue
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Ryuk reaper — crash-safe container cleanup
 # ---------------------------------------------------------------------------

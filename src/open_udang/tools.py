@@ -53,6 +53,7 @@ def create_openudang_mcp_server(
     job_queue: Any | None = None,
     computer_use_container: str | None = None,
     screenshots_dir: str | None = None,
+    context_name: str | None = None,
 ) -> McpSdkServerConfig:
     """Create an in-process MCP server with OpenUdang-specific tools.
 
@@ -638,11 +639,29 @@ def create_openudang_mcp_server(
             # Send screenshot to Telegram for user observability.
             try:
                 if os.path.isfile(host_path):
+                    # Build "View desktop" button if VNC Mini App is available.
+                    reply_markup = None
+                    if context_name and config is not None:
+                        base_url = None
+                        if config.review.public_url:
+                            base_url = config.review.public_url.rstrip("/")
+                        elif config.review.host and config.review.port:
+                            base_url = f"https://{config.review.host}:{config.review.port}"
+                        if base_url:
+                            vnc_url = f"{base_url}/vnc/?context={context_name}"
+                            reply_markup = InlineKeyboardMarkup([[
+                                InlineKeyboardButton(
+                                    "View desktop",
+                                    web_app=WebAppInfo(url=vnc_url),
+                                ),
+                            ]])
+
                     with open(host_path, "rb") as f:
                         await bot.send_photo(
                             chat_id=chat_id,
                             photo=f,
                             caption="Screenshot",
+                            reply_markup=reply_markup,
                             **_thread_kwargs,
                         )
             except Exception:

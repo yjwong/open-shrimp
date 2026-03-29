@@ -571,6 +571,11 @@ def create_review_app(config: Config, db: aiosqlite.Connection) -> Starlette:
 
     routes.extend(create_preview_routes())
 
+    # Add VNC Mini App routes (WebSocket proxy + static frontend).
+    from open_udang.vnc.api import create_vnc_routes
+
+    routes.extend(create_vnc_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db
