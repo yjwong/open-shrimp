@@ -244,7 +244,9 @@ async def get_or_create_session(
             docker_in_docker = context.container.docker_in_docker
             computer_use = context.container.computer_use
 
-            if computer_use:
+            if computer_use and custom_dockerfile:
+                image_name = f"openudang-claude:{context_name}"
+            elif computer_use:
                 image_name = COMPUTER_USE_IMAGE
             elif custom_dockerfile:
                 image_name = f"openudang-claude:{context_name}"
@@ -268,9 +270,16 @@ async def get_or_create_session(
                 )
 
             def _ensure_and_build_wrapper() -> str:
-                if computer_use:
-                    # Computer-use image extends the base image (which
-                    # already includes Docker for DinD support).
+                if computer_use and custom_dockerfile:
+                    # Build computer-use base first, then layer the
+                    # custom Dockerfile on top.
+                    docker_ensure_computer_use_image()
+                    docker_ensure_image(
+                        image_name=image_name,
+                        dockerfile=custom_dockerfile,
+                        base_image=COMPUTER_USE_IMAGE,
+                    )
+                elif computer_use:
                     docker_ensure_computer_use_image(
                         image_name=image_name,
                     )

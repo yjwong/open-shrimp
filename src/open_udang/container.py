@@ -138,6 +138,7 @@ def _find_seccomp_profile() -> Path:
 def ensure_image(
     image_name: str = CONTAINER_IMAGE,
     dockerfile: str | None = None,
+    base_image: str | None = None,
 ) -> None:
     """Ensure the container image exists, building it if necessary.
 
@@ -152,6 +153,10 @@ def ensure_image(
         dockerfile: Optional path to a custom Dockerfile.  When set,
             the build context is the directory containing the
             Dockerfile (so ``COPY`` instructions work relative to it).
+        base_image: When set with a custom *dockerfile*, ensure this
+            image exists (instead of the default base) before building.
+            Useful for layering a custom Dockerfile on top of the
+            computer-use image.
 
     Raises:
         RuntimeError: If the Claude CLI binary cannot be found or if
@@ -173,7 +178,16 @@ def ensure_image(
     if dockerfile is not None:
         # Ensure the base image exists before building a custom image
         # that likely depends on it (e.g. FROM openudang-claude:latest).
-        if image_name != CONTAINER_IMAGE:
+        if base_image:
+            # Caller explicitly specified which base to ensure (e.g.
+            # the computer-use image).  That base's own dependencies
+            # should already be satisfied by the caller.
+            subprocess.run(
+                ["docker", "image", "inspect", base_image],
+                capture_output=True,
+                check=True,
+            )
+        elif image_name != CONTAINER_IMAGE:
             ensure_image(image_name=CONTAINER_IMAGE, dockerfile=None)
 
         # Custom Dockerfile: use its parent directory as the build
@@ -188,10 +202,14 @@ def ensure_image(
         cli_dest = build_dir_path / "claude"
         if not cli_dest.exists() or not cli_dest.samefile(Path(cli_binary)):
             shutil.copy2(cli_binary, cli_dest)
+        extra_args = None
+        if base_image:
+            extra_args = ["--build-arg", f"BASE_IMAGE={base_image}"]
         _docker_build(
             image_name=image_name,
             build_dir=str(build_dir_path),
             dockerfile_name=dockerfile_path.name,
+            extra_build_args=extra_args,
         )
     else:
         # Default: bundled Dockerfile.claude in a temp build context.
@@ -286,20 +304,24 @@ def _docker_build(
     image_name: str,
     build_dir: str,
     dockerfile_name: str = "Dockerfile",
+    extra_build_args: list[str] | None = None,
 ) -> None:
     """Run ``docker build`` and stream output to the logger.
 
     Raises:
         RuntimeError: If the build fails.
     """
+    cmd = [
+        "docker", "build",
+        "-t", image_name,
+        "-f", dockerfile_name,
+        "--build-arg", "CLAUDE_CLI=claude",
+    ]
+    if extra_build_args:
+        cmd.extend(extra_build_args)
+    cmd.append(".")
     process = subprocess.Popen(
-        [
-            "docker", "build",
-            "-t", image_name,
-            "-f", dockerfile_name,
-            "--build-arg", "CLAUDE_CLI=claude",
-            ".",
-        ],
+        cmd,
         cwd=build_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
