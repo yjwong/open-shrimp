@@ -35,8 +35,19 @@ _CONTENT_TTL = 3600  # 1 hour
 _content_store: dict[str, dict[str, Any]] = {}
 
 
-def store_ephemeral_content(title: str, content: str) -> str:
-    """Store markdown content and return a unique ID for retrieval."""
+def store_ephemeral_content(
+    title: str,
+    content: str,
+    chat_id: int | None = None,
+    thread_id: int | None = None,
+    tool_use_id: str | None = None,
+) -> str:
+    """Store markdown content and return a unique ID for retrieval.
+
+    When *chat_id*, *thread_id*, and *tool_use_id* are provided the entry
+    can later be used to auto-deny a pending approval and dispatch review
+    comments back to the agent.
+    """
     # Lazy purge of expired entries.
     now = time.monotonic()
     expired = [k for k, v in _content_store.items() if now - v["created"] > _CONTENT_TTL]
@@ -48,6 +59,9 @@ def store_ephemeral_content(title: str, content: str) -> str:
         "title": title,
         "content": content,
         "created": now,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "tool_use_id": tool_use_id,
     }
     return content_id
 
@@ -162,14 +176,25 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
     Formats the comments into a prompt and dispatches it to the agent
     for the given chat via the dispatch registry.
 
-    Expects JSON body::
+    Expects JSON body — **either** file-based or ephemeral-content-based::
 
+        # File-based (existing behaviour):
         {
             "chat_id": <int>,
             "thread_id": <int|null>,
             "path": <str>,
             "comments": [{"block_text": <str>, "comment": <str>}, ...]
         }
+
+        # Ephemeral content (plan review):
+        {
+            "content_id": <str>,
+            "comments": [{"block_text": <str>, "comment": <str>}, ...]
+        }
+
+    When ``content_id`` is provided, the chat/thread targeting and
+    ``tool_use_id`` are read from the ephemeral content store, and the
+    pending ExitPlanMode approval is automatically denied.
     """
     try:
         await _authenticate(request)
@@ -181,39 +206,66 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    # Validate chat_id.
-    try:
-        chat_id = int(body["chat_id"])
-    except (KeyError, ValueError, TypeError):
-        return JSONResponse(
-            {"error": "chat_id is required (integer)"}, status_code=400
-        )
+    # ---- Resolve target (file-based vs ephemeral content) ----
+    content_id = body.get("content_id")
+    tool_use_id: str | None = None
 
-    # Validate thread_id (optional).
-    thread_id_raw = body.get("thread_id")
-    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+    if content_id:
+        # Ephemeral content mode (e.g. plan review).
+        entry = _content_store.get(content_id)
+        if not entry:
+            return JSONResponse(
+                {"error": "content not found or expired"}, status_code=404
+            )
+        if time.monotonic() - entry["created"] > _CONTENT_TTL:
+            _content_store.pop(content_id, None)
+            return JSONResponse({"error": "content expired"}, status_code=404)
 
-    # Validate path.
-    path_str = body.get("path", "")
-    if not path_str or not isinstance(path_str, str):
-        return JSONResponse(
-            {"error": "path is required (string)"}, status_code=400
-        )
+        chat_id = entry.get("chat_id")
+        thread_id = entry.get("thread_id")
+        tool_use_id = entry.get("tool_use_id")
 
-    file_path = Path(path_str)
-    if not file_path.is_absolute():
-        return JSONResponse(
-            {"error": "path must be absolute"}, status_code=400
-        )
+        if chat_id is None:
+            return JSONResponse(
+                {"error": "ephemeral content has no associated chat"},
+                status_code=400,
+            )
 
-    config: Config = request.app.state.config
-    if not _is_within_context_directories(file_path, config):
-        return JSONResponse(
-            {"error": "path is outside configured context directories"},
-            status_code=403,
-        )
+        subject = "your plan"
+    else:
+        # File-based mode (original behaviour).
+        try:
+            chat_id = int(body["chat_id"])
+        except (KeyError, ValueError, TypeError):
+            return JSONResponse(
+                {"error": "chat_id is required (integer)"}, status_code=400
+            )
 
-    # Validate comments.
+        thread_id_raw = body.get("thread_id")
+        thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
+        path_str = body.get("path", "")
+        if not path_str or not isinstance(path_str, str):
+            return JSONResponse(
+                {"error": "path is required (string)"}, status_code=400
+            )
+
+        file_path = Path(path_str)
+        if not file_path.is_absolute():
+            return JSONResponse(
+                {"error": "path must be absolute"}, status_code=400
+            )
+
+        config: Config = request.app.state.config
+        if not _is_within_context_directories(file_path, config):
+            return JSONResponse(
+                {"error": "path is outside configured context directories"},
+                status_code=403,
+            )
+
+        subject = f"the document at `{path_str}`"
+
+    # ---- Validate comments ----
     comments = body.get("comments")
     if not isinstance(comments, list) or not comments:
         return JSONResponse(
@@ -225,20 +277,19 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
             {"error": "too many comments (max 50)"}, status_code=400
         )
 
-    # Build the prompt.
+    # ---- Build the prompt ----
     prompt_parts = [
-        f"The user has reviewed the document at `{path_str}` and left "
-        f"the following comments:"
+        f"The user has reviewed {subject} and left the following comments:"
     ]
 
-    for i, entry in enumerate(comments, 1):
-        if not isinstance(entry, dict):
+    for i, entry_c in enumerate(comments, 1):
+        if not isinstance(entry_c, dict):
             return JSONResponse(
                 {"error": f"comment {i} must be an object"}, status_code=400
             )
 
-        block_text = str(entry.get("block_text", ""))[:200]
-        comment_text = str(entry.get("comment", ""))
+        block_text = str(entry_c.get("block_text", ""))[:200]
+        comment_text = str(entry_c.get("comment", ""))
         if not comment_text:
             return JSONResponse(
                 {"error": f"comment {i} has empty comment text"}, status_code=400
@@ -256,13 +307,17 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
 
     prompt = "\n".join(prompt_parts)
 
-    # Dispatch.
+    # ---- Auto-deny pending ExitPlanMode approval ----
+    if tool_use_id:
+        await _auto_deny_plan_approval(request, tool_use_id)
+
+    # ---- Dispatch ----
     from open_udang.dispatch_registry import dispatch as dispatch_to_agent
 
     try:
         await dispatch_to_agent(
             prompt, chat_id, thread_id,
-            placeholder="Reviewing document feedback\\.\\.\\.",
+            placeholder="Reviewing feedback\\.\\.\\.",
         )
     except RuntimeError as e:
         logger.error("submit_review_endpoint: %s", e)
@@ -279,6 +334,59 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
         )
 
     return JSONResponse({"ok": True})
+
+
+async def _auto_deny_plan_approval(
+    request: Request, tool_use_id: str
+) -> None:
+    """Auto-deny a pending ExitPlanMode approval and update the Telegram message.
+
+    Called when the user submits review comments on a plan, which implicitly
+    means they are rejecting it.  We must read metadata *before* resolving
+    the future because the ``finally`` block in ``_send_approval_keyboard``
+    cleans up ``_approval_metadata`` immediately after resolution.
+    """
+    from open_udang.handlers.state import _approval_futures, _approval_metadata
+
+    deny_key = f"deny:{tool_use_id}"
+    future = _approval_futures.get(deny_key)
+    if not future or future.done():
+        logger.debug(
+            "Plan approval for %s already resolved — skipping auto-deny",
+            tool_use_id,
+        )
+        return
+
+    # Read metadata before resolving (cleanup runs in the finally block).
+    meta = _approval_metadata.get(tool_use_id, {})
+    message_id = meta.get("message_id")
+    approval_chat_id = meta.get("chat_id")
+
+    # Deny the pending approval.
+    future.set_result(False)
+
+    # Edit the Telegram message to indicate it was denied via review.
+    if message_id and approval_chat_id:
+        try:
+            from telegram import Bot
+
+            config: Config = request.app.state.config
+            bot = Bot(token=config.telegram.token)
+            async with bot:
+                status = (
+                    "\n\n\u274c *Denied\\.* "
+                    "_Review comments submitted\\._"
+                )
+                await bot.edit_message_text(
+                    chat_id=approval_chat_id,
+                    message_id=message_id,
+                    text="\U0001f4cb *Plan*" + status,
+                    parse_mode="MarkdownV2",
+                )
+        except Exception:
+            logger.exception(
+                "Failed to update Telegram message for auto-denied plan"
+            )
 
 
 def create_preview_routes() -> list[Route | Mount]:

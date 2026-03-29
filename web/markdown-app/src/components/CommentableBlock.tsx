@@ -12,16 +12,16 @@ export default function CommentableBlock({ blockIndex, children }: Props) {
   const { reviewMode, comments, addComment, editComment, deleteComment } = useReview();
   const [showEditor, setShowEditor] = useState(false);
   const blockRef = useRef<HTMLDivElement>(null);
+  const blockTextRef = useRef("");
 
   const blockComments = comments.filter((c) => c.blockIndex === blockIndex);
 
   const handleTap = () => {
     if (!reviewMode || showEditor) return;
+    // Capture block text now, before the editor renders inside the div
+    // (otherwise textContent would include "Save"/"Cancel" button labels).
+    blockTextRef.current = (blockRef.current?.textContent ?? "").slice(0, 200);
     setShowEditor(true);
-  };
-
-  const getBlockText = (): string => {
-    return (blockRef.current?.textContent ?? "").slice(0, 200);
   };
 
   return (
@@ -44,7 +44,7 @@ export default function CommentableBlock({ blockIndex, children }: Props) {
       {showEditor && (
         <CommentEditor
           onSave={(text) => {
-            addComment(blockIndex, getBlockText(), text);
+            addComment(blockIndex, blockTextRef.current, text);
             setShowEditor(false);
           }}
           onCancel={() => setShowEditor(false)}

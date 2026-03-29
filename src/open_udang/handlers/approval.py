@@ -350,10 +350,20 @@ async def _send_approval_keyboard(
         if plan:
             from open_udang.preview.api import store_ephemeral_content
 
-            content_id = store_ephemeral_content("Plan", plan)
+            content_id = store_ephemeral_content(
+                "Plan", plan,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                tool_use_id=tool_use_id,
+            )
+            thread_param = (
+                f"&thread_id={thread_id}" if thread_id is not None else ""
+            )
             app_url = (
                 f"{base_url}/preview/"
                 f"?content_id={content_id}"
+                f"&chat_id={chat_id}"
+                f"{thread_param}"
             )
             rows.append([InlineKeyboardButton(
                 "\U0001f4cb View plan", web_app=WebAppInfo(url=app_url),

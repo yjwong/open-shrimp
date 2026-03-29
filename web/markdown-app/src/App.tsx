@@ -8,7 +8,6 @@ import { injectStyles } from "./styles";
 import { submitReview } from "./api";
 import CodeBlock from "./components/CodeBlock";
 import CommentableBlock from "./components/CommentableBlock";
-import CopyMarkdownButton from "./components/CopyMarkdownButton";
 import ReviewToolbar from "./components/ReviewToolbar";
 import SubmitDialog from "./components/SubmitDialog";
 import { ReviewProvider, useReview } from "./context/ReviewContext";
@@ -45,7 +44,6 @@ function AppInner() {
   const chatId = Number(params.get("chat_id"));
   const threadIdParam = params.get("thread_id");
   const threadId = threadIdParam ? Number(threadIdParam) : null;
-  const readOnly = !!contentId;
 
   useEffect(() => {
     initTelegram();
@@ -79,7 +77,7 @@ function AppInner() {
     await submitReview({
       chatId,
       threadId,
-      path: filePath!,
+      ...(contentId ? { contentId } : { path: filePath! }),
       comments,
     });
     window.Telegram?.WebApp?.close();
@@ -110,24 +108,16 @@ function AppInner() {
           {data.content}
         </ReactMarkdown>
       </div>
-      {readOnly ? (
-        <div className="review-toolbar">
-          <CopyMarkdownButton content={data.content} />
-        </div>
-      ) : (
-        <>
-          <ReviewToolbar
-            onSubmit={() => setShowSubmitDialog(true)}
-            copyContent={!reviewMode ? data.content : undefined}
-          />
-          {showSubmitDialog && (
-            <SubmitDialog
-              comments={comments}
-              onConfirm={handleSubmit}
-              onCancel={() => setShowSubmitDialog(false)}
-            />
-          )}
-        </>
+      <ReviewToolbar
+        onSubmit={() => setShowSubmitDialog(true)}
+        copyContent={!reviewMode ? data.content : undefined}
+      />
+      {showSubmitDialog && (
+        <SubmitDialog
+          comments={comments}
+          onConfirm={handleSubmit}
+          onCancel={() => setShowSubmitDialog(false)}
+        />
       )}
     </>
   );
