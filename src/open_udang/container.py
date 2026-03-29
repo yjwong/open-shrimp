@@ -93,6 +93,42 @@ def find_claude_binary() -> str:
 
 logger = logging.getLogger(__name__)
 
+def _image_created_ts(image_name: str) -> str | None:
+    """Return the creation timestamp of a Docker image, or None if missing."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", image_name,
+         "--format", "{{.Created}}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _container_image_id(container_name: str) -> str | None:
+    """Return the image ID a running container was created from."""
+    result = subprocess.run(
+        ["docker", "inspect", container_name,
+         "--format", "{{.Image}}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _image_id(image_name: str) -> str | None:
+    """Return the ID of a Docker image."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", image_name,
+         "--format", "{{.Id}}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
 # Docker image name used for containerized contexts.
 CONTAINER_IMAGE = "openudang-claude:latest"
 
@@ -162,15 +198,35 @@ def ensure_image(
         RuntimeError: If the Claude CLI binary cannot be found or if
             the Docker build fails.
     """
-    result = subprocess.run(
+    image_exists = subprocess.run(
         ["docker", "image", "inspect", image_name],
         capture_output=True,
-    )
-    if result.returncode == 0:
+    ).returncode == 0
+
+    # Check if the base image is newer than the derived image.
+    needs_rebuild = False
+    if image_exists and dockerfile is not None:
+        effective_base = base_image or (
+            CONTAINER_IMAGE if image_name != CONTAINER_IMAGE else None
+        )
+        if effective_base:
+            base_ts = _image_created_ts(effective_base)
+            derived_ts = _image_created_ts(image_name)
+            if base_ts and derived_ts and base_ts > derived_ts:
+                logger.info(
+                    "Base image %s (%s) is newer than %s (%s), rebuilding",
+                    effective_base, base_ts, image_name, derived_ts,
+                )
+                needs_rebuild = True
+
+    if image_exists and not needs_rebuild:
         logger.info("Container image %s already exists", image_name)
         return
 
-    logger.info("Container image %s not found, building...", image_name)
+    if needs_rebuild:
+        logger.info("Rebuilding container image %s...", image_name)
+    else:
+        logger.info("Container image %s not found, building...", image_name)
 
     cli_binary = find_claude_binary()
     logger.info("Using Claude CLI binary: %s", cli_binary)
@@ -244,18 +300,34 @@ def ensure_computer_use_image(
     layers ``Dockerfile.computer-use`` on top with labwc, wlrctl, grim,
     wayvnc, and Chromium.
     """
-    result = subprocess.run(
+    image_exists = subprocess.run(
         ["docker", "image", "inspect", image_name],
         capture_output=True,
-    )
-    if result.returncode == 0:
+    ).returncode == 0
+
+    # Check if the base image is newer than the computer-use image.
+    needs_rebuild = False
+    if image_exists:
+        base_ts = _image_created_ts(CONTAINER_IMAGE)
+        derived_ts = _image_created_ts(image_name)
+        if base_ts and derived_ts and base_ts > derived_ts:
+            logger.info(
+                "Base image %s (%s) is newer than %s (%s), rebuilding",
+                CONTAINER_IMAGE, base_ts, image_name, derived_ts,
+            )
+            needs_rebuild = True
+
+    if image_exists and not needs_rebuild:
         logger.info("Computer-use image %s already exists", image_name)
         return
 
     # Ensure the base image exists first.
     ensure_image(image_name=CONTAINER_IMAGE, dockerfile=None)
 
-    logger.info("Computer-use image %s not found, building...", image_name)
+    if needs_rebuild:
+        logger.info("Rebuilding computer-use image %s...", image_name)
+    else:
+        logger.info("Computer-use image %s not found, building...", image_name)
 
     repo_root = Path(__file__).resolve().parent.parent.parent
     repo_dockerfile = repo_root / "Dockerfile.computer-use"
@@ -815,11 +887,22 @@ def ensure_container_running(
     name = _container_name(context_name)
     state = _get_container_state(name)
     if state == "running":
-        logger.info("Container %s already running", name)
-        return name
-
-    # Remove stale container (exited, dead, created).
-    if state is not None:
+        # Check if the container's image matches the current image tag.
+        container_img = _container_image_id(name)
+        current_img = _image_id(image_name)
+        if container_img and current_img and container_img != current_img:
+            logger.info(
+                "Container %s is running an outdated image, recreating",
+                name,
+            )
+            subprocess.run(
+                ["docker", "rm", "-f", name], capture_output=True,
+            )
+        else:
+            logger.info("Container %s already running", name)
+            return name
+    elif state is not None:
+        # Remove stale container (exited, dead, created).
         logger.info("Removing stale container %s (state=%s)", name, state)
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
