@@ -42,6 +42,7 @@ from open_udang.container import (
     CONTAINER_IMAGE,
     build_cli_wrapper as docker_build_cli_wrapper,
     cleanup_wrapper as docker_cleanup_wrapper,
+    ensure_container_running as docker_ensure_container,
     ensure_image as docker_ensure_image,
 )
 from open_udang.sandbox import (
@@ -215,10 +216,17 @@ async def get_or_create_session(
                     parse_mode="MarkdownV2",
                 )
 
-            def _build_wrapper() -> str:
+            def _ensure_and_build_wrapper() -> str:
                 docker_ensure_image(
                     image_name=image_name,
                     dockerfile=custom_dockerfile,
+                )
+                docker_ensure_container(
+                    context_name=context_name,
+                    project_dir=context.directory,
+                    additional_directories=context.additional_directories or None,
+                    docker_in_docker=docker_in_docker,
+                    image_name=image_name,
                 )
                 return docker_build_cli_wrapper(
                     context_name=context_name,
@@ -228,7 +236,7 @@ async def get_or_create_session(
                     image_name=image_name,
                 )
 
-            wrapper_path = await asyncio.to_thread(_build_wrapper)
+            wrapper_path = await asyncio.to_thread(_ensure_and_build_wrapper)
             logger.info(
                 "Containerized context '%s': using Docker wrapper %s",
                 context_name,

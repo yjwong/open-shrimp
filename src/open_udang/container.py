@@ -5,11 +5,22 @@ inside a Docker container instead of directly on the host.  This provides
 strong filesystem isolation — the agent can only access the bind-mounted
 project directory and its own session storage.
 
-The approach works by generating a thin wrapper script that invokes
-``docker run`` with the right mounts and forwarding all CLI arguments.
-The SDK's ``cli_path`` option is pointed at this wrapper, so the rest of
-the SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP)
-works unchanged.
+Containers are **persistent**: one long-lived container per context name,
+shared across all sessions and threads.  The first invocation starts the
+container with ``docker run -d`` (using ``sleep infinity`` as the keep-alive
+process), and subsequent invocations use ``docker exec -i`` to run the
+Claude CLI inside the already-running container.  This eliminates the 2-5s
+``docker run`` overhead per invocation (and 10-30s for DinD contexts where
+the rootless Docker daemon now stays warm).
+
+Testcontainers Ryuk is used as a crash-safety net: a TCP connection to Ryuk
+acts as a liveness signal for the bot process.  If the bot dies without
+graceful shutdown, Ryuk reaps all labelled containers after a short timeout.
+
+The SDK's ``cli_path`` option is pointed at a wrapper script that does the
+``docker exec`` (with fallback to ``docker run -d`` if the container isn't
+running).  All other SDK machinery (stdin/stdout streaming, canUseTool
+callbacks, MCP) works unchanged.
 """
 
 from __future__ import annotations
@@ -18,6 +29,7 @@ import logging
 import os
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
@@ -257,8 +269,203 @@ def check_docker_available() -> bool:
     return shutil.which("docker") is not None
 
 
+# ---------------------------------------------------------------------------
+# Ryuk reaper — crash-safe container cleanup
+# ---------------------------------------------------------------------------
+
+RYUK_IMAGE = "testcontainers/ryuk:0.11.0"
+_CONTAINER_LABEL = "openudang"
+
+_ryuk_socket: socket.socket | None = None
+_ryuk_container_id: str | None = None
+
+
+def start_ryuk() -> None:
+    """Start Testcontainers Ryuk and register a label filter.
+
+    Ryuk is a container reaper that watches a TCP connection as a liveness
+    signal.  As long as the connection is open, labelled containers are kept
+    alive.  When the connection drops (bot crash / exit), Ryuk reaps them.
+
+    This function is a no-op if Docker is not available or Ryuk fails to
+    start (the bot continues without crash cleanup, matching pre-Ryuk
+    behaviour).
+    """
+    global _ryuk_socket, _ryuk_container_id  # noqa: PLW0603
+
+    if not check_docker_available():
+        return
+
+    try:
+        # Start Ryuk container with a random host port.
+        result = subprocess.run(
+            [
+                "docker", "run", "-d",
+                "--name", "openudang-ryuk",
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                "-p", "8080",
+                "--label", f"{_CONTAINER_LABEL}.ryuk=true",
+                RYUK_IMAGE,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            # Container name conflict — Ryuk may already be running from
+            # a previous bot instance.  Remove it and retry.
+            if "Conflict" in result.stderr or "already in use" in result.stderr:
+                subprocess.run(
+                    ["docker", "rm", "-f", "openudang-ryuk"],
+                    capture_output=True,
+                )
+                result = subprocess.run(
+                    [
+                        "docker", "run", "-d",
+                        "--name", "openudang-ryuk",
+                        "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                        "-p", "8080",
+                        "--label", f"{_CONTAINER_LABEL}.ryuk=true",
+                        RYUK_IMAGE,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+            if result.returncode != 0:
+                logger.warning(
+                    "Failed to start Ryuk container: %s", result.stderr.strip()
+                )
+                return
+
+        _ryuk_container_id = result.stdout.strip()
+        logger.info("Started Ryuk container: %s", _ryuk_container_id[:12])
+
+        # Discover the mapped host port.
+        port_result = subprocess.run(
+            ["docker", "port", "openudang-ryuk", "8080"],
+            capture_output=True,
+            text=True,
+        )
+        if port_result.returncode != 0:
+            logger.warning("Failed to get Ryuk port: %s", port_result.stderr.strip())
+            _cleanup_ryuk_container()
+            return
+
+        # Output is like "0.0.0.0:32768" or "[::]:32768".
+        port_str = port_result.stdout.strip().rsplit(":", 1)[-1]
+        port = int(port_str)
+
+        # Connect to Ryuk and register our label filter.  Docker's
+        # port forwarding accepts TCP connections before Ryuk's Go
+        # server has called Accept(), so the connect() succeeds but
+        # the subsequent send/recv gets ConnectionResetError.  Retry
+        # the full connect+send+recv sequence until Ryuk is ready.
+        import time as _time
+
+        filter_msg = f"label={_CONTAINER_LABEL}=true\n".encode()
+        sock: socket.socket | None = None
+        for _attempt in range(10):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                sock.connect(("127.0.0.1", port))
+                sock.sendall(filter_msg)
+                ack = sock.recv(1024).decode().strip()
+                if ack == "ACK":
+                    break
+                logger.warning("Unexpected Ryuk response: %s", ack)
+                sock.close()
+                sock = None
+            except (ConnectionResetError, ConnectionRefusedError, OSError):
+                if sock is not None:
+                    sock.close()
+                    sock = None
+                _time.sleep(0.2)
+        else:
+            logger.warning("Could not connect to Ryuk after retries")
+            _cleanup_ryuk_container()
+            return
+
+        # Keep the socket open — this is the liveness signal.
+        sock.settimeout(None)
+        _ryuk_socket = sock
+        logger.info("Ryuk connected on port %d, label filter registered", port)
+
+    except Exception:
+        logger.warning("Failed to start Ryuk (continuing without crash cleanup)", exc_info=True)
+        _cleanup_ryuk_container()
+
+
+def stop_ryuk() -> None:
+    """Close the Ryuk connection and remove the Ryuk container.
+
+    On graceful shutdown the caller should stop managed containers
+    explicitly via :func:`stop_all_containers` *before* calling this,
+    so Ryuk only serves as a crash-safety net.
+    """
+    global _ryuk_socket, _ryuk_container_id  # noqa: PLW0603
+
+    if _ryuk_socket is not None:
+        try:
+            _ryuk_socket.close()
+        except OSError:
+            pass
+        _ryuk_socket = None
+
+    _cleanup_ryuk_container()
+
+
+def _cleanup_ryuk_container() -> None:
+    global _ryuk_container_id  # noqa: PLW0603
+    if _ryuk_container_id is not None:
+        subprocess.run(
+            ["docker", "rm", "-f", "openudang-ryuk"],
+            capture_output=True,
+        )
+        logger.info("Removed Ryuk container")
+        _ryuk_container_id = None
+
+
+# ---------------------------------------------------------------------------
+# Persistent container lifecycle
+# ---------------------------------------------------------------------------
+
+def _container_name(context_name: str) -> str:
+    """Return the fixed Docker container name for a context."""
+    return f"openudang-{context_name}"
+
+
+def _get_container_state(name: str) -> str | None:
+    """Return the container state ('running', 'exited', …) or None."""
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Status}}", name],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def stop_all_containers() -> None:
+    """Stop and remove all OpenUdang-managed containers (graceful shutdown)."""
+    result = subprocess.run(
+        [
+            "docker", "ps", "-a",
+            "--filter", f"label={_CONTAINER_LABEL}=true",
+            "--format", "{{.Names}}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    for name in result.stdout.strip().splitlines():
+        name = name.strip()
+        if name:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+            logger.info("Removed container %s", name)
+
+
 # Shell script that starts rootless Docker daemon inside the container,
-# waits for it to be ready, then execs the Claude CLI.
+# waits for it to be ready, then keeps the container alive.
 _DIND_ENTRYPOINT = r"""#!/bin/bash
 set -eu
 
@@ -307,57 +514,31 @@ for _i in $(seq 1 30); do
     sleep 1
 done
 
-# Hand off to the Claude CLI.
-exec "$@"
+# Keep the container alive.  CLI invocations arrive via `docker exec`.
+exec sleep infinity
 """
 
 
-def build_cli_wrapper(
+def _build_docker_run_argv(
     context_name: str,
     project_dir: str,
     additional_directories: list[str] | None = None,
     docker_in_docker: bool = False,
     image_name: str = CONTAINER_IMAGE,
-) -> str:
-    """Generate a wrapper script that runs the Claude CLI inside Docker.
+) -> tuple[list[str], str]:
+    """Build the ``docker run -d`` argv for creating a persistent container.
 
-    The wrapper:
-    - Bind-mounts the project directory at the same path inside the
-      container (no path remapping needed).
-    - Bind-mounts per-context state as ``/home/claude/.claude`` for
-      session persistence.
-    - Runs as the host user's uid/gid to avoid root-owned files.
-    - Passes ``ANTHROPIC_API_KEY`` into the container.
-    - Forwards all CLI arguments via ``"$@"``.
-
-    Args:
-        context_name: Context name (used for state directory and
-            container naming).
-        project_dir: Absolute path to the project directory on the host.
-        additional_directories: Optional extra directories to bind-mount
-            (read-write, same path inside and outside).
-        docker_in_docker: When True, start a rootless Docker daemon
-            inside the container so the agent can run docker commands.
-            Uses rootless Docker with fuse-overlayfs and slirp4netns.
-            Adds ``CAP_SYS_ADMIN``, ``apparmor=unconfined``,
-            ``systempaths=unconfined``, and a custom seccomp profile
-            (Docker default + ``keyctl`` + ``pivot_root``).
-
-    Returns:
-        Absolute path to the generated wrapper script.
+    Returns ``(docker_run_argv, container_name)`` where *docker_run_argv*
+    is a complete argv list ending with the image and keep-alive command.
     """
     state_dir = _ensure_state_dir(context_name)
     uid = os.getuid()
     gid = os.getgid()
+    container_name = _container_name(context_name)
 
-    # Mount the host's credentials file (read-only) so the CLI can use
-    # the authenticated OAuth session (Claude.ai Pro/Teams) without
-    # exposing the rest of ~/.claude.
     host_credentials = Path.home() / ".claude" / ".credentials.json"
 
-    # Forward the host's git identity into the container so that
-    # git commit/tag commands work without extra configuration.
-    # Each entry is a "KEY=VALUE" string passed via docker's -e flag.
+    # Git identity — baked into the container at creation time.
     git_env_args: list[str] = []
     for git_key, env_vars in [
         ("user.name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
@@ -374,17 +555,17 @@ def build_cli_wrapper(
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
 
-    # Build the docker run argv as a proper list (one element per
-    # argument) so the generated script can use a bash array — no
-    # shell-escaping headaches for values with spaces or special chars.
     docker_argv: list[str] = [
-        "docker", "run", "--rm", "-i",
+        "docker", "run", "-d",
+        "--name", container_name,
+        "--label", f"{_CONTAINER_LABEL}=true",
+        "--label", f"{_CONTAINER_LABEL}.context={context_name}",
         "--user", f"{uid}:{gid}",
         "-e", "HOME=/home/claude",
-        "-e", "ANTHROPIC_API_KEY",
     ]
     for env_arg in git_env_args:
         docker_argv.extend(["-e", env_arg])
+
     # Mount Claude CLI tmp dir inside the container so background task
     # outputs are written to the host-visible state directory.
     claude_tmp_dir = state_dir / "tmp"
@@ -402,14 +583,6 @@ def build_cli_wrapper(
     for extra_dir in additional_directories or []:
         docker_argv.extend(["-v", f"{extra_dir}:{extra_dir}"])
 
-    # When DinD is enabled, write an entrypoint script into the state
-    # directory (persists across sessions) and mount it into the
-    # container.  Rootless Docker needs:
-    #   - CAP_SYS_ADMIN: for user namespaces and mount inside the container
-    #   - apparmor=unconfined: docker-default blocks mount/newuidmap
-    #   - systempaths=unconfined: allows mounting proc/sys in nested userns
-    #   - Custom seccomp profile: default + keyctl + pivot_root (for inner runc)
-    entrypoint_path: Path | None = None
     if docker_in_docker:
         docker_argv.extend([
             "--cap-add", "SYS_ADMIN",
@@ -419,13 +592,11 @@ def build_cli_wrapper(
             "--device", "/dev/net/tun",
             "--sysctl", "net.ipv4.ip_forward=1",
         ])
-        # Persist the inner Docker's image/container storage across sessions.
         docker_data_dir = state_dir / "docker-data"
         docker_data_dir.mkdir(exist_ok=True)
         docker_argv.extend([
             "-v", f"{docker_data_dir}:/home/claude/.local/share/docker",
         ])
-        # Write the DinD entrypoint script alongside the state dir.
         entrypoint_path = state_dir / "dind-entrypoint.sh"
         entrypoint_path.write_text(_DIND_ENTRYPOINT)
         entrypoint_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
@@ -437,36 +608,190 @@ def build_cli_wrapper(
 
     docker_argv.extend(["-w", project_dir])
 
-    # Emit the argv as a bash array so each element is properly quoted.
-    # --name and the image/command are appended separately: --name needs
-    # shell expansion ($$) and the image + trailing "$@" are static.
-    quoted_elements = " \\\n  ".join(shlex.quote(a) for a in docker_argv)
-
-    # Build the tail: --name (with $$), image, and command.
-    container_name = f"openudang-{context_name}"
+    # Image and keep-alive command.
+    docker_argv.append(image_name)
     if docker_in_docker:
-        tail_cmd = (
-            "/usr/local/bin/dind-entrypoint.sh"
-            " /usr/local/bin/claude"
-        )
+        docker_argv.append("/usr/local/bin/dind-entrypoint.sh")
     else:
-        tail_cmd = "/usr/local/bin/claude"
+        docker_argv.extend(["sleep", "infinity"])
+
+    return docker_argv, container_name
+
+
+def ensure_container_running(
+    context_name: str,
+    project_dir: str,
+    additional_directories: list[str] | None = None,
+    docker_in_docker: bool = False,
+    image_name: str = CONTAINER_IMAGE,
+) -> str:
+    """Ensure a persistent container is running for the given context.
+
+    If the container already exists and is running, this is a fast no-op
+    (a single ``docker inspect``).  Otherwise it creates a new detached
+    container.
+
+    Race-safe: if two threads try to create the container simultaneously,
+    one will get a name-conflict error and fall through to the running
+    container.
+
+    Returns:
+        The container name (e.g. ``openudang-dev``).
+    """
+    name = _container_name(context_name)
+    state = _get_container_state(name)
+    if state == "running":
+        logger.info("Container %s already running", name)
+        return name
+
+    # Remove stale container (exited, dead, created).
+    if state is not None:
+        logger.info("Removing stale container %s (state=%s)", name, state)
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+    docker_argv, _ = _build_docker_run_argv(
+        context_name=context_name,
+        project_dir=project_dir,
+        additional_directories=additional_directories,
+        docker_in_docker=docker_in_docker,
+        image_name=image_name,
+    )
+
+    result = subprocess.run(docker_argv, capture_output=True, text=True)
+    if result.returncode != 0:
+        # Race: another invocation may have created it.
+        if _get_container_state(name) == "running":
+            logger.info("Container %s started by another invocation", name)
+            return name
+        raise RuntimeError(
+            f"Failed to start container {name}: {result.stderr.strip()}"
+        )
+
+    logger.info("Started persistent container %s", name)
+
+    # For DinD, wait for the inner Docker daemon to be ready.
+    if docker_in_docker:
+        _wait_for_dind(name)
+
+    return name
+
+
+def _wait_for_dind(container_name: str, timeout: int = 30) -> None:
+    """Wait for the rootless Docker daemon inside a DinD container."""
+    import time
+
+    uid = os.getuid()
+    docker_host = f"unix:///tmp/runtime-{uid}/docker.sock"
+    for i in range(timeout):
+        result = subprocess.run(
+            [
+                "docker", "exec",
+                "-e", f"DOCKER_HOST={docker_host}",
+                container_name,
+                "docker", "info",
+            ],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            logger.info("DinD ready in container %s after %ds", container_name, i)
+            return
+        time.sleep(1)
+    logger.warning(
+        "DinD not ready in container %s after %ds", container_name, timeout
+    )
+
+
+def build_cli_wrapper(
+    context_name: str,
+    project_dir: str,
+    additional_directories: list[str] | None = None,
+    docker_in_docker: bool = False,
+    image_name: str = CONTAINER_IMAGE,
+) -> str:
+    """Generate a wrapper script that runs the Claude CLI via ``docker exec``.
+
+    The wrapper checks if the persistent container is running and falls
+    back to creating it if needed (crash recovery).  Each CLI invocation
+    uses ``docker exec -i`` into the shared container.
+
+    Args:
+        context_name: Context name (used for container naming).
+        project_dir: Absolute path to the project directory on the host.
+        additional_directories: Optional extra directories to bind-mount.
+        docker_in_docker: When True, the container runs a rootless Docker
+            daemon (started once at container creation, stays warm).
+        image_name: Docker image to use.
+
+    Returns:
+        Absolute path to the generated wrapper script.
+    """
+    container_name = _container_name(context_name)
+
+    # Build the docker run argv for the fallback creation path.
+    # This is embedded in the wrapper so it can self-heal if the
+    # container was removed externally.
+    docker_run_argv, _ = _build_docker_run_argv(
+        context_name=context_name,
+        project_dir=project_dir,
+        additional_directories=additional_directories,
+        docker_in_docker=docker_in_docker,
+        image_name=image_name,
+    )
+    quoted_run_args = " \\\n  ".join(shlex.quote(a) for a in docker_run_argv)
+
+    # For DinD, we need to wait for dockerd after container creation and
+    # set DOCKER_HOST on exec so the claude CLI can use the inner daemon.
+    uid = os.getuid()
+    dind_wait = ""
+    dind_exec_env = ""
+    if docker_in_docker:
+        docker_host = f"unix:///tmp/runtime-{uid}/docker.sock"
+        dind_wait = (
+            f'\n    # Wait for inner Docker daemon to be ready.\n'
+            f'    for _i in $(seq 1 30); do\n'
+            f'      if docker exec -e DOCKER_HOST={shlex.quote(docker_host)}'
+            f' {shlex.quote(container_name)} docker info > /dev/null 2>&1; then\n'
+            f'        break\n'
+            f'      fi\n'
+            f'      sleep 1\n'
+            f'    done\n'
+        )
+        dind_exec_env = f" -e DOCKER_HOST={shlex.quote(docker_host)}"
 
     script = (
         f"#!/bin/bash\n"
         f"# Auto-generated by OpenUdang for containerized context "
         f"'{context_name}'.\n"
         f"# Do not edit — this file is recreated on each session.\n"
-        f"DOCKER_ARGS=(\n  {quoted_elements}\n)\n"
-        f'exec "${{DOCKER_ARGS[@]}}"'
-        f' --name "{container_name}-$$"'
-        f" {shlex.quote(image_name)}"
-        f" {tail_cmd}"
-        f' "$@"\n'
+        f'CONTAINER={shlex.quote(container_name)}\n'
+        f'\n'
+        f'# Ensure the persistent container is running.\n'
+        f'STATE=$(docker inspect --format '
+        f"'{{{{.State.Status}}}}' \"$CONTAINER\" 2>/dev/null)\n"
+        f'if [ "$STATE" != "running" ]; then\n'
+        f'    docker rm -f "$CONTAINER" 2>/dev/null\n'
+        f'    DOCKER_RUN_ARGS=(\n'
+        f'      {quoted_run_args}\n'
+        f'    )\n'
+        f'    "${{DOCKER_RUN_ARGS[@]}}" || {{\n'
+        f'        # Race: another invocation may have started the container.\n'
+        f'        sleep 0.5\n'
+        f'        STATE=$(docker inspect --format '
+        f"'{{{{.State.Status}}}}' \"$CONTAINER\" 2>/dev/null)\n"
+        f'        if [ "$STATE" != "running" ]; then\n'
+        f'            echo "Failed to start container $CONTAINER" >&2\n'
+        f'            exit 1\n'
+        f'        fi\n'
+        f'    }}'
+        f'{dind_wait}\n'
+        f'fi\n'
+        f'\n'
+        f'exec docker exec -i \\\n'
+        f'  -e ANTHROPIC_API_KEY{dind_exec_env} \\\n'
+        f'  "$CONTAINER" \\\n'
+        f'  /usr/local/bin/claude "$@"\n'
     )
 
-    # Write to a temp file that persists for the session lifetime.
-    # The caller is responsible for cleanup (or it's cleaned up on reboot).
     fd, wrapper_path = tempfile.mkstemp(
         prefix=f"openudang-docker-{context_name}-",
         suffix=".sh",
@@ -476,7 +801,7 @@ def build_cli_wrapper(
     os.chmod(wrapper_path, stat.S_IRWXU)
 
     logger.info(
-        "Generated Docker wrapper for context '%s'%s: %s",
+        "Generated Docker exec wrapper for context '%s'%s: %s",
         context_name,
         " (DinD)" if docker_in_docker else "",
         wrapper_path,

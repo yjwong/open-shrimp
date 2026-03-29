@@ -24,6 +24,7 @@ import aiosqlite
 
 from open_udang.client_manager import close_all_sessions
 from open_udang.config import Config, load_config
+from open_udang.container import start_ryuk, stop_all_containers, stop_ryuk
 from open_udang.dispatch_registry import register_dispatch
 from open_udang.handlers.approval import handle_approval_callback
 from open_udang.handlers.commands import (
@@ -208,6 +209,16 @@ async def run_bot(
     await app.updater.start_polling()
     logger.info("Bot is running")
 
+    # Start Ryuk reaper for crash-safe container cleanup.  Only needed
+    # on Linux where Docker containers are used (macOS uses sandbox-exec).
+    import sys as _sys
+    _has_docker_containers = _sys.platform != "darwin" and any(
+        ctx.container is not None and ctx.container.enabled
+        for ctx in config.contexts.values()
+    )
+    if _has_docker_containers:
+        await asyncio.to_thread(start_ryuk)
+
     # Reload scheduled tasks from the database.
     from open_udang.scheduler import reload_tasks
 
@@ -235,6 +246,8 @@ async def run_bot(
         if watcher_task:
             watcher_task.cancel()
         await close_all_sessions()
+        await asyncio.to_thread(stop_all_containers)
+        stop_ryuk()
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
