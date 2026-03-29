@@ -233,8 +233,29 @@ async function main(): Promise<void> {
             // Ignore malformed JSON.
           }
         } else if (line.startsWith("event: done")) {
+          // Next "data:" line carries the done payload.
+          const dataLine = lines.find(
+            (l, j) => j > lines.indexOf(line) && l.startsWith("data: ")
+          );
+          let completed = false;
+          if (dataLine) {
+            try {
+              const d = JSON.parse(dataLine.slice(6)) as {
+                completed?: boolean;
+              };
+              completed = !!d.completed;
+            } catch {
+              // ignore
+            }
+          }
           term.writeln("");
-          term.writeln("\x1b[1;32m● Task output stream ended.\x1b[0m");
+          if (completed) {
+            term.writeln("\x1b[1;32m● Task completed.\x1b[0m");
+          } else {
+            term.writeln(
+              "\x1b[1;33m● Task output stream ended.\x1b[0m"
+            );
+          }
           return;
         }
       }

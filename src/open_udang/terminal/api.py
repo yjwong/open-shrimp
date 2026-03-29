@@ -21,6 +21,7 @@ from starlette.staticfiles import StaticFiles
 
 from open_udang.config import Config
 from open_udang.container import CONTAINER_STATE_DIR
+from open_udang.handlers.state import is_task_active
 from open_udang.review.auth import AuthError, validate_init_data
 
 from open_udang.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
@@ -197,6 +198,25 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
         # Maximum idle iterations before we consider the task done.
         # At 0.5s intervals, 120 iterations = 60 seconds of no new output.
         max_idle = 120
+        # After we detect the task is no longer active, allow a few more
+        # iterations to drain any remaining output before sending done.
+        finishing = False
+        finish_countdown = 6  # 3 seconds (6 × 0.5s)
+
+        def _flush_and_done(completed: bool) -> str:
+            """Flush remaining agent buffer and return done SSE events."""
+            parts = ""
+            if is_agent and line_buffer.strip():
+                rendered, _ = render_jsonl_lines(line_buffer + "\n")
+                if rendered:
+                    payload = json.dumps({
+                        "text": rendered,
+                        "offset": pos,
+                    })
+                    parts += f"data: {payload}\n\n"
+            done_data = json.dumps({"completed": completed})
+            parts += f"event: done\ndata: {done_data}\n\n"
+            return parts
 
         while True:
             try:
@@ -204,7 +224,7 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                 file_size = stat.st_size
             except FileNotFoundError:
                 # File was deleted — task finished and cleaned up.
-                yield "event: done\ndata: {}\n\n"
+                yield _flush_and_done(completed=True)
                 return
 
             if file_size > pos:
@@ -233,20 +253,20 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                         yield f"data: {payload}\n\n"
                     pos = file_size
             else:
+                # No new data — check if the task has finished.
+                if not finishing and not is_task_active(task_id):
+                    finishing = True
+                    finish_countdown = 6
+
+                if finishing:
+                    finish_countdown -= 1
+                    if finish_countdown <= 0:
+                        yield _flush_and_done(completed=True)
+                        return
+
                 idle_count += 1
                 if idle_count >= max_idle:
-                    # Flush any remaining buffer for agent output.
-                    if is_agent and line_buffer.strip():
-                        rendered, _ = render_jsonl_lines(
-                            line_buffer + "\n"
-                        )
-                        if rendered:
-                            payload = json.dumps({
-                                "text": rendered,
-                                "offset": pos,
-                            })
-                            yield f"data: {payload}\n\n"
-                    yield "event: done\ndata: {}\n\n"
+                    yield _flush_and_done(completed=False)
                     return
 
             await asyncio.sleep(0.5)

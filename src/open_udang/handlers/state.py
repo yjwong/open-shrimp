@@ -116,6 +116,15 @@ class TrackedTask:
 
 _active_bg_tasks: dict[ChatScope, dict[str, TrackedTask]] = {}
 
+
+def is_task_active(task_id: str) -> bool:
+    """Check whether a background task is still active (any scope)."""
+    for scope_tasks in _active_bg_tasks.values():
+        if task_id in scope_tasks:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Media group batching: media_group_id -> list of messages received so far.
 # ---------------------------------------------------------------------------
