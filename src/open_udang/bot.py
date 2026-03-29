@@ -38,6 +38,7 @@ from open_udang.handlers.commands import (
     review_handler,
     schedule_handler,
     status_handler,
+    tasks_handler,
 )
 from open_udang.handlers.messages import message_handler, web_app_data_handler
 from open_udang.handlers.questions import _handle_question_callback
@@ -152,6 +153,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("review", review_handler))
     app.add_handler(CommandHandler("mcp", mcp_handler))
     app.add_handler(CommandHandler("schedule", schedule_handler))
+    app.add_handler(CommandHandler("tasks", tasks_handler))
 
     # Callback query handler for tool approval buttons
     app.add_handler(CallbackQueryHandler(callback_query_handler))
@@ -204,6 +206,7 @@ async def run_bot(
         BotCommand("review", "Review and stage git changes"),
         BotCommand("mcp", "List and manage MCP servers"),
         BotCommand("schedule", "List scheduled tasks"),
+        BotCommand("tasks", "List or stop background tasks"),
     ])
     await app.start()
     await app.updater.start_polling()

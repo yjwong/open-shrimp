@@ -619,6 +619,7 @@ async def _start_agent_task(
                     cwd=ctx_config.directory,
                     on_todo_update=on_todo_update,
                     terminal_base_url=terminal_url,
+                    scope=scope,
                 )
 
                 if result.session_id:

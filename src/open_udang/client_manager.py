@@ -360,6 +360,22 @@ def get_session(scope: ChatScope) -> AgentSession | None:
     return _active_sessions.get(scope)
 
 
+async def stop_background_task(scope: ChatScope, task_id: str) -> bool:
+    """Send a stop signal for a background task.  Returns True on success."""
+    session = _active_sessions.get(scope)
+    if session is None:
+        logger.warning("No active session for scope %s to stop task %s", scope, task_id)
+        return False
+    try:
+        logger.info("Sending stop signal for task %s in scope %s", task_id, scope)
+        await session.client.stop_task(task_id)
+        logger.info("Stop signal sent successfully for task %s", task_id)
+        return True
+    except Exception:
+        logger.exception("Failed to stop task %s for scope %s", task_id, scope)
+        return False
+
+
 def has_session(scope: ChatScope) -> bool:
     """Return True if *scope* has a live session."""
     return scope in _active_sessions

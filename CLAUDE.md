@@ -125,6 +125,7 @@ Key fields:
 | `/review` | `review_handler` | Open the review Mini App for the current context |
 | `/mcp` | `mcp_handler` | List and manage MCP servers (reset/enable/disable) |
 | `/schedule` | `schedule_handler` | List and manage scheduled tasks |
+| `/tasks` | `tasks_handler` | List or stop background tasks |
 
 ## Conventions
 

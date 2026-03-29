@@ -95,6 +95,28 @@ _tool_approved_sessions: dict[tuple[ChatScope, str], list[ApprovalRule]] = {}
 _model_overrides: dict[ChatScope, str] = {}
 
 # ---------------------------------------------------------------------------
+# Per-scope active background tasks.  Populated by TaskStartedMessage,
+# updated by TaskProgressMessage, removed by TaskNotificationMessage.
+# Cleared on /clear.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TrackedTask:
+    """A background task being tracked."""
+
+    task_id: str
+    description: str
+    task_type: str | None  # "local_bash", "local_agent", "remote_agent"
+    started_at: float  # time.monotonic()
+    tool_use_id: str | None = None
+    session_id: str | None = None
+    last_tool_name: str | None = None  # updated by TaskProgressMessage
+
+
+_active_bg_tasks: dict[ChatScope, dict[str, TrackedTask]] = {}
+
+# ---------------------------------------------------------------------------
 # Media group batching: media_group_id -> list of messages received so far.
 # ---------------------------------------------------------------------------
 _media_group_messages: dict[str, list[Any]] = {}

@@ -1,11 +1,12 @@
 """Telegram command handlers (/context, /clear, /status, /cancel, /model,
-/resume, /review, /mcp).
+/resume, /review, /mcp, /tasks).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import aiosqlite
@@ -22,6 +23,7 @@ from open_udang.db import ChatScope, delete_session, get_session_id, set_session
 from open_udang.handlers.state import (
     _MCP_STATUS_EMOJI,
     _RESUME_LIST_LIMIT,
+    _active_bg_tasks,
     _edit_approved_sessions,
     _injectable_sessions,
     _model_overrides,
@@ -139,6 +141,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _edit_approved_sessions.discard((scope, ctx_name))
     _tool_approved_sessions.pop((scope, ctx_name), None)
     _model_overrides.pop(scope, None)
+    _active_bg_tasks.pop(scope, None)
     await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
     await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
 
@@ -170,6 +173,21 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"*Injectable:* {'Yes' if injectable else 'No'}",
         f"*Setup queued:* {setup_queued}",
     ]
+    # Background tasks.
+    scope_tasks = _active_bg_tasks.get(scope, {})
+    if scope_tasks:
+        lines.append(f"*Background tasks:* {len(scope_tasks)}")
+        now = time.monotonic()
+        for task in scope_tasks.values():
+            elapsed = int(now - task.started_at)
+            minutes, seconds = divmod(elapsed, 60)
+            duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
+            tid_short = task.task_id[:12]
+            ttype = task.task_type or "unknown"
+            lines.append(
+                f"  • `{tid_short}` {ttype}: "
+                f"{task.description or 'N/A'} ({duration})"
+            )
     # Escape dots and dashes for MarkdownV2
     text = "\n".join(lines)
     for ch in ".-/":
@@ -774,5 +792,98 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"  💬 _{prompt_escaped}_"
         )
 
+    text = "\n".join(lines)
+    await message.reply_text(text, parse_mode="MarkdownV2")
+
+
+# ── /tasks ──
+
+
+async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /tasks command: list active background tasks or stop one.
+
+    Usage:
+        /tasks              -- list active background tasks
+        /tasks stop <id>    -- stop a background task by ID (prefix match)
+    """
+    config: Config = context.bot_data["config"]
+    message = update.effective_message
+    if not message or not _is_authorized(
+        update.effective_user and update.effective_user.id, config
+    ):
+        return
+
+    scope = chat_scope_from_message(message)
+    args = message.text.split() if message.text else []
+
+    # ── /tasks stop <id> ──
+    if len(args) >= 3 and args[1] == "stop":
+        target = args[2]
+        scope_tasks = _active_bg_tasks.get(scope, {})
+
+        # Find by exact match or prefix.
+        matched_task = None
+        for tid, task in scope_tasks.items():
+            if tid == target or tid.startswith(target):
+                matched_task = task
+                break
+
+        if not matched_task:
+            await message.reply_text(
+                f"No active task matching `{_escape_mdv2(target)}`\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        from open_udang.client_manager import stop_background_task
+
+        success = await stop_background_task(scope, matched_task.task_id)
+        if success:
+            # Remove from tracking immediately — the TaskNotificationMessage
+            # may arrive later when the stream is next consumed, but we
+            # don't want the task to linger in /tasks output.
+            scope_tasks.pop(matched_task.task_id, None)
+            if not scope_tasks:
+                _active_bg_tasks.pop(scope, None)
+            tid_short = _escape_mdv2(matched_task.task_id[:12])
+            await message.reply_text(
+                f"Stopped task `{tid_short}`\\.",
+                parse_mode="MarkdownV2",
+            )
+        else:
+            await message.reply_text(
+                "Failed to stop task \\(no active session\\)\\.",
+                parse_mode="MarkdownV2",
+            )
+        return
+
+    # ── /tasks (list) ──
+    scope_tasks = _active_bg_tasks.get(scope, {})
+    if not scope_tasks:
+        await message.reply_text(
+            "No active background tasks\\.", parse_mode="MarkdownV2"
+        )
+        return
+
+    now = time.monotonic()
+    lines = [f"*Active background tasks \\({len(scope_tasks)}\\):*\n"]
+    for task in scope_tasks.values():
+        elapsed = int(now - task.started_at)
+        minutes, seconds = divmod(elapsed, 60)
+        duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
+
+        tid_short = _escape_mdv2(task.task_id[:12])
+        desc_escaped = _escape_mdv2(task.description or "No description")
+        type_escaped = _escape_mdv2(task.task_type or "unknown")
+
+        line = (
+            f"• `{tid_short}` \\- {desc_escaped}\n"
+            f"  Type: {type_escaped} \\| Duration: {_escape_mdv2(duration)}"
+        )
+        if task.last_tool_name:
+            line += f" \\| Last tool: {_escape_mdv2(task.last_tool_name)}"
+        lines.append(line)
+
+    lines.append(f"\nUse `/tasks stop <id>` to stop a task\\.")
     text = "\n".join(lines)
     await message.reply_text(text, parse_mode="MarkdownV2")

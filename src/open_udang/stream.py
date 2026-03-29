@@ -25,10 +25,16 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
-from claude_agent_sdk.types import StreamEvent, TaskNotificationMessage
+from claude_agent_sdk.types import (
+    StreamEvent,
+    TaskNotificationMessage,
+    TaskProgressMessage,
+    TaskStartedMessage,
+)
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from open_udang.agent import AgentEvent
+from open_udang.db import ChatScope
 from open_udang.markdown import gfm_to_telegram
 
 logger = logging.getLogger(__name__)
@@ -354,32 +360,11 @@ def _format_bash_output(
     return f"{header_block}\n{output_block}"
 
 
-def _extract_background_task_id(
-    tool_input: dict[str, Any],
-    content: str | list[dict[str, Any]] | None,
-) -> str | None:
-    """Extract background task ID from a Bash tool result.
-
-    When ``run_in_background`` is set, the tool result contains a line
-    like ``Command running in background with ID: brf4e7jzw.``
-
-    Returns the task ID if found, otherwise None.
-    """
-    if not tool_input.get("run_in_background"):
-        return None
-    output = _extract_bash_output_text(content)
-    m = re.search(r"background with ID:\s*(\S+)", output)
-    if m:
-        return m.group(1).rstrip(".")
-    return None
-
-
 async def _send_bash_button(
     bot: Bot,
     state: _DraftState,
     tool_input: dict[str, Any],
     content: str | list[dict[str, Any]] | None,
-    terminal_base_url: str | None = None,
 ) -> None:
     """Send a compact Bash message with a 'Show output' inline button.
 
@@ -387,8 +372,8 @@ async def _send_bash_button(
     then sends a standalone message showing the command with an inline
     keyboard button to reveal the output on demand.
 
-    For background tasks, also includes a 'View output' Mini App button
-    that opens a live terminal viewer.
+    Background tasks get their "View output" button from the
+    ``TaskStartedMessage`` handler instead.
     """
     # Finalize any in-progress draft so the bash button appears in order.
     await finalize_and_reset(bot, state)
@@ -397,12 +382,11 @@ async def _send_bash_button(
     header_chunks = gfm_to_telegram(header)
     header_text = header_chunks[0] if header_chunks else ""
 
-    # Check if this is a background task with a terminal viewer available.
-    bg_task_id = _extract_background_task_id(tool_input, content)
+    is_background = bool(tool_input.get("run_in_background"))
 
     # Check if there's any actual output to show.
     output_text = _extract_bash_output_text(content).strip()
-    if not output_text and not bg_task_id:
+    if not output_text and not is_background:
         # No output and not a background task — send header only.
         try:
             msg = await bot.send_message(
@@ -423,21 +407,11 @@ async def _send_bash_button(
     # "Show output" callback button (for inline reveal).
     # Skip for background tasks — the inline output is just the
     # "running in background" message which isn't useful.
-    if output_text and not bg_task_id:
+    if output_text and not is_background:
         callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
         _bash_output_store[callback_id] = _format_bash_output(tool_input, content)
         buttons.append(
             InlineKeyboardButton("📋 Show output", callback_data=callback_id)
-        )
-
-    # "View output" Mini App button (for live terminal tail).
-    if bg_task_id and terminal_base_url:
-        app_url = f"{terminal_base_url}/terminal/?task_id={bg_task_id}"
-        buttons.append(
-            InlineKeyboardButton(
-                "📺 View output",
-                web_app=WebAppInfo(url=app_url),
-            )
         )
 
     keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
@@ -560,6 +534,7 @@ async def stream_response(
     cwd: str | None = None,
     on_todo_update: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     terminal_base_url: str | None = None,
+    scope: ChatScope | None = None,
 ) -> StreamResult:
     """Stream Agent SDK events to Telegram as draft messages.
 
@@ -680,7 +655,6 @@ async def stream_response(
                                 await _send_bash_button(
                                     bot, state, tool_input,
                                     block.content,
-                                    terminal_base_url=terminal_base_url,
                                 )
 
             elif isinstance(event, StreamEvent):
@@ -724,7 +698,86 @@ async def stream_response(
                     state.session_id = sid
                     result.session_id = sid
 
-                if isinstance(event, TaskNotificationMessage):
+                if isinstance(event, TaskStartedMessage):
+                    logger.info(
+                        "Background task started %s (%s) for chat %d: %s",
+                        event.task_id,
+                        event.task_type,
+                        state.chat_id,
+                        event.description,
+                    )
+                    # Track the task.
+                    if scope is not None:
+                        import time
+
+                        from open_udang.handlers.state import (
+                            TrackedTask,
+                            _active_bg_tasks,
+                        )
+
+                        scope_tasks = _active_bg_tasks.setdefault(scope, {})
+                        scope_tasks[event.task_id] = TrackedTask(
+                            task_id=event.task_id,
+                            description=event.description,
+                            task_type=event.task_type,
+                            started_at=time.monotonic(),
+                            tool_use_id=event.tool_use_id,
+                            session_id=event.session_id,
+                        )
+                    # Send Telegram notification.
+                    await finalize_and_reset(bot, state)
+                    try:
+                        desc = event.description or "Background task"
+                        chunks = gfm_to_telegram(f"⏳ {desc}")
+                        text = chunks[0] if chunks else f"⏳ {desc}"
+                        buttons: list[InlineKeyboardButton] = []
+                        if terminal_base_url:
+                            app_url = (
+                                f"{terminal_base_url}/terminal/"
+                                f"?task_id={event.task_id}"
+                            )
+                            buttons.append(
+                                InlineKeyboardButton(
+                                    "📺 View output",
+                                    web_app=WebAppInfo(url=app_url),
+                                )
+                            )
+                        keyboard = (
+                            InlineKeyboardMarkup([buttons])
+                            if buttons
+                            else None
+                        )
+                        await bot.send_message(
+                            chat_id=state.chat_id,
+                            text=text,
+                            parse_mode="MarkdownV2",
+                            reply_markup=keyboard,
+                            disable_notification=True,
+                            **state._thread_kwargs,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to send task started message"
+                        )
+
+                elif isinstance(event, TaskProgressMessage):
+                    logger.debug(
+                        "Background task progress %s for chat %d: "
+                        "last_tool=%s",
+                        event.task_id,
+                        state.chat_id,
+                        event.last_tool_name,
+                    )
+                    if scope is not None:
+                        from open_udang.handlers.state import _active_bg_tasks
+
+                        scope_tasks = _active_bg_tasks.get(scope)
+                        if scope_tasks and event.task_id in scope_tasks:
+                            scope_tasks[event.task_id].last_tool_name = (
+                                event.last_tool_name
+                            )
+
+                elif isinstance(event, TaskNotificationMessage):
                     logger.info(
                         "Background task %s %s for chat %d: %s",
                         event.task_id,
@@ -732,6 +785,15 @@ async def stream_response(
                         state.chat_id,
                         event.summary,
                     )
+                    # Remove from tracking state.
+                    if scope is not None:
+                        from open_udang.handlers.state import _active_bg_tasks
+
+                        scope_tasks = _active_bg_tasks.get(scope)
+                        if scope_tasks:
+                            scope_tasks.pop(event.task_id, None)
+                            if not scope_tasks:
+                                _active_bg_tasks.pop(scope, None)
                     await finalize_and_reset(bot, state)
                     try:
                         summary = event.summary or event.status
