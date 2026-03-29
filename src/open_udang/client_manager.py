@@ -179,6 +179,41 @@ async def get_or_create_session(
             "mcp__openudang__computer_scroll",
             "mcp__openudang__computer_toplevel",
         ])
+        # Auto-approve Playwright MCP browser tools (core + tabs,
+        # always enabled).  Tool names from microsoft/playwright-mcp.
+        allowed_tools.extend([
+            # Core automation
+            "mcp__playwright__browser_click",
+            "mcp__playwright__browser_close",
+            "mcp__playwright__browser_console_messages",
+            "mcp__playwright__browser_drag",
+            "mcp__playwright__browser_evaluate",
+            "mcp__playwright__browser_file_upload",
+            "mcp__playwright__browser_fill_form",
+            "mcp__playwright__browser_handle_dialog",
+            "mcp__playwright__browser_hover",
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_navigate_back",
+            "mcp__playwright__browser_network_requests",
+            "mcp__playwright__browser_press_key",
+            "mcp__playwright__browser_resize",
+            "mcp__playwright__browser_run_code",
+            "mcp__playwright__browser_select_option",
+            "mcp__playwright__browser_snapshot",
+            "mcp__playwright__browser_take_screenshot",
+            "mcp__playwright__browser_type",
+            "mcp__playwright__browser_wait_for",
+            # Tab management
+            "mcp__playwright__browser_tabs",
+            # PDF (opt-in via --caps=pdf)
+            "mcp__playwright__browser_pdf_save",
+            # Testing assertions (opt-in via --caps=testing)
+            "mcp__playwright__browser_generate_locator",
+            "mcp__playwright__browser_verify_element_visible",
+            "mcp__playwright__browser_verify_list_visible",
+            "mcp__playwright__browser_verify_text_visible",
+            "mcp__playwright__browser_verify_value",
+        ])
 
     # When containerized, generate a wrapper script that runs the Claude
     # CLI in an isolated environment.  On macOS we use sandbox-exec (since
@@ -310,13 +345,21 @@ async def get_or_create_session(
         system_prompt_parts.append(
             "This context has computer use (GUI interaction) enabled. "
             "You have access to a headless 1280x720 Linux desktop with "
-            "a Wayland compositor (labwc), a web browser (Firefox ESR), "
-            "and a terminal (foot). Use the computer_screenshot tool to "
-            "see the screen, computer_click to click at coordinates, "
-            "computer_type to type text, computer_key for special keys "
-            "and combos, computer_scroll to scroll, and computer_toplevel "
-            "to switch between windows. Always take a screenshot first to "
-            "understand the current state before interacting."
+            "a Wayland compositor (labwc), a web browser (Chromium), "
+            "and a terminal (foot).\n\n"
+            "For browser/web testing, prefer the Playwright MCP tools "
+            "(browser_navigate, browser_click, browser_type, browser_snapshot, "
+            "browser_screenshot, etc.) — they provide structured DOM access "
+            "via accessibility snapshots which is far more reliable than "
+            "pixel-based interaction. Use browser_snapshot to read the page "
+            "structure before interacting.\n\n"
+            "For non-browser GUI interaction (terminal, native apps, or when "
+            "Playwright tools are insufficient), use the pixel-based tools: "
+            "computer_screenshot to see the screen, computer_click to click "
+            "at coordinates, computer_type to type text, computer_key for "
+            "special keys and combos, computer_scroll to scroll, and "
+            "computer_toplevel to switch between windows. Always take a "
+            "screenshot first to understand the current state."
         )
 
     if system_prompt_parts:
@@ -336,7 +379,23 @@ async def get_or_create_session(
             screenshots_dir=_cu_screenshots_dir,
             context_name=context_name,
         )
-        options.mcp_servers = {"openudang": openudang_server}
+        mcp_servers: dict[str, Any] = {"openudang": openudang_server}
+
+        # Add Playwright MCP for structured browser automation in
+        # computer-use contexts.  The CLI runs inside the container,
+        # so it spawns the Playwright MCP server as a child process
+        # inside the container automatically.
+        if _cu_container is not None:
+            mcp_servers["playwright"] = {
+                "command": "npx",
+                "args": [
+                    "@playwright/mcp",
+                    "--headless",
+                    "--caps", "pdf,testing",
+                ],
+            }
+
+        options.mcp_servers = mcp_servers
 
     if session_id:
         options.resume = session_id

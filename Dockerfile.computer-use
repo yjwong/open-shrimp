@@ -2,7 +2,8 @@
 #
 # Extends the base openudang-claude image with a headless Wayland
 # compositor (labwc), input injection (wlrctl), screenshot capture
-# (grim), VNC server (wayvnc), and a web browser (Firefox ESR).
+# (grim), VNC server (wayvnc), a web browser (Chromium via Playwright),
+# and Playwright MCP for structured browser automation.
 #
 # Build:
 #   docker build -f Dockerfile.computer-use -t openudang-computer-use:latest .
@@ -16,8 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     grim \
     wayvnc \
     foot \
-    # Browser
-    firefox-esr \
     # Fonts for readable screenshots
     fonts-liberation \
     fonts-noto-color-emoji \
@@ -63,22 +62,25 @@ COPY computer-use/autostart /home/claude/.config/labwc/autostart
 COPY computer-use/entrypoint.sh /usr/local/bin/computer-use-entrypoint.sh
 RUN chmod +x /usr/local/bin/computer-use-entrypoint.sh
 
-# Firefox profile: skip first-run UI.
-RUN mkdir -p /home/claude/.mozilla/firefox/default \
-    && echo '[General]' > /home/claude/.mozilla/firefox/profiles.ini \
-    && echo 'StartWithLastProfile=1' >> /home/claude/.mozilla/firefox/profiles.ini \
-    && echo '' >> /home/claude/.mozilla/firefox/profiles.ini \
-    && echo '[Profile0]' >> /home/claude/.mozilla/firefox/profiles.ini \
-    && echo 'Name=default' >> /home/claude/.mozilla/firefox/profiles.ini \
-    && echo 'IsRelative=1' >> /home/claude/.mozilla/firefox/profiles.ini \
-    && echo 'Path=default' >> /home/claude/.mozilla/firefox/profiles.ini \
-    && echo 'Default=1' >> /home/claude/.mozilla/firefox/profiles.ini \
-    && printf 'user_pref("browser.shell.checkDefaultBrowser", false);\n\
-user_pref("datareporting.policy.dataSubmissionEnabled", false);\n\
-user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);\n\
-user_pref("browser.aboutwelcome.enabled", false);\n\
-user_pref("browser.startup.homepage_override.mstone", "ignore");\n\
-user_pref("startup.homepage_welcome_url", "");\n\
-user_pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);\n' \
-    > /home/claude/.mozilla/firefox/default/user.js \
-    && chmod -R 777 /home/claude/.mozilla
+# Node.js 24 LTS for Playwright MCP.
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-install Playwright MCP and its Chromium browser so the CLI
+# doesn't need to download anything at runtime.
+RUN npm install -g --cache /tmp/npm-cache @anthropic-ai/claude-code@latest @playwright/mcp \
+    && npx playwright install --with-deps chromium \
+    && rm -rf /tmp/npm-cache \
+    && chmod -R 777 /home/claude/.cache \
+    && rm -rf /home/claude/.npm && mkdir -p /home/claude/.npm && chmod 777 /home/claude/.npm
+
+# Chromium profile: skip first-run UI and disable crash reporter.
+# Playwright installs Chromium under /home/claude/.cache/ms-playwright/.
+RUN CHROMIUM_DIR=$(find /home/claude/.cache/ms-playwright -maxdepth 2 -name 'chromium*' -type d | head -1) \
+    && mkdir -p /home/claude/.config/chromium/Default \
+    && printf '{\n  "browser": { "check_default_browser": false },\n  "profile": { "default_content_setting_values": {} }\n}\n' \
+    > /home/claude/.config/chromium/Default/Preferences \
+    && printf '%s\n' '{"countrycode_at_install":"","default_browser_infobar_last_declined":"","default_browser_set_once":"","metrics":{"reporting_enabled":false},"session":{"restore_on_startup":4}}' \
+    > /home/claude/.config/chromium/'Local State' \
+    && chmod -R 777 /home/claude/.config/chromium

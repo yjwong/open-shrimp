@@ -1,7 +1,7 @@
 #!/bin/bash
 # Entrypoint for computer-use containers.
 # Starts a headless Wayland compositor (labwc), VNC server (wayvnc),
-# and a default browser (Firefox ESR).
+# and a default browser (Chromium).
 #
 # When ENABLE_DIND=1, also starts a rootless Docker daemon before the
 # compositor — used when both computer_use and docker_in_docker are
@@ -86,7 +86,7 @@ fi
 echo "labwc ready (PID ${LABWC_PID})"
 
 # Start persistent virtual keyboard so the seat advertises keyboard
-# capability.  Without this, Firefox (native Wayland) never creates a
+# capability.  Without this, Chromium (native Wayland) never creates a
 # wl_keyboard listener and silently drops all wlrctl keyboard input.
 seat-keyboard &
 echo "seat-keyboard started"
@@ -95,9 +95,19 @@ echo "seat-keyboard started"
 wayvnc --output=HEADLESS-1 0.0.0.0 5900 &
 echo "wayvnc started on port 5900"
 
-# Launch Firefox ESR with the pre-configured profile.
-firefox-esr --no-remote -P default &
-echo "Firefox ESR started"
+# Launch Chromium (installed by Playwright) with Wayland native mode.
+CHROMIUM_BIN=$(find /home/claude/.cache/ms-playwright -name 'chromium' -o -name 'chrome' 2>/dev/null | grep -E '/(chromium|chrome)$' | head -1)
+if [ -z "$CHROMIUM_BIN" ]; then
+    echo "WARNING: Chromium binary not found in Playwright cache" >&2
+else
+    "$CHROMIUM_BIN" \
+        --no-first-run \
+        --no-default-browser-check \
+        --disable-background-networking \
+        --ozone-platform=wayland \
+        --user-data-dir=/home/claude/.config/chromium &
+    echo "Chromium started"
+fi
 
 # Keep the container alive.  CLI invocations arrive via `docker exec`.
 exec sleep infinity

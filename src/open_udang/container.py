@@ -224,7 +224,7 @@ def ensure_computer_use_image(
 
     Builds the base ``openudang-claude`` image first (if needed), then
     layers ``Dockerfile.computer-use`` on top with labwc, wlrctl, grim,
-    wayvnc, and Firefox ESR.
+    wayvnc, and Chromium.
     """
     result = subprocess.run(
         ["docker", "image", "inspect", image_name],
@@ -919,6 +919,7 @@ def build_cli_wrapper(
         dind_exec_env = f" -e DOCKER_HOST={shlex.quote(docker_host)}"
 
     compositor_wait = ""
+    computer_use_exec_env = ""
     if computer_use:
         wayland_socket = f"/tmp/runtime-{uid}/wayland-0"
         compositor_wait = (
@@ -930,6 +931,12 @@ def build_cli_wrapper(
             f'      fi\n'
             f'      sleep 0.2\n'
             f'    done\n'
+        )
+        # Pass Wayland env vars so Playwright (and other child processes
+        # spawned by the CLI) can optionally render in the compositor.
+        computer_use_exec_env = (
+            f" -e WAYLAND_DISPLAY=wayland-0"
+            f" -e XDG_RUNTIME_DIR=/tmp/runtime-{uid}"
         )
 
     script = (
@@ -962,7 +969,7 @@ def build_cli_wrapper(
         f'fi\n'
         f'\n'
         f'exec docker exec -i \\\n'
-        f'  -e ANTHROPIC_API_KEY{dind_exec_env} \\\n'
+        f'  -e ANTHROPIC_API_KEY{dind_exec_env}{computer_use_exec_env} \\\n'
         f'  "$CONTAINER" \\\n'
         f'  /usr/local/bin/claude "$@"\n'
     )
