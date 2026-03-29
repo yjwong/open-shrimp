@@ -60,7 +60,7 @@ contexts:
     #                              # (available via CLAUDE_CLI build arg).
     #   computer_use: true         # Enable GUI interaction (computer use).
     #                              # Runs a headless Wayland desktop (labwc) with
-    #                              # Firefox ESR and a terminal (foot) inside the
+    #                              # Chromium and a terminal (foot) inside the
     #                              # container. Claude can take screenshots, click,
     #                              # type, scroll, and switch windows via MCP tools.
     #                              # A VNC server (wayvnc) is exposed for

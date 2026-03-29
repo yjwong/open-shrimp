@@ -104,7 +104,7 @@ Claude manages schedules via built-in tools. Use `/schedule` to see what's activ
 
 ## Container Isolation
 
-You can run each context inside a Docker container by setting `containerize: true` in your config. The Claude CLI runs inside the container with only the project directory bind-mounted — so it can't touch anything else on the host.
+You can run each context inside a Docker container by adding a `container:` block to your context config. The Claude CLI runs inside the container with only the project directory bind-mounted — so it can't touch anything else on the host.
 
 Session state is stored separately per context under `~/.config/openudang/containers/`, so containerized contexts don't interfere with each other or your host `~/.claude`.
 
@@ -155,11 +155,13 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 git clone https://github.com/yjwong/open-udang.git
 cd open-udang
 
-# Build the review Mini App (requires Node.js 18+)
-cd web/review-app && npm install && npm run build && cd ../..
+# Build the web apps (requires Node.js 18+)
+for app in review-app terminal-app markdown-app vnc-app; do
+  (cd "web/$app" && npm install && npm run build)
+done
 
-# If you don't need the /review feature, create an empty placeholder instead:
-# mkdir -p web/review-app/dist
+# If you don't need the web features, create empty placeholders instead:
+# for app in review-app terminal-app markdown-app vnc-app; do mkdir -p "web/$app/dist"; done
 
 uv sync
 ```
@@ -223,6 +225,8 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 | `/review` | Open the mobile code review UI |
 | `/mcp` | List and manage MCP servers |
 | `/schedule` | List and manage scheduled tasks |
+| `/tasks` | List or stop background tasks |
+| `/vnc` | View the computer-use desktop |
 
 ## How Tool Approval Works
 
