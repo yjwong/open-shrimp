@@ -13,7 +13,9 @@ Path-scoped auto-approval: read-only file-access tools (Read, Glob, Grep)
 are auto-approved when their target paths resolve to within the context's
 working directory. Mutating tools (Edit, Write) always require explicit
 approval, even within the working directory, unless the user has opted into
-"accept all edits" for the current session. Paths outside the working
+"accept all edits" for the current session. In containerized contexts, all
+path-scoped tools (including Edit/Write) are auto-approved regardless of
+path, since Docker provides the safety boundary. Paths outside the working
 directory always fall through to the interactive Telegram approval prompt.
 This prevents the agent from silently reading arbitrary files (e.g. ~/.ssh/*,
 config files with secrets) when these tools are removed from allowedTools and
@@ -399,15 +401,19 @@ def make_can_use_tool(
                 ),
             )
 
-        # Containerized contexts: auto-approve all read-only path tools
-        # (Read, Glob, Grep) regardless of path, since Docker isolation
-        # provides the safety boundary — consistent with Bash being
-        # fully auto-approved in containerized contexts.
-        if (
-            is_containerized
-            and tool_name in _PATH_SCOPED_TOOLS
-            and tool_name not in _MUTATING_PATH_TOOLS
-        ):
+        # Containerized contexts: auto-approve all path-scoped tools
+        # regardless of path, since Docker isolation provides the safety
+        # boundary — consistent with Bash being fully auto-approved in
+        # containerized contexts.  For mutating tools (Edit, Write), still
+        # fire the edit notification so the user sees diffs.
+        if is_containerized and tool_name in _PATH_SCOPED_TOOLS:
+            if tool_name in _MUTATING_PATH_TOOLS and notify_auto_approved_edit:
+                try:
+                    await notify_auto_approved_edit(tool_name, tool_input)
+                except Exception:
+                    logger.exception(
+                        "Failed to send auto-approved edit notification"
+                    )
             logger.info(
                 "Auto-approved %s in containerized context", tool_name
             )
