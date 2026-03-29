@@ -74,16 +74,15 @@ You're away from your desk but need Claude to fix a bug, review a diff, or scaff
 - **Real agent, not a chatbot.** Claude can read, edit, and write files in your actual project directories. Full tool use, not just text completion.
 - **You stay in control.** Every file mutation requires your explicit approval via inline keyboard buttons. One tap to approve, one tap to deny. Or hit "Accept all edits" when you trust the flow. When you're ready to commit, `/review` opens a swipe-based UI to stage exactly the hunks you want.
 - **Talk to it.** Send a voice note and it gets transcribed automatically as a prompt — no typing needed. Great for quick instructions when you're on the go.
-- **Stream responses in real-time.** Responses stream directly into Telegram using `sendMessageDraft` — no waiting for the full response to generate.
 - **Multiple projects, one bot.** Switch between project contexts on the fly with `/context`. Each context has its own working directory, CLAUDE.md, model, and tool permissions.
 - **Persistent sessions.** Pick up where you left off. Sessions survive restarts, and you can `/resume` any previous conversation.
 - **Forum topic support.** Use Telegram forum channels to organize conversations — each topic thread gets its own independent Claude session. Run parallel tasks in the same chat without them stepping on each other. Claude auto-titles each topic for easy navigation.
+- **Container isolation.** Run each context inside a Docker container with only the project directory mounted. On macOS, native `sandbox-exec` isolation — no Docker required.
+- **Computer use.** Enable a headless desktop inside the container — Claude can launch Chromium, click around, take screenshots, and interact with GUIs. Watch live via VNC.
 - **Group chat ready.** Add the bot to a team chat. It responds to @mentions and replies, so it stays out of the way until you need it.
 - **Schedule recurring tasks.** Tell Claude to check your repo every morning, monitor a CI pipeline, or run a one-shot task later — all via natural language. Tasks run in isolated sessions automatically.
-- **Claude can send you files.** Ask Claude to generate something and it sends the file right to the chat — images, logs, exports, whatever.
 - **Watch background tasks.** When Claude runs a long command in the background, tap "View output" to open a live terminal viewer right in Telegram.
 - **Locked down by default.** User allowlist, path-scoped file access, and granular tool approval. The agent can't silently read your `~/.ssh` or write outside your project.
-- **Config hot-reload.** Edit your config file and changes are picked up automatically — no restart needed.
 
 ## Code Review
 
