@@ -342,20 +342,22 @@ def get_screenshots_dir(context_name: str) -> Path:
     return CONTAINER_STATE_DIR / context_name / "screenshots"
 
 
+def get_text_input_state_path(context_name: str) -> Path:
+    """Return the host-side text-input-state file for a computer-use context."""
+    return CONTAINER_STATE_DIR / context_name / "text-input-state"
+
+
 def get_text_input_active(context_name: str) -> bool:
     """Check if a text input field is focused inside a computer-use container.
 
-    Reads /tmp/text-input-state written by seat-keyboard's input-method-v2
-    monitor.  Returns True if a text field is active, False otherwise.
+    Reads the bind-mounted text-input-state file written by seat-keyboard's
+    input-method-v2 monitor.  Returns True if active, False otherwise.
     """
-    name = _container_name(context_name)
-    result = subprocess.run(
-        ["docker", "exec", name, "cat", "/tmp/text-input-state"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    return result.returncode == 0 and result.stdout.strip() == "1"
+    path = get_text_input_state_path(context_name)
+    try:
+        return path.read_text().strip() == "1"
+    except (FileNotFoundError, OSError):
+        return False
 
 
 def get_vnc_port(context_name: str) -> int | None:
@@ -736,6 +738,13 @@ def _build_docker_run_argv(
         screenshots_dir.mkdir(exist_ok=True)
         docker_argv.extend([
             "-v", f"{screenshots_dir}:/tmp/screenshots",
+        ])
+        # Bind-mount text-input-state file for host-side inotify watching.
+        # seat-keyboard writes "1"/"0" here when text fields gain/lose focus.
+        text_input_state_file = state_dir / "text-input-state"
+        text_input_state_file.touch()
+        docker_argv.extend([
+            "-v", f"{text_input_state_file}:/tmp/text-input-state",
         ])
         # Expose VNC port (dynamic mapping to avoid conflicts).
         docker_argv.extend(["-p", "5900"])

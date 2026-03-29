@@ -196,9 +196,9 @@ function setupKeyboardInput(rfb: RFBType): {
   };
 }
 
-// ── Text-input state polling ──
+// ── Text-input state SSE stream ──
 
-function startTextInputPolling(
+function startTextInputSSE(
   context: string,
   initData: string,
   rfb: RFBType,
@@ -206,34 +206,68 @@ function startTextInputPolling(
   kbdBtn: HTMLButtonElement,
 ): () => void {
   let lastActive = false;
-  const url =
-    `/api/vnc/text-input-state` +
-    `?context=${encodeURIComponent(context)}` +
-    `&token=${encodeURIComponent(initData)}`;
+  const abortController = new AbortController();
 
-  const poll = async () => {
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) return;
-      const data = (await resp.json()) as { active: boolean };
-      if (data.active !== lastActive) {
-        lastActive = data.active;
-        if (data.active && !rfb.viewOnly) {
-          keyboard.show();
-          kbdBtn.classList.add("active");
-        } else {
-          keyboard.hide();
-          kbdBtn.classList.remove("active");
-        }
-      }
-    } catch {
-      // Ignore transient fetch errors.
+  const applyState = (active: boolean) => {
+    if (active === lastActive) return;
+    lastActive = active;
+    if (active && !rfb.viewOnly) {
+      keyboard.show();
+      kbdBtn.classList.add("active");
+    } else {
+      keyboard.hide();
+      kbdBtn.classList.remove("active");
     }
   };
 
-  const intervalId = setInterval(poll, 1500);
-  poll(); // Initial check.
-  return () => clearInterval(intervalId);
+  const connect = async () => {
+    const url =
+      `/api/vnc/text-input-state/stream` +
+      `?context=${encodeURIComponent(context)}` +
+      `&token=${encodeURIComponent(initData)}`;
+
+    try {
+      const resp = await fetch(url, {
+        headers: { Accept: "text/event-stream" },
+        signal: abortController.signal,
+      });
+      if (!resp.ok || !resp.body) return;
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6)) as { active: boolean };
+              applyState(data.active);
+            } catch {
+              /* ignore malformed */
+            }
+          }
+        }
+      }
+    } catch {
+      if (abortController.signal.aborted) return;
+    }
+
+    // Reconnect after a short delay on disconnect.
+    if (!abortController.signal.aborted) {
+      setTimeout(connect, 2000);
+    }
+  };
+
+  connect();
+  return () => abortController.abort();
 }
 
 // ── Toolbar ──
@@ -370,8 +404,8 @@ function buildToolbar(
     });
     toolbar.appendChild(kbdBtn);
 
-    // Start polling for text-input state to auto-show/hide keyboard.
-    startTextInputPolling(context, initData, rfb, keyboard, kbdBtn);
+    // Stream text-input state to auto-show/hide keyboard.
+    startTextInputSSE(context, initData, rfb, keyboard, kbdBtn);
   }
 
   // Spacer.

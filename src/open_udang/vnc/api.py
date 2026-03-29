@@ -7,17 +7,23 @@ the wayvnc server running inside computer-use containers.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
 from open_udang.config import Config
-from open_udang.container import get_text_input_active, get_vnc_port
+from open_udang.container import (
+    get_text_input_active,
+    get_text_input_state_path,
+    get_vnc_port,
+)
 from open_udang.review.auth import AuthError, validate_init_data
 
 logger = logging.getLogger(__name__)
@@ -148,6 +154,89 @@ async def text_input_state_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"active": active})
 
 
+async def text_input_state_stream_endpoint(
+    request: Request,
+) -> StreamingResponse | JSONResponse:
+    """GET /api/vnc/text-input-state/stream — SSE stream of text-input focus.
+
+    Pushes ``{"active": true/false}`` events whenever the text-input state
+    changes inside the computer-use container, using inotify on the
+    bind-mounted state file for instant notification.
+    """
+    config: Config = request.app.state.config
+    token = request.query_params.get("token", "")
+    context_name = request.query_params.get("context", "")
+
+    try:
+        await validate_init_data(
+            f"tg-init-data {token}",
+            config.telegram.token,
+            config.allowed_users,
+        )
+    except AuthError:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if not context_name or context_name not in config.contexts:
+        return JSONResponse({"error": "Unknown context"}, status_code=400)
+
+    ctx = config.contexts[context_name]
+    if ctx.container is None or not ctx.container.computer_use:
+        return JSONResponse({"error": "Not a computer_use context"}, status_code=400)
+
+    state_path = get_text_input_state_path(context_name)
+
+    def _read_state() -> bool:
+        try:
+            return state_path.read_text().strip() == "1"
+        except (FileNotFoundError, OSError):
+            return False
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        from watchfiles import awatch
+
+        last_active = _read_state()
+        yield f"data: {json.dumps({'active': last_active})}\n\n"
+
+        # Detect client disconnect.
+        stop_event = asyncio.Event()
+
+        async def watch_disconnect() -> None:
+            while not stop_event.is_set():
+                if await request.is_disconnected():
+                    stop_event.set()
+                    return
+                await asyncio.sleep(1)
+
+        disconnect_task = asyncio.create_task(watch_disconnect())
+
+        try:
+            if not state_path.exists():
+                # No bind mount (old container) — just keep connection open
+                # with initial state until client disconnects.
+                await stop_event.wait()
+                return
+
+            async for _changes in awatch(
+                state_path, stop_event=stop_event
+            ):
+                active = _read_state()
+                if active != last_active:
+                    last_active = active
+                    yield f"data: {json.dumps({'active': active})}\n\n"
+        finally:
+            stop_event.set()
+            disconnect_task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
     """Create the routes for the VNC API and Mini App frontend.
 
@@ -165,6 +254,10 @@ def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
     routes: list[Route | Mount | WebSocketRoute] = [
         WebSocketRoute("/api/vnc/ws", vnc_ws_endpoint),
         Route("/api/vnc/text-input-state", text_input_state_endpoint),
+        Route(
+            "/api/vnc/text-input-state/stream",
+            text_input_state_stream_endpoint,
+        ),
     ]
 
     if _dist_dir.is_dir():
