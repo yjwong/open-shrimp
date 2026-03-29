@@ -37,11 +37,19 @@ _AGENT_TASK_TYPES = {"local_agent", "remote_agent"}
 _CLAUDE_TMP_BASE = Path(f"/tmp/claude-{os.getuid()}")
 
 
+def _is_file_or_symlink(path: Path) -> bool:
+    """Return True if *path* is a regular file or a symlink (even broken)."""
+    return path.is_file() or path.is_symlink()
+
+
 def _search_tmp_base(base: Path, filename: str) -> Path | None:
     """Search a Claude CLI tmp base directory for a task output file.
 
     Looks for ``<base>/<project>/tasks/<filename>`` and
     ``<base>/<project>/<session>/tasks/<filename>``.
+
+    Also matches broken symlinks (common for agent tasks in containers
+    where the symlink target uses a container-internal path).
     """
     if not base.is_dir():
         return None
@@ -51,15 +59,41 @@ def _search_tmp_base(base: Path, filename: str) -> Path | None:
             continue
 
         candidate = project_dir / "tasks" / filename
-        if candidate.is_file():
+        if _is_file_or_symlink(candidate):
             return candidate
 
         for sub in project_dir.iterdir():
             if not sub.is_dir():
                 continue
             candidate = sub / "tasks" / filename
-            if candidate.is_file():
+            if _is_file_or_symlink(candidate):
                 return candidate
+
+    return None
+
+
+def _resolve_container_symlink(
+    symlink: Path, context_dir: Path,
+) -> Path | None:
+    """Resolve a broken symlink created inside a container to its host path.
+
+    Inside the container, ``/home/claude/.claude`` is bind-mounted from
+    *context_dir* on the host.  Agent task ``.output`` files are symlinks
+    to ``.jsonl`` session files under ``/home/claude/.claude/projects/…``,
+    which don't exist on the host.  This function translates the container
+    path back to the host equivalent.
+    """
+    try:
+        target = os.readlink(symlink)
+    except OSError:
+        return None
+
+    container_prefix = "/home/claude/.claude/"
+    if target.startswith(container_prefix):
+        relative = target[len(container_prefix):]
+        host_path = context_dir / relative
+        if host_path.is_file():
+            return host_path
 
     return None
 
@@ -69,6 +103,11 @@ def _find_task_output_file(task_id: str) -> Path | None:
 
     Searches the host Claude CLI tmp directory and all container state
     directories (where containerized contexts write their tmp files).
+
+    For containerized agent tasks the ``.output`` file is a symlink whose
+    target uses a container-internal path.  When a broken symlink is found
+    in a container state directory, the target is translated to the host
+    equivalent so the caller can read the actual data.
     """
     if not _TASK_ID_RE.match(task_id):
         return None
@@ -87,6 +126,13 @@ def _find_task_output_file(task_id: str) -> Path | None:
             tmp_dir = context_dir / "tmp"
             result = _search_tmp_base(tmp_dir, filename)
             if result:
+                # Broken symlink — resolve container path to host path.
+                if result.is_symlink() and not result.exists():
+                    resolved = _resolve_container_symlink(
+                        result, context_dir,
+                    )
+                    if resolved:
+                        return resolved
                 return result
 
     return None
