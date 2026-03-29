@@ -695,14 +695,16 @@ def _build_docker_run_argv(
         docker_argv.extend([
             "-v", f"{docker_data_dir}:/home/claude/.local/share/docker",
         ])
-        entrypoint_path = state_dir / "dind-entrypoint.sh"
-        entrypoint_path.write_text(_DIND_ENTRYPOINT)
-        entrypoint_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
-                              | stat.S_IROTH | stat.S_IXOTH)
-        docker_argv.extend([
-            "-v",
-            f"{entrypoint_path}:/usr/local/bin/dind-entrypoint.sh:ro",
-        ])
+        if not computer_use:
+            # Standalone DinD: use the dedicated entrypoint script.
+            entrypoint_path = state_dir / "dind-entrypoint.sh"
+            entrypoint_path.write_text(_DIND_ENTRYPOINT)
+            entrypoint_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
+                                  | stat.S_IROTH | stat.S_IXOTH)
+            docker_argv.extend([
+                "-v",
+                f"{entrypoint_path}:/usr/local/bin/dind-entrypoint.sh:ro",
+            ])
 
     if computer_use:
         # Headless Wayland compositor environment.
@@ -721,15 +723,21 @@ def _build_docker_run_argv(
         ])
         # Expose VNC port (dynamic mapping to avoid conflicts).
         docker_argv.extend(["-p", "5900"])
+        # When both computer_use and DinD are enabled, the computer-use
+        # entrypoint handles dockerd startup via ENABLE_DIND=1.
+        if docker_in_docker:
+            docker_argv.extend(["-e", "ENABLE_DIND=1"])
 
     docker_argv.extend(["-w", project_dir])
 
     # Image and keep-alive command.
     docker_argv.append(image_name)
-    if docker_in_docker:
-        docker_argv.append("/usr/local/bin/dind-entrypoint.sh")
-    elif computer_use:
+    if computer_use:
+        # The computer-use entrypoint handles both compositor and
+        # optional DinD (via ENABLE_DIND env var).
         docker_argv.append("/usr/local/bin/computer-use-entrypoint.sh")
+    elif docker_in_docker:
+        docker_argv.append("/usr/local/bin/dind-entrypoint.sh")
     else:
         docker_argv.extend(["sleep", "infinity"])
 
@@ -970,7 +978,9 @@ def build_cli_wrapper(
     logger.info(
         "Generated Docker exec wrapper for context '%s'%s: %s",
         context_name,
-        " (DinD)" if docker_in_docker else " (computer-use)" if computer_use else "",
+        (" (DinD + computer-use)" if docker_in_docker and computer_use
+         else " (DinD)" if docker_in_docker
+         else " (computer-use)" if computer_use else ""),
         wrapper_path,
     )
     return wrapper_path

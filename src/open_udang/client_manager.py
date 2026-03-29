@@ -234,6 +234,8 @@ async def get_or_create_session(
 
             def _ensure_and_build_wrapper() -> str:
                 if computer_use:
+                    # Computer-use image extends the base image (which
+                    # already includes Docker for DinD support).
                     docker_ensure_computer_use_image(
                         image_name=image_name,
                     )
