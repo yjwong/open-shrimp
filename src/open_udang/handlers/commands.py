@@ -48,6 +48,116 @@ logger = logging.getLogger(__name__)
 
 # ── /context ──
 
+_CONTEXT_PAGE_SIZE = 6
+
+
+def _build_context_page(
+    config: Config, current: str, page: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build a page of context buttons with optional pagination."""
+    names = list(config.contexts.keys())
+    total = len(names)
+    total_pages = max(1, (total + _CONTEXT_PAGE_SIZE - 1) // _CONTEXT_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * _CONTEXT_PAGE_SIZE
+    page_names = names[start : start + _CONTEXT_PAGE_SIZE]
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    for name in page_names:
+        ctx = config.contexts[name]
+        label = f"{'• ' if name == current else ''}{name} — {ctx.description}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"ctx:{name}")])
+
+    # Pagination row
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"ctx_page:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="ctx_noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("Next ▶", callback_data=f"ctx_page:{page + 1}"))
+        buttons.append(nav)
+
+    text = "*Select a context:*"
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def handle_context_callback(
+    query: Any, data: str, config: Config, context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Handle context selection and pagination callbacks. Returns True if handled."""
+    if data == "ctx_noop":
+        await query.answer()
+        return True
+
+    if data.startswith("ctx_page:"):
+        # Pagination
+        page = int(data.split(":", 1)[1])
+        db: aiosqlite.Connection = context.bot_data["db"]
+        if not query.message:
+            await query.answer()
+            return True
+        scope = chat_scope_from_message(query.message)
+        current = await _get_context_name(scope, config, db)
+        text, markup = _build_context_page(config, current, page)
+        try:
+            await query.message.edit_text(text, parse_mode="MarkdownV2", reply_markup=markup)
+        except Exception:
+            pass
+        await query.answer()
+        return True
+
+    if data.startswith("ctx:"):
+        # Context selection
+        target = data[4:]
+        db = context.bot_data["db"]
+        if not query.message:
+            await query.answer("Cannot determine chat.")
+            return True
+
+        scope = chat_scope_from_message(query.message)
+
+        if target not in config.contexts:
+            await query.answer("Context no longer exists.")
+            return True
+
+        locked = _get_locked_context(scope.chat_id, config)
+        if locked:
+            await query.answer(f"Chat is locked to context {locked}.")
+            return True
+
+        current = await _get_context_name(scope, config, db)
+        if target == current:
+            await query.answer(f"Already on {target}.")
+            return True
+
+        _edit_approved_sessions.discard((scope, current))
+        _tool_approved_sessions.pop((scope, current), None)
+        _model_overrides.pop(scope, None)
+        await close_session(scope)
+
+        from open_udang.db import set_active_context
+
+        await set_active_context(db, scope, target)
+        ctx = config.contexts[target]
+        desc = _escape_mdv2(ctx.description)
+        target_escaped = _escape_mdv2(target)
+
+        try:
+            await query.message.edit_text(
+                f"Switched to context `{target_escaped}` \\- {desc}",
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+        except Exception:
+            logger.exception("Failed to update context message")
+
+        await query.answer(f"Switched to {target}")
+        await _update_pinned_status(context.bot, scope, target, ctx, db)
+        return True
+
+    return False
+
 
 async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /context command: list or switch contexts."""
@@ -61,7 +171,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     args = message.text.split() if message.text else []
 
     if len(args) < 2:
-        # List contexts
+        # List contexts as inline keyboard
         current = await _get_context_name(scope, config, db)
         locked = _get_locked_context(scope.chat_id, config)
         if locked:
@@ -73,13 +183,8 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 parse_mode="MarkdownV2",
             )
         else:
-            lines = ["*Available contexts:*\n"]
-            for name, ctx in config.contexts.items():
-                marker = " \\(active\\)" if name == current else ""
-                escaped_name = _escape_mdv2(name)
-                escaped_desc = _escape_mdv2(ctx.description)
-                lines.append(f"\u2022 `{escaped_name}` \\- {escaped_desc}{marker}")
-            await message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+            text, markup = _build_context_page(config, current, page=0)
+            await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=markup)
         return
 
     # Switch context

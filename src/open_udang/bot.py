@@ -31,6 +31,7 @@ from open_udang.handlers.commands import (
     cancel_handler,
     clear_handler,
     context_handler,
+    handle_context_callback,
     handle_resume_callback,
     mcp_handler,
     model_handler,
@@ -70,6 +71,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if not _is_authorized(query.from_user and query.from_user.id, config):
         await query.answer("Unauthorized.")
+        return
+
+    # /context selection and pagination
+    if await handle_context_callback(query, data, config, context):
         return
 
     # /resume session selection
