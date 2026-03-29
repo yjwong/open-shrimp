@@ -23,10 +23,15 @@ from open_udang.config import Config
 from open_udang.container import CONTAINER_STATE_DIR
 from open_udang.review.auth import AuthError, validate_init_data
 
+from open_udang.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
+
 logger = logging.getLogger(__name__)
 
 # Task ID pattern: alphanumeric, used by Claude CLI (e.g. "brf4e7jzw")
 _TASK_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+# task_type values that indicate an agent transcript (JSONL format).
+_AGENT_TASK_TYPES = {"local_agent", "remote_agent"}
 
 # Base directory for Claude CLI tmp files
 _CLAUDE_TMP_BASE = Path(f"/tmp/claude-{os.getuid()}")
@@ -87,6 +92,17 @@ def _find_task_output_file(task_id: str) -> Path | None:
     return None
 
 
+def _is_agent_output(path: Path, task_type: str | None) -> bool:
+    """Determine if a task output file is an agent JSONL transcript."""
+    if task_type:
+        return task_type in _AGENT_TASK_TYPES
+    # Fallback: agent output files are symlinks to .jsonl files.
+    try:
+        return path.is_symlink() and os.readlink(path).endswith(".jsonl")
+    except OSError:
+        return False
+
+
 async def _authenticate(request: Request) -> int:
     """Validate the Authorization header and return the user ID."""
     config: Config = request.app.state.config
@@ -124,10 +140,14 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
             {"error": f"Task output not found: {task_id}"}, status_code=404
         )
 
+    task_type = request.query_params.get("task_type")
+    is_agent = _is_agent_output(output_file, task_type)
+
     async def event_stream() -> AsyncGenerator[str, None]:
         """Generate SSE events as the file grows."""
         pos = offset
         idle_count = 0
+        line_buffer = ""  # carries incomplete JSONL lines (agent only)
         # Maximum idle iterations before we consider the task done.
         # At 0.5s intervals, 120 iterations = 60 seconds of no new output.
         max_idle = 120
@@ -148,15 +168,38 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                     _read_chunk, output_file, pos, file_size
                 )
                 if chunk:
-                    payload = json.dumps({
-                        "text": chunk,
-                        "offset": file_size,
-                    })
-                    yield f"data: {payload}\n\n"
+                    if is_agent:
+                        text_to_render = line_buffer + chunk
+                        rendered, line_buffer = render_jsonl_lines(
+                            text_to_render
+                        )
+                        if rendered:
+                            payload = json.dumps({
+                                "text": rendered,
+                                "offset": file_size,
+                            })
+                            yield f"data: {payload}\n\n"
+                    else:
+                        payload = json.dumps({
+                            "text": chunk,
+                            "offset": file_size,
+                        })
+                        yield f"data: {payload}\n\n"
                     pos = file_size
             else:
                 idle_count += 1
                 if idle_count >= max_idle:
+                    # Flush any remaining buffer for agent output.
+                    if is_agent and line_buffer.strip():
+                        rendered, _ = render_jsonl_lines(
+                            line_buffer + "\n"
+                        )
+                        if rendered:
+                            payload = json.dumps({
+                                "text": rendered,
+                                "offset": pos,
+                            })
+                            yield f"data: {payload}\n\n"
                     yield "event: done\ndata: {}\n\n"
                     return
 
@@ -203,6 +246,9 @@ async def read_endpoint(request: Request) -> JSONResponse:
             {"error": f"Task output not found: {task_id}"}, status_code=404
         )
 
+    task_type = request.query_params.get("task_type")
+    is_agent = _is_agent_output(output_file, task_type)
+
     try:
         content = await asyncio.to_thread(output_file.read_text, "utf-8", "replace")
         size = output_file.stat().st_size
@@ -210,6 +256,9 @@ async def read_endpoint(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": f"Task output not found: {task_id}"}, status_code=404
         )
+
+    if is_agent:
+        content = render_jsonl_content(content)
 
     return JSONResponse({
         "task_id": task_id,

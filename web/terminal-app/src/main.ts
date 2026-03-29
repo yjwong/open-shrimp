@@ -46,11 +46,16 @@ async function main(): Promise<void> {
 
   const params = new URLSearchParams(window.location.search);
   const taskId = params.get("task_id");
+  const taskType = params.get("task_type");
 
   if (!taskId) {
     showError("No task_id provided.");
     return;
   }
+
+  const taskTypeParam = taskType
+    ? `&task_type=${encodeURIComponent(taskType)}`
+    : "";
 
   showStatus(`Loading xterm.js...`);
 
@@ -146,14 +151,20 @@ async function main(): Promise<void> {
 
   // ── Start tailing ──
 
-  term.writeln(`\x1b[1;34m● Tailing task \x1b[1;37m${taskId}\x1b[0m`);
+  const typeLabel =
+    taskType === "local_agent" || taskType === "remote_agent"
+      ? "agent task"
+      : "task";
+  term.writeln(
+    `\x1b[1;34m● Tailing ${typeLabel} \x1b[1;37m${taskId}\x1b[0m`
+  );
   term.writeln("");
 
   // Read existing content.
   let offset = 0;
   try {
     const readResp = await fetch(
-      `/api/terminal/read?task_id=${encodeURIComponent(taskId)}`,
+      `/api/terminal/read?task_id=${encodeURIComponent(taskId)}${taskTypeParam}`,
       { headers: getAuthHeader() }
     );
     if (readResp.ok) {
@@ -174,7 +185,7 @@ async function main(): Promise<void> {
   }
 
   // Stream new output via fetch-based SSE.
-  const url = `/api/terminal/tail?task_id=${encodeURIComponent(taskId)}&offset=${offset}`;
+  const url = `/api/terminal/tail?task_id=${encodeURIComponent(taskId)}&offset=${offset}${taskTypeParam}`;
 
   try {
     const resp = await fetch(url, {

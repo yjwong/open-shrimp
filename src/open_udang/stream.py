@@ -106,6 +106,10 @@ class _DraftState:
     tool_use_map: dict[str, tuple[str, dict[str, Any]]] = field(
         default_factory=dict
     )
+    # tool_use_ids of background agent tasks.  Messages with a matching
+    # parent_tool_use_id are suppressed from the Telegram chat (the user
+    # can watch progress via the terminal viewer instead).
+    bg_task_tool_use_ids: set[str] = field(default_factory=set)
 
     @property
     def _thread_kwargs(self) -> dict[str, Any]:
@@ -243,7 +247,7 @@ def _relative_path(path: str, cwd: str | None) -> str:
     return rel
 
 
-def _extract_tool_summary(
+def extract_tool_summary(
     tool_name: str, tool_input: dict[str, Any], cwd: str | None = None,
 ) -> str:
     """Extract a brief summary from tool input for notifications."""
@@ -573,6 +577,16 @@ async def stream_response(
         draft_task = asyncio.create_task(periodic_flush())
 
         async for event in events:
+            # Suppress sub-agent messages from background tasks.
+            _parent = getattr(event, "parent_tool_use_id", None)
+            if _parent and _parent in state.bg_task_tool_use_ids:
+                # Still capture session_id from any message type.
+                sid = getattr(event, "session_id", None)
+                if sid:
+                    state.session_id = sid
+                    result.session_id = sid
+                continue
+
             if isinstance(event, AssistantMessage):
                 # Capture per-turn token usage (patched via sdk_patch).
                 turn_usage = getattr(event, "usage", None)
@@ -724,6 +738,12 @@ async def stream_response(
                             tool_use_id=event.tool_use_id,
                             session_id=event.session_id,
                         )
+                    # Record tool_use_id so sub-agent messages are
+                    # suppressed from the Telegram chat.
+                    if event.tool_use_id and event.task_type in (
+                        "local_agent", "remote_agent",
+                    ):
+                        state.bg_task_tool_use_ids.add(event.tool_use_id)
                     # Send Telegram notification.
                     await finalize_and_reset(bot, state)
                     try:
@@ -732,9 +752,15 @@ async def stream_response(
                         text = chunks[0] if chunks else f"⏳ {desc}"
                         buttons: list[InlineKeyboardButton] = []
                         if terminal_base_url:
+                            task_type_param = (
+                                f"&task_type={event.task_type}"
+                                if event.task_type
+                                else ""
+                            )
                             app_url = (
                                 f"{terminal_base_url}/terminal/"
                                 f"?task_id={event.task_id}"
+                                f"{task_type_param}"
                             )
                             buttons.append(
                                 InlineKeyboardButton(
@@ -954,7 +980,7 @@ def add_tool_notification(
     cwd: str | None = None,
 ) -> None:
     """Add a tool call notification to the current draft state."""
-    summary = _extract_tool_summary(tool_name, tool_input, cwd=cwd)
+    summary = extract_tool_summary(tool_name, tool_input, cwd=cwd)
     state.tool_notifications.append(
         ToolNotification(tool_name=tool_name, summary=summary, auto=auto)
     )
