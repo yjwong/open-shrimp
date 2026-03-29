@@ -24,7 +24,6 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent
 
-import open_udang.sdk_patch  # noqa: F401 — patch ResultMessage.model_usage
 
 from open_udang.config import ContextConfig
 from open_udang.hooks import (

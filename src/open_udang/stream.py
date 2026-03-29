@@ -26,6 +26,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 from claude_agent_sdk.types import (
+    RateLimitEvent,
     StreamEvent,
     TaskNotificationMessage,
     TaskProgressMessage,
@@ -588,8 +589,8 @@ async def stream_response(
                 continue
 
             if isinstance(event, AssistantMessage):
-                # Capture per-turn token usage (patched via sdk_patch).
-                turn_usage = getattr(event, "usage", None)
+                # Capture per-turn token usage.
+                turn_usage = event.usage
                 if turn_usage:
                     result.turn_usage = turn_usage
 
@@ -699,9 +700,15 @@ async def stream_response(
             elif isinstance(event, ResultMessage):
                 result.session_id = event.session_id
                 state.session_id = event.session_id
-                result.model_usage = getattr(event, "model_usage", None)
+                result.model_usage = event.model_usage
                 result.num_turns = event.num_turns
                 result.duration_ms = event.duration_ms
+                if event.errors:
+                    logger.warning(
+                        "ResultMessage errors for chat %d: %s",
+                        state.chat_id,
+                        event.errors,
+                    )
 
             elif isinstance(event, SystemMessage):
                 # Capture session_id from init messages as early as
@@ -836,6 +843,38 @@ async def stream_response(
                         logger.exception(
                             "Failed to send task notification message"
                         )
+
+            elif isinstance(event, RateLimitEvent):
+                info = event.rate_limit_info
+                if info.status == "rejected":
+                    logger.warning(
+                        "Rate limit hit (%s) for chat %d, resets at %s",
+                        info.rate_limit_type,
+                        state.chat_id,
+                        info.resets_at,
+                    )
+                    await finalize_and_reset(bot, state)
+                    try:
+                        await bot.send_message(
+                            chat_id=state.chat_id,
+                            text="⚠️ Rate limit reached\\. Waiting for reset\\.",
+                            parse_mode="MarkdownV2",
+                            disable_notification=True,
+                            **state._thread_kwargs,
+                        )
+                    except Exception:
+                        logger.exception("Failed to send rate limit message")
+                elif info.status == "allowed_warning":
+                    pct = (
+                        f" ({info.utilization:.0%})"
+                        if info.utilization is not None
+                        else ""
+                    )
+                    logger.info(
+                        "Rate limit warning%s for chat %d",
+                        pct,
+                        state.chat_id,
+                    )
 
     finally:
         if draft_task:

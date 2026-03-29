@@ -26,7 +26,6 @@ import fnmatch
 import logging
 import os
 import tempfile
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -506,13 +505,10 @@ def make_can_use_tool(
             return PermissionResultAllow()
 
         logger.info("Requesting approval for tool: %s", tool_name)
-        # Generate a unique tool_use_id so that parallel approval requests
-        # each get their own Future in _approval_futures (keyed by this id).
-        # The SDK's canUseTool callback does not provide a tool_use_id, so
-        # without this, concurrent approvals would collide on the same
-        # dict key ("approve:", "deny:") causing the second future to
-        # overwrite the first — resulting in a hang / "expired" error.
-        tool_use_id = uuid.uuid4().hex[:12]
+        # Use the SDK-provided tool_use_id to distinguish parallel
+        # approval requests (each gets its own Future in
+        # _approval_futures).
+        tool_use_id = context.tool_use_id
         approved = await request_approval(tool_name, tool_input, tool_use_id)
         decision = "allow" if approved else "deny"
         logger.info("Tool %s %s", tool_name, decision)
