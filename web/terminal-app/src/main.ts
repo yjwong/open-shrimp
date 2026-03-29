@@ -103,6 +103,7 @@ async function main(): Promise<void> {
     cursorStyle: "bar",
     disableStdin: true,
     scrollback: 10000,
+    smoothScrollDuration: 100,
     fontSize: 13,
     fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", monospace',
     theme: {
