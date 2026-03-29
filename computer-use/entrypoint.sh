@@ -109,6 +109,8 @@ else
     "$CHROMIUM_BIN" \
         --no-first-run \
         --no-default-browser-check \
+        --no-sandbox \
+        --disable-dev-shm-usage \
         --disable-background-networking \
         --ozone-platform=wayland \
         --user-data-dir=/home/claude/.config/chromium \
