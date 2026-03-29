@@ -418,7 +418,7 @@ def start_ryuk() -> None:
                 "docker", "run", "-d",
                 "--name", "openudang-ryuk",
                 "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                "-p", "8080",
+                "-p", "127.0.0.1::8080",
                 "--label", f"{_CONTAINER_LABEL}.ryuk=true",
                 RYUK_IMAGE,
             ],
@@ -438,7 +438,7 @@ def start_ryuk() -> None:
                         "docker", "run", "-d",
                         "--name", "openudang-ryuk",
                         "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                        "-p", "8080",
+                        "-p", "127.0.0.1::8080",
                         "--label", f"{_CONTAINER_LABEL}.ryuk=true",
                         RYUK_IMAGE,
                     ],
@@ -747,7 +747,7 @@ def _build_docker_run_argv(
             "-v", f"{text_input_state_file}:/tmp/text-input-state",
         ])
         # Expose VNC port (dynamic mapping to avoid conflicts).
-        docker_argv.extend(["-p", "5900"])
+        docker_argv.extend(["-p", "127.0.0.1::5900"])
         # When both computer_use and DinD are enabled, the computer-use
         # entrypoint handles dockerd startup via ENABLE_DIND=1.
         if docker_in_docker:
