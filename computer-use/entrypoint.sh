@@ -26,6 +26,11 @@ if [ "${ENABLE_DIND:-0}" = "1" ]; then
     echo "claude:100000:65536" > /etc/subuid
     echo "claude:100000:65536" > /etc/subgid
 
+    # Ensure XDG_RUNTIME_DIR exists before starting dockerd-rootless.sh,
+    # which checks for a writable runtime dir on startup.
+    export XDG_RUNTIME_DIR="/tmp/runtime-${MY_UID}"
+    mkdir -p "$XDG_RUNTIME_DIR"
+
     # Patch dockerd-rootless.sh to tolerate sysctl failures (ip_forward is
     # already set via the container's --sysctl flag).
     sed 's/sysctl -w \(.*\)$/sysctl -w \1 || true/' /usr/bin/dockerd-rootless.sh \
