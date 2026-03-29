@@ -71,7 +71,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 # doesn't need to download anything at runtime.
 RUN npm install -g --cache /tmp/npm-cache @anthropic-ai/claude-code@latest @playwright/mcp \
     && npx playwright install --with-deps chromium \
-    && /usr/lib/node_modules/@playwright/mcp/node_modules/.bin/playwright install --with-deps chromium \
     && rm -rf /tmp/npm-cache \
     && chmod -R 777 /home/claude/.cache \
     && rm -rf /home/claude/.npm && mkdir -p /home/claude/.npm && chmod 777 /home/claude/.npm

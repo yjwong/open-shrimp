@@ -390,9 +390,8 @@ async def get_or_create_session(
                 "command": "npx",
                 "args": [
                     "@playwright/mcp",
-                    "--headless",
-                    "--browser", "chromium",
-                    "--caps", "pdf,testing",
+                    "--cdp-endpoint", "http://localhost:9222",
+                    "--caps", "pdf",
                 ],
             }
 

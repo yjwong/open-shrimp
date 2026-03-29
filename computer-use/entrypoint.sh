@@ -95,7 +95,8 @@ echo "seat-keyboard started"
 wayvnc --output=HEADLESS-1 0.0.0.0 5900 &
 echo "wayvnc started on port 5900"
 
-# Launch Chromium (installed by Playwright) with Wayland native mode.
+# Launch Chromium (installed by Playwright) with Wayland native mode and
+# a CDP debugging port so Playwright MCP can attach to it.
 CHROMIUM_BIN=$(find /home/claude/.cache/ms-playwright -name 'chromium' -o -name 'chrome' 2>/dev/null | grep -E '/(chromium|chrome)$' | head -1)
 if [ -z "$CHROMIUM_BIN" ]; then
     echo "WARNING: Chromium binary not found in Playwright cache" >&2
@@ -105,8 +106,9 @@ else
         --no-default-browser-check \
         --disable-background-networking \
         --ozone-platform=wayland \
-        --user-data-dir=/home/claude/.config/chromium &
-    echo "Chromium started"
+        --user-data-dir=/home/claude/.config/chromium \
+        --remote-debugging-port=9222 &
+    echo "Chromium started with CDP on port 9222"
 fi
 
 # Keep the container alive.  CLI invocations arrive via `docker exec`.
