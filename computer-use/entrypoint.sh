@@ -56,6 +56,20 @@ if [ "${ENABLE_DIND:-0}" = "1" ]; then
         fi
         sleep 1
     done
+
+    # Add masquerade rule for container outbound networking.
+    # rootless dockerd runs with --iptables=false (required in nested containers),
+    # so we must manually add the NAT rule for the docker0 bridge subnet.
+    CHILD_PID=$(cat "${XDG_RUNTIME_DIR}/dockerd-rootless/child_pid" 2>/dev/null)
+    if [ -n "$CHILD_PID" ]; then
+        DOCKER0_SUBNET=$(nsenter --preserve-credentials -U -n -t "$CHILD_PID" \
+            ip -4 addr show docker0 2>/dev/null | grep -oP 'inet \K[\d./]+')
+        if [ -n "$DOCKER0_SUBNET" ]; then
+            nsenter --preserve-credentials -U -n -t "$CHILD_PID" \
+                iptables -t nat -A POSTROUTING -s "$DOCKER0_SUBNET" ! -o docker0 -j MASQUERADE \
+                2>/dev/null || true
+        fi
+    fi
 fi
 
 # --- Wayland / wlroots environment ---
