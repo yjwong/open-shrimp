@@ -409,7 +409,7 @@ def _list_sessions_for_context(
     from claude_agent_sdk import list_sessions
     from claude_agent_sdk._internal.sessions import (
         MAX_SANITIZED_LENGTH,
-        _apply_sort_and_limit,
+        _apply_sort_limit_offset,
         _canonicalize_path,
         _read_sessions_from_dir,
         _sanitize_path,
@@ -439,7 +439,7 @@ def _list_sessions_for_context(
         if project_dir is None:
             return []
         sessions = _read_sessions_from_dir(project_dir, canonical)
-        return _apply_sort_and_limit(sessions, kwargs.get("limit"))
+        return _apply_sort_limit_offset(sessions, kwargs.get("limit"))
 
     return list_sessions(directory=ctx.directory, **kwargs)
 
