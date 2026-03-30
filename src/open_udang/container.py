@@ -723,6 +723,12 @@ for _i in $(seq 1 30); do
     sleep 1
 done
 
+# Create a Docker context so that `docker exec` sessions (which don't
+# inherit runtime env vars) can find the daemon without DOCKER_HOST.
+docker context create rootless --docker "host=unix://${XDG_RUNTIME_DIR}/docker.sock" 2>/dev/null || true
+docker context use rootless 2>/dev/null || true
+unset DOCKER_HOST
+
 # Add masquerade rules for container outbound networking.
 # rootless dockerd runs with --iptables=false (required in nested containers),
 # so we must manually add NAT rules for all bridge subnets (docker0 + any
@@ -996,13 +1002,10 @@ def _wait_for_dind(container_name: str, timeout: int = 30) -> None:
     """Wait for the rootless Docker daemon inside a DinD container."""
     import time
 
-    uid = os.getuid()
-    docker_host = f"unix:///tmp/runtime-{uid}/docker.sock"
     for i in range(timeout):
         result = subprocess.run(
             [
                 "docker", "exec",
-                "-e", f"DOCKER_HOST={docker_host}",
                 container_name,
                 "docker", "info",
             ],
@@ -1083,24 +1086,21 @@ def build_cli_wrapper(
     )
     quoted_run_args = " \\\n  ".join(shlex.quote(a) for a in docker_run_argv)
 
-    # For DinD, we need to wait for dockerd after container creation and
-    # set DOCKER_HOST on exec so the claude CLI can use the inner daemon.
+    # For DinD, we need to wait for dockerd after container creation.
+    # The entrypoint creates a Docker context so no DOCKER_HOST is needed.
     uid = os.getuid()
     dind_wait = ""
-    dind_exec_env = ""
     if docker_in_docker:
-        docker_host = f"unix:///tmp/runtime-{uid}/docker.sock"
         dind_wait = (
             f'\n    # Wait for inner Docker daemon to be ready.\n'
             f'    for _i in $(seq 1 30); do\n'
-            f'      if docker exec -e DOCKER_HOST={shlex.quote(docker_host)}'
+            f'      if docker exec'
             f' {shlex.quote(container_name)} docker info > /dev/null 2>&1; then\n'
             f'        break\n'
             f'      fi\n'
             f'      sleep 1\n'
             f'    done\n'
         )
-        dind_exec_env = f" -e DOCKER_HOST={shlex.quote(docker_host)}"
 
     compositor_wait = ""
     computer_use_exec_env = ""
@@ -1153,7 +1153,7 @@ def build_cli_wrapper(
         f'fi\n'
         f'\n'
         f'exec docker exec -i \\\n'
-        f'  -e ANTHROPIC_API_KEY{dind_exec_env}{computer_use_exec_env} \\\n'
+        f'  -e ANTHROPIC_API_KEY{computer_use_exec_env} \\\n'
         f'  "$CONTAINER" \\\n'
         f'  /usr/local/bin/claude "$@"\n'
     )

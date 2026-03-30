@@ -57,6 +57,12 @@ if [ "${ENABLE_DIND:-0}" = "1" ]; then
         sleep 1
     done
 
+    # Create a Docker context so that `docker exec` sessions (which don't
+    # inherit runtime env vars) can find the daemon without DOCKER_HOST.
+    docker context create rootless --docker "host=unix:///tmp/runtime-${MY_UID}/docker.sock" 2>/dev/null || true
+    docker context use rootless 2>/dev/null || true
+    unset DOCKER_HOST
+
     # Add masquerade rules for container outbound networking.
     # rootless dockerd runs with --iptables=false (required in nested containers),
     # so we must manually add NAT rules for all bridge subnets (docker0 + any
