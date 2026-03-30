@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wlrctl \
     grim \
     wayvnc \
+    wl-clipboard \
     foot \
     # Fonts for readable screenshots
     fonts-liberation \

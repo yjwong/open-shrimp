@@ -210,6 +210,47 @@ function setupPinchZoom(
   };
 }
 
+// ── Clipboard ──
+
+/** Track the remote VNC clipboard and provide copy/paste helpers. */
+function setupClipboard(rfb: RFBType): {
+  /** Copy the remote clipboard content to the local device clipboard. */
+  copyToLocal: () => Promise<void>;
+  /** Read the local device clipboard and send it to the remote VNC session. */
+  pasteFromLocal: () => Promise<void>;
+} {
+  let remoteClipboard = "";
+
+  // noVNC fires "clipboard" when the VNC server's clipboard changes.
+  rfb.addEventListener("clipboard", (ev: Event) => {
+    const detail = (ev as CustomEvent).detail as { text: string } | undefined;
+    if (detail?.text) {
+      remoteClipboard = detail.text;
+    }
+  });
+
+  return {
+    async copyToLocal() {
+      if (!remoteClipboard) return;
+      try {
+        await navigator.clipboard.writeText(remoteClipboard);
+      } catch {
+        // Clipboard API may not be available (insecure context, denied).
+      }
+    },
+    async pasteFromLocal() {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          rfb.clipboardPasteFrom(text);
+        }
+      } catch {
+        // Clipboard API may not be available (insecure context, denied).
+      }
+    },
+  };
+}
+
 // ── Main ──
 
 main().catch((e) => showError(`Fatal: ${e}`));
@@ -270,9 +311,11 @@ async function main(): Promise<void> {
 
   // ── Events ──
 
+  const clipboard = setupClipboard(rfb);
+
   rfb.addEventListener("connect", () => {
     loadingEl.remove();
-    buildToolbar(toolbarEl, rfb, isMobile, context, initData, pinchZoom);
+    buildToolbar(toolbarEl, rfb, isMobile, context, initData, pinchZoom, clipboard);
   });
 
   rfb.addEventListener("disconnect", (ev: Event) => {
@@ -437,6 +480,7 @@ function buildToolbar(
   context: string,
   initData: string,
   pinchZoom: { reset: () => void; getScale: () => number } | null,
+  clipboard: { copyToLocal: () => Promise<void>; pasteFromLocal: () => Promise<void> },
 ): void {
   // Inject styles.
   const style = document.createElement("style");
@@ -540,6 +584,21 @@ function buildToolbar(
     updateQuality();
   });
   toolbar.appendChild(qualityBtn);
+
+  // Clipboard buttons.
+  const copyBtn = document.createElement("button");
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", () => {
+    clipboard.copyToLocal();
+  });
+  toolbar.appendChild(copyBtn);
+
+  const pasteBtn = document.createElement("button");
+  pasteBtn.textContent = "Paste";
+  pasteBtn.addEventListener("click", () => {
+    clipboard.pasteFromLocal();
+  });
+  toolbar.appendChild(pasteBtn);
 
   // Keyboard toggle (mobile only).
   if (isMobile) {
