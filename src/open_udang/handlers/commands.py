@@ -439,12 +439,78 @@ def _list_sessions_for_context(
         if project_dir is None:
             return []
         sessions = _read_sessions_from_dir(project_dir, canonical)
-        return _apply_sort_limit_offset(sessions, kwargs.get("limit"))
+        return _apply_sort_limit_offset(
+            sessions, kwargs.get("limit"), kwargs.get("offset", 0),
+        )
 
     return list_sessions(directory=ctx.directory, **kwargs)
 
 
 # ── /resume ──
+
+
+async def _build_resume_page(
+    ctx_name: str,
+    ctx: ContextConfig,
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    page: int,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Build a single page of the resume session list.
+
+    Returns ``(text, keyboard)`` where *keyboard* is ``None`` when there are
+    no sessions at all.
+    """
+    per_page = _RESUME_LIST_LIMIT
+    offset = page * per_page
+    # Fetch one extra to detect whether a next page exists.
+    sessions = await asyncio.to_thread(
+        _list_sessions_for_context, ctx_name, ctx,
+        limit=per_page + 1, offset=offset,
+    )
+
+    if not sessions:
+        if page == 0:
+            return (
+                f"No sessions found for context `{_escape_mdv2(ctx_name)}`\\.",
+                None,
+            )
+        # Edge case: page beyond last – go back.
+        return await _build_resume_page(ctx_name, ctx, db, scope, page - 1)
+
+    has_next = len(sessions) > per_page
+    sessions = sessions[:per_page]
+
+    current_session_id = await get_session_id(db, scope, ctx_name)
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    for s in sessions:
+        summary = s.summary or "No summary"
+        if len(summary) > 60:
+            summary = summary[:57] + "..."
+        sid_short = s.session_id[:8]
+        marker = " (current)" if s.session_id == current_session_id else ""
+        label = f"{sid_short} - {summary}{marker}"
+        cb_data = f"resume:{s.session_id}"
+        _resume_selections[cb_data] = s.session_id
+        buttons.append([InlineKeyboardButton(label, callback_data=cb_data)])
+
+    # Navigation row
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "\u25c0 Prev", callback_data=f"resume_page:{ctx_name}:{page - 1}",
+        ))
+    if has_next:
+        nav.append(InlineKeyboardButton(
+            "Next \u25b6", callback_data=f"resume_page:{ctx_name}:{page + 1}",
+        ))
+    if nav:
+        buttons.append(nav)
+
+    page_label = f" \\(page {page + 1}\\)" if page > 0 or has_next else ""
+    text = f"*Recent sessions for* `{_escape_mdv2(ctx_name)}`*:*{page_label}"
+    return text, InlineKeyboardMarkup(buttons)
 
 
 async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -494,40 +560,14 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
         return
 
-    # List recent sessions for the current context
-    sessions = await asyncio.to_thread(
-        _list_sessions_for_context, ctx_name, ctx, limit=_RESUME_LIST_LIMIT,
-    )
+    # List recent sessions for the current context (page 0)
+    text, keyboard = await _build_resume_page(ctx_name, ctx, db, scope, page=0)
 
-    if not sessions:
-        await message.reply_text(
-            f"No sessions found for context `{_escape_mdv2(ctx_name)}`\\.",
-            parse_mode="MarkdownV2",
-        )
+    if keyboard is None:
+        await message.reply_text(text, parse_mode="MarkdownV2")
         return
 
-    current_session_id = await get_session_id(db, scope, ctx_name)
-
-    buttons: list[list[InlineKeyboardButton]] = []
-    for s in sessions:
-        summary = s.summary or "No summary"
-        # Truncate long summaries for button text
-        if len(summary) > 60:
-            summary = summary[:57] + "..."
-        sid_short = s.session_id[:8]
-        marker = " (current)" if s.session_id == current_session_id else ""
-        label = f"{sid_short} - {summary}{marker}"
-
-        cb_data = f"resume:{s.session_id}"
-        _resume_selections[cb_data] = s.session_id
-        buttons.append([InlineKeyboardButton(label, callback_data=cb_data)])
-
-    keyboard = InlineKeyboardMarkup(buttons)
-    await message.reply_text(
-        f"*Recent sessions for* `{_escape_mdv2(ctx_name)}`*:*",
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
-    )
+    await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=keyboard)
 
 
 # ── /resume callback handler ──
@@ -537,10 +577,44 @@ async def handle_resume_callback(
     query: Any, data: str, config: Config, context: ContextTypes.DEFAULT_TYPE,
 ) -> bool:
     """Handle /resume session selection callback. Returns True if handled."""
-    if not data.startswith("resume:"):
+    if not data.startswith("resume:") and not data.startswith("resume_page:"):
         return False
 
     db: aiosqlite.Connection = context.bot_data["db"]
+
+    # Handle pagination
+    if data.startswith("resume_page:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            await query.answer("Invalid page data.")
+            return True
+        ctx_name_req, page_str = parts[1], parts[2]
+        try:
+            page = int(page_str)
+        except ValueError:
+            await query.answer("Invalid page number.")
+            return True
+        if not query.message:
+            await query.answer("Cannot determine chat.")
+            return True
+        scope = chat_scope_from_message(query.message)
+        _, ctx = await _get_context(scope, config, db)
+        # Use the context name from the callback to stay consistent
+        ctx = config.contexts.get(ctx_name_req, ctx)
+        text, keyboard = await _build_resume_page(
+            ctx_name_req, ctx, db, scope, page,
+        )
+        await query.answer()
+        try:
+            await query.message.edit_text(
+                text=text,
+                parse_mode="MarkdownV2",
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.exception("Failed to update resume page")
+        return True
+
     session_id = _resume_selections.pop(data, None)
     if not session_id:
         await query.answer("This selection has expired.")

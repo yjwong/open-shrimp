@@ -171,8 +171,8 @@ _pending_other_input: dict[ChatScope, str] = {}
 # Resume command state
 # ---------------------------------------------------------------------------
 
-# Maximum number of sessions to show in /resume list.
-_RESUME_LIST_LIMIT = 10
+# Number of sessions per page in /resume list.
+_RESUME_LIST_LIMIT = 5
 
 # Pending resume selections: callback_data -> session_id
 _resume_selections: dict[str, str] = {}
