@@ -409,15 +409,17 @@ async def _run_scheduled_prompt(
 
     from open_udang.stream import _DraftState, stream_response
 
-    # Read-only tools only — no mutating tools, no approval callbacks.
+    # Read-only tools by default. Bash is only allowed in containerized
+    # contexts where Docker provides the safety boundary.
     allowed_tools = [
         "Read",
         "Glob",
         "Grep",
-        "Bash",
         "WebSearch",
         "WebFetch",
     ]
+    if ctx_config.container and ctx_config.container.enabled:
+        allowed_tools.append("Bash")
 
     options = ClaudeAgentOptions(
         cwd=ctx_config.directory,
