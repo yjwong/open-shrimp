@@ -119,6 +119,7 @@ _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.*) b/(.*)$")
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 # Regex for binary file detection.
 _BINARY_RE = re.compile(r"^Binary files .* and .* differ$")
+_LARGE_FILE_RE = re.compile(r"^Large file \(.+\) skipped$")
 
 
 def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
@@ -161,7 +162,7 @@ def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
                 is_new_file = True
             elif lines[i].startswith("deleted file mode"):
                 is_deleted_file = True
-            elif _BINARY_RE.match(lines[i]):
+            elif _BINARY_RE.match(lines[i]) or _LARGE_FILE_RE.match(lines[i]):
                 is_binary = True
             # Check for next diff header — stop processing this file.
             if _DIFF_HEADER_RE.match(lines[i]):
@@ -340,24 +341,36 @@ def _is_binary_file(path: Path, sample_size: int = 8192) -> bool:
         return False
 
 
+_MAX_UNTRACKED_DIFF_SIZE = 1_000_000  # 1 MB
+
+
 async def _diff_untracked_files(cwd: str, files: list[str]) -> str:
     """Generate unified diff output for untracked files without touching the index.
 
     Binary files are detected cheaply (first 8KB null-byte check) and get
-    a synthetic diff header — avoiding the cost of git reading the entire
-    file.  Text files are diffed via ``git diff --no-index`` as usual.
+    a synthetic diff header.  Large text files (>1 MB) are skipped with a
+    synthetic header to avoid reading gigabytes of data.  Remaining text
+    files are diffed via ``git diff --no-index`` as usual.
     """
     if not files:
         return ""
 
     text_files: list[str] = []
-    binary_diffs: list[str] = []
+    skipped_diffs: list[str] = []
     for file_path in files:
-        if _is_binary_file(Path(cwd) / file_path):
-            binary_diffs.append(
+        full_path = Path(cwd) / file_path
+        if _is_binary_file(full_path):
+            skipped_diffs.append(
                 f"diff --git a/{file_path} b/{file_path}\n"
                 f"new file mode 100644\n"
                 f"Binary files /dev/null and b/{file_path} differ\n"
+            )
+        elif (file_size := full_path.stat().st_size) > _MAX_UNTRACKED_DIFF_SIZE:
+            size_mb = file_size / 1_000_000
+            skipped_diffs.append(
+                f"diff --git a/{file_path} b/{file_path}\n"
+                f"new file mode 100644\n"
+                f"Large file ({size_mb:.1f} MB) skipped\n"
             )
         else:
             text_files.append(file_path)
@@ -375,7 +388,7 @@ async def _diff_untracked_files(cwd: str, files: list[str]) -> str:
         return stdout
 
     text_diffs = await asyncio.gather(*[_diff_one(f) for f in text_files])
-    all_diffs = binary_diffs + [d for d in text_diffs if d]
+    all_diffs = skipped_diffs + [d for d in text_diffs if d]
     return "\n".join(all_diffs)
 
 
