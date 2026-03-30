@@ -57,19 +57,57 @@ if [ "${ENABLE_DIND:-0}" = "1" ]; then
         sleep 1
     done
 
-    # Add masquerade rule for container outbound networking.
+    # Add masquerade rules for container outbound networking.
     # rootless dockerd runs with --iptables=false (required in nested containers),
-    # so we must manually add the NAT rule for the docker0 bridge subnet.
-    CHILD_PID=$(cat "${XDG_RUNTIME_DIR}/dockerd-rootless/child_pid" 2>/dev/null)
-    if [ -n "$CHILD_PID" ]; then
-        DOCKER0_SUBNET=$(nsenter --preserve-credentials -U -n -t "$CHILD_PID" \
-            ip -4 addr show docker0 2>/dev/null | grep -oP 'inet \K[\d./]+')
-        if [ -n "$DOCKER0_SUBNET" ]; then
-            nsenter --preserve-credentials -U -n -t "$CHILD_PID" \
-                iptables -t nat -A POSTROUTING -s "$DOCKER0_SUBNET" ! -o docker0 -j MASQUERADE \
-                2>/dev/null || true
-        fi
-    fi
+    # so we must manually add NAT rules for all bridge subnets (docker0 + any
+    # docker-compose br-* networks created later).  Run in a background loop so
+    # dynamically-created networks get rules too.
+    _nsenter() {
+        CHILD_PID=$(cat "${XDG_RUNTIME_DIR}/dockerd-rootless/child_pid" 2>/dev/null)
+        [ -z "$CHILD_PID" ] && return 1
+        nsenter --preserve-credentials -U -n -t "$CHILD_PID" "$@"
+    }
+
+    ensure_masquerade() {
+        _nsenter true 2>/dev/null || return
+        for BRIDGE in $(_nsenter ip -o link show type bridge 2>/dev/null \
+                | grep -oP '(?<=: )\S+(?=:)'); do
+            SUBNET=$(_nsenter ip -4 addr show "$BRIDGE" 2>/dev/null \
+                | grep -oP 'inet \K[\d./]+')
+            if [ -n "$SUBNET" ]; then
+                _nsenter iptables -t nat -C POSTROUTING \
+                    -s "$SUBNET" ! -o "$BRIDGE" -j MASQUERADE 2>/dev/null || \
+                _nsenter iptables -t nat -A POSTROUTING \
+                    -s "$SUBNET" ! -o "$BRIDGE" -j MASQUERADE 2>/dev/null || true
+            fi
+        done
+    }
+
+    cleanup_masquerade() {
+        _nsenter true 2>/dev/null || return
+        BRIDGES=$(_nsenter ip -o link show type bridge 2>/dev/null \
+            | grep -oP '(?<=: )\S+(?=:)')
+        _nsenter iptables -t nat -S POSTROUTING 2>/dev/null \
+            | grep 'MASQUERADE' | while read -r RULE; do
+            RULE_BRIDGE=$(echo "$RULE" | sed -n 's/.* -o \([^ ]*\).*/\1/p')
+            RULE_SUBNET=$(echo "$RULE" | sed -n 's/.*-s \([^ ]*\).*/\1/p')
+            [ -z "$RULE_BRIDGE" ] || [ -z "$RULE_SUBNET" ] && continue
+            if ! echo "$BRIDGES" | grep -qxF "$RULE_BRIDGE"; then
+                _nsenter iptables -t nat -D POSTROUTING \
+                    -s "$RULE_SUBNET" ! -o "$RULE_BRIDGE" -j MASQUERADE \
+                    2>/dev/null || true
+            fi
+        done
+    }
+
+    ensure_masquerade
+    docker events --filter type=network --format '{{.Action}}' 2>/dev/null | \
+        while read -r event; do
+            case "$event" in
+                create|connect) ensure_masquerade ;;
+                destroy) cleanup_masquerade ;;
+            esac
+        done &
 fi
 
 # --- Wayland / wlroots environment ---
