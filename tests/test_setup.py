@@ -263,8 +263,9 @@ class TestPathCompleter:
 
     def test_tilde_completion(self) -> None:
         """Tilde paths should be expanded for matching but kept in output."""
-        result = _path_completer("~/", 0)
-        # Home dir always has some contents, so first completion should work
+        # Use ~/. to match dotfiles, since some environments only have dotfiles
+        result = _path_completer("~/.", 0)
+        # Home dir always has some dotfiles, so first completion should work
         assert result is not None
 
 
