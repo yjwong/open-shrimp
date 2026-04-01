@@ -1,5 +1,5 @@
-# OpenUdang configuration
-# Copy to ~/.config/openudang/config.yaml and fill in your values
+# OpenShrimp configuration
+# Copy to ~/.config/openshrimp/config.yaml and fill in your values
 
 telegram:
   token: "YOUR_BOT_TOKEN"
@@ -16,7 +16,7 @@ contexts:
       - LSP
       - AskUserQuestion
       # Note: Read, Glob, Grep, Write, and Edit are intentionally NOT listed
-      # here. They are handled by OpenUdang's path-scoped approval:
+      # here. They are handled by OpenShrimp's path-scoped approval:
       #
       # - Read, Glob, Grep: auto-approved when within the context directory.
       # - Edit, Write: always require manual approval via Telegram, even
@@ -54,7 +54,7 @@ contexts:
     #                              # Adds --cap-add SYS_ADMIN (reduced isolation).
     #   dockerfile: /path/to/Dockerfile.claude  # Custom Dockerfile for this context.
     #                              # Use to install dev tools (Go, Node, Rust, etc.).
-    #                              # Should typically FROM openudang-claude:latest.
+    #                              # Should typically FROM openshrimp-claude:latest.
     #                              # Build context is the Dockerfile's parent dir.
     #                              # The Claude CLI binary is copied in as "claude"
     #                              # (available via CLAUDE_CLI build arg).

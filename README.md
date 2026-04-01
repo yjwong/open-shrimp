@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="OpenUdang" width="480">
+  <img src="assets/logo.svg" alt="OpenShrimp" width="480">
 </p>
 
 <p align="center">
@@ -8,9 +8,9 @@
 
 ---
 
-OpenUdang puts a full Claude coding agent in Telegram — complete with file editing, tool use, and project awareness. It's the prawn 🦐 to [OpenClaw](https://openclaw.ai/)'s lobster.
+OpenShrimp puts a full Claude coding agent in Telegram — complete with file editing, tool use, and project awareness. It's the shrimp 🦐 to [OpenClaw](https://openclaw.ai/)'s lobster.
 
-*Udang* is Malay for "prawn" — small, personal, gets the job done.
+Small, personal, gets the job done.
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> · <a href="#commands">Commands</a> · <a href="#code-review">Code Review</a> · <a href="#scheduled-tasks">Scheduled Tasks</a> · <a href="#voice-notes">Voice Notes</a> · <a href="#macos-app">macOS App</a> · <a href="#deployment">Deployment</a>
@@ -39,11 +39,11 @@ https://github.com/user-attachments/assets/b8971e87-2003-4956-a449-8f8ca09a043f
 
 ---
 
-## OpenUdang vs OpenClaw
+## OpenShrimp vs OpenClaw
 
 Both are self-hosted and open source. They solve different problems.
 
-| | **OpenUdang** | **OpenClaw** |
+| | **OpenShrimp** | **OpenClaw** |
 |---|---|---|
 | **Focus** | Code agent — reads, edits, and writes files in your projects | General-purpose assistant — browsing, memory, smart home, 50+ integrations |
 | **Platform** | Telegram | WhatsApp, Telegram, Discord, Slack, Signal, iMessage |
@@ -51,13 +51,13 @@ Both are self-hosted and open source. They solve different problems.
 | **Tool approval** | Interactive — inline keyboard approve/deny per tool call | Autonomous by default |
 | **Project awareness** | Full — CLAUDE.md, working directories, path-scoped permissions | Limited — general shell access |
 
-**TL;DR:** OpenClaw is a Swiss Army knife for daily life. OpenUdang is a scalpel for code — it does one thing and does it well.
+**TL;DR:** OpenClaw is a Swiss Army knife for daily life. OpenShrimp is a scalpel for code — it does one thing and does it well.
 
-## OpenUdang vs Claude Code Remote Control
+## OpenShrimp vs Claude Code Remote Control
 
 Both let you use Claude Code from your phone. They take very different approaches.
 
-| | **OpenUdang** | **Claude Code Remote Control** |
+| | **OpenShrimp** | **Claude Code Remote Control** |
 |---|---|---|
 | **How it works** | Standalone bot — talks to Agent SDK directly | Remote view into a running Claude Code terminal session |
 | **Interface** | Telegram — no extra app needed | claude.ai/code or Claude mobile app |
@@ -65,11 +65,11 @@ Both let you use Claude Code from your phone. They take very different approache
 | **Code review** | Mobile-first review UI — swipe through hunks to stage or skip | No dedicated review UI |
 | **Stability** | Simple architecture, fewer moving parts | Research preview — still buggy |
 
-**TL;DR:** Remote Control mirrors a terminal session to your phone. OpenUdang *is* the session — always on, in Telegram, with a proper code review flow. No extra app required.
+**TL;DR:** Remote Control mirrors a terminal session to your phone. OpenShrimp *is* the session — always on, in Telegram, with a proper code review flow. No extra app required.
 
-## Why OpenUdang?
+## Why OpenShrimp?
 
-You're away from your desk but need Claude to fix a bug, review a diff, or scaffold something quick. OpenUdang gives you a proper Claude Code session from any Telegram chat — on your phone, your tablet, wherever.
+You're away from your desk but need Claude to fix a bug, review a diff, or scaffold something quick. OpenShrimp gives you a proper Claude Code session from any Telegram chat — on your phone, your tablet, wherever.
 
 - **Real agent, not a chatbot.** Claude can read, edit, and write files in your actual project directories. Full tool use, not just text completion.
 - **You stay in control.** Every file mutation requires your explicit approval via inline keyboard buttons. One tap to approve, one tap to deny. Or hit "Accept all edits" when you trust the flow. When you're ready to commit, `/review` opens a swipe-based UI to stage exactly the hunks you want.
@@ -86,13 +86,13 @@ You're away from your desk but need Claude to fix a bug, review a diff, or scaff
 
 ## Code Review
 
-OpenUdang includes a mobile-first code review UI built as a Telegram Mini App. Send `/review` to open it.
+OpenShrimp includes a mobile-first code review UI built as a Telegram Mini App. Send `/review` to open it.
 
 It works like Tinder for diffs — each hunk is a card. Swipe right to stage, left to skip, down to undo. You review at the hunk level, not the file level, so you can cherry-pick exactly the changes you want — like `git add -p`, but designed for your phone.
 
 ## Voice Notes
 
-Send a voice message instead of typing. OpenUdang automatically transcribes it using [Moonshine](https://github.com/usefulsensors/moonshine) — a fast, lightweight speech-to-text model that runs locally. The transcribed text is sent to Claude as a prompt, prefixed with `[Transcribed from voice note]` so it knows the input came from speech.
+Send a voice message instead of typing. OpenShrimp automatically transcribes it using [Moonshine](https://github.com/usefulsensors/moonshine) — a fast, lightweight speech-to-text model that runs locally. The transcribed text is sent to Claude as a prompt, prefixed with `[Transcribed from voice note]` so it knows the input came from speech.
 
 The `moonshine-stt` binary is auto-downloaded on first use. No setup required.
 
@@ -106,13 +106,13 @@ Claude manages schedules via built-in tools. Use `/schedule` to see what's activ
 
 You can run each context inside a Docker container by adding a `container:` block to your context config. The Claude CLI runs inside the container with only the project directory bind-mounted — so it can't touch anything else on the host.
 
-Session state is stored separately per context under `~/.config/openudang/containers/`, so containerized contexts don't interfere with each other or your host `~/.claude`.
+Session state is stored separately per context under `~/.config/openshrimp/containers/`, so containerized contexts don't interfere with each other or your host `~/.claude`.
 
 On Linux, this uses Docker. On macOS, it uses Apple's `sandbox-exec` for native binary-level isolation — no Docker required.
 
 ## macOS App
 
-On macOS, OpenUdang is also available as a menu bar app. Download the `.dmg` from [Releases](https://github.com/yjwong/open-udang/releases), drag to Applications, and launch — no terminal needed.
+On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` from [Releases](https://github.com/yjwong/open-shrimp/releases), drag to Applications, and launch — no terminal needed.
 
 - Lives in the menu bar (shrimp icon) with no Dock icon
 - First-run setup wizard walks you through configuration with native macOS dialogs
@@ -130,19 +130,19 @@ On macOS, OpenUdang is also available as a menu bar app. Download the `.dmg` fro
 
 ### Option 1: Download Binary (recommended)
 
-Grab the latest binary from [Releases](https://github.com/yjwong/open-udang/releases). No Python or package manager required — just download, configure, and run.
+Grab the latest binary from [Releases](https://github.com/yjwong/open-shrimp/releases). No Python or package manager required — just download, configure, and run.
 
 > **Note:** The Linux binaries require glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13+, Fedora 40+). On older distros, use the [from-source](#option-2-from-source) install instead.
 
 ```bash
 # Linux x86_64
-curl -fsSL https://github.com/yjwong/open-udang/releases/latest/download/openudang-linux-x86_64 -o openudang
+curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-linux-x86_64 -o openshrimp
 # Linux ARM64
-curl -fsSL https://github.com/yjwong/open-udang/releases/latest/download/openudang-linux-aarch64 -o openudang
+curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-linux-aarch64 -o openshrimp
 # macOS Apple Silicon
-curl -fsSL https://github.com/yjwong/open-udang/releases/latest/download/openudang-macos-aarch64 -o openudang
+curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-macos-aarch64 -o openshrimp
 
-chmod +x openudang
+chmod +x openshrimp
 ```
 
 On first run, the binary will automatically set up an isolated Python environment and install dependencies. If no config file exists, an interactive setup wizard walks you through creating one. Subsequent runs start instantly.
@@ -152,8 +152,8 @@ On first run, the binary will automatically set up an isolated Python environmen
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/yjwong/open-udang.git
-cd open-udang
+git clone https://github.com/yjwong/open-shrimp.git
+cd open-shrimp
 
 # Build the web apps (requires Node.js 18+)
 for app in review-app terminal-app markdown-app vnc-app; do
@@ -166,16 +166,16 @@ done
 uv sync
 ```
 
-Just like the binary, running `uv run openudang` without a config file will launch the interactive setup wizard. Or configure manually:
+Just like the binary, running `uv run openshrimp` without a config file will launch the interactive setup wizard. Or configure manually:
 
 <details>
 <summary>Manual config setup</summary>
 
 ```bash
-cp config.example.yaml ~/.config/openudang/config.yaml
+cp config.example.yaml ~/.config/openshrimp/config.yaml
 ```
 
-Edit `~/.config/openudang/config.yaml` with your bot token, Telegram user IDs, and project directories:
+Edit `~/.config/openshrimp/config.yaml` with your bot token, Telegram user IDs, and project directories:
 
 ```yaml
 telegram:
@@ -199,16 +199,16 @@ default_context: my-project
 
 ```bash
 # Binary
-./openudang
+./openshrimp
 
 # From source
-uv run openudang
+uv run openshrimp
 
 # If using an API key instead of Claude Code login
-ANTHROPIC_API_KEY=sk-ant-... ./openudang
+ANTHROPIC_API_KEY=sk-ant-... ./openshrimp
 ```
 
-If no config file exists, OpenUdang starts an interactive setup wizard that walks you through creating one — no need to copy or edit YAML manually.
+If no config file exists, OpenShrimp starts an interactive setup wizard that walks you through creating one — no need to copy or edit YAML manually.
 
 Or deploy as a systemd service for always-on access — see [Deployment](#deployment).
 
@@ -230,7 +230,7 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 
 ## How Tool Approval Works
 
-OpenUdang enforces a layered permission model:
+OpenShrimp enforces a layered permission model:
 
 - **Read-only tools** (Read, Glob, Grep) — auto-approved within the context directory
 - **Write tools** (Edit, Write) — always require manual approval via Telegram inline buttons
@@ -245,10 +245,10 @@ The easiest way to deploy is with the built-in install command:
 
 ```bash
 # Install as a systemd user service (Linux) or launchd agent (macOS)
-openudang install
+openshrimp install
 
 # Remove the service
-openudang uninstall
+openshrimp uninstall
 ```
 
 This auto-detects your platform, finds the executable path, and sets everything up — including enabling lingering on Linux so the service runs without an active login session.
@@ -259,12 +259,12 @@ This auto-detects your platform, finds the executable path, and sets everything 
 If you prefer to set up the service manually:
 
 ```ini
-# ~/.config/systemd/user/open-udang.service
+# ~/.config/systemd/user/open-shrimp.service
 [Unit]
-Description=OpenUdang Telegram Bot
+Description=OpenShrimp Telegram Bot
 
 [Service]
-ExecStart=/path/to/uv run openudang
+ExecStart=/path/to/uv run openshrimp
 # Only needed if not using Claude Code login:
 # Environment=ANTHROPIC_API_KEY=sk-ant-...
 Restart=always
@@ -274,7 +274,7 @@ WantedBy=default.target
 ```
 
 ```bash
-systemctl --user enable --now open-udang
+systemctl --user enable --now open-shrimp
 ```
 
 </details>

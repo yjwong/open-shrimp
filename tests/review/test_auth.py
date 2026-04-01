@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 import pytest
 
-from open_udang.review.auth import AuthError, validate_init_data
+from open_shrimp.review.auth import AuthError, validate_init_data
 
 BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 ALLOWED_USERS = [111222333]

@@ -1,0 +1,294 @@
+"""Interactive setup wizard for first-time OpenShrimp configuration."""
+
+from __future__ import annotations
+
+import asyncio
+import glob as globmod
+import os
+import random
+import readline
+import sys
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+
+def _path_completer(text: str, state: int) -> str | None:
+    """Readline completer for filesystem paths."""
+    # Expand ~ before globbing
+    expanded = os.path.expanduser(text)
+    # Add trailing wildcard for globbing, append * only if not already there
+    pattern = expanded + "*" if not expanded.endswith("*") else expanded
+    matches = globmod.glob(pattern)
+    # Append / to directories so the user can keep tabbing
+    matches = [m + "/" if os.path.isdir(m) else m for m in matches]
+    # If the original text started with ~, keep the ~ prefix in completions
+    if text.startswith("~") and not expanded.startswith("~"):
+        home = os.path.expanduser("~")
+        matches = ["~" + m[len(home):] if m.startswith(home) else m for m in matches]
+    return matches[state] if state < len(matches) else None
+
+
+_MODELS: tuple[tuple[str | None, str], ...] = (
+    (None, "use CLI default (recommended)"),
+    ("sonnet", "fast and capable"),
+    ("opus", "most capable, slower"),
+    ("haiku", "fastest, least capable"),
+)
+
+# Models that may support the [1m] (1M context) variant.
+_1M_CANDIDATES = {"sonnet", "opus"}
+
+
+def _check_1m_available(model: str) -> bool:
+    """Probe whether a model supports the [1m] variant via the SDK.
+
+    Sends a minimal query with max_turns=1 and checks if the CLI
+    rejects it with an invalid_request error.
+    """
+    from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+    from claude_agent_sdk.types import AssistantMessage
+
+    candidate = f"{model}[1m]"
+
+    async def _probe() -> bool:
+        options = ClaudeAgentOptions(model=candidate, max_turns=1)
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query("hi")
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantMessage):
+                        if getattr(msg, "error", None) == "invalid_request":
+                            return False
+        except Exception:
+            return False
+        return True
+
+    # Unset CLAUDECODE to avoid nested-session guard if running inside
+    # Claude Code (e.g. during development).
+    old = os.environ.pop("CLAUDECODE", None)
+    try:
+        return asyncio.run(_probe())
+    finally:
+        if old is not None:
+            os.environ["CLAUDECODE"] = old
+
+
+def _prompt(
+    label: str,
+    *,
+    default: str | None = None,
+    validator: Callable[[str], str | None] | None = None,
+) -> str:
+    """Prompt the user for input with optional default and validation.
+
+    Args:
+        label: The prompt text shown to the user.
+        default: Default value if the user presses Enter without typing.
+        validator: A callable that returns an error message string if the
+            value is invalid, or None if it's valid.
+
+    Returns:
+        The validated user input.
+
+    Raises:
+        SystemExit: If the user presses Ctrl-C or Ctrl-D.
+    """
+    suffix = f" [{default}]: " if default else ": "
+    while True:
+        try:
+            value = input(f"{label}{suffix}").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nSetup cancelled.")
+            raise SystemExit(0)
+
+        if not value:
+            if default is not None:
+                return default
+            print("  This field is required.")
+            continue
+
+        if validator:
+            error = validator(value)
+            if error:
+                print(f"  {error}")
+                continue
+
+        return value
+
+
+def _validate_token(value: str) -> str | None:
+    """Validate a Telegram bot token has the expected format."""
+    if ":" not in value:
+        return "Token should look like '123456:ABC-DEF...' — get one from @BotFather."
+    return None
+
+
+def _validate_user_id(value: str) -> str | None:
+    """Validate a Telegram user ID is a positive integer."""
+    try:
+        uid = int(value)
+    except ValueError:
+        return "Must be an integer."
+    if uid <= 0:
+        return "Must be a positive integer."
+    return None
+
+
+def _validate_directory(value: str) -> str | None:
+    """Validate a directory path exists."""
+    p = Path(value).expanduser()
+    if not p.is_dir():
+        return f"Directory does not exist: {p}"
+    return None
+
+
+def _validate_context_name(value: str) -> str | None:
+    """Validate a context name is a simple identifier."""
+    if not value.replace("-", "").replace("_", "").isalnum():
+        return "Use only letters, numbers, hyphens, and underscores."
+    return None
+
+
+def _prompt_token() -> str:
+    """Prompt for the Telegram bot token."""
+    print("  Create a bot via @BotFather on Telegram and paste the token here.")
+    return _prompt("Telegram bot token", validator=_validate_token)
+
+
+def _prompt_user_id() -> int:
+    """Prompt for the user's Telegram user ID."""
+    print("  Send /start to @userinfobot on Telegram to find your user ID.")
+    return int(_prompt("Your Telegram user ID", validator=_validate_user_id))
+
+
+def _prompt_context() -> tuple[str, dict[str, Any]]:
+    """Prompt for the first context configuration.
+
+    Returns:
+        A tuple of (context_name, context_dict) ready for the config YAML.
+    """
+    print("\nSet up your first context.")
+    print("A context is a named shortcut for a project. You'll use the name with")
+    print("/context to switch between projects in Telegram.\n")
+
+    name = _prompt("Context name (e.g. my-project)", default="default", validator=_validate_context_name)
+
+    # Enable path completion for the directory prompt.
+    old_completer = readline.get_completer()
+    old_delims = readline.get_completer_delims()
+    readline.set_completer(_path_completer)
+    readline.set_completer_delims(" \t\n")
+    # libedit (macOS) uses different syntax from GNU readline (Linux).
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+    try:
+        directory = _prompt(
+            "Project directory (absolute path, tab to autocomplete)",
+            validator=_validate_directory,
+        )
+    finally:
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delims)
+    description = _prompt("Short description", default="Default context")
+
+    # Model selection
+    print("\nSelect a model:")
+    for i, (model_name, model_desc) in enumerate(_MODELS, 1):
+        display = model_name or "CLI default"
+        print(f"  {i}. {display} ({model_desc})")
+    print(f"  {len(_MODELS) + 1}. Enter a custom model name")
+
+    def _validate_model_choice(value: str) -> str | None:
+        try:
+            choice = int(value)
+        except ValueError:
+            return f"Enter a number between 1 and {len(_MODELS) + 1}."
+        if choice < 1 or choice > len(_MODELS) + 1:
+            return f"Enter a number between 1 and {len(_MODELS) + 1}."
+        return None
+
+    choice = int(_prompt("Choice", default="1", validator=_validate_model_choice))
+    if choice <= len(_MODELS):
+        model = _MODELS[choice - 1][0]
+    else:
+        model = _prompt("Custom model name")
+
+    # Check if the selected model supports the [1m] (1M context) variant.
+    if model in _1M_CANDIDATES:
+        print(f"\n  Checking if {model}[1m] (1M context) is available...", end=" ", flush=True)
+        if _check_1m_available(model):
+            model = f"{model}[1m]"
+            print(f"yes! Using {model}.")
+        else:
+            print("not available, using standard context window.")
+
+    # Resolve the directory so we store an absolute path.
+    resolved_dir = str(Path(directory).expanduser().resolve())
+
+    context_dict: dict[str, Any] = {
+        "directory": resolved_dir,
+        "description": description,
+        "allowed_tools": ["LSP", "AskUserQuestion"],
+    }
+    if model is not None:
+        context_dict["model"] = model
+    return name, context_dict
+
+
+def _build_config_dict(
+    token: str,
+    user_id: int,
+    context_name: str,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Assemble the full config dictionary for YAML serialization."""
+    return {
+        "telegram": {"token": token},
+        "allowed_users": [user_id],
+        "contexts": {context_name: context},
+        "default_context": context_name,
+        "review": {
+            "port": random.randint(49152, 65535),
+            "tunnel": "cloudflared",
+        },
+    }
+
+
+def run_setup_wizard(config_path: Path) -> None:
+    """Run the interactive setup wizard.
+
+    Prompts the user for essential configuration and writes the config file.
+
+    Args:
+        config_path: Destination path for the config YAML file.
+
+    Raises:
+        SystemExit: If the user cancels the wizard.
+    """
+    print()
+    print("Welcome to OpenShrimp!")
+    print("No config file found — let's set one up.")
+    print("Press Ctrl-C at any time to cancel.")
+    print()
+
+    token = _prompt_token()
+    print()
+    user_id = _prompt_user_id()
+    context_name, context = _prompt_context()
+
+    config_dict = _build_config_dict(token, user_id, context_name, context)
+
+    from open_shrimp.config import write_config
+
+    try:
+        write_config(config_path, config_dict)
+    except OSError as e:
+        print(f"\nFailed to write config file: {e}", file=sys.stderr)
+        raise SystemExit(1)
+
+    print(f"\nConfig written to {config_path}")
+    print("You can edit it later to add more contexts, tools, or users.")
+    print("Starting OpenShrimp...\n")

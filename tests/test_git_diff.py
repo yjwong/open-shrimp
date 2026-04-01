@@ -5,7 +5,7 @@ import textwrap
 
 import pytest
 
-from open_udang.review.git_diff import (
+from open_shrimp.review.git_diff import (
     Hunk,
     HunkLine,
     HunkResult,

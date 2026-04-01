@@ -1,4 +1,4 @@
-"""py2app build configuration for OpenUdang.app.
+"""py2app build configuration for OpenShrimp.app.
 
 Build a self-contained macOS .app bundle.  Setuptools auto-discovers
 ``pyproject.toml`` in the working directory and conflicts with the
@@ -21,10 +21,10 @@ from setuptools import setup
 
 _VERSION = Path("VERSION").read_text().strip()
 
-APP = ["src/open_udang/platform/macos/app.py"]
+APP = ["src/open_shrimp/platform/macos/app.py"]
 DATA_FILES: list[tuple[str, list[str]]] = []
 
-_RESOURCES = Path("src/open_udang/platform/macos/resources")
+_RESOURCES = Path("src/open_shrimp/platform/macos/resources")
 
 # Include the icon if it exists (may not be generated yet)
 _ICON = _RESOURCES / "icon.icns"
@@ -33,9 +33,9 @@ _ICON_FILE = str(_ICON) if _ICON.exists() else None
 OPTIONS: dict = {
     "argv_emulation": False,
     "plist": {
-        "CFBundleName": "OpenUdang",
-        "CFBundleDisplayName": "OpenUdang",
-        "CFBundleIdentifier": "com.openudang.app",
+        "CFBundleName": "OpenShrimp",
+        "CFBundleDisplayName": "OpenShrimp",
+        "CFBundleIdentifier": "com.openshrimp.app",
         "CFBundleVersion": _VERSION,
         "CFBundleShortVersionString": _VERSION,
         "LSUIElement": True,  # No Dock icon — menu bar only
@@ -43,7 +43,7 @@ OPTIONS: dict = {
         "NSHighResolutionCapable": True,
     },
     "packages": [
-        "open_udang",
+        "open_shrimp",
         "telegram",
         "httpx",
         "httpcore",
@@ -60,8 +60,8 @@ OPTIONS: dict = {
     ],
     "includes": [
         "rumps",
-        "open_udang.platform.macos.app",
-        "open_udang.platform.macos.app_setup",
+        "open_shrimp.platform.macos.app",
+        "open_shrimp.platform.macos.app_setup",
     ],
     "excludes": [
         # Trim unnecessary stdlib modules to reduce bundle size
@@ -82,7 +82,7 @@ for _img in ("menubar-icon.png", "menubar-icon@2x.png"):
         OPTIONS["resources"].append(str(_path))
 
 setup(
-    name="OpenUdang",
+    name="OpenShrimp",
     version=_VERSION,
     app=APP,
     data_files=DATA_FILES,

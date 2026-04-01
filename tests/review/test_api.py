@@ -13,10 +13,10 @@ from urllib.parse import urlencode
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from open_udang.config import Config, ContextConfig, ReviewConfig, TelegramConfig
-from open_udang.review.api import _hunk_cache, create_review_app
-from open_udang.review.git_diff import Hunk, HunkLine, HunkResult
-from open_udang.review.git_stage import StageResult
+from open_shrimp.config import Config, ContextConfig, ReviewConfig, TelegramConfig
+from open_shrimp.review.api import _hunk_cache, create_review_app
+from open_shrimp.review.git_diff import Hunk, HunkLine, HunkResult
+from open_shrimp.review.git_stage import StageResult
 
 BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 ALLOWED_USER_ID = 111222333
@@ -149,7 +149,7 @@ async def test_get_hunks_success(transport) -> None:
     hunks = [_make_hunk()]
     result = _make_hunk_result(hunks)
 
-    with patch("open_udang.review.api.get_hunks", new_callable=AsyncMock) as mock_get:
+    with patch("open_shrimp.review.api.get_hunks", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = result
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get(
@@ -201,7 +201,7 @@ async def test_get_hunks_wrong_user(transport) -> None:
 @pytest.mark.asyncio
 async def test_get_hunks_missing_chat_id(transport) -> None:
     """Request without chat_id returns 400."""
-    with patch("open_udang.review.api.get_hunks", new_callable=AsyncMock):
+    with patch("open_shrimp.review.api.get_hunks", new_callable=AsyncMock):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get(
                 "/api/review/hunks",
@@ -217,7 +217,7 @@ async def test_get_hunks_pagination(transport) -> None:
     hunks = [_make_hunk(hunk_id=f"hunk{i}") for i in range(5)]
     result = _make_hunk_result(hunks)
 
-    with patch("open_udang.review.api.get_hunks", new_callable=AsyncMock) as mock_get:
+    with patch("open_shrimp.review.api.get_hunks", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = result
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get(
@@ -244,7 +244,7 @@ async def test_stage_hunk_success(transport) -> None:
     _hunk_cache[(CHAT_ID, "default", 0)] = [hunk]
 
     with (
-        patch("open_udang.review.api.stage_hunk", new_callable=AsyncMock) as mock_stage,
+        patch("open_shrimp.review.api.stage_hunk", new_callable=AsyncMock) as mock_stage,
     ):
         mock_stage.return_value = StageResult(ok=True)
 
@@ -281,7 +281,7 @@ async def test_stage_hunk_stale(transport) -> None:
     hunk = _make_hunk()
     _hunk_cache[(CHAT_ID, "default", 0)] = [hunk]
 
-    with patch("open_udang.review.api.stage_hunk", new_callable=AsyncMock) as mock_stage:
+    with patch("open_shrimp.review.api.stage_hunk", new_callable=AsyncMock) as mock_stage:
         mock_stage.return_value = StageResult(ok=False, error="Hunk is stale", stale=True)
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -330,7 +330,7 @@ async def test_unstage_hunk_success(transport) -> None:
     _hunk_cache[(CHAT_ID, "default", 0)] = [hunk]
 
     with (
-        patch("open_udang.review.api.unstage_hunk", new_callable=AsyncMock) as mock_unstage,
+        patch("open_shrimp.review.api.unstage_hunk", new_callable=AsyncMock) as mock_unstage,
     ):
         mock_unstage.return_value = StageResult(ok=True)
 
@@ -352,7 +352,7 @@ async def test_unstage_hunk_stale(transport) -> None:
     hunk = _make_hunk(staged=True)
     _hunk_cache[(CHAT_ID, "default", 0)] = [hunk]
 
-    with patch("open_udang.review.api.unstage_hunk", new_callable=AsyncMock) as mock_unstage:
+    with patch("open_shrimp.review.api.unstage_hunk", new_callable=AsyncMock) as mock_unstage:
         mock_unstage.return_value = StageResult(ok=False, error="Hunk is stale", stale=True)
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -391,7 +391,7 @@ async def test_hunks_endpoint_populates_cache(transport) -> None:
     hunks = [_make_hunk()]
     result = _make_hunk_result(hunks)
 
-    with patch("open_udang.review.api.get_hunks", new_callable=AsyncMock) as mock_get:
+    with patch("open_shrimp.review.api.get_hunks", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = result
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             await client.get(
@@ -412,8 +412,8 @@ async def test_stage_without_chat_id_searches_all_cache(transport) -> None:
     updated_result = _make_hunk_result([_make_hunk(staged=True)])
 
     with (
-        patch("open_udang.review.api.stage_hunk", new_callable=AsyncMock) as mock_stage,
-        patch("open_udang.review.api.get_hunks", new_callable=AsyncMock) as mock_get,
+        patch("open_shrimp.review.api.stage_hunk", new_callable=AsyncMock) as mock_stage,
+        patch("open_shrimp.review.api.get_hunks", new_callable=AsyncMock) as mock_get,
     ):
         mock_stage.return_value = StageResult(ok=True)
         mock_get.return_value = updated_result

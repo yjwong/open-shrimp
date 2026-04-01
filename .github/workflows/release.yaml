@@ -40,17 +40,17 @@ jobs:
         working-directory: web/vnc-app
         run: npm ci && npm run build
 
-      - name: Build open-udang sdist
+      - name: Build open-shrimp sdist
         run: uv build --sdist
 
       - name: Build moonshine-stt sdist
         working-directory: moonshine-stt
         run: uv build --sdist
 
-      - name: Upload open-udang sdist
+      - name: Upload open-shrimp sdist
         uses: actions/upload-artifact@v7
         with:
-          name: sdist-openudang
+          name: sdist-openshrimp
           path: dist/*.tar.gz
 
       - name: Upload moonshine-stt sdist
@@ -67,19 +67,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # open-udang
+          # open-shrimp
           - os: ubuntu-latest
-            artifact: openudang-linux-x86_64
-            sdist_artifact: sdist-openudang
-            exec_code: "from open_udang.main import main; main()"
+            artifact: openshrimp-linux-x86_64
+            sdist_artifact: sdist-openshrimp
+            exec_code: "from open_shrimp.main import main; main()"
           - os: ubuntu-24.04-arm
-            artifact: openudang-linux-aarch64
-            sdist_artifact: sdist-openudang
-            exec_code: "from open_udang.main import main; main()"
+            artifact: openshrimp-linux-aarch64
+            sdist_artifact: sdist-openshrimp
+            exec_code: "from open_shrimp.main import main; main()"
           - os: macos-latest
-            artifact: openudang-macos-aarch64
-            sdist_artifact: sdist-openudang
-            exec_code: "from open_udang.main import main; main()"
+            artifact: openshrimp-macos-aarch64
+            sdist_artifact: sdist-openshrimp
+            exec_code: "from open_shrimp.main import main; main()"
           # moonshine-stt
           - os: ubuntu-latest
             artifact: moonshine-stt-linux-x86_64
@@ -185,19 +185,19 @@ jobs:
         run: |
           brew install create-dmg
           create-dmg \
-            --volname "OpenUdang" \
+            --volname "OpenShrimp" \
             --window-size 600 400 \
-            --icon "OpenUdang.app" 150 200 \
+            --icon "OpenShrimp.app" 150 200 \
             --app-drop-link 450 200 \
             --no-internet-enable \
-            "dist/OpenUdang-$(cat VERSION).dmg" \
-            "dist/OpenUdang.app"
+            "dist/OpenShrimp-$(cat VERSION).dmg" \
+            "dist/OpenShrimp.app"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v7
         with:
-          name: OpenUdang-macos-app
-          path: dist/OpenUdang-*.dmg
+          name: OpenShrimp-macos-app
+          path: dist/OpenShrimp-*.dmg
 
   release:
     name: Create GitHub Release
@@ -218,7 +218,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/openudang-*
+            artifacts/openshrimp-*
             artifacts/moonshine-stt-*
-            artifacts/OpenUdang-*.dmg
+            artifacts/OpenShrimp-*.dmg
             artifacts/*.tar.gz

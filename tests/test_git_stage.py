@@ -5,13 +5,13 @@ import textwrap
 
 import pytest
 
-from open_udang.review.git_diff import (
+from open_shrimp.review.git_diff import (
     Hunk,
     HunkLine,
     get_hunks,
     parse_diff,
 )
-from open_udang.review.git_stage import (
+from open_shrimp.review.git_stage import (
     StageResult,
     reconstruct_patch,
     stage_hunk,

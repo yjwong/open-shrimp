@@ -1,14 +1,14 @@
 # Container image for computer use (GUI interaction) contexts.
 #
-# Extends the base openudang-claude image with a headless Wayland
+# Extends the base openshrimp-claude image with a headless Wayland
 # compositor (labwc), input injection (wlrctl), screenshot capture
 # (grim), VNC server (wayvnc), a web browser (Chromium via Playwright),
 # and Playwright MCP for structured browser automation.
 #
 # Build:
-#   docker build -f Dockerfile.computer-use -t openudang-computer-use:latest .
+#   docker build -f Dockerfile.computer-use -t openshrimp-computer-use:latest .
 
-FROM openudang-claude:latest
+FROM openshrimp-claude:latest
 
 # Wayland compositor + tools
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from open_udang.setup import _path_completer, _validate_directory, run_setup_wizard
+from open_shrimp.setup import _path_completer, _validate_directory, run_setup_wizard
 
 
 def _make_inputs(*responses: str):
@@ -17,7 +17,7 @@ def _make_inputs(*responses: str):
     return lambda prompt="": next(it)
 
 
-@patch("open_udang.setup._check_1m_available", return_value=False)
+@patch("open_shrimp.setup._check_1m_available", return_value=False)
 class TestRunSetupWizard:
     """End-to-end tests for run_setup_wizard."""
 
@@ -221,7 +221,7 @@ class TestRunSetupWizard:
 
     def test_config_roundtrips_through_load(self, _mock_1m: MagicMock, tmp_path: Path) -> None:
         """The wizard-generated config should pass load_config validation."""
-        from open_udang.config import load_config
+        from open_shrimp.config import load_config
 
         config_path = tmp_path / "config.yaml"
         inputs = _make_inputs(

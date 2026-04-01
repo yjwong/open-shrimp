@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from open_udang.tunnel import (
+from open_shrimp.tunnel import (
     _BIN_DIR,
     _find_cloudflared,
     _get_binary_name,
@@ -26,25 +26,25 @@ class TestGetBinaryName:
     """Tests for _get_binary_name()."""
 
     def test_linux_x86_64(self) -> None:
-        with patch("open_udang.tunnel.platform") as mock_platform:
+        with patch("open_shrimp.tunnel.platform") as mock_platform:
             mock_platform.system.return_value = "Linux"
             mock_platform.machine.return_value = "x86_64"
             assert _get_binary_name() == "cloudflared-linux-amd64"
 
     def test_linux_aarch64(self) -> None:
-        with patch("open_udang.tunnel.platform") as mock_platform:
+        with patch("open_shrimp.tunnel.platform") as mock_platform:
             mock_platform.system.return_value = "Linux"
             mock_platform.machine.return_value = "aarch64"
             assert _get_binary_name() == "cloudflared-linux-arm64"
 
     def test_darwin_arm64(self) -> None:
-        with patch("open_udang.tunnel.platform") as mock_platform:
+        with patch("open_shrimp.tunnel.platform") as mock_platform:
             mock_platform.system.return_value = "Darwin"
             mock_platform.machine.return_value = "arm64"
             assert _get_binary_name() == "cloudflared-darwin-arm64.tgz"
 
     def test_unsupported_platform(self) -> None:
-        with patch("open_udang.tunnel.platform") as mock_platform:
+        with patch("open_shrimp.tunnel.platform") as mock_platform:
             mock_platform.system.return_value = "FreeBSD"
             mock_platform.machine.return_value = "x86_64"
             assert _get_binary_name() is None
@@ -59,14 +59,14 @@ class TestFindCloudflared:
         fake_bin.write_text("#!/bin/sh\n")
         fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IXUSR)
 
-        with patch("open_udang.tunnel._BIN_DIR", tmp_path):
+        with patch("open_shrimp.tunnel._BIN_DIR", tmp_path):
             result = _find_cloudflared()
             assert result == str(fake_bin)
 
     def test_finds_in_path(self) -> None:
         """Should fall back to $PATH lookup."""
         with (
-            patch("open_udang.tunnel._BIN_DIR", Path("/nonexistent")),
+            patch("open_shrimp.tunnel._BIN_DIR", Path("/nonexistent")),
             patch("shutil.which", return_value="/usr/bin/cloudflared"),
         ):
             result = _find_cloudflared()
@@ -75,7 +75,7 @@ class TestFindCloudflared:
     def test_not_found(self) -> None:
         """Should return None if not found anywhere."""
         with (
-            patch("open_udang.tunnel._BIN_DIR", Path("/nonexistent")),
+            patch("open_shrimp.tunnel._BIN_DIR", Path("/nonexistent")),
             patch("shutil.which", return_value=None),
         ):
             result = _find_cloudflared()
@@ -138,7 +138,7 @@ class TestEnsureCloudflared:
     async def test_already_installed(self) -> None:
         """Should return existing path if found."""
         with patch(
-            "open_udang.tunnel._find_cloudflared",
+            "open_shrimp.tunnel._find_cloudflared",
             return_value="/usr/bin/cloudflared",
         ):
             result = await ensure_cloudflared()
@@ -148,14 +148,14 @@ class TestEnsureCloudflared:
     async def test_downloads_if_not_found(self) -> None:
         """Should attempt download if not found."""
         with (
-            patch("open_udang.tunnel._find_cloudflared", return_value=None),
+            patch("open_shrimp.tunnel._find_cloudflared", return_value=None),
             patch(
-                "open_udang.tunnel._download_cloudflared",
-                return_value="/home/user/.config/openudang/bin/cloudflared",
+                "open_shrimp.tunnel._download_cloudflared",
+                return_value="/home/user/.config/openshrimp/bin/cloudflared",
             ) as mock_download,
         ):
             result = await ensure_cloudflared()
-            assert result == "/home/user/.config/openudang/bin/cloudflared"
+            assert result == "/home/user/.config/openshrimp/bin/cloudflared"
             mock_download.assert_called_once()
 
 
@@ -177,7 +177,7 @@ class TestStartTunnel:
 
         with (
             patch(
-                "open_udang.tunnel.ensure_cloudflared",
+                "open_shrimp.tunnel.ensure_cloudflared",
                 return_value="/usr/bin/cloudflared",
             ),
             patch(

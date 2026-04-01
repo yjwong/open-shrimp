@@ -1,4 +1,4 @@
-# OpenUdang
+# OpenShrimp
 
 Telegram bot for remote Claude access via the Agent SDK. A personal, self-hosted alternative to OpenClaw.
 
@@ -11,7 +11,7 @@ Telegram bot for remote Claude access via the Agent SDK. A personal, self-hosted
 ## Architecture
 
 ```
-Telegram <-> OpenUdang (Python, async) <-> Claude Agent SDK
+Telegram <-> OpenShrimp (Python, async) <-> Claude Agent SDK
                 |
                 +-- Config (YAML: contexts, ACL)
                 +-- Session store (SQLite: chat/thread -> session_id mapping)
@@ -22,10 +22,10 @@ Telegram <-> OpenUdang (Python, async) <-> Claude Agent SDK
 
 - **Context**: A working directory + CLAUDE.md. Switch with `/context <name>`. Each context has its own model, auto-approve list, and tools.
 - **ChatScope**: A `(chat_id, thread_id)` pair that identifies a unique conversation scope. In private/group chats, `thread_id` is `None`. In forum topics, each topic thread has its own `thread_id`, so multiple topics in the same chat get independent contexts and sessions.
-- **Session**: A persistent Claude conversation. The Agent SDK handles persistence as `.jsonl` files under `~/.claude/projects/<encoded-cwd>/`. OpenUdang maps `(chat_id, thread_id, context_name) -> session_id` in SQLite.
+- **Session**: A persistent Claude conversation. The Agent SDK handles persistence as `.jsonl` files under `~/.claude/projects/<encoded-cwd>/`. OpenShrimp maps `(chat_id, thread_id, context_name) -> session_id` in SQLite.
 - **Tool approval**: Uses the SDK's `allowedTools` for auto-approved tools (patterns like `Bash(git *)`) and a `canUseTool` callback for everything else. Read-only file tools (Read, Glob, Grep) are auto-approved within the context working directory. Mutating tools (Edit, Write) always require explicit approval via Telegram inline keyboard, even within cwd, unless the user opts into "accept all edits" for the session. Non-path tools use pattern-based session-scoped approval rules: for Bash, the user can approve by command prefix (e.g. "Accept all git" creates a `git *` pattern) or blanket-approve the entire tool. Approval rules are `ApprovalRule(tool_name, pattern)` with `fnmatch` glob matching.
-- **Containerization**: Optional per-context Docker isolation via the `container:` config key. The Claude CLI runs inside a container with only the project directory bind-mounted (at the same host path). Session storage is isolated under `~/.config/openudang/containers/<context>/`, mounted as `~/.claude` inside the container. The container runs as the host user's uid/gid to avoid root-owned files. The SDK's `cli_path` is pointed at a generated wrapper script that invokes `docker run`; all other SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged. Containerized contexts auto-approve all Bash commands since Docker provides the safety boundary. Custom Dockerfiles can be specified per-context via `container.dockerfile` to install dev tools (Go, Node, Rust, etc.); images are tagged `openudang-claude:<context-name>` and built lazily.
-- **Computer use**: Optional per-context GUI interaction via `container.computer_use: true`. Runs a headless Wayland desktop (labwc compositor, 1280x720) inside the container with Chromium and a foot terminal. Claude interacts via MCP tools: `computer_screenshot` (grim), `computer_click`/`computer_type`/`computer_key`/`computer_scroll` (wlrctl), and `computer_toplevel` for window management. Screenshots are saved to a bind-mounted directory and sent to Telegram for user observability. A VNC server (wayvnc) is exposed on a dynamic port for live viewing. The computer-use image (`openudang-computer-use:latest`) extends the base image with `Dockerfile.computer-use`.
+- **Containerization**: Optional per-context Docker isolation via the `container:` config key. The Claude CLI runs inside a container with only the project directory bind-mounted (at the same host path). Session storage is isolated under `~/.config/openshrimp/containers/<context>/`, mounted as `~/.claude` inside the container. The container runs as the host user's uid/gid to avoid root-owned files. The SDK's `cli_path` is pointed at a generated wrapper script that invokes `docker run`; all other SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged. Containerized contexts auto-approve all Bash commands since Docker provides the safety boundary. Custom Dockerfiles can be specified per-context via `container.dockerfile` to install dev tools (Go, Node, Rust, etc.); images are tagged `openshrimp-claude:<context-name>` and built lazily.
+- **Computer use**: Optional per-context GUI interaction via `container.computer_use: true`. Runs a headless Wayland desktop (labwc compositor, 1280x720) inside the container with Chromium and a foot terminal. Claude interacts via MCP tools: `computer_screenshot` (grim), `computer_click`/`computer_type`/`computer_key`/`computer_scroll` (wlrctl), and `computer_toplevel` for window management. Screenshots are saved to a bind-mounted directory and sent to Telegram for user observability. A VNC server (wayvnc) is exposed on a dynamic port for live viewing. The computer-use image (`openshrimp-computer-use:latest`) extends the base image with `Dockerfile.computer-use`.
 - **Scheduled tasks**: Cron-like recurring and one-shot Claude prompts. Users describe schedules in natural language; Claude calls MCP tools (`create_schedule`, `list_schedules`, `delete_schedule`) to manage them. Tasks run in isolated sessions with read-only tools only (no approval UI needed). Persistence via SQLite `scheduled_tasks` table, scheduling via `python-telegram-bot` JobQueue (APScheduler). Safety: 5-minute minimum interval, max 20 tasks per chat, max 3 concurrent executions (global semaphore), per-task timeout (default 10 minutes). One-shot tasks auto-delete after execution.
 
 ### Key SDK Patterns
@@ -55,13 +55,13 @@ async def can_use_tool(tool_name, tool_input, context):
 
 ## Versioning
 
-Both `open-udang` and `moonshine-stt` share a single version from the `VERSION` file at the repo root. Both `pyproject.toml` files use hatchling's dynamic version source to read from it. To bump the version, edit `VERSION` — both projects pick it up automatically.
+Both `open-shrimp` and `moonshine-stt` share a single version from the `VERSION` file at the repo root. Both `pyproject.toml` files use hatchling's dynamic version source to read from it. To bump the version, edit `VERSION` — both projects pick it up automatically.
 
 ## Project Structure
 
 ```
 VERSION                   # Single source of truth for version (shared)
-src/open_udang/
+src/open_shrimp/
     __init__.py
     main.py          # Entry point, arg parsing, config loading
     bot.py            # Telegram bot setup, handlers, long polling
@@ -93,7 +93,7 @@ moonshine-stt/            # Subproject: standalone STT binary (packaged via PyAp
 
 ## Config
 
-Config lives at `~/.config/openudang/config.yaml`. See `config.example.yaml` for schema.
+Config lives at `~/.config/openshrimp/config.yaml`. See `config.example.yaml` for schema.
 
 Key fields:
 - `telegram.token` - Bot token from @BotFather
@@ -147,6 +147,6 @@ Key fields:
 ## Deployment
 
 - Run as a systemd service on the home server.
-- `uv run openudang` as the ExecStart command.
+- `uv run openshrimp` as the ExecStart command.
 - Environment: `ANTHROPIC_API_KEY` in systemd unit or `.env` file loaded by the service.
-- Restart the service: `systemctl --user restart open-udang`
+- Restart the service: `systemctl --user restart open-shrimp`

@@ -5,11 +5,11 @@
 # Node.js required.
 #
 # Build:
-#   docker build -f Dockerfile.claude -t openudang-claude:latest \
+#   docker build -f Dockerfile.claude -t openshrimp-claude:latest \
 #     --build-arg CLAUDE_CLI=/path/to/claude .
 #
 # Or let it auto-detect from an installed claude-agent-sdk:
-#   docker build -f Dockerfile.claude -t openudang-claude:latest .
+#   docker build -f Dockerfile.claude -t openshrimp-claude:latest .
 
 FROM debian:trixie-slim
 
