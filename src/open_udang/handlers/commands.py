@@ -110,6 +110,42 @@ async def handle_context_callback(
         await query.answer()
         return True
 
+    if data.startswith("ctx_clear:"):
+        # Clear session for a context (from the "Clear session" button after switch)
+        target = data[len("ctx_clear:"):]
+        db = context.bot_data["db"]
+        if not query.message:
+            await query.answer("Cannot determine chat.")
+            return True
+
+        scope = chat_scope_from_message(query.message)
+        ctx_name = await _get_context_name(scope, config, db)
+
+        if target == ctx_name:
+            await _cancel_running(scope)
+            _injectable_sessions.pop(scope, None)
+            _setup_queues.pop(scope, None)
+            await close_session(scope)
+            await delete_session(db, scope, ctx_name)
+            _edit_approved_sessions.discard((scope, ctx_name))
+            _tool_approved_sessions.pop((scope, ctx_name), None)
+            _active_bg_tasks.pop(scope, None)
+
+        ctx = config.contexts.get(target)
+        desc = _escape_mdv2(ctx.description) if ctx else ""
+        target_escaped = _escape_mdv2(target)
+        try:
+            await query.message.edit_text(
+                f"Switched to context `{target_escaped}` \\- {desc}\n_Started fresh session\\._",
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+        except Exception:
+            logger.exception("Failed to update context message")
+
+        await query.answer("Session cleared")
+        return True
+
     if data.startswith("ctx:"):
         # Context selection
         target = data[4:]
@@ -146,11 +182,21 @@ async def handle_context_callback(
         desc = _escape_mdv2(ctx.description)
         target_escaped = _escape_mdv2(target)
 
+        existing_session = await get_session_id(db, scope, target)
+        if existing_session:
+            text = f"Switched to context `{target_escaped}` \\- {desc}\n_Resuming existing session\\._"
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Clear session", callback_data=f"ctx_clear:{target}"),
+            ]])
+        else:
+            text = f"Switched to context `{target_escaped}` \\- {desc}"
+            markup = None
+
         try:
             await query.message.edit_text(
-                f"Switched to context `{target_escaped}` \\- {desc}",
+                text,
                 parse_mode="MarkdownV2",
-                reply_markup=None,
+                reply_markup=markup,
             )
         except Exception:
             logger.exception("Failed to update context message")
@@ -220,10 +266,18 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ctx = config.contexts[target]
     desc = _escape_mdv2(ctx.description)
     target_escaped = _escape_mdv2(target)
-    await message.reply_text(
-        f"Switched to context `{target_escaped}` \\- {desc}",
-        parse_mode="MarkdownV2",
-    )
+
+    existing_session = await get_session_id(db, scope, target)
+    if existing_session:
+        text = f"Switched to context `{target_escaped}` \\- {desc}\n_Resuming existing session\\._"
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Clear session", callback_data=f"ctx_clear:{target}"),
+        ]])
+    else:
+        text = f"Switched to context `{target_escaped}` \\- {desc}"
+        markup = None
+
+    await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=markup)
     await _update_pinned_status(context.bot, scope, target, ctx, db)
 
 
