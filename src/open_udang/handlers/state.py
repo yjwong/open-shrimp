@@ -177,6 +177,12 @@ _RESUME_LIST_LIMIT = 5
 # Pending resume selections: callback_data -> session_id
 _resume_selections: dict[str, str] = {}
 
+# Cached session info for detail view: session_id -> SDKSessionInfo
+_resume_session_cache: dict[str, Any] = {}
+
+# Page each session was listed on: session_id -> (ctx_name, page)
+_resume_page_cache: dict[str, tuple[str, int]] = {}
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

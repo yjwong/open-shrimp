@@ -30,7 +30,9 @@ from open_udang.handlers.state import (
     _edit_approved_sessions,
     _injectable_sessions,
     _model_overrides,
+    _resume_page_cache,
     _resume_selections,
+    _resume_session_cache,
     _running_tasks,
     _tool_approved_sessions,
     _setup_queues,
@@ -506,6 +508,26 @@ def _list_sessions_for_context(
 # ── /resume ──
 
 
+def _relative_time(epoch_ms: int | None) -> str:
+    """Format an epoch-millisecond timestamp as a human-readable relative time."""
+    if not epoch_ms:
+        return "unknown"
+    delta = time.time() - epoch_ms / 1000
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        m = int(delta / 60)
+        return f"{m}m ago"
+    if delta < 86400:
+        h = int(delta / 3600)
+        return f"{h}h ago"
+    if delta < 604800:
+        d = int(delta / 86400)
+        return f"{d}d ago"
+    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    return dt.strftime("%b %d")
+
+
 async def _build_resume_page(
     ctx_name: str,
     ctx: ContextConfig,
@@ -543,14 +565,22 @@ async def _build_resume_page(
     buttons: list[list[InlineKeyboardButton]] = []
     for s in sessions:
         summary = s.summary or "No summary"
-        if len(summary) > 60:
-            summary = summary[:57] + "..."
-        sid_short = s.session_id[:8]
-        marker = " (current)" if s.session_id == current_session_id else ""
-        label = f"{sid_short} - {summary}{marker}"
-        cb_data = f"resume:{s.session_id}"
-        _resume_selections[cb_data] = s.session_id
-        buttons.append([InlineKeyboardButton(label, callback_data=cb_data)])
+        rel = _relative_time(s.last_modified)
+        marker = " \u2713" if s.session_id == current_session_id else ""
+        # Truncate summary to fit button with timestamp and marker.
+        max_summary = 44
+        if len(summary) > max_summary:
+            summary = summary[:max_summary - 3] + "..."
+        label = f"{rel} - {summary}{marker}"
+        resume_data = f"resume:{s.session_id}"
+        info_data = f"resume_info:{s.session_id}"
+        _resume_selections[resume_data] = s.session_id
+        _resume_session_cache[s.session_id] = s
+        _resume_page_cache[s.session_id] = (ctx_name, page)
+        buttons.append([
+            InlineKeyboardButton(label, callback_data=resume_data),
+            InlineKeyboardButton("\u2139\ufe0f", callback_data=info_data),
+        ])
 
     # Navigation row
     nav: list[InlineKeyboardButton] = []
@@ -568,6 +598,64 @@ async def _build_resume_page(
     page_label = f" \\(page {page + 1}\\)" if page > 0 or has_next else ""
     text = f"*Recent sessions for* `{_escape_mdv2(ctx_name)}`*:*{page_label}"
     return text, InlineKeyboardMarkup(buttons)
+
+
+def _build_resume_detail(
+    session_id: str,
+    ctx_name: str,
+    current_session_id: str | None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the detail view for a single session."""
+    s = _resume_session_cache.get(session_id)
+    if not s:
+        text = "Session info has expired\\. Use /resume to list again\\."
+        keyboard = InlineKeyboardMarkup([])
+        return text, keyboard
+
+    lines: list[str] = []
+    lines.append(f"*Session details*\n")
+
+    if s.custom_title:
+        lines.append(f"*Title:* {_escape_mdv2(s.custom_title)}")
+    lines.append(f"*Summary:* {_escape_mdv2(s.summary or 'No summary')}")
+
+    if s.first_prompt:
+        prompt = s.first_prompt
+        if len(prompt) > 200:
+            prompt = prompt[:197] + "..."
+        lines.append(f"*First prompt:* {_escape_mdv2(prompt)}")
+
+    if s.git_branch:
+        lines.append(f"*Branch:* `{_escape_mdv2(s.git_branch)}`")
+
+    lines.append(f"*Created:* {_escape_mdv2(_relative_time(s.created_at))}")
+    lines.append(f"*Last active:* {_escape_mdv2(_relative_time(s.last_modified))}")
+
+    if s.file_size:
+        size_kb = s.file_size / 1024
+        if size_kb >= 1024:
+            size_str = f"{size_kb / 1024:.1f} MB"
+        else:
+            size_str = f"{size_kb:.0f} KB"
+        lines.append(f"*Size:* {_escape_mdv2(size_str)}")
+
+    lines.append(f"*ID:* `{_escape_mdv2(s.session_id)}`")
+
+    if s.session_id == current_session_id:
+        lines.append("\n_This is the current session\\._")
+
+    text = "\n".join(lines)
+
+    resume_data = f"resume:{s.session_id}"
+    _resume_selections[resume_data] = s.session_id
+    ctx_name_cached, page = _resume_page_cache.get(s.session_id, (ctx_name, 0))
+    back_data = f"resume_page:{ctx_name_cached}:{page}"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("\u25b6\ufe0f Resume", callback_data=resume_data)],
+        [InlineKeyboardButton("\u25c0 Back to list", callback_data=back_data)],
+    ])
+    return text, keyboard
 
 
 async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -634,7 +722,8 @@ async def handle_resume_callback(
     query: Any, data: str, config: Config, context: ContextTypes.DEFAULT_TYPE,
 ) -> bool:
     """Handle /resume session selection callback. Returns True if handled."""
-    if not data.startswith("resume:") and not data.startswith("resume_page:"):
+    prefixes = ("resume:", "resume_page:", "resume_info:")
+    if not any(data.startswith(p) for p in prefixes):
         return False
 
     db: aiosqlite.Connection = context.bot_data["db"]
@@ -672,6 +761,30 @@ async def handle_resume_callback(
             logger.exception("Failed to update resume page")
         return True
 
+    # Handle session detail view
+    if data.startswith("resume_info:"):
+        session_id = data[len("resume_info:"):]
+        if not query.message:
+            await query.answer("Cannot determine chat.")
+            return True
+        scope = chat_scope_from_message(query.message)
+        ctx_name, _ = await _get_context(scope, config, db)
+        current_session_id = await get_session_id(db, scope, ctx_name)
+        text, keyboard = _build_resume_detail(
+            session_id, ctx_name, current_session_id,
+        )
+        await query.answer()
+        try:
+            await query.message.edit_text(
+                text=text,
+                parse_mode="MarkdownV2",
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.exception("Failed to show session detail")
+        return True
+
+    # Handle session resume
     session_id = _resume_selections.pop(data, None)
     if not session_id:
         await query.answer("This selection has expired.")
