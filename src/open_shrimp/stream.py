@@ -70,24 +70,14 @@ class StreamResult:
 
 
 @dataclass
-class ToolNotification:
-    """A tool call notification to show in the message."""
-
-    tool_name: str
-    summary: str
-    auto: bool
-
-
-@dataclass
 class _DraftState:
     """Internal state for message drafting."""
 
     chat_id: int
     thread_id: int | None = None
-    # Raw GFM text accumulated so far (before conversion)
+    # Raw GFM text accumulated so far (before conversion).
+    # Tool notifications are inlined as GFM blockquotes.
     raw_text: str = ""
-    # Tool notifications collected for the current message
-    tool_notifications: list[ToolNotification] = field(default_factory=list)
     # Message IDs of finalized messages (for reference)
     sent_message_ids: list[int] = field(default_factory=list)
     # Draft ID for sendMessageDraft (non-zero integer, stable per draft)
@@ -120,21 +110,9 @@ class _DraftState:
         return {}
 
 
-def _format_tool_prefix(notifications: list[ToolNotification]) -> str:
-    """Format tool notifications as a GFM blockquote prefix."""
-    if not notifications:
-        return ""
-    lines = []
-    for n in notifications:
-        suffix = " (auto)" if n.auto else ""
-        lines.append(f"> {n.tool_name}: {n.summary}{suffix}")
-    return "\n".join(lines) + "\n\n"
-
-
 def _build_full_text(state: _DraftState) -> str:
-    """Build the full GFM text including tool prefix."""
-    prefix = _format_tool_prefix(state.tool_notifications)
-    return prefix + state.raw_text
+    """Build the full GFM text."""
+    return state.raw_text
 
 
 async def _send_draft(bot: Bot, state: _DraftState) -> None:
@@ -449,11 +427,10 @@ async def finalize_and_reset(
     Args:
         silent: If True, send the finalized message silently (no notification).
     """
-    if state.raw_text.strip() or state.tool_notifications:
+    if state.raw_text.strip():
         msg_ids = await _finalize_message(bot, state, silent=silent)
         state.sent_message_ids.extend(msg_ids)
     state.raw_text = ""
-    state.tool_notifications = []
     state.draft_id = random.randint(1, 2**31 - 1)
     state.dirty = False
     state.turn_complete = False
@@ -888,13 +865,12 @@ async def stream_response(
                 pass
 
         # Final send of any remaining text — notify since the task is done.
-        if state.raw_text.strip() or state.tool_notifications:
+        if state.raw_text.strip():
             msg_ids = await _finalize_message(bot, state, silent=False)
             state.sent_message_ids.extend(msg_ids)
 
         # Reset for the next stream_response() iteration.
         state.raw_text = ""
-        state.tool_notifications = []
         state.draft_id = random.randint(1, 2**31 - 1)
         state.dirty = False
         state.turn_complete = False
@@ -1006,9 +982,7 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
             logger.exception("Failed to send plaintext fallback")
 
     # Keep the remainder as raw GFM for the next message.
-    # Tool notifications were part of the prefix, so clear them.
     state.raw_text = remainder_gfm
-    state.tool_notifications = []
     state.draft_id = random.randint(1, 2**31 - 1)
     state.dirty = bool(remainder_gfm.strip())
     state.turn_complete = False
@@ -1021,9 +995,22 @@ def add_tool_notification(
     auto: bool,
     cwd: str | None = None,
 ) -> None:
-    """Add a tool call notification to the current draft state."""
+    """Add a tool call notification inline as a GFM blockquote."""
     summary = extract_tool_summary(tool_name, tool_input, cwd=cwd)
-    state.tool_notifications.append(
-        ToolNotification(tool_name=tool_name, summary=summary, auto=auto)
-    )
+    suffix = " (auto)" if auto else ""
+    line = f"> {tool_name}: {summary}{suffix}"
+
+    # Group consecutive tool notifications into a single blockquote block.
+    stripped = state.raw_text.rstrip()
+    last_line = stripped.rsplit("\n", 1)[-1] if stripped else ""
+
+    if last_line.startswith(">"):
+        # Continue the existing blockquote (consecutive tool calls).
+        state.raw_text = stripped + "\n" + line + "\n"
+    elif stripped:
+        # Paragraph break before starting a new blockquote.
+        state.raw_text = stripped + "\n\n" + line + "\n"
+    else:
+        state.raw_text = line + "\n"
+
     state.dirty = True
