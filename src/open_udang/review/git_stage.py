@@ -15,6 +15,18 @@ from open_udang.review.git_diff import (
 
 logger = logging.getLogger(__name__)
 
+# Per-directory locks to serialise git index operations.
+# Without this, concurrent stage/unstage requests racing on the same
+# repo cause "patch does not apply" errors.
+_dir_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_lock(cwd: str) -> asyncio.Lock:
+    """Return (or create) the asyncio.Lock for the given directory."""
+    if cwd not in _dir_locks:
+        _dir_locks[cwd] = asyncio.Lock()
+    return _dir_locks[cwd]
+
 
 @dataclass
 class StageResult:
@@ -89,14 +101,15 @@ async def stage_hunk(cwd: str, hunk: Hunk) -> StageResult:
     """
     patch = reconstruct_patch(hunk)
 
-    proc = await asyncio.create_subprocess_exec(
-        "git", "apply", "--cached", "-",
-        cwd=cwd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate(input=patch.encode())
+    async with _get_lock(cwd):
+        proc = await asyncio.create_subprocess_exec(
+            "git", "apply", "--cached", "-",
+            cwd=cwd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate(input=patch.encode())
 
     if proc.returncode != 0:
         error_msg = stderr.decode().strip()
@@ -126,14 +139,15 @@ async def unstage_hunk(cwd: str, hunk: Hunk) -> StageResult:
     """
     patch = reconstruct_patch(hunk)
 
-    proc = await asyncio.create_subprocess_exec(
-        "git", "apply", "--cached", "-R", "-",
-        cwd=cwd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate(input=patch.encode())
+    async with _get_lock(cwd):
+        proc = await asyncio.create_subprocess_exec(
+            "git", "apply", "--cached", "-R", "-",
+            cwd=cwd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate(input=patch.encode())
 
     if proc.returncode != 0:
         error_msg = stderr.decode().strip()
@@ -172,13 +186,14 @@ async def remove_intent_to_add(cwd: str, hunk: Hunk) -> StageResult:
     Returns:
         StageResult indicating success or failure.
     """
-    proc = await asyncio.create_subprocess_exec(
-        "git", "rm", "--cached", "--", hunk.file_path,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
+    async with _get_lock(cwd):
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rm", "--cached", "--", hunk.file_path,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
 
     if proc.returncode != 0:
         error_msg = stderr.decode().strip()
