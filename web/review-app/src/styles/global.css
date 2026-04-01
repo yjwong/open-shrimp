@@ -431,6 +431,34 @@ body {
   border: 2px solid var(--warning);
 }
 
+/* --- Keyboard Hints --- */
+
+.keyboard-hints {
+  display: none;
+  justify-content: center;
+  gap: 16px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .keyboard-hints {
+    display: flex;
+  }
+}
+
+.keyboard-hints kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid var(--text-muted);
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 /* --- HunkCard --- */
 
 .hunk-card {

@@ -178,6 +178,32 @@ export function SwipeDeck({
     enabled: swipeEnabled && !isComplete,
   });
 
+  // Keyboard shortcuts for desktop: arrow keys + vim keys
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isProcessing || isComplete || !currentHunk) return;
+      // Don't intercept if user is typing in an input/textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      let direction: SwipeDirection = null;
+      if (e.key === "ArrowRight" || e.key === "l") {
+        direction = "right";
+      } else if (e.key === "ArrowLeft" || e.key === "h") {
+        direction = "left";
+      } else if (e.key === "ArrowDown" || e.key === "z") {
+        direction = "down";
+      }
+
+      if (direction) {
+        e.preventDefault();
+        void handleSwipe(direction);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isProcessing, isComplete, currentHunk, handleSwipe]);
+
   // Track drag for overlay — listen to style changes on the card.
   // Uses direct DOM manipulation instead of React state to avoid
   // re-renders that would kill the @use-gesture drag session.
@@ -431,6 +457,12 @@ export function SwipeDeck({
           className="swipe-card swipe-card-exiting"
           style={{ display: "none" }}
         />
+      </div>
+
+      <div className="keyboard-hints">
+        <span><kbd>&larr;</kbd> / <kbd>h</kbd> Skip</span>
+        <span><kbd>&rarr;</kbd> / <kbd>l</kbd> Stage</span>
+        <span><kbd>&darr;</kbd> / <kbd>z</kbd> Undo</span>
       </div>
     </div>
   );
