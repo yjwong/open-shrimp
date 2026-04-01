@@ -766,7 +766,7 @@ async def stream_response(
                             )
                             app_url = (
                                 f"{terminal_base_url}/terminal/"
-                                f"?task_id={event.task_id}"
+                                f"?type=task&id={event.task_id}"
                                 f"{task_type_param}"
                             )
                             buttons.append(

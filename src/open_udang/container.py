@@ -33,6 +33,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import threading
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 
@@ -138,6 +139,75 @@ COMPUTER_USE_IMAGE = "openudang-computer-use:latest"
 # Base directory for per-context container state (session storage, etc.).
 CONTAINER_STATE_DIR = user_data_path("openudang") / "containers"
 
+# ---------------------------------------------------------------------------
+# Build log streaming support
+# ---------------------------------------------------------------------------
+
+# Directory for build log files, tailed by the terminal mini app.
+BUILD_LOG_DIR = Path(tempfile.gettempdir()) / "openudang-builds"
+
+# Active builds: context_name -> log file path.
+_active_builds: dict[str, Path] = {}
+_active_builds_lock = threading.Lock()
+
+# Per-context build locks to prevent concurrent builds for the same context.
+_build_locks: dict[str, threading.Lock] = {}
+_build_locks_meta = threading.Lock()
+
+
+def _get_build_lock(context_name: str) -> threading.Lock:
+    """Return a per-context lock, creating it if needed."""
+    with _build_locks_meta:
+        if context_name not in _build_locks:
+            _build_locks[context_name] = threading.Lock()
+        return _build_locks[context_name]
+
+
+def register_build(context_name: str) -> Path:
+    """Register an active build and create its log file.
+
+    Returns the path to the log file. The file is created empty so it
+    exists by the time the user clicks "View output".
+    """
+    BUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = BUILD_LOG_DIR / f"{context_name}.log"
+    # Truncate any previous log.
+    log_path.write_bytes(b"")
+    with _active_builds_lock:
+        _active_builds[context_name] = log_path
+    logger.info("Registered build log for context '%s': %s", context_name, log_path)
+    return log_path
+
+
+def unregister_build(context_name: str) -> None:
+    """Mark a build as no longer active.
+
+    The log file is kept for 1 hour so users can review it after
+    completion, then cleaned up.
+    """
+    with _active_builds_lock:
+        _active_builds.pop(context_name, None)
+    logger.info("Unregistered build for context '%s'", context_name)
+
+    log_path = BUILD_LOG_DIR / f"{context_name}.log"
+
+    def _cleanup() -> None:
+        try:
+            log_path.unlink(missing_ok=True)
+            logger.debug("Cleaned up build log %s", log_path)
+        except Exception:
+            logger.debug("Failed to clean up build log %s", log_path)
+
+    timer = threading.Timer(3600, _cleanup)
+    timer.daemon = True
+    timer.start()
+
+
+def is_build_active(context_name: str) -> bool:
+    """Check whether a build is currently active for the given context."""
+    with _active_builds_lock:
+        return context_name in _active_builds
+
 # Custom seccomp profile for DinD: Docker's default + keyctl (inner runc
 # session keyrings) + pivot_root (inner container rootfs setup).
 def _find_seccomp_profile() -> Path:
@@ -175,6 +245,7 @@ def ensure_image(
     image_name: str = CONTAINER_IMAGE,
     dockerfile: str | None = None,
     base_image: str | None = None,
+    log_file: Path | None = None,
 ) -> None:
     """Ensure the container image exists, building it if necessary.
 
@@ -266,6 +337,7 @@ def ensure_image(
             build_dir=str(build_dir_path),
             dockerfile_name=dockerfile_path.name,
             extra_build_args=extra_args,
+            log_file=log_file,
         )
     else:
         # Default: bundled Dockerfile.claude in a temp build context.
@@ -286,13 +358,18 @@ def ensure_image(
             build_path = Path(build_dir)
             shutil.copy2(cli_binary, build_path / "claude")
             (build_path / "Dockerfile").write_text(dockerfile_text)
-            _docker_build(image_name=image_name, build_dir=build_dir)
+            _docker_build(
+                image_name=image_name,
+                build_dir=build_dir,
+                log_file=log_file,
+            )
 
     logger.info("Successfully built container image %s", image_name)
 
 
 def ensure_computer_use_image(
     image_name: str = COMPUTER_USE_IMAGE,
+    log_file: Path | None = None,
 ) -> None:
     """Ensure the computer-use container image exists, building if necessary.
 
@@ -322,7 +399,7 @@ def ensure_computer_use_image(
         return
 
     # Ensure the base image exists first.
-    ensure_image(image_name=CONTAINER_IMAGE, dockerfile=None)
+    ensure_image(image_name=CONTAINER_IMAGE, dockerfile=None, log_file=log_file)
 
     if needs_rebuild:
         logger.info("Rebuilding computer-use image %s...", image_name)
@@ -339,6 +416,7 @@ def ensure_computer_use_image(
             image_name=image_name,
             build_dir=str(repo_root),
             dockerfile_name="Dockerfile.computer-use",
+            log_file=log_file,
         )
     else:
         # Installed wheel / PyApp — extract assets to a temp dir.
@@ -367,6 +445,7 @@ def ensure_computer_use_image(
                 image_name=image_name,
                 build_dir=str(build_path),
                 dockerfile_name="Dockerfile.computer-use",
+                log_file=log_file,
             )
 
     logger.info("Successfully built computer-use image %s", image_name)
@@ -377,8 +456,13 @@ def _docker_build(
     build_dir: str,
     dockerfile_name: str = "Dockerfile",
     extra_build_args: list[str] | None = None,
+    log_file: Path | None = None,
 ) -> None:
     """Run ``docker build`` and stream output to the logger.
+
+    Args:
+        log_file: Optional path to a file where build output is also
+            written line-by-line (with flush) for the terminal mini app.
 
     Raises:
         RuntimeError: If the build fails.
@@ -400,12 +484,20 @@ def _docker_build(
         text=True,
     )
     output_lines: list[str] = []
-    assert process.stdout is not None
-    for line in process.stdout:
-        line = line.rstrip()
-        output_lines.append(line)
-        logger.info("docker build: %s", line)
-    returncode = process.wait()
+    log_fh = open(log_file, "a", encoding="utf-8") if log_file else None
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.rstrip()
+            output_lines.append(line)
+            logger.info("docker build: %s", line)
+            if log_fh is not None:
+                log_fh.write(line + "\n")
+                log_fh.flush()
+        returncode = process.wait()
+    finally:
+        if log_fh is not None:
+            log_fh.close()
 
     if returncode != 0:
         output = "\n".join(output_lines)

@@ -1,7 +1,7 @@
 """HTTP API routes for the terminal Mini App.
 
-Provides an SSE endpoint for tailing background task output files
-and a REST endpoint for reading task output.
+Provides an SSE endpoint for tailing log sources (background task output,
+container build logs, etc.) and a REST endpoint for reading their content.
 """
 
 from __future__ import annotations
@@ -9,8 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -20,134 +18,11 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from open_udang.config import Config
-from open_udang.container import CONTAINER_STATE_DIR
-from open_udang.handlers.state import is_task_active
 from open_udang.review.auth import AuthError, validate_init_data
-
 from open_udang.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
+from open_udang.terminal.log_source import LogSource, resolve
 
 logger = logging.getLogger(__name__)
-
-# Task ID pattern: alphanumeric, used by Claude CLI (e.g. "brf4e7jzw")
-_TASK_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
-
-# task_type values that indicate an agent transcript (JSONL format).
-_AGENT_TASK_TYPES = {"local_agent", "remote_agent"}
-
-# Base directory for Claude CLI tmp files
-_CLAUDE_TMP_BASE = Path(f"/tmp/claude-{os.getuid()}")
-
-
-def _is_file_or_symlink(path: Path) -> bool:
-    """Return True if *path* is a regular file or a symlink (even broken)."""
-    return path.is_file() or path.is_symlink()
-
-
-def _search_tmp_base(base: Path, filename: str) -> Path | None:
-    """Search a Claude CLI tmp base directory for a task output file.
-
-    Looks for ``<base>/<project>/tasks/<filename>`` and
-    ``<base>/<project>/<session>/tasks/<filename>``.
-
-    Also matches broken symlinks (common for agent tasks in containers
-    where the symlink target uses a container-internal path).
-    """
-    if not base.is_dir():
-        return None
-
-    for project_dir in base.iterdir():
-        if not project_dir.is_dir():
-            continue
-
-        candidate = project_dir / "tasks" / filename
-        if _is_file_or_symlink(candidate):
-            return candidate
-
-        for sub in project_dir.iterdir():
-            if not sub.is_dir():
-                continue
-            candidate = sub / "tasks" / filename
-            if _is_file_or_symlink(candidate):
-                return candidate
-
-    return None
-
-
-def _resolve_container_symlink(
-    symlink: Path, context_dir: Path,
-) -> Path | None:
-    """Resolve a broken symlink created inside a container to its host path.
-
-    Inside the container, ``/home/claude/.claude`` is bind-mounted from
-    *context_dir* on the host.  Agent task ``.output`` files are symlinks
-    to ``.jsonl`` session files under ``/home/claude/.claude/projects/…``,
-    which don't exist on the host.  This function translates the container
-    path back to the host equivalent.
-    """
-    try:
-        target = os.readlink(symlink)
-    except OSError:
-        return None
-
-    container_prefix = "/home/claude/.claude/"
-    if target.startswith(container_prefix):
-        relative = target[len(container_prefix):]
-        host_path = context_dir / relative
-        if host_path.is_file():
-            return host_path
-
-    return None
-
-
-def _find_task_output_file(task_id: str) -> Path | None:
-    """Find the output file for a background task by ID.
-
-    Searches the host Claude CLI tmp directory and all container state
-    directories (where containerized contexts write their tmp files).
-
-    For containerized agent tasks the ``.output`` file is a symlink whose
-    target uses a container-internal path.  When a broken symlink is found
-    in a container state directory, the target is translated to the host
-    equivalent so the caller can read the actual data.
-    """
-    if not _TASK_ID_RE.match(task_id):
-        return None
-
-    filename = f"{task_id}.output"
-
-    # Search the host tmp directory first.
-    result = _search_tmp_base(_CLAUDE_TMP_BASE, filename)
-    if result:
-        return result
-
-    # Search container state directories: each has a tmp/ subdirectory
-    # that is bind-mounted as /tmp/claude-<uid>/ inside the container.
-    if CONTAINER_STATE_DIR.is_dir():
-        for context_dir in CONTAINER_STATE_DIR.iterdir():
-            tmp_dir = context_dir / "tmp"
-            result = _search_tmp_base(tmp_dir, filename)
-            if result:
-                # Broken symlink — resolve container path to host path.
-                if result.is_symlink() and not result.exists():
-                    resolved = _resolve_container_symlink(
-                        result, context_dir,
-                    )
-                    if resolved:
-                        return resolved
-                return result
-
-    return None
-
-
-def _is_agent_output(path: Path, task_type: str | None) -> bool:
-    """Determine if a task output file is an agent JSONL transcript."""
-    if task_type:
-        return task_type in _AGENT_TASK_TYPES
-    # Fallback: agent output files are symlinks to .jsonl files.
-    try:
-        return path.is_symlink() and os.readlink(path).endswith(".jsonl")
-    except OSError:
-        return False
 
 
 async def _authenticate(request: Request) -> int:
@@ -159,11 +34,24 @@ async def _authenticate(request: Request) -> int:
     )
 
 
+def _resolve_source(request: Request) -> LogSource | None:
+    """Extract ``type``, ``id``, and optional ``task_type`` from query
+    params and resolve to a ``LogSource``."""
+    source_type = request.query_params.get("type", "")
+    source_id = request.query_params.get("id", "")
+    task_type = request.query_params.get("task_type")
+    if not source_type or not source_id:
+        return None
+    return resolve(source_type, source_id, task_type=task_type)
+
+
 async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
-    """GET /api/terminal/tail — SSE stream tailing a task output file.
+    """GET /api/terminal/tail — SSE stream tailing a log source.
 
     Query params:
-        task_id: The background task ID.
+        type: Log source type (``"task"`` or ``"container_build"``).
+        id: Source identifier (task ID or context name).
+        task_type: Optional task type hint (only for ``type=task``).
         offset: Byte offset to start reading from (default 0).
     """
     try:
@@ -171,34 +59,27 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
-    task_id = request.query_params.get("task_id", "")
-    if not task_id or not _TASK_ID_RE.match(task_id):
+    source = _resolve_source(request)
+    if source is None:
         return JSONResponse(
-            {"error": "task_id is required (alphanumeric)"}, status_code=400
+            {"error": "type and id are required"}, status_code=400
         )
 
     offset = int(request.query_params.get("offset", "0"))
     if offset < 0:
         offset = 0
 
-    output_file = _find_task_output_file(task_id)
-    if output_file is None:
-        return JSONResponse(
-            {"error": f"Task output not found: {task_id}"}, status_code=404
-        )
-
-    task_type = request.query_params.get("task_type")
-    is_agent = _is_agent_output(output_file, task_type)
+    is_agent = source.render == "jsonl"
 
     async def event_stream() -> AsyncGenerator[str, None]:
         """Generate SSE events as the file grows."""
         pos = offset
         idle_count = 0
         line_buffer = ""  # carries incomplete JSONL lines (agent only)
-        # Maximum idle iterations before we consider the task done.
+        # Maximum idle iterations before we consider the source done.
         # At 0.5s intervals, 120 iterations = 60 seconds of no new output.
         max_idle = 120
-        # After we detect the task is no longer active, allow a few more
+        # After we detect the source is no longer active, allow a few more
         # iterations to drain any remaining output before sending done.
         finishing = False
         finish_countdown = 6  # 3 seconds (6 × 0.5s)
@@ -220,10 +101,10 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
 
         while True:
             try:
-                stat = output_file.stat()
+                stat = source.path.stat()
                 file_size = stat.st_size
             except FileNotFoundError:
-                # File was deleted — task finished and cleaned up.
+                # File was deleted — source finished and cleaned up.
                 yield _flush_and_done(completed=True)
                 return
 
@@ -231,7 +112,7 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                 # New data available.
                 idle_count = 0
                 chunk = await asyncio.to_thread(
-                    _read_chunk, output_file, pos, file_size
+                    _read_chunk, source.path, pos, file_size
                 )
                 if chunk:
                     if is_agent:
@@ -253,8 +134,8 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                         yield f"data: {payload}\n\n"
                     pos = file_size
             else:
-                # No new data — check if the task has finished.
-                if not finishing and not is_task_active(task_id):
+                # No new data — check if the source has finished.
+                if not finishing and not source.is_active():
                     finishing = True
                     finish_countdown = 6
 
@@ -290,44 +171,39 @@ def _read_chunk(path: Path, start: int, end: int) -> str:
 
 
 async def read_endpoint(request: Request) -> JSONResponse:
-    """GET /api/terminal/read — read the full content of a task output file.
+    """GET /api/terminal/read — read the full content of a log source.
 
     Query params:
-        task_id: The background task ID.
+        type: Log source type (``"task"`` or ``"container_build"``).
+        id: Source identifier (task ID or context name).
+        task_type: Optional task type hint (only for ``type=task``).
     """
     try:
         await _authenticate(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
-    task_id = request.query_params.get("task_id", "")
-    if not task_id or not _TASK_ID_RE.match(task_id):
+    source = _resolve_source(request)
+    if source is None:
         return JSONResponse(
-            {"error": "task_id is required (alphanumeric)"}, status_code=400
+            {"error": "type and id are required"}, status_code=400
         )
 
-    output_file = _find_task_output_file(task_id)
-    if output_file is None:
-        return JSONResponse(
-            {"error": f"Task output not found: {task_id}"}, status_code=404
-        )
-
-    task_type = request.query_params.get("task_type")
-    is_agent = _is_agent_output(output_file, task_type)
+    is_agent = source.render == "jsonl"
 
     try:
-        content = await asyncio.to_thread(output_file.read_text, "utf-8", "replace")
-        size = output_file.stat().st_size
+        content = await asyncio.to_thread(source.path.read_text, "utf-8", "replace")
+        size = source.path.stat().st_size
     except FileNotFoundError:
         return JSONResponse(
-            {"error": f"Task output not found: {task_id}"}, status_code=404
+            {"error": "Log source not found"}, status_code=404
         )
 
     if is_agent:
         content = render_jsonl_content(content)
 
     return JSONResponse({
-        "task_id": task_id,
+        "id": request.query_params.get("id", ""),
         "content": content,
         "size": size,
     })

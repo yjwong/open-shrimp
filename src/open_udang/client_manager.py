@@ -26,7 +26,7 @@ from claude_agent_sdk import (
     SystemMessage,
 )
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from open_udang.agent import AgentEvent
 from open_udang.config import ContextConfig
@@ -47,6 +47,8 @@ from open_udang.container import (
     ensure_container_running as docker_ensure_container,
     ensure_image as docker_ensure_image,
     get_screenshots_dir,
+    register_build,
+    unregister_build,
 )
 from open_udang.sandbox import (
     build_cli_wrapper as sandbox_build_cli_wrapper,
@@ -98,6 +100,7 @@ async def get_or_create_session(
     db: Any | None = None,
     config: Any | None = None,
     job_queue: Any | None = None,
+    terminal_base_url: str | None = None,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
@@ -258,36 +261,67 @@ async def get_or_create_session(
                 ["docker", "image", "inspect", image_name],
                 capture_output=True,
             )
-            if inspect_result.returncode != 0 and bot is not None:
+            needs_build = inspect_result.returncode != 0
+            if needs_build and bot is not None:
+                # Register the build so the terminal mini app can tail
+                # the log file while the image is being built.
+                log_file = register_build(context_name)
+
+                build_text = (
+                    "Building container image for the first time, "
+                    "this may take a few minutes\\.\\.\\."
+                )
+                keyboard = None
+                if terminal_base_url:
+                    app_url = (
+                        f"{terminal_base_url}/terminal/"
+                        f"?type=container_build&id={context_name}"
+                    )
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "📺 View build log",
+                            web_app=WebAppInfo(url=app_url),
+                        )
+                    ]])
                 await bot.send_message(
                     chat_id=scope.chat_id,
                     message_thread_id=scope.thread_id,
-                    text=(
-                        "Building container image for the first time, "
-                        "this may take a few minutes\\.\\.\\."
-                    ),
+                    text=build_text,
                     parse_mode="MarkdownV2",
+                    reply_markup=keyboard,
                 )
+            else:
+                log_file = None
 
             def _ensure_and_build_wrapper() -> str:
-                if computer_use and custom_dockerfile:
-                    # Build computer-use base first, then layer the
-                    # custom Dockerfile on top.
-                    docker_ensure_computer_use_image()
-                    docker_ensure_image(
-                        image_name=image_name,
-                        dockerfile=custom_dockerfile,
-                        base_image=COMPUTER_USE_IMAGE,
-                    )
-                elif computer_use:
-                    docker_ensure_computer_use_image(
-                        image_name=image_name,
-                    )
-                else:
-                    docker_ensure_image(
-                        image_name=image_name,
-                        dockerfile=custom_dockerfile,
-                    )
+                try:
+                    if computer_use and custom_dockerfile:
+                        # Build computer-use base first, then layer the
+                        # custom Dockerfile on top.
+                        docker_ensure_computer_use_image(
+                            log_file=log_file,
+                        )
+                        docker_ensure_image(
+                            image_name=image_name,
+                            dockerfile=custom_dockerfile,
+                            base_image=COMPUTER_USE_IMAGE,
+                            log_file=log_file,
+                        )
+                    elif computer_use:
+                        docker_ensure_computer_use_image(
+                            image_name=image_name,
+                            log_file=log_file,
+                        )
+                    else:
+                        docker_ensure_image(
+                            image_name=image_name,
+                            dockerfile=custom_dockerfile,
+                            log_file=log_file,
+                        )
+                finally:
+                    if log_file is not None:
+                        unregister_build(context_name)
+
                 docker_ensure_container(
                     context_name=context_name,
                     project_dir=context.directory,

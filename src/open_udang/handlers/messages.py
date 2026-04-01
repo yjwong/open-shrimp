@@ -578,6 +578,7 @@ async def _start_agent_task(
                 db=db,
                 config=config,
                 job_queue=getattr(context, "job_queue", None),
+                terminal_base_url=_base_url,
             )
 
             # Send the primary query.

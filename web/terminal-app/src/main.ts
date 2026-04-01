@@ -29,6 +29,32 @@ function showStatus(msg: string): void {
   loadingEl.textContent = msg;
 }
 
+// ── Labels by source type ──
+
+interface SourceLabels {
+  tailPrefix: string;
+  completedMsg: string;
+  endedMsg: string;
+}
+
+function getLabels(sourceType: string): SourceLabels {
+  switch (sourceType) {
+    case "container_build":
+      return {
+        tailPrefix: "build",
+        completedMsg: "Build completed.",
+        endedMsg: "Build output stream ended.",
+      };
+    case "task":
+    default:
+      return {
+        tailPrefix: "task",
+        completedMsg: "Task completed.",
+        endedMsg: "Task output stream ended.",
+      };
+  }
+}
+
 // ── Main (wrapped in try-catch for visible errors) ──
 
 main().catch((e) => showError(`Fatal: ${e}`));
@@ -45,17 +71,22 @@ async function main(): Promise<void> {
   }
 
   const params = new URLSearchParams(window.location.search);
-  const taskId = params.get("task_id");
+  const sourceType = params.get("type") ?? "task";
+  const sourceId = params.get("id");
   const taskType = params.get("task_type");
 
-  if (!taskId) {
-    showError("No task_id provided.");
+  if (!sourceId) {
+    showError("No id provided.");
     return;
   }
 
-  const taskTypeParam = taskType
-    ? `&task_type=${encodeURIComponent(taskType)}`
-    : "";
+  // Build query string for API calls.
+  let apiQuery = `type=${encodeURIComponent(sourceType)}&id=${encodeURIComponent(sourceId)}`;
+  if (taskType) {
+    apiQuery += `&task_type=${encodeURIComponent(taskType)}`;
+  }
+
+  const labels = getLabels(sourceType);
 
   showStatus(`Loading xterm.js...`);
 
@@ -152,12 +183,8 @@ async function main(): Promise<void> {
 
   // ── Start tailing ──
 
-  const typeLabel =
-    taskType === "local_agent" || taskType === "remote_agent"
-      ? "agent task"
-      : "task";
   term.writeln(
-    `\x1b[1;34m● Tailing ${typeLabel} \x1b[1;37m${taskId}\x1b[0m`
+    `\x1b[1;34m● Tailing ${labels.tailPrefix} \x1b[1;37m${sourceId}\x1b[0m`
   );
   term.writeln("");
 
@@ -165,7 +192,7 @@ async function main(): Promise<void> {
   let offset = 0;
   try {
     const readResp = await fetch(
-      `/api/terminal/read?task_id=${encodeURIComponent(taskId)}${taskTypeParam}`,
+      `/api/terminal/read?${apiQuery}`,
       { headers: getAuthHeader() }
     );
     if (readResp.ok) {
@@ -186,7 +213,7 @@ async function main(): Promise<void> {
   }
 
   // Stream new output via fetch-based SSE.
-  const url = `/api/terminal/tail?task_id=${encodeURIComponent(taskId)}&offset=${offset}${taskTypeParam}`;
+  const url = `/api/terminal/tail?${apiQuery}&offset=${offset}`;
 
   try {
     const resp = await fetch(url, {
@@ -251,10 +278,10 @@ async function main(): Promise<void> {
           }
           term.writeln("");
           if (completed) {
-            term.writeln("\x1b[1;32m● Task completed.\x1b[0m");
+            term.writeln(`\x1b[1;32m● ${labels.completedMsg}\x1b[0m`);
           } else {
             term.writeln(
-              "\x1b[1;33m● Task output stream ended.\x1b[0m"
+              `\x1b[1;33m● ${labels.endedMsg}\x1b[0m`
             );
           }
           return;
