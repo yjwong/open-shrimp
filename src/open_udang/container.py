@@ -937,11 +937,14 @@ def _build_docker_run_argv(
         "-v", f"{state_dir}:/home/claude/.claude",
         "-v", f"{claude_tmp_dir}:/tmp/claude-{uid}",
     ])
+    # Copy credentials into the state dir (which is directory-mounted as
+    # /home/claude/.claude) instead of bind-mounting the file directly.
+    # File bind mounts break when the host replaces the file via atomic
+    # rename (new inode) — the container stays pinned to the stale inode.
+    # The wrapper script also copies before each `docker exec` to pick up
+    # host-side token refreshes.
     if host_credentials.exists():
-        docker_argv.extend([
-            "-v",
-            f"{host_credentials}:/home/claude/.claude/.credentials.json:ro",
-        ])
+        shutil.copy2(str(host_credentials), str(state_dir / ".credentials.json"))
     for extra_dir in additional_directories or []:
         docker_argv.extend(["-v", f"{extra_dir}:{extra_dir}"])
 
@@ -1164,6 +1167,8 @@ def build_cli_wrapper(
         Absolute path to the generated wrapper script.
     """
     container_name = _container_name(context_name)
+    state_dir = _ensure_state_dir(context_name)
+    host_credentials = Path.home() / ".claude" / ".credentials.json"
 
     # Build the docker run argv for the fallback creation path.
     # This is embedded in the wrapper so it can self-heal if the
@@ -1243,6 +1248,12 @@ def build_cli_wrapper(
         f'{dind_wait}'
         f'{compositor_wait}\n'
         f'fi\n'
+        f'\n'
+        f'# Refresh credentials in the state dir so the container sees the\n'
+        f'# latest host token (avoids stale-inode bind mount issues).\n'
+        f'HOST_CREDS={shlex.quote(str(host_credentials))}\n'
+        f'STATE_CREDS={shlex.quote(str(state_dir / ".credentials.json"))}\n'
+        f'[ -f "$HOST_CREDS" ] && cp "$HOST_CREDS" "$STATE_CREDS" 2>/dev/null\n'
         f'\n'
         f'exec docker exec -i \\\n'
         f'  -e ANTHROPIC_API_KEY{computer_use_exec_env} \\\n'
