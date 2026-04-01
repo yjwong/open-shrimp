@@ -668,6 +668,12 @@ async def stream_response(
                             if state.turn_complete:
                                 state.raw_text += "\n\n"
                                 state.turn_complete = False
+                            # Ensure a blank line after a blockquote so
+                            # assistant text isn't swallowed into it.
+                            stripped = state.raw_text.rstrip()
+                            last_line = stripped.rsplit("\n", 1)[-1] if stripped else ""
+                            if last_line.startswith(">") and stripped:
+                                state.raw_text = stripped + "\n\n"
                             state.raw_text += text
                             state.dirty = True
 
