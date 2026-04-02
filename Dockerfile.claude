@@ -55,7 +55,8 @@ RUN mkdir -p /home/claude/.claude /home/claude/.local/share/docker \
 # and passwd/group entries needed by rootless Docker.  Safe in an ephemeral
 # container.
 RUN touch /etc/subuid /etc/subgid \
-    && chmod 666 /etc/subuid /etc/subgid /etc/passwd /etc/group
+    && chmod 666 /etc/subuid /etc/subgid /etc/passwd /etc/group \
+    && chmod 777 /var/run
 
 # Copy the Claude CLI binary.
 # Default: the bundled binary from claude-agent-sdk.
