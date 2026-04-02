@@ -815,11 +815,16 @@ for _i in $(seq 1 30); do
     sleep 1
 done
 
-# Create a Docker context so that `docker exec` sessions (which don't
-# inherit runtime env vars) can find the daemon without DOCKER_HOST.
+# Symlink the rootless socket to the standard path so that all Docker
+# clients (Testcontainers/Ryuk, SDK libraries, etc.) find the daemon at
+# the default location without needing DOCKER_HOST or Docker contexts.
+mkdir -p /var/run
+ln -sf "${XDG_RUNTIME_DIR}/docker.sock" /var/run/docker.sock
+
+# Also create a Docker context so that `docker exec` sessions (which don't
+# inherit runtime env vars or the symlink's XDG target) can find the daemon.
 docker context create rootless --docker "host=unix://${XDG_RUNTIME_DIR}/docker.sock" 2>/dev/null || true
 docker context use rootless 2>/dev/null || true
-unset DOCKER_HOST
 
 # Add masquerade rules for container outbound networking.
 # rootless dockerd runs with --iptables=false (required in nested containers),
