@@ -274,15 +274,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Auth token from Telegram initData.
+  // Auth token: prefer Telegram initData, fall back to HMAC token from URL.
   const initData = window.Telegram?.WebApp?.initData ?? "";
+  const authToken =
+    initData || new URLSearchParams(window.location.search).get("token") || "";
 
   // Build WebSocket URL.
   const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl =
     `${wsProto}//${window.location.host}/api/vnc/ws` +
     `?context=${encodeURIComponent(context)}` +
-    `&token=${encodeURIComponent(initData)}`;
+    `&token=${encodeURIComponent(authToken)}`;
 
   showStatus("Loading noVNC...");
 
@@ -315,7 +317,7 @@ async function main(): Promise<void> {
 
   rfb.addEventListener("connect", () => {
     loadingEl.remove();
-    buildToolbar(toolbarEl, rfb, isMobile, context, initData, pinchZoom, clipboard);
+    buildToolbar(toolbarEl, rfb, isMobile, context, authToken, pinchZoom, clipboard);
   });
 
   rfb.addEventListener("disconnect", (ev: Event) => {

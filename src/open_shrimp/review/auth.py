@@ -1,4 +1,9 @@
-"""Telegram initData authentication for the review web app."""
+"""Telegram initData authentication for the review web app.
+
+Supports two auth schemes:
+- ``tg-init-data <initData>`` — standard Telegram Mini App auth
+- ``tg-token <token>`` — HMAC token for non-Mini-App contexts (group chats)
+"""
 
 import hashlib
 import hmac
@@ -14,6 +19,64 @@ class AuthError(Exception):
         self.status_code = status_code
         self.message = message
         super().__init__(message)
+
+
+# ---------------------------------------------------------------------------
+# HMAC token generation / validation (for group chat URL buttons)
+# ---------------------------------------------------------------------------
+
+_TOKEN_TTL = 3600  # 1 hour, matches initData expiry
+
+
+def generate_auth_token(
+    user_id: int, chat_id: int, bot_token: str, ttl: int = _TOKEN_TTL
+) -> str:
+    """Generate a short-lived HMAC-SHA256 auth token.
+
+    Format: ``user_id:chat_id:expiry_ts:hmac_hex``
+    """
+    expiry_ts = int(time.time()) + ttl
+    payload = f"{user_id}:{chat_id}:{expiry_ts}"
+    sig = hmac.new(
+        bot_token.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"{payload}:{sig}"
+
+
+def validate_auth_token(
+    token: str, bot_token: str, allowed_users: list[int]
+) -> int:
+    """Validate an HMAC auth token and return the user ID.
+
+    Raises AuthError on failure.
+    """
+    parts = token.split(":")
+    if len(parts) != 4:
+        raise AuthError(401, "Malformed auth token")
+
+    try:
+        user_id = int(parts[0])
+        # parts[1] is chat_id — not checked server-side beyond HMAC integrity
+        expiry_ts = int(parts[2])
+    except ValueError:
+        raise AuthError(401, "Invalid auth token fields")
+
+    provided_sig = parts[3]
+    payload = f"{parts[0]}:{parts[1]}:{parts[2]}"
+    expected_sig = hmac.new(
+        bot_token.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_sig, provided_sig):
+        raise AuthError(401, "Invalid auth token signature")
+
+    if int(time.time()) > expiry_ts:
+        raise AuthError(401, "Auth token has expired")
+
+    if user_id not in allowed_users:
+        raise AuthError(403, "User not allowed")
+
+    return user_id
 
 
 def _compute_data_check_string(parsed: dict[str, list[str]]) -> str:
@@ -120,3 +183,46 @@ async def validate_init_data(
         raise AuthError(403, "User not allowed")
 
     return user_id
+
+
+# ---------------------------------------------------------------------------
+# Unified authentication
+# ---------------------------------------------------------------------------
+
+
+async def authenticate(
+    authorization: str, bot_token: str, allowed_users: list[int]
+) -> int:
+    """Validate an Authorization header using either auth scheme.
+
+    Accepts:
+    - ``tg-init-data <initData>`` — Telegram Mini App initData
+    - ``tg-token <token>`` — HMAC auth token (for group chat URL buttons)
+
+    Returns the authenticated user ID.  Raises AuthError on failure.
+    """
+    if not authorization:
+        raise AuthError(401, "Missing Authorization header")
+
+    if authorization.startswith("tg-init-data "):
+        return await validate_init_data(authorization, bot_token, allowed_users)
+    elif authorization.startswith("tg-token "):
+        token = authorization.split(" ", 1)[1]
+        return validate_auth_token(token, bot_token, allowed_users)
+    else:
+        raise AuthError(401, "Unsupported auth scheme")
+
+
+async def validate_token_param(
+    token: str, bot_token: str, allowed_users: list[int]
+) -> int:
+    """Validate a token query parameter that could be either initData or HMAC.
+
+    HMAC tokens have the format ``user_id:chat_id:expiry_ts:sig`` (4 colon-
+    separated parts).  Telegram initData is URL-encoded key-value pairs.
+    """
+    if token.count(":") == 3:
+        return validate_auth_token(token, bot_token, allowed_users)
+    return await validate_init_data(
+        f"tg-init-data {token}", bot_token, allowed_users
+    )

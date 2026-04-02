@@ -26,7 +26,9 @@ from claude_agent_sdk import (
     SystemMessage,
 )
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+
+from open_shrimp.web_app_button import make_web_app_button
 
 from open_shrimp.agent import AgentEvent
 from open_shrimp.config import ContextConfig
@@ -101,6 +103,8 @@ async def get_or_create_session(
     config: Any | None = None,
     job_queue: Any | None = None,
     terminal_base_url: str | None = None,
+    user_id: int = 0,
+    is_private_chat: bool = True,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
@@ -291,15 +295,19 @@ async def get_or_create_session(
                     "this may take a few minutes\\.\\.\\."
                 )
                 keyboard = None
-                if terminal_base_url:
+                if terminal_base_url and config is not None:
                     app_url = (
                         f"{terminal_base_url}/terminal/"
                         f"?type=container_build&id={context_name}"
                     )
                     keyboard = InlineKeyboardMarkup([[
-                        InlineKeyboardButton(
+                        make_web_app_button(
                             "📺 View build log",
-                            web_app=WebAppInfo(url=app_url),
+                            app_url,
+                            chat_id=scope.chat_id,
+                            user_id=user_id,
+                            bot_token=config.telegram.token,
+                            is_private_chat=is_private_chat,
                         )
                     ]])
                 await bot.send_message(
@@ -440,6 +448,8 @@ async def get_or_create_session(
             computer_use_container=_cu_container,
             screenshots_dir=_cu_screenshots_dir,
             context_name=context_name,
+            user_id=user_id,
+            is_private_chat=is_private_chat,
         )
         mcp_servers: dict[str, Any] = {"openshrimp": openshrimp_server}
 
@@ -513,6 +523,8 @@ async def reconnect_session(
     config: Any | None = None,
     job_queue: Any | None = None,
     terminal_base_url: str | None = None,
+    user_id: int = 0,
+    is_private_chat: bool = True,
 ) -> AgentSession | None:
     """Reconnect after a mid-session container crash.
 
@@ -554,6 +566,8 @@ async def reconnect_session(
             config=config,
             job_queue=job_queue,
             terminal_base_url=terminal_base_url,
+            user_id=user_id,
+            is_private_chat=is_private_chat,
         )
     except Exception:
         logger.exception(

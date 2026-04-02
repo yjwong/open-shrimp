@@ -10,17 +10,19 @@ declare global {
   }
 }
 
-export function getInitData(): string {
-  const initData = window.Telegram?.WebApp?.initData;
-  if (!initData) {
-    throw new Error("Telegram WebApp initData is not available");
-  }
-  return initData;
+export function getInitData(): string | null {
+  return window.Telegram?.WebApp?.initData || null;
 }
 
 export function getAuthHeader(): Record<string, string> {
   const initData = getInitData();
-  return {
-    Authorization: `tg-init-data ${initData}`,
-  };
+  if (initData) {
+    return { Authorization: `tg-init-data ${initData}` };
+  }
+  // Fallback: use HMAC token from URL (group chat / external browser).
+  const token = new URLSearchParams(window.location.search).get("token");
+  if (token) {
+    return { Authorization: `tg-token ${token}` };
+  }
+  return {};
 }

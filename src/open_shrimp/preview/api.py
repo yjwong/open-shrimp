@@ -20,7 +20,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from open_shrimp.config import Config
-from open_shrimp.review.auth import AuthError, validate_init_data
+from open_shrimp.review.auth import AuthError, authenticate
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ async def _authenticate(request: Request) -> int:
     """Validate the Authorization header and return the user ID."""
     config: Config = request.app.state.config
     authorization = request.headers.get("authorization", "")
-    return await validate_init_data(
+    return await authenticate(
         authorization, config.telegram.token, config.allowed_users
     )
 

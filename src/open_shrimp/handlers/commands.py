@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+
+from open_shrimp.web_app_button import make_web_app_button
 from telegram.ext import ContextTypes
 
 from open_shrimp.client_manager import (
@@ -851,17 +853,9 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         base_url = f"https://{config.review.host}:{config.review.port}"
 
-    # Telegram Mini App (web_app) buttons only work in private chats.
-    # The review app also relies on Telegram.WebApp.initData for auth,
-    # which is unavailable outside the Mini App WebView.
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    if chat_type != "private":
-        await update.message.reply_text(
-            "The review Mini App is only available in private chats\\. "
-            "Send /review to me in a DM instead\\.",
-            parse_mode="MarkdownV2",
-        )
-        return
+    _is_private = chat_type == "private"
+    _user_id = update.effective_user.id
 
     escaped_context = _escape_mdv2(context_name)
     dirs = [ctx.directory] + (ctx.additional_directories or [])
@@ -870,9 +864,13 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if len(dirs) == 1:
         app_url = f"{base_url}/app/?chat_id={scope.chat_id}{thread_param}"
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
+            [make_web_app_button(
                 text="\U0001f4dd Open Review",
-                web_app=WebAppInfo(url=app_url),
+                url=app_url,
+                chat_id=scope.chat_id,
+                user_id=_user_id,
+                bot_token=config.telegram.token,
+                is_private_chat=_is_private,
             )]
         ])
         escaped_dir = _escape_mdv2(ctx.directory)
@@ -886,9 +884,13 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for i, d in enumerate(dirs):
             app_url = f"{base_url}/app/?chat_id={scope.chat_id}&dir={i}{thread_param}"
             basename = d.rstrip("/").rsplit("/", 1)[-1]
-            rows.append([InlineKeyboardButton(
+            rows.append([make_web_app_button(
                 text=f"\U0001f4c1 {basename}",
-                web_app=WebAppInfo(url=app_url),
+                url=app_url,
+                chat_id=scope.chat_id,
+                user_id=_user_id,
+                bot_token=config.telegram.token,
+                is_private_chat=_is_private,
             )])
         keyboard = InlineKeyboardMarkup(rows)
         text = f"Review changes in *{escaped_context}*"
@@ -931,11 +933,16 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         base_url = f"https://{config.review.host}:{config.review.port}"
 
+    chat_type = update.effective_chat.type if update.effective_chat else "private"
     vnc_url = f"{base_url}/vnc/?context={context_name}"
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
+        [make_web_app_button(
             text="View desktop",
-            web_app=WebAppInfo(url=vnc_url),
+            url=vnc_url,
+            chat_id=scope.chat_id,
+            user_id=update.effective_user.id,
+            bot_token=config.telegram.token,
+            is_private_chat=chat_type == "private",
         )]
     ])
 

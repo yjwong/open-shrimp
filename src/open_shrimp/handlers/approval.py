@@ -7,7 +7,9 @@ import difflib
 import logging
 from typing import Any
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+
+from open_shrimp.web_app_button import make_web_app_button
 
 from open_shrimp.handlers.state import (
     _approval_futures,
@@ -280,6 +282,9 @@ async def _send_approval_keyboard(
     cwd: str | None = None,
     thread_id: int | None = None,
     base_url: str | None = None,
+    user_id: int = 0,
+    is_private_chat: bool = True,
+    bot_token: str = "",
 ) -> bool:
     """Send an inline keyboard for tool approval and wait for response."""
     if tool_name == "Edit":
@@ -365,8 +370,13 @@ async def _send_approval_keyboard(
                 f"&chat_id={chat_id}"
                 f"{thread_param}"
             )
-            rows.append([InlineKeyboardButton(
-                "\U0001f4cb View plan", web_app=WebAppInfo(url=app_url),
+            rows.append([make_web_app_button(
+                "\U0001f4cb View plan",
+                app_url,
+                chat_id=chat_id,
+                user_id=user_id,
+                bot_token=bot_token,
+                is_private_chat=is_private_chat,
             )])
     if session_row:
         rows.append(session_row)

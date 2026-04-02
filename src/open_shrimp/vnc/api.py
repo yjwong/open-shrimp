@@ -24,7 +24,7 @@ from open_shrimp.container import (
     get_text_input_state_path,
     get_vnc_port,
 )
-from open_shrimp.review.auth import AuthError, validate_init_data
+from open_shrimp.review.auth import AuthError, validate_token_param
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +40,10 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
     token = websocket.query_params.get("token", "")
     context_name = websocket.query_params.get("context", "")
 
-    # Authenticate via Telegram initData passed as query param.
+    # Authenticate via token query param (initData or HMAC token).
     try:
-        await validate_init_data(
-            f"tg-init-data {token}",
+        await validate_token_param(
+            token,
             config.telegram.token,
             config.allowed_users,
         )
@@ -135,8 +135,8 @@ async def text_input_state_endpoint(request: Request) -> JSONResponse:
     context_name = request.query_params.get("context", "")
 
     try:
-        await validate_init_data(
-            f"tg-init-data {token}",
+        await validate_token_param(
+            token,
             config.telegram.token,
             config.allowed_users,
         )
@@ -168,8 +168,8 @@ async def text_input_state_stream_endpoint(
     context_name = request.query_params.get("context", "")
 
     try:
-        await validate_init_data(
-            f"tg-init-data {token}",
+        await validate_token_param(
+            token,
             config.telegram.token,
             config.allowed_users,
         )

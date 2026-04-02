@@ -20,7 +20,7 @@ from starlette.staticfiles import StaticFiles
 
 from open_shrimp.config import Config, ContextConfig
 from open_shrimp.db import ChatScope, get_active_context
-from open_shrimp.review.auth import AuthError, validate_init_data
+from open_shrimp.review.auth import AuthError, authenticate
 from open_shrimp.review.git_diff import Hunk, get_hunks
 from open_shrimp.review.git_stage import stage_hunk, unstage_hunk, remove_intent_to_add
 
@@ -63,7 +63,7 @@ async def _authenticate(request: Request) -> int:
     """
     config: Config = request.app.state.config
     authorization = request.headers.get("authorization", "")
-    return await validate_init_data(
+    return await authenticate(
         authorization, config.telegram.token, config.allowed_users
     )
 

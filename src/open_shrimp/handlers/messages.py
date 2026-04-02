@@ -211,6 +211,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     prompt = f"[Transcribed from voice note] {transcription}"
                     await _dispatch_to_agent(
                         prompt, [], scope, config, db, context,
+                        user_id=update.effective_user.id,
+                        is_private_chat=update.effective_chat.type == "private" if update.effective_chat else True,
                     )
                     return
                 else:
@@ -261,7 +263,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             len(attachments), scope, sum(len(att.data) for att in attachments),
         )
 
-    await _dispatch_to_agent(prompt, attachments, scope, config, db, context)
+    await _dispatch_to_agent(
+        prompt, attachments, scope, config, db, context,
+        user_id=update.effective_user.id if update.effective_user else 0,
+        is_private_chat=update.effective_chat.type == "private" if update.effective_chat else True,
+    )
 
 
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -295,7 +301,11 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "Please commit the currently staged changes. "
             "Generate an appropriate commit message based on the staged diff."
         )
-        await _dispatch_to_agent(prompt, [], scope, config, db, context)
+        await _dispatch_to_agent(
+            prompt, [], scope, config, db, context,
+            user_id=update.effective_user.id if update.effective_user else 0,
+            is_private_chat=message.chat.type == "private" if message.chat else True,
+        )
     else:
         logger.warning("Unknown web_app_data action: %s", action)
 
@@ -368,7 +378,11 @@ async def _handle_media_group_message(
             group_id, len(attachments), scope, sum(len(att.data) for att in attachments),
         )
 
-        await _dispatch_to_agent(prompt, attachments, scope, config, db, context)
+        await _dispatch_to_agent(
+            prompt, attachments, scope, config, db, context,
+            user_id=update.effective_user.id if update.effective_user else 0,
+            is_private_chat=update.effective_chat.type == "private" if update.effective_chat else True,
+        )
 
     _media_group_tasks[group_id] = asyncio.create_task(_process_group())
 
@@ -387,6 +401,8 @@ async def _dispatch_to_agent(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     placeholder: str | None = None,
+    user_id: int = 0,
+    is_private_chat: bool = True,
 ) -> None:
     """Dispatch a message to the agent.
 
@@ -413,7 +429,10 @@ async def _dispatch_to_agent(
                 )
             except Exception:
                 logger.debug("Failed to send placeholder for scope %s", scope)
-        await _start_agent_task(prompt, attachments, scope, config, db, context)
+        await _start_agent_task(
+            prompt, attachments, scope, config, db, context,
+            user_id=user_id, is_private_chat=is_private_chat,
+        )
         return
 
     # Task is running -- try to inject into the live session.
@@ -493,6 +512,8 @@ async def _start_agent_task(
     config: Config,
     db: aiosqlite.Connection,
     context: ContextTypes.DEFAULT_TYPE,
+    user_id: int = 0,
+    is_private_chat: bool = True,
 ) -> None:
     """Start a new agent task for *scope*.  Must only be called when no
     task is currently running for this scope."""
@@ -505,7 +526,11 @@ async def _start_agent_task(
         await _update_pinned_status(context.bot, scope, ctx_name, ctx_config, db)
 
     async def _run() -> None:
-        draft_state = _DraftState(chat_id=scope.chat_id, thread_id=scope.thread_id)
+        draft_state = _DraftState(
+            chat_id=scope.chat_id, thread_id=scope.thread_id,
+            user_id=user_id, is_private_chat=is_private_chat,
+            bot_token=config.telegram.token,
+        )
         actual_prompt, attachment_paths = prepare_prompt(
             prompt, attachments if attachments else None, chat_id=scope.chat_id,
         )
@@ -527,6 +552,9 @@ async def _start_agent_task(
                     cwd=ctx_config.directory,
                     thread_id=scope.thread_id,
                     base_url=_base_url,
+                    user_id=user_id,
+                    is_private_chat=is_private_chat,
+                    bot_token=config.telegram.token,
                 )
 
             async def handle_questions(
@@ -581,6 +609,8 @@ async def _start_agent_task(
                 config=config,
                 job_queue=getattr(context, "job_queue", None),
                 terminal_base_url=_base_url,
+                user_id=user_id,
+                is_private_chat=is_private_chat,
             )
 
             # Send the primary query.
@@ -675,6 +705,8 @@ async def _start_agent_task(
                         config=config,
                         job_queue=getattr(context, "job_queue", None),
                         terminal_base_url=_base_url,
+                        user_id=user_id,
+                        is_private_chat=is_private_chat,
                     )
                     if new_session is None:
                         raise

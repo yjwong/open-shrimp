@@ -38,6 +38,9 @@ export function getThemeParams() {
 
 export function getAuthHeader(): Record<string, string> {
   const initData = window.Telegram?.WebApp?.initData;
-  if (!initData) return {};
-  return { Authorization: `tg-init-data ${initData}` };
+  if (initData) return { Authorization: `tg-init-data ${initData}` };
+  // Fallback: use HMAC token from URL (group chat / external browser).
+  const token = new URLSearchParams(window.location.search).get("token");
+  if (token) return { Authorization: `tg-token ${token}` };
+  return {};
 }

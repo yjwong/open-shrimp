@@ -32,11 +32,12 @@ from claude_agent_sdk.types import (
     TaskProgressMessage,
     TaskStartedMessage,
 )
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from open_shrimp.agent import AgentEvent
 from open_shrimp.db import ChatScope
 from open_shrimp.markdown import gfm_to_telegram
+from open_shrimp.web_app_button import make_web_app_button
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,10 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
+    # Fields for web_app button fallback in group chats.
+    user_id: int = 0
+    is_private_chat: bool = True
+    bot_token: str = ""
 
     @property
     def _thread_kwargs(self) -> dict[str, Any]:
@@ -756,9 +761,13 @@ async def stream_response(
                                 f"{task_type_param}"
                             )
                             buttons.append(
-                                InlineKeyboardButton(
+                                make_web_app_button(
                                     "📺 View output",
-                                    web_app=WebAppInfo(url=app_url),
+                                    app_url,
+                                    chat_id=state.chat_id,
+                                    user_id=state.user_id,
+                                    bot_token=state.bot_token,
+                                    is_private_chat=state.is_private_chat,
                                 )
                             )
                         keyboard = (

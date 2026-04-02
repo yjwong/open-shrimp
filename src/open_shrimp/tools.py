@@ -16,7 +16,9 @@ from typing import Any
 
 from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+
+from open_shrimp.web_app_button import make_web_app_button
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,8 @@ def create_openshrimp_mcp_server(
     computer_use_container: str | None = None,
     screenshots_dir: str | None = None,
     context_name: str | None = None,
+    user_id: int = 0,
+    is_private_chat: bool = True,
 ) -> McpSdkServerConfig:
     """Create an in-process MCP server with OpenShrimp-specific tools.
 
@@ -183,9 +187,13 @@ def create_openshrimp_mcp_server(
                     preview_params += f"&thread_id={thread_id}"
                 preview_url = f"{base_url}/preview/?{preview_params}"
                 reply_markup = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
+                    make_web_app_button(
                         "📖 Preview",
-                        web_app=WebAppInfo(url=preview_url),
+                        preview_url,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        bot_token=config.telegram.token,
+                        is_private_chat=is_private_chat,
                     ),
                 ]])
 
@@ -650,9 +658,13 @@ def create_openshrimp_mcp_server(
                         if base_url:
                             vnc_url = f"{base_url}/vnc/?context={context_name}"
                             reply_markup = InlineKeyboardMarkup([[
-                                InlineKeyboardButton(
+                                make_web_app_button(
                                     "View desktop",
-                                    web_app=WebAppInfo(url=vnc_url),
+                                    vnc_url,
+                                    chat_id=chat_id,
+                                    user_id=user_id,
+                                    bot_token=config.telegram.token,
+                                    is_private_chat=is_private_chat,
                                 ),
                             ]])
 
