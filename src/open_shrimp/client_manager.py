@@ -156,8 +156,27 @@ async def get_or_create_session(
         is_containerized=context.container is not None and context.container.enabled,
     )
 
+    _last_stderr: list[str] = [""]
+    _stderr_repeat_count: list[int] = [0]
+
     def _log_stderr(line: str) -> None:
-        logger.info("CLI stderr: %s", line.rstrip())
+        stripped = line.rstrip()
+        if stripped == _last_stderr[0]:
+            _stderr_repeat_count[0] += 1
+            if _stderr_repeat_count[0] in (10, 50, 100):
+                logger.info(
+                    "CLI stderr (repeated %d times): %s",
+                    _stderr_repeat_count[0], stripped,
+                )
+            return
+        if _stderr_repeat_count[0] > 1:
+            logger.info(
+                "CLI stderr (repeated %d times total): %s",
+                _stderr_repeat_count[0], _last_stderr[0],
+            )
+        _last_stderr[0] = stripped
+        _stderr_repeat_count[0] = 1
+        logger.info("CLI stderr: %s", stripped)
 
     # Auto-approve the built-in OpenShrimp MCP tools (send_file, send_photo)
     # alongside whatever the user configured.
@@ -483,6 +502,64 @@ async def get_or_create_session(
     )
     _active_sessions[scope] = session
     return session
+
+
+async def reconnect_session(
+    scope: ChatScope,
+    context_name: str,
+    context: ContextConfig,
+    bot: Bot | None = None,
+    db: Any | None = None,
+    config: Any | None = None,
+    job_queue: Any | None = None,
+    terminal_base_url: str | None = None,
+) -> AgentSession | None:
+    """Reconnect after a mid-session container crash.
+
+    Closes the dead session, ensures the container is running again,
+    and creates a new client that resumes the existing session.
+
+    Returns the new ``AgentSession``, or ``None`` if reconnection fails.
+    """
+    old_session = _active_sessions.get(scope)
+    if old_session is None:
+        return None
+
+    session_id = old_session.session_id
+    callback_context = old_session.callback_context
+
+    # Tear down the dead client (ignore errors — it's already dead).
+    await close_session(scope)
+
+    if not session_id:
+        logger.warning(
+            "Cannot reconnect scope %s: no session_id to resume", scope
+        )
+        return None
+
+    logger.info(
+        "Reconnecting scope %s: resuming session %s after container crash",
+        scope, session_id,
+    )
+
+    try:
+        return await get_or_create_session(
+            scope=scope,
+            context_name=context_name,
+            context=context,
+            session_id=session_id,
+            callback_context=callback_context,
+            bot=bot,
+            db=db,
+            config=config,
+            job_queue=job_queue,
+            terminal_base_url=terminal_base_url,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to reconnect session for scope %s", scope
+        )
+        return None
 
 
 async def close_session(scope: ChatScope) -> None:

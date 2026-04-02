@@ -14,10 +14,12 @@ from telegram.ext import ContextTypes
 
 from open_shrimp.agent import FileAttachment, cleanup_attachments, prepare_prompt
 from open_shrimp.stt import transcribe as stt_transcribe
+from claude_agent_sdk import ProcessError
 from open_shrimp.client_manager import (
     CallbackContext,
     get_or_create_session,
     receive_events,
+    reconnect_session,
 )
 from open_shrimp.config import Config
 from open_shrimp.db import ChatScope, get_pinned_message_id, get_session_id, set_session_id
@@ -608,40 +610,85 @@ async def _start_agent_task(
                         scope,
                     )
 
+            container_retries = 0
+            max_container_retries = 2
+            is_containerized = (
+                ctx_config.container is not None
+                and ctx_config.container.enabled
+            )
+
             while True:
-                events = receive_events(session)
-                # Build terminal base URL for background task
-                # "View output" buttons.
-                if config.review.public_url:
-                    terminal_url: str | None = config.review.public_url.rstrip("/")
-                else:
-                    terminal_url = f"https://{config.review.host}:{config.review.port}"
+                try:
+                    events = receive_events(session)
+                    # Build terminal base URL for background task
+                    # "View output" buttons.
+                    if config.review.public_url:
+                        terminal_url: str | None = config.review.public_url.rstrip("/")
+                    else:
+                        terminal_url = f"https://{config.review.host}:{config.review.port}"
 
-                result = await stream_response(
-                    bot=context.bot,
-                    chat_id=scope.chat_id,
-                    events=events,
-                    draft_state=draft_state,
-                    allowed_tools=ctx_config.allowed_tools,
-                    cwd=ctx_config.directory,
-                    on_todo_update=on_todo_update,
-                    terminal_base_url=terminal_url,
-                    scope=scope,
-                )
-
-                if result.session_id:
-                    await set_session_id(db, scope, ctx_name, result.session_id)
-
-                if result.model_usage or result.turn_usage:
-                    await _update_pinned_status(
-                        context.bot, scope, ctx_name, ctx_config, db,
-                        model_usage=result.model_usage,
-                        turn_usage=result.turn_usage,
-                        todos=latest_todos if latest_todos else None,
+                    result = await stream_response(
+                        bot=context.bot,
+                        chat_id=scope.chat_id,
+                        events=events,
+                        draft_state=draft_state,
+                        allowed_tools=ctx_config.allowed_tools,
+                        cwd=ctx_config.directory,
+                        on_todo_update=on_todo_update,
+                        terminal_base_url=terminal_url,
+                        scope=scope,
                     )
 
-                if result.num_turns == 0 and result.session_id is None:
-                    break
+                    if result.session_id:
+                        await set_session_id(db, scope, ctx_name, result.session_id)
+
+                    if result.model_usage or result.turn_usage:
+                        await _update_pinned_status(
+                            context.bot, scope, ctx_name, ctx_config, db,
+                            model_usage=result.model_usage,
+                            turn_usage=result.turn_usage,
+                            todos=latest_todos if latest_todos else None,
+                        )
+
+                    if result.num_turns == 0 and result.session_id is None:
+                        break
+
+                    # Reset retry counter on successful iteration.
+                    container_retries = 0
+
+                except ProcessError:
+                    if not is_containerized or container_retries >= max_container_retries:
+                        raise
+                    container_retries += 1
+                    logger.warning(
+                        "Container crash detected for scope %s "
+                        "(attempt %d/%d), reconnecting...",
+                        scope, container_retries, max_container_retries,
+                    )
+                    await finalize_and_reset(context.bot, draft_state)
+                    new_session = await reconnect_session(
+                        scope=scope,
+                        context_name=ctx_name,
+                        context=ctx_config,
+                        bot=context.bot,
+                        db=db,
+                        config=config,
+                        job_queue=getattr(context, "job_queue", None),
+                        terminal_base_url=_base_url,
+                    )
+                    if new_session is None:
+                        raise
+                    session = new_session
+                    _injectable_sessions[scope] = session
+                    try:
+                        await context.bot.send_message(
+                            chat_id=scope.chat_id,
+                            text="Container restarted, resuming session\\.\\.\\.",
+                            parse_mode="MarkdownV2",
+                            **_thread_kwargs(scope),
+                        )
+                    except Exception:
+                        logger.debug("Failed to send reconnect notice")
 
         except asyncio.CancelledError:
             logger.info("Agent task cancelled for scope %s", scope)
