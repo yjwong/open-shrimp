@@ -87,6 +87,12 @@ class _DraftState:
     dirty: bool = False
     # Whether drafts are disabled (e.g. unsupported chat type)
     drafts_disabled: bool = False
+    # Message ID of the current "live edit" message (fallback when drafts
+    # are disabled — we send a real message and keep editing it).
+    live_edit_message_id: int | None = None
+    # Snapshot of raw_text that was last sent via editMessageText, so we
+    # can skip no-op edits.
+    live_edit_last_text: str = ""
     # Whether the last assistant turn has completed (AssistantMessage seen).
     # Used to insert a newline separator before text from the next turn.
     turn_complete: bool = False
@@ -121,8 +127,13 @@ def _build_full_text(state: _DraftState) -> str:
 
 
 async def _send_draft(bot: Bot, state: _DraftState) -> None:
-    """Send or update a draft message via sendMessageDraft."""
+    """Send or update a draft message via sendMessageDraft.
+
+    When drafts are disabled (unsupported chat type), falls back to
+    sending a real message and editing it in-place for a streaming effect.
+    """
     if state.drafts_disabled:
+        await _send_live_edit(bot, state)
         return
 
     full_text = _build_full_text(state)
@@ -156,14 +167,78 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
             # sendMessageDraft not supported for this chat type — disable drafts
             logger.info("Drafts not supported for chat %s, disabling", state.chat_id)
             state.drafts_disabled = True
+            # Immediately try the live-edit fallback so the user doesn't
+            # wait until the next periodic flush.
+            await _send_live_edit(bot, state)
         else:
             logger.exception("Failed to send draft message")
+
+
+async def _send_live_edit(bot: Bot, state: _DraftState) -> None:
+    """Fallback streaming: send a message and keep editing it in-place.
+
+    Used when sendMessageDraft is not supported (e.g. group chats).
+    """
+    full_text = _build_full_text(state)
+    if not full_text.strip():
+        return
+
+    # Skip if nothing changed since last edit.
+    if full_text == state.live_edit_last_text:
+        return
+
+    chunks = gfm_to_telegram(full_text)
+    if not chunks:
+        return
+
+    # If the text overflows into multiple chunks, we need to finalize.
+    if len(chunks) > 1:
+        return
+
+    text = chunks[0]
+
+    if state.live_edit_message_id is None:
+        # First flush — send a new message.
+        try:
+            msg = await bot.send_message(
+                chat_id=state.chat_id,
+                text=text,
+                parse_mode="MarkdownV2",
+                disable_notification=True,
+                **state._thread_kwargs,
+            )
+            state.live_edit_message_id = msg.message_id
+            state.live_edit_last_text = full_text
+            state.dirty = False
+        except Exception:
+            logger.exception("Failed to send live-edit message")
+    else:
+        # Update the existing message.
+        try:
+            await bot.edit_message_text(
+                chat_id=state.chat_id,
+                message_id=state.live_edit_message_id,
+                text=text,
+                parse_mode="MarkdownV2",
+            )
+            state.live_edit_last_text = full_text
+            state.dirty = False
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "message is not modified" in error_msg:
+                state.dirty = False
+            else:
+                logger.exception("Failed to edit live-edit message")
 
 
 async def _finalize_message(
     bot: Bot, state: _DraftState, *, silent: bool = True,
 ) -> list[int]:
     """Finalize the draft by sending the full message.
+
+    If a live-edit message exists, the first chunk is delivered by editing
+    that message in-place (avoiding a duplicate), and any overflow chunks
+    are sent as new messages.
 
     Args:
         silent: If True, send with ``disable_notification=True`` so the
@@ -184,7 +259,33 @@ async def _finalize_message(
         notif_kwargs["disable_notification"] = True
 
     message_ids: list[int] = []
-    for chunk in chunks:
+
+    for i, chunk in enumerate(chunks):
+        # Reuse the live-edit message for the first chunk.
+        if i == 0 and state.live_edit_message_id is not None:
+            try:
+                await bot.edit_message_text(
+                    chat_id=state.chat_id,
+                    message_id=state.live_edit_message_id,
+                    text=chunk,
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                logger.exception("Failed to finalize live-edit message")
+                # Fallback: try without parse mode.
+                try:
+                    await bot.edit_message_text(
+                        chat_id=state.chat_id,
+                        message_id=state.live_edit_message_id,
+                        text=chunk,
+                    )
+                except Exception:
+                    logger.exception("Failed to finalize live-edit plaintext fallback")
+            message_ids.append(state.live_edit_message_id)
+            state.live_edit_message_id = None
+            state.live_edit_last_text = ""
+            continue
+
         try:
             msg = await bot.send_message(
                 chat_id=state.chat_id,
@@ -439,6 +540,8 @@ async def finalize_and_reset(
     state.draft_id = random.randint(1, 2**31 - 1)
     state.dirty = False
     state.turn_complete = False
+    state.live_edit_message_id = None
+    state.live_edit_last_text = ""
 
 
 _ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
@@ -889,6 +992,8 @@ async def stream_response(
         state.draft_id = random.randint(1, 2**31 - 1)
         state.dirty = False
         state.turn_complete = False
+        state.live_edit_message_id = None
+        state.live_edit_last_text = ""
 
     return result
 
