@@ -576,6 +576,18 @@ def get_vnc_port(context_name: str) -> int | None:
 
 RYUK_IMAGE = "testcontainers/ryuk:0.11.0"
 _CONTAINER_LABEL = "openshrimp"
+_INSTANCE_PREFIX = "openshrimp"
+
+
+def set_instance_prefix(instance_name: str | None) -> None:
+    """Set a custom prefix for Docker container names (multi-instance support)."""
+    global _INSTANCE_PREFIX, _CONTAINER_LABEL  # noqa: PLW0603
+    if instance_name:
+        _INSTANCE_PREFIX = f"openshrimp-{instance_name}"
+        _CONTAINER_LABEL = f"openshrimp-{instance_name}"
+    else:
+        _INSTANCE_PREFIX = "openshrimp"
+        _CONTAINER_LABEL = "openshrimp"
 
 _ryuk_socket: socket.socket | None = None
 _ryuk_container_id: str | None = None
@@ -602,7 +614,7 @@ def start_ryuk() -> None:
         result = subprocess.run(
             [
                 "docker", "run", "-d",
-                "--name", "openshrimp-ryuk",
+                "--name", f"{_INSTANCE_PREFIX}-ryuk",
                 "-v", "/var/run/docker.sock:/var/run/docker.sock",
                 "-p", "127.0.0.1::8080",
                 "--label", f"{_CONTAINER_LABEL}.ryuk=true",
@@ -616,13 +628,13 @@ def start_ryuk() -> None:
             # a previous bot instance.  Remove it and retry.
             if "Conflict" in result.stderr or "already in use" in result.stderr:
                 subprocess.run(
-                    ["docker", "rm", "-f", "openshrimp-ryuk"],
+                    ["docker", "rm", "-f", f"{_INSTANCE_PREFIX}-ryuk"],
                     capture_output=True,
                 )
                 result = subprocess.run(
                     [
                         "docker", "run", "-d",
-                        "--name", "openshrimp-ryuk",
+                        "--name", f"{_INSTANCE_PREFIX}-ryuk",
                         "-v", "/var/run/docker.sock:/var/run/docker.sock",
                         "-p", "127.0.0.1::8080",
                         "--label", f"{_CONTAINER_LABEL}.ryuk=true",
@@ -642,7 +654,7 @@ def start_ryuk() -> None:
 
         # Discover the mapped host port.
         port_result = subprocess.run(
-            ["docker", "port", "openshrimp-ryuk", "8080"],
+            ["docker", "port", f"{_INSTANCE_PREFIX}-ryuk", "8080"],
             capture_output=True,
             text=True,
         )
@@ -719,7 +731,7 @@ def _cleanup_ryuk_container() -> None:
     global _ryuk_container_id  # noqa: PLW0603
     if _ryuk_container_id is not None:
         subprocess.run(
-            ["docker", "rm", "-f", "openshrimp-ryuk"],
+            ["docker", "rm", "-f", f"{_INSTANCE_PREFIX}-ryuk"],
             capture_output=True,
         )
         logger.info("Removed Ryuk container")
@@ -732,7 +744,7 @@ def _cleanup_ryuk_container() -> None:
 
 def _container_name(context_name: str) -> str:
     """Return the fixed Docker container name for a context."""
-    return f"openshrimp-{context_name}"
+    return f"{_INSTANCE_PREFIX}-{context_name}"
 
 
 def _get_container_state(name: str) -> str | None:

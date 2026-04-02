@@ -51,6 +51,7 @@ class Config:
     contexts: dict[str, ContextConfig]
     default_context: str
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    instance_name: str | None = None
 
 
 def _validate_raw(raw: dict) -> None:
@@ -183,6 +184,7 @@ def _parse(raw: dict) -> Config:
         contexts=contexts,
         default_context=raw["default_context"],
         review=review,
+        instance_name=raw.get("instance_name"),
     )
 
 

@@ -24,7 +24,7 @@ import aiosqlite
 
 from open_shrimp.client_manager import close_all_sessions
 from open_shrimp.config import Config, load_config
-from open_shrimp.container import start_ryuk, stop_all_containers, stop_ryuk
+from open_shrimp.container import set_instance_prefix, start_ryuk, stop_all_containers, stop_ryuk
 from open_shrimp.dispatch_registry import register_dispatch
 from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
@@ -222,6 +222,9 @@ async def run_bot(
     await app.start()
     await app.updater.start_polling()
     logger.info("Bot is running")
+
+    # Set instance prefix for container name isolation (multi-instance).
+    set_instance_prefix(config.instance_name)
 
     # Start Ryuk reaper for crash-safe container cleanup.  Only needed
     # on Linux where Docker containers are used (macOS uses sandbox-exec).
