@@ -38,24 +38,11 @@ from open_shrimp.hooks import (
     EditNotifyCallback,
     QuestionCallback,
 )
-import sys
-
 from open_shrimp.container import (
-    COMPUTER_USE_IMAGE,
-    CONTAINER_IMAGE,
-    build_cli_wrapper as docker_build_cli_wrapper,
-    cleanup_wrapper as docker_cleanup_wrapper,
-    ensure_computer_use_image as docker_ensure_computer_use_image,
-    ensure_container_running as docker_ensure_container,
-    ensure_image as docker_ensure_image,
-    get_screenshots_dir,
     register_build,
     unregister_build,
 )
-from open_shrimp.sandbox import (
-    build_cli_wrapper as sandbox_build_cli_wrapper,
-    cleanup_wrapper as sandbox_cleanup_wrapper,
-)
+from open_shrimp.sandbox_base import Sandbox, create_sandbox
 from open_shrimp.tools import create_openshrimp_mcp_server
 
 logger = logging.getLogger(__name__)
@@ -86,7 +73,7 @@ class AgentSession:
     session_id: str | None = None
     context_name: str = ""
     callback_context: CallbackContext = field(default_factory=CallbackContext)
-    container_wrapper_path: str | None = None
+    sandbox: Sandbox | None = None
 
 
 _active_sessions: dict[ChatScope, AgentSession] = {}
@@ -242,137 +229,70 @@ async def get_or_create_session(
         ])
 
     # When containerized, generate a wrapper script that runs the Claude
-    # CLI in an isolated environment.  On macOS we use sandbox-exec (since
-    # Docker runs a Linux VM and would break the native Claude CLI binary);
-    # on Linux we use Docker.  The wrapper is pointed at via cli_path; all
-    # other SDK machinery (stdin/stdout streaming, canUseTool, MCP) is
-    # unchanged.
-    wrapper_path: str | None = None
+    # CLI in an isolated environment.  The sandbox backend is chosen by
+    # platform (macOS -> sandbox-exec, Linux -> Docker).  The wrapper is
+    # pointed at via cli_path; all other SDK machinery (stdin/stdout
+    # streaming, canUseTool, MCP) is unchanged.
+    sandbox: Sandbox | None = None
     cli_path: str | None = None
     is_containerized = context.container is not None and context.container.enabled
     if is_containerized:
-        if sys.platform == "darwin":
-            wrapper_path = sandbox_build_cli_wrapper(
-                context_name=context_name,
-                project_dir=context.directory,
-                additional_directories=context.additional_directories or None,
+        sandbox = create_sandbox(context_name, context)
+
+        # Check if the environment needs building — send user feedback
+        # before the potentially slow build.
+        needs_build = not sandbox.environment_ready()
+        if needs_build and bot is not None:
+            log_file = register_build(context_name)
+
+            build_text = (
+                "Building container image for the first time, "
+                "this may take a few minutes\\.\\.\\."
             )
-            logger.info(
-                "Sandboxed context '%s': using sandbox-exec wrapper %s",
-                context_name,
-                wrapper_path,
+            keyboard = None
+            if terminal_base_url and config is not None:
+                app_url = (
+                    f"{terminal_base_url}/terminal/"
+                    f"?type=container_build&id={context_name}"
+                )
+                keyboard = InlineKeyboardMarkup([[
+                    make_web_app_button(
+                        "📺 View build log",
+                        app_url,
+                        chat_id=scope.chat_id,
+                        user_id=user_id,
+                        bot_token=config.telegram.token,
+                        is_private_chat=is_private_chat,
+                    )
+                ]])
+            await bot.send_message(
+                chat_id=scope.chat_id,
+                message_thread_id=scope.thread_id,
+                text=build_text,
+                parse_mode="MarkdownV2",
+                reply_markup=keyboard,
             )
         else:
-            # Check if the image needs building — send user feedback
-            # before the potentially slow build.
-            assert context.container is not None
-            custom_dockerfile = context.container.dockerfile
-            docker_in_docker = context.container.docker_in_docker
-            computer_use = context.container.computer_use
+            log_file = None
 
-            if computer_use and custom_dockerfile:
-                image_name = f"openshrimp-claude:{context_name}"
-            elif computer_use:
-                image_name = COMPUTER_USE_IMAGE
-            elif custom_dockerfile:
-                image_name = f"openshrimp-claude:{context_name}"
-            else:
-                image_name = CONTAINER_IMAGE
+        _sandbox = sandbox  # capture for closure
 
-            import subprocess as _subprocess
-            inspect_result = _subprocess.run(
-                ["docker", "image", "inspect", image_name],
-                capture_output=True,
-            )
-            needs_build = inspect_result.returncode != 0
-            if needs_build and bot is not None:
-                # Register the build so the terminal mini app can tail
-                # the log file while the image is being built.
-                log_file = register_build(context_name)
+        def _ensure_and_build_wrapper() -> str:
+            try:
+                _sandbox.ensure_environment(log_file=log_file)
+            finally:
+                if log_file is not None:
+                    unregister_build(context_name)
+            _sandbox.ensure_running()
+            return _sandbox.build_cli_wrapper()
 
-                build_text = (
-                    "Building container image for the first time, "
-                    "this may take a few minutes\\.\\.\\."
-                )
-                keyboard = None
-                if terminal_base_url and config is not None:
-                    app_url = (
-                        f"{terminal_base_url}/terminal/"
-                        f"?type=container_build&id={context_name}"
-                    )
-                    keyboard = InlineKeyboardMarkup([[
-                        make_web_app_button(
-                            "📺 View build log",
-                            app_url,
-                            chat_id=scope.chat_id,
-                            user_id=user_id,
-                            bot_token=config.telegram.token,
-                            is_private_chat=is_private_chat,
-                        )
-                    ]])
-                await bot.send_message(
-                    chat_id=scope.chat_id,
-                    message_thread_id=scope.thread_id,
-                    text=build_text,
-                    parse_mode="MarkdownV2",
-                    reply_markup=keyboard,
-                )
-            else:
-                log_file = None
-
-            def _ensure_and_build_wrapper() -> str:
-                try:
-                    if computer_use and custom_dockerfile:
-                        # Build computer-use base first, then layer the
-                        # custom Dockerfile on top.
-                        docker_ensure_computer_use_image(
-                            log_file=log_file,
-                        )
-                        docker_ensure_image(
-                            image_name=image_name,
-                            dockerfile=custom_dockerfile,
-                            base_image=COMPUTER_USE_IMAGE,
-                            log_file=log_file,
-                        )
-                    elif computer_use:
-                        docker_ensure_computer_use_image(
-                            image_name=image_name,
-                            log_file=log_file,
-                        )
-                    else:
-                        docker_ensure_image(
-                            image_name=image_name,
-                            dockerfile=custom_dockerfile,
-                            log_file=log_file,
-                        )
-                finally:
-                    if log_file is not None:
-                        unregister_build(context_name)
-
-                docker_ensure_container(
-                    context_name=context_name,
-                    project_dir=context.directory,
-                    additional_directories=context.additional_directories or None,
-                    docker_in_docker=docker_in_docker,
-                    computer_use=computer_use,
-                    image_name=image_name,
-                )
-                return docker_build_cli_wrapper(
-                    context_name=context_name,
-                    project_dir=context.directory,
-                    additional_directories=context.additional_directories or None,
-                    docker_in_docker=docker_in_docker,
-                    computer_use=computer_use,
-                    image_name=image_name,
-                )
-
-            wrapper_path = await asyncio.to_thread(_ensure_and_build_wrapper)
-            logger.info(
-                "Containerized context '%s': using Docker wrapper %s",
-                context_name,
-                wrapper_path,
-            )
+        wrapper_path = await asyncio.to_thread(_ensure_and_build_wrapper)
         cli_path = wrapper_path
+        logger.info(
+            "Sandbox context '%s': using wrapper %s",
+            context_name,
+            wrapper_path,
+        )
 
     options = ClaudeAgentOptions(
         cwd=context.directory,
@@ -402,35 +322,31 @@ async def get_or_create_session(
     # Determine computer-use container name and screenshots dir for MCP.
     _cu_container: str | None = None
     _cu_screenshots_dir: str | None = None
-    if (
-        context.container is not None
-        and context.container.computer_use
-        and is_containerized
-        and sys.platform != "darwin"
-    ):
-        from open_shrimp.container import _container_name
-        _cu_container = _container_name(context_name)
-        _cu_screenshots_dir = str(get_screenshots_dir(context_name))
+    if sandbox is not None and sandbox.container_name is not None:
+        screenshots_dir = sandbox.get_screenshots_dir()
+        if screenshots_dir is not None:
+            _cu_container = sandbox.container_name
+            _cu_screenshots_dir = str(screenshots_dir)
 
-        system_prompt_parts.append(
-            "This context has computer use (GUI interaction) enabled. "
-            "You have access to a headless 1280x720 Linux desktop with "
-            "a Wayland compositor (labwc), a web browser (Chromium), "
-            "and a terminal (foot).\n\n"
-            "For browser/web testing, prefer the Playwright MCP tools "
-            "(browser_navigate, browser_click, browser_type, browser_snapshot, "
-            "browser_screenshot, etc.) — they provide structured DOM access "
-            "via accessibility snapshots which is far more reliable than "
-            "pixel-based interaction. Use browser_snapshot to read the page "
-            "structure before interacting.\n\n"
-            "For non-browser GUI interaction (terminal, native apps, or when "
-            "Playwright tools are insufficient), use the pixel-based tools: "
-            "computer_screenshot to see the screen, computer_click to click "
-            "at coordinates, computer_type to type text, computer_key for "
-            "special keys and combos, computer_scroll to scroll, and "
-            "computer_toplevel to switch between windows. Always take a "
-            "screenshot first to understand the current state."
-        )
+            system_prompt_parts.append(
+                "This context has computer use (GUI interaction) enabled. "
+                "You have access to a headless 1280x720 Linux desktop with "
+                "a Wayland compositor (labwc), a web browser (Chromium), "
+                "and a terminal (foot).\n\n"
+                "For browser/web testing, prefer the Playwright MCP tools "
+                "(browser_navigate, browser_click, browser_type, browser_snapshot, "
+                "browser_screenshot, etc.) — they provide structured DOM access "
+                "via accessibility snapshots which is far more reliable than "
+                "pixel-based interaction. Use browser_snapshot to read the page "
+                "structure before interacting.\n\n"
+                "For non-browser GUI interaction (terminal, native apps, or when "
+                "Playwright tools are insufficient), use the pixel-based tools: "
+                "computer_screenshot to see the screen, computer_click to click "
+                "at coordinates, computer_type to type text, computer_key for "
+                "special keys and combos, computer_scroll to scroll, and "
+                "computer_toplevel to switch between windows. Always take a "
+                "screenshot first to understand the current state."
+            )
 
     if system_prompt_parts:
         options.system_prompt = {
@@ -508,7 +424,7 @@ async def get_or_create_session(
         session_id=session_id,
         context_name=context_name,
         callback_context=callback_context,
-        container_wrapper_path=wrapper_path,
+        sandbox=sandbox,
     )
     _active_sessions[scope] = session
     return session
@@ -587,11 +503,8 @@ async def close_session(scope: ChatScope) -> None:
         logger.info("Closed client for scope %s", scope)
     except (Exception, TimeoutError):
         logger.debug("Error/timeout closing client for scope %s", scope, exc_info=True)
-    if session.container_wrapper_path:
-        if sys.platform == "darwin":
-            sandbox_cleanup_wrapper(session.container_wrapper_path)
-        else:
-            docker_cleanup_wrapper(session.container_wrapper_path)
+    if session.sandbox is not None:
+        session.sandbox.cleanup()
 
 
 async def close_all_sessions() -> None:

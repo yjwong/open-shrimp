@@ -16,7 +16,6 @@ from open_shrimp.agent import (
     FileAttachment,
     build_prompt_with_attachments,
     cleanup_attachments,
-    copy_attachments_to_container,
     save_attachments,
 )
 from open_shrimp.stt import transcribe as stt_transcribe
@@ -486,13 +485,10 @@ async def _inject_message(
         # For containerized contexts, copy into the container and use
         # container-side paths in the prompt.
         prompt_paths = attachment_paths
-        if config and session.context_name:
-            ctx_cfg = config.contexts.get(session.context_name)
-            if ctx_cfg and ctx_cfg.container and ctx_cfg.container.enabled:
-                from open_shrimp.container import container_name as _cn
-                prompt_paths = await copy_attachments_to_container(
-                    attachment_paths, _cn(session.context_name),
-                )
+        if session.sandbox is not None:
+            prompt_paths = await session.sandbox.copy_files_in(
+                attachment_paths,
+            )
 
         actual_prompt = build_prompt_with_attachments(prompt, prompt_paths)
     else:
@@ -561,17 +557,6 @@ async def _start_agent_task(
         attachment_paths: list[Path] = []
         if attachments:
             attachment_paths = save_attachments(attachments, scope.chat_id)
-            prompt_paths = attachment_paths
-            # For containerized contexts, copy into the container and use
-            # container-side paths in the prompt.
-            if is_containerized:
-                from open_shrimp.container import container_name as _cn
-                prompt_paths = await copy_attachments_to_container(
-                    attachment_paths, _cn(ctx_name),
-                )
-            actual_prompt = build_prompt_with_attachments(prompt, prompt_paths)
-        else:
-            actual_prompt = prompt
 
         # Collect all attachment paths (original + injected) for cleanup.
         all_attachment_paths: list[Path] = list(attachment_paths)
@@ -652,6 +637,19 @@ async def _start_agent_task(
                 is_private_chat=is_private_chat,
             )
 
+            # Copy attachments into sandbox (if applicable) and build prompt.
+            if attachment_paths:
+                prompt_paths = attachment_paths
+                if session.sandbox is not None:
+                    prompt_paths = await session.sandbox.copy_files_in(
+                        attachment_paths,
+                    )
+                actual_prompt = build_prompt_with_attachments(
+                    prompt, prompt_paths,
+                )
+            else:
+                actual_prompt = prompt
+
             # Send the primary query.
             await session.client.query(actual_prompt)
 
@@ -668,10 +666,9 @@ async def _start_agent_task(
                         queued_attachments, scope.chat_id,
                     )
                     prompt_paths = queued_paths
-                    if is_containerized:
-                        from open_shrimp.container import container_name as _cn
-                        prompt_paths = await copy_attachments_to_container(
-                            queued_paths, _cn(ctx_name),
+                    if session.sandbox is not None:
+                        prompt_paths = await session.sandbox.copy_files_in(
+                            queued_paths,
                         )
                     queued_actual = build_prompt_with_attachments(
                         queued_prompt, prompt_paths,
