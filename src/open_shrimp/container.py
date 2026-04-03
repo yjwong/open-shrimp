@@ -29,11 +29,9 @@ import logging
 import os
 import shlex
 import shutil
-import socket
 import stat
 import subprocess
 import tempfile
-import threading
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 
@@ -139,74 +137,6 @@ COMPUTER_USE_IMAGE = "openshrimp-computer-use:latest"
 # Base directory for per-context container state (session storage, etc.).
 CONTAINER_STATE_DIR = user_data_path("openshrimp") / "containers"
 
-# ---------------------------------------------------------------------------
-# Build log streaming support
-# ---------------------------------------------------------------------------
-
-# Directory for build log files, tailed by the terminal mini app.
-BUILD_LOG_DIR = Path(tempfile.gettempdir()) / "openshrimp-builds"
-
-# Active builds: context_name -> log file path.
-_active_builds: dict[str, Path] = {}
-_active_builds_lock = threading.Lock()
-
-# Per-context build locks to prevent concurrent builds for the same context.
-_build_locks: dict[str, threading.Lock] = {}
-_build_locks_meta = threading.Lock()
-
-
-def _get_build_lock(context_name: str) -> threading.Lock:
-    """Return a per-context lock, creating it if needed."""
-    with _build_locks_meta:
-        if context_name not in _build_locks:
-            _build_locks[context_name] = threading.Lock()
-        return _build_locks[context_name]
-
-
-def register_build(context_name: str) -> Path:
-    """Register an active build and create its log file.
-
-    Returns the path to the log file. The file is created empty so it
-    exists by the time the user clicks "View output".
-    """
-    BUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = BUILD_LOG_DIR / f"{context_name}.log"
-    # Truncate any previous log.
-    log_path.write_bytes(b"")
-    with _active_builds_lock:
-        _active_builds[context_name] = log_path
-    logger.info("Registered build log for context '%s': %s", context_name, log_path)
-    return log_path
-
-
-def unregister_build(context_name: str) -> None:
-    """Mark a build as no longer active.
-
-    The log file is kept for 1 hour so users can review it after
-    completion, then cleaned up.
-    """
-    with _active_builds_lock:
-        _active_builds.pop(context_name, None)
-    logger.info("Unregistered build for context '%s'", context_name)
-
-    log_path = BUILD_LOG_DIR / f"{context_name}.log"
-
-    def _cleanup() -> None:
-        try:
-            log_path.unlink(missing_ok=True)
-            logger.debug("Cleaned up build log %s", log_path)
-        except Exception:
-            logger.debug("Failed to clean up build log %s", log_path)
-
-    timer = threading.Timer(3600, _cleanup)
-    timer.daemon = True
-    timer.start()
-
-
-def is_build_active(context_name: str) -> bool:
-    """Check whether a build is currently active for the given context."""
-    with _active_builds_lock:
-        return context_name in _active_builds
 
 # Custom seccomp profile for DinD: Docker's default + keyctl (inner runc
 # session keyrings) + pivot_root (inner container rootfs setup).
@@ -575,167 +505,14 @@ def get_vnc_port(context_name: str) -> int | None:
 # ---------------------------------------------------------------------------
 
 RYUK_IMAGE = "testcontainers/ryuk:0.11.0"
+
+# These globals are set by ``DockerSandboxManager.set_instance_prefix()``
+# so that the free functions below (called by ``DockerSandbox``) see the
+# correct prefix/label.  New code should access these values through the
+# manager instead.
 _CONTAINER_LABEL = "openshrimp"
 _INSTANCE_PREFIX = "openshrimp"
 
-
-def set_instance_prefix(instance_name: str | None) -> None:
-    """Set a custom prefix for Docker container names (multi-instance support)."""
-    global _INSTANCE_PREFIX, _CONTAINER_LABEL  # noqa: PLW0603
-    if instance_name:
-        _INSTANCE_PREFIX = f"openshrimp-{instance_name}"
-        _CONTAINER_LABEL = f"openshrimp-{instance_name}"
-    else:
-        _INSTANCE_PREFIX = "openshrimp"
-        _CONTAINER_LABEL = "openshrimp"
-
-_ryuk_socket: socket.socket | None = None
-_ryuk_container_id: str | None = None
-
-
-def start_ryuk() -> None:
-    """Start Testcontainers Ryuk and register a label filter.
-
-    Ryuk is a container reaper that watches a TCP connection as a liveness
-    signal.  As long as the connection is open, labelled containers are kept
-    alive.  When the connection drops (bot crash / exit), Ryuk reaps them.
-
-    This function is a no-op if Docker is not available or Ryuk fails to
-    start (the bot continues without crash cleanup, matching pre-Ryuk
-    behaviour).
-    """
-    global _ryuk_socket, _ryuk_container_id  # noqa: PLW0603
-
-    if not check_docker_available():
-        return
-
-    try:
-        # Start Ryuk container with a random host port.
-        result = subprocess.run(
-            [
-                "docker", "run", "-d",
-                "--name", f"{_INSTANCE_PREFIX}-ryuk",
-                "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                "-p", "127.0.0.1::8080",
-                "--label", f"{_CONTAINER_LABEL}.ryuk=true",
-                RYUK_IMAGE,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            # Container name conflict — Ryuk may already be running from
-            # a previous bot instance.  Remove it and retry.
-            if "Conflict" in result.stderr or "already in use" in result.stderr:
-                subprocess.run(
-                    ["docker", "rm", "-f", f"{_INSTANCE_PREFIX}-ryuk"],
-                    capture_output=True,
-                )
-                result = subprocess.run(
-                    [
-                        "docker", "run", "-d",
-                        "--name", f"{_INSTANCE_PREFIX}-ryuk",
-                        "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                        "-p", "127.0.0.1::8080",
-                        "--label", f"{_CONTAINER_LABEL}.ryuk=true",
-                        RYUK_IMAGE,
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-            if result.returncode != 0:
-                logger.warning(
-                    "Failed to start Ryuk container: %s", result.stderr.strip()
-                )
-                return
-
-        _ryuk_container_id = result.stdout.strip()
-        logger.info("Started Ryuk container: %s", _ryuk_container_id[:12])
-
-        # Discover the mapped host port.
-        port_result = subprocess.run(
-            ["docker", "port", f"{_INSTANCE_PREFIX}-ryuk", "8080"],
-            capture_output=True,
-            text=True,
-        )
-        if port_result.returncode != 0:
-            logger.warning("Failed to get Ryuk port: %s", port_result.stderr.strip())
-            _cleanup_ryuk_container()
-            return
-
-        # Output is like "0.0.0.0:32768" or "[::]:32768".
-        port_str = port_result.stdout.strip().rsplit(":", 1)[-1]
-        port = int(port_str)
-
-        # Connect to Ryuk and register our label filter.  Docker's
-        # port forwarding accepts TCP connections before Ryuk's Go
-        # server has called Accept(), so the connect() succeeds but
-        # the subsequent send/recv gets ConnectionResetError.  Retry
-        # the full connect+send+recv sequence until Ryuk is ready.
-        import time as _time
-
-        filter_msg = f"label={_CONTAINER_LABEL}=true\n".encode()
-        sock: socket.socket | None = None
-        for _attempt in range(10):
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                sock.connect(("127.0.0.1", port))
-                sock.sendall(filter_msg)
-                ack = sock.recv(1024).decode().strip()
-                if ack == "ACK":
-                    break
-                logger.warning("Unexpected Ryuk response: %s", ack)
-                sock.close()
-                sock = None
-            except (ConnectionResetError, ConnectionRefusedError, OSError):
-                if sock is not None:
-                    sock.close()
-                    sock = None
-                _time.sleep(0.2)
-        else:
-            logger.warning("Could not connect to Ryuk after retries")
-            _cleanup_ryuk_container()
-            return
-
-        # Keep the socket open — this is the liveness signal.
-        sock.settimeout(None)
-        _ryuk_socket = sock
-        logger.info("Ryuk connected on port %d, label filter registered", port)
-
-    except Exception:
-        logger.warning("Failed to start Ryuk (continuing without crash cleanup)", exc_info=True)
-        _cleanup_ryuk_container()
-
-
-def stop_ryuk() -> None:
-    """Close the Ryuk connection and remove the Ryuk container.
-
-    On graceful shutdown the caller should stop managed containers
-    explicitly via :func:`stop_all_containers` *before* calling this,
-    so Ryuk only serves as a crash-safety net.
-    """
-    global _ryuk_socket, _ryuk_container_id  # noqa: PLW0603
-
-    if _ryuk_socket is not None:
-        try:
-            _ryuk_socket.close()
-        except OSError:
-            pass
-        _ryuk_socket = None
-
-    _cleanup_ryuk_container()
-
-
-def _cleanup_ryuk_container() -> None:
-    global _ryuk_container_id  # noqa: PLW0603
-    if _ryuk_container_id is not None:
-        subprocess.run(
-            ["docker", "rm", "-f", f"{_INSTANCE_PREFIX}-ryuk"],
-            capture_output=True,
-        )
-        logger.info("Removed Ryuk container")
-        _ryuk_container_id = None
 
 
 # ---------------------------------------------------------------------------
@@ -762,23 +539,6 @@ def _get_container_state(name: str) -> str | None:
         return None
     return result.stdout.strip()
 
-
-def stop_all_containers() -> None:
-    """Stop and remove all OpenShrimp-managed containers (graceful shutdown)."""
-    result = subprocess.run(
-        [
-            "docker", "ps", "-a",
-            "--filter", f"label={_CONTAINER_LABEL}=true",
-            "--format", "{{.Names}}",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    for name in result.stdout.strip().splitlines():
-        name = name.strip()
-        if name:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-            logger.info("Removed container %s", name)
 
 
 # Shell script that starts rootless Docker daemon inside the container,

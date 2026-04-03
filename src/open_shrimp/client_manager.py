@@ -38,11 +38,8 @@ from open_shrimp.hooks import (
     EditNotifyCallback,
     QuestionCallback,
 )
-from open_shrimp.container import (
-    register_build,
-    unregister_build,
-)
-from open_shrimp.sandbox_base import Sandbox, create_sandbox
+from open_shrimp.sandbox_base import Sandbox
+from open_shrimp.sandbox_manager import SandboxManager
 from open_shrimp.tools import create_openshrimp_mcp_server
 
 logger = logging.getLogger(__name__)
@@ -92,6 +89,7 @@ async def get_or_create_session(
     terminal_base_url: str | None = None,
     user_id: int = 0,
     is_private_chat: bool = True,
+    sandbox_manager: SandboxManager | None = None,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
@@ -237,13 +235,16 @@ async def get_or_create_session(
     cli_path: str | None = None
     is_containerized = context.container is not None and context.container.enabled
     if is_containerized:
-        sandbox = create_sandbox(context_name, context)
+        assert sandbox_manager is not None, (
+            "sandbox_manager is required for containerized contexts"
+        )
+        sandbox = sandbox_manager.create_sandbox(context_name, context)
 
         # Check if the environment needs building — send user feedback
         # before the potentially slow build.
         needs_build = not sandbox.environment_ready()
         if needs_build and bot is not None:
-            log_file = register_build(context_name)
+            log_file = sandbox_manager.register_build(context_name)
 
             build_text = (
                 "Building container image for the first time, "
@@ -276,13 +277,15 @@ async def get_or_create_session(
             log_file = None
 
         _sandbox = sandbox  # capture for closure
+        _mgr = sandbox_manager  # capture for closure
 
         def _ensure_and_build_wrapper() -> str:
             try:
                 _sandbox.ensure_environment(log_file=log_file)
             finally:
                 if log_file is not None:
-                    unregister_build(context_name)
+                    assert _mgr is not None
+                    _mgr.unregister_build(context_name)
             _sandbox.ensure_running()
             return _sandbox.build_cli_wrapper()
 
@@ -441,6 +444,7 @@ async def reconnect_session(
     terminal_base_url: str | None = None,
     user_id: int = 0,
     is_private_chat: bool = True,
+    sandbox_manager: SandboxManager | None = None,
 ) -> AgentSession | None:
     """Reconnect after a mid-session container crash.
 
@@ -484,6 +488,7 @@ async def reconnect_session(
             terminal_base_url=terminal_base_url,
             user_id=user_id,
             is_private_chat=is_private_chat,
+            sandbox_manager=sandbox_manager,
         )
     except Exception:
         logger.exception(

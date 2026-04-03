@@ -13,6 +13,7 @@ from pathlib import Path
 from open_shrimp.bot import run_bot
 from open_shrimp.config import DEFAULT_CONFIG_PATH, load_config
 from open_shrimp.db import init_db
+from open_shrimp.sandbox_manager import SandboxManager, create_sandbox_manager
 
 logger = logging.getLogger("open_shrimp")
 
@@ -46,13 +47,17 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def _run_http_server(config: "Config", db: "aiosqlite.Connection") -> None:  # noqa: F821
+async def _run_http_server(
+    config: "Config",  # noqa: F821
+    db: "aiosqlite.Connection",  # noqa: F821
+    sandbox_manager: SandboxManager | None = None,
+) -> None:
     """Run the review API HTTP server."""
     import uvicorn
 
     from open_shrimp.review.api import create_review_app
 
-    app = create_review_app(config, db)
+    app = create_review_app(config, db, sandbox_manager=sandbox_manager)
 
     server_config = uvicorn.Config(
         app,
@@ -105,8 +110,14 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop_event.set)
 
-    bot_task = asyncio.create_task(run_bot(config, db, config_path=config_path))
-    http_task = asyncio.create_task(_run_http_server(config, db))
+    sandbox_mgr = create_sandbox_manager(config)
+
+    bot_task = asyncio.create_task(
+        run_bot(config, db, config_path=config_path, sandbox_manager=sandbox_mgr)
+    )
+    http_task = asyncio.create_task(
+        _run_http_server(config, db, sandbox_manager=sandbox_mgr)
+    )
 
     await stop_event.wait()
     logger.info("Shutting down...")

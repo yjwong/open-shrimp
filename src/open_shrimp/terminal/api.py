@@ -50,7 +50,11 @@ def _resolve_source(request: Request) -> LogSource | None:
     task_type = request.query_params.get("task_type")
     if not source_type or not source_id:
         return None
-    return resolve(source_type, source_id, task_type=task_type)
+    sandbox_manager = getattr(request.app.state, "sandbox_manager", None)
+    return resolve(
+        source_type, source_id, task_type=task_type,
+        sandbox_manager=sandbox_manager,
+    )
 
 
 async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:

@@ -635,6 +635,7 @@ async def _start_agent_task(
                 terminal_base_url=_base_url,
                 user_id=user_id,
                 is_private_chat=is_private_chat,
+                sandbox_manager=context.bot_data.get("sandbox_manager"),
             )
 
             # Copy attachments into sandbox (if applicable) and build prompt.
@@ -751,6 +752,7 @@ async def _start_agent_task(
                         terminal_base_url=_base_url,
                         user_id=user_id,
                         is_private_chat=is_private_chat,
+                        sandbox_manager=context.bot_data.get("sandbox_manager"),
                     )
                     if new_session is None:
                         raise

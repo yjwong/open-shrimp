@@ -24,7 +24,7 @@ import aiosqlite
 
 from open_shrimp.client_manager import close_all_sessions
 from open_shrimp.config import Config, load_config
-from open_shrimp.container import set_instance_prefix, start_ryuk, stop_all_containers, stop_ryuk
+from open_shrimp.sandbox_manager import SandboxManager, create_sandbox_manager
 from open_shrimp.dispatch_registry import register_dispatch
 from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
@@ -183,7 +183,10 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
 
 
 async def run_bot(
-    config: Config, db: aiosqlite.Connection, config_path: str | None = None
+    config: Config,
+    db: aiosqlite.Connection,
+    config_path: str | None = None,
+    sandbox_manager: "SandboxManager | None" = None,
 ) -> None:
     """Start the bot with long polling."""
     app = build_application(config, db)
@@ -226,18 +229,13 @@ async def run_bot(
     await app.updater.start_polling()
     logger.info("Bot is running")
 
-    # Set instance prefix for container name isolation (multi-instance).
-    set_instance_prefix(config.instance_name)
+    # Use the provided sandbox manager or create one.
+    sandbox_mgr = sandbox_manager or create_sandbox_manager(config)
+    sandbox_mgr.set_instance_prefix(config.instance_name)
+    app.bot_data["sandbox_manager"] = sandbox_mgr
 
-    # Start Ryuk reaper for crash-safe container cleanup.  Only needed
-    # on Linux where Docker containers are used (macOS uses sandbox-exec).
-    import sys as _sys
-    _has_docker_containers = _sys.platform != "darwin" and any(
-        ctx.container is not None and ctx.container.enabled
-        for ctx in config.contexts.values()
-    )
-    if _has_docker_containers:
-        await asyncio.to_thread(start_ryuk)
+    # Start Ryuk reaper for crash-safe container cleanup.
+    await asyncio.to_thread(sandbox_mgr.start_reaper)
 
     # Reload scheduled tasks from the database.
     from open_shrimp.scheduler import reload_tasks
@@ -266,8 +264,8 @@ async def run_bot(
         if watcher_task:
             watcher_task.cancel()
         await close_all_sessions()
-        await asyncio.to_thread(stop_all_containers)
-        stop_ryuk()
+        await asyncio.to_thread(sandbox_mgr.stop_all)
+        sandbox_mgr.stop_reaper()
         await app.updater.stop()
         await app.stop()
         await app.shutdown()

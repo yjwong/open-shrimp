@@ -6,17 +6,15 @@ common lifecycle interface.  The SDK's ``cli_path`` option is pointed at a
 wrapper script produced by :meth:`Sandbox.build_cli_wrapper`; all other SDK
 machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.
 
-Use :func:`create_sandbox` to instantiate the appropriate backend based on
-the platform and context configuration.
+Use :meth:`SandboxManager.create_sandbox
+<open_shrimp.sandbox_manager.SandboxManager.create_sandbox>` to instantiate
+the appropriate backend.
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Protocol, runtime_checkable
-
-from open_shrimp.config import ContextConfig
 
 
 @runtime_checkable
@@ -120,29 +118,3 @@ class Sandbox(Protocol):
         ...
 
 
-def create_sandbox(context_name: str, context: ContextConfig) -> Sandbox:
-    """Factory: instantiate the appropriate sandbox backend.
-
-    On macOS, uses ``sandbox-exec`` (since Docker runs a Linux VM and would
-    break the native Claude CLI binary).  On Linux, uses Docker containers.
-    """
-    if sys.platform == "darwin":
-        from open_shrimp.sandbox_macos import MacOSSandbox
-
-        return MacOSSandbox(
-            context_name=context_name,
-            project_dir=context.directory,
-            additional_directories=context.additional_directories or None,
-        )
-    else:
-        from open_shrimp.sandbox_docker import DockerSandbox
-
-        assert context.container is not None
-        return DockerSandbox(
-            context_name=context_name,
-            project_dir=context.directory,
-            additional_directories=context.additional_directories or None,
-            docker_in_docker=context.container.docker_in_docker,
-            computer_use=context.container.computer_use,
-            custom_dockerfile=context.container.dockerfile,
-        )

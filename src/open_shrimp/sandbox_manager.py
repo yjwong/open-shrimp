@@ -1,0 +1,461 @@
+"""Sandbox manager: global lifecycle, factory, and build logging.
+
+The :class:`SandboxManager` protocol abstracts global sandbox concerns
+(reaper lifecycle, instance naming, container cleanup, build logging)
+away from the per-instance :class:`~open_shrimp.sandbox_base.Sandbox`
+protocol.  Callers interact with a single manager instance threaded
+through ``bot_data``; individual sandboxes are obtained via
+:meth:`SandboxManager.create_sandbox`.
+
+Use :func:`create_sandbox_manager` to instantiate the correct backend
+for the current platform and configuration.
+"""
+
+from __future__ import annotations
+
+import logging
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+from platformdirs import user_data_path
+
+from open_shrimp.config import Config, ContextConfig
+from open_shrimp.sandbox_base import Sandbox
+
+logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class SandboxManager(Protocol):
+    """Manages global sandbox lifecycle and acts as a factory for sandboxes."""
+
+    # -- Instance naming ------------------------------------------------------
+
+    def set_instance_prefix(self, instance_name: str | None) -> None:
+        """Configure instance-specific naming for multi-instance deployments."""
+        ...
+
+    @property
+    def instance_prefix(self) -> str:
+        """The current instance prefix (e.g. ``"openshrimp"`` or
+        ``"openshrimp-mybot"``)."""
+        ...
+
+    @property
+    def container_label(self) -> str:
+        """Docker label used to tag managed containers."""
+        ...
+
+    # -- Global lifecycle -----------------------------------------------------
+
+    def start_reaper(self) -> None:
+        """Start crash-safety reaper (Ryuk for Docker, no-op for others)."""
+        ...
+
+    def stop_reaper(self) -> None:
+        """Stop the crash-safety reaper."""
+        ...
+
+    def stop_all(self) -> None:
+        """Stop and remove all managed sandbox runtimes."""
+        ...
+
+    # -- Factory --------------------------------------------------------------
+
+    def create_sandbox(
+        self, context_name: str, context: ContextConfig,
+    ) -> Sandbox:
+        """Create a per-context :class:`Sandbox` instance."""
+        ...
+
+    # -- Build logging --------------------------------------------------------
+
+    def register_build(self, context_name: str) -> Path:
+        """Register an active build, return the log file path."""
+        ...
+
+    def unregister_build(self, context_name: str) -> None:
+        """Mark a build as no longer active."""
+        ...
+
+    def is_build_active(self, context_name: str) -> bool:
+        """Check whether a build is currently active."""
+        ...
+
+    @property
+    def build_log_dir(self) -> Path:
+        """Directory containing build log files."""
+        ...
+
+    @property
+    def state_dir(self) -> Path:
+        """Base directory for per-context sandbox state."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Docker implementation
+# ---------------------------------------------------------------------------
+
+
+class DockerSandboxManager:
+    """Docker-backed :class:`SandboxManager` implementation.
+
+    Lifts the module-level globals from :mod:`open_shrimp.container` into
+    instance attributes so the manager can be injected and tested.
+    """
+
+    def __init__(self) -> None:
+        self._instance_prefix = "openshrimp"
+        self._container_label = "openshrimp"
+        self._ryuk_socket: socket.socket | None = None
+        self._ryuk_container_id: str | None = None
+
+        # Build logging state.
+        self._active_builds: dict[str, Path] = {}
+        self._active_builds_lock = threading.Lock()
+
+        self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
+        self._state_dir = user_data_path("openshrimp") / "containers"
+
+    # -- Instance naming ------------------------------------------------------
+
+    def set_instance_prefix(self, instance_name: str | None) -> None:
+        if instance_name:
+            self._instance_prefix = f"openshrimp-{instance_name}"
+            self._container_label = f"openshrimp-{instance_name}"
+        else:
+            self._instance_prefix = "openshrimp"
+            self._container_label = "openshrimp"
+        # Keep the legacy module globals in sync so that free functions in
+        # container.py (called by DockerSandbox) see the right prefix.
+        import open_shrimp.container as _c
+        _c._INSTANCE_PREFIX = self._instance_prefix  # noqa: SLF001
+        _c._CONTAINER_LABEL = self._container_label  # noqa: SLF001
+
+    @property
+    def instance_prefix(self) -> str:
+        return self._instance_prefix
+
+    @property
+    def container_label(self) -> str:
+        return self._container_label
+
+    # -- Global lifecycle -----------------------------------------------------
+
+    def start_reaper(self) -> None:
+        """Start Testcontainers Ryuk and register a label filter.
+
+        Ryuk watches a TCP connection as a liveness signal.  When the
+        connection drops (bot crash/exit), Ryuk reaps labelled containers.
+        """
+        from open_shrimp.container import RYUK_IMAGE, check_docker_available
+
+        if not check_docker_available():
+            return
+
+        prefix = self._instance_prefix
+        label = self._container_label
+
+        try:
+            result = subprocess.run(
+                [
+                    "docker", "run", "-d",
+                    "--name", f"{prefix}-ryuk",
+                    "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                    "-p", "127.0.0.1::8080",
+                    "--label", f"{label}.ryuk=true",
+                    RYUK_IMAGE,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                if "Conflict" in result.stderr or "already in use" in result.stderr:
+                    subprocess.run(
+                        ["docker", "rm", "-f", f"{prefix}-ryuk"],
+                        capture_output=True,
+                    )
+                    result = subprocess.run(
+                        [
+                            "docker", "run", "-d",
+                            "--name", f"{prefix}-ryuk",
+                            "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                            "-p", "127.0.0.1::8080",
+                            "--label", f"{label}.ryuk=true",
+                            RYUK_IMAGE,
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                if result.returncode != 0:
+                    logger.warning(
+                        "Failed to start Ryuk container: %s",
+                        result.stderr.strip(),
+                    )
+                    return
+
+            self._ryuk_container_id = result.stdout.strip()
+            logger.info(
+                "Started Ryuk container: %s", self._ryuk_container_id[:12],
+            )
+
+            # Discover the mapped host port.
+            port_result = subprocess.run(
+                ["docker", "port", f"{prefix}-ryuk", "8080"],
+                capture_output=True,
+                text=True,
+            )
+            if port_result.returncode != 0:
+                logger.warning(
+                    "Failed to get Ryuk port: %s",
+                    port_result.stderr.strip(),
+                )
+                self._cleanup_ryuk_container()
+                return
+
+            port_str = port_result.stdout.strip().rsplit(":", 1)[-1]
+            port = int(port_str)
+
+            # Connect and register our label filter.
+            import time as _time
+
+            filter_msg = f"label={label}=true\n".encode()
+            sock: socket.socket | None = None
+            for _attempt in range(10):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect(("127.0.0.1", port))
+                    sock.sendall(filter_msg)
+                    ack = sock.recv(1024).decode().strip()
+                    if ack == "ACK":
+                        break
+                    logger.warning("Unexpected Ryuk response: %s", ack)
+                    sock.close()
+                    sock = None
+                except (ConnectionResetError, ConnectionRefusedError, OSError):
+                    if sock is not None:
+                        sock.close()
+                        sock = None
+                    _time.sleep(0.2)
+            else:
+                logger.warning("Could not connect to Ryuk after retries")
+                self._cleanup_ryuk_container()
+                return
+
+            sock.settimeout(None)
+            self._ryuk_socket = sock
+            logger.info(
+                "Ryuk connected on port %d, label filter registered", port,
+            )
+
+        except Exception:
+            logger.warning(
+                "Failed to start Ryuk (continuing without crash cleanup)",
+                exc_info=True,
+            )
+            self._cleanup_ryuk_container()
+
+    def stop_reaper(self) -> None:
+        """Close the Ryuk connection and remove the Ryuk container."""
+        if self._ryuk_socket is not None:
+            try:
+                self._ryuk_socket.close()
+            except OSError:
+                pass
+            self._ryuk_socket = None
+        self._cleanup_ryuk_container()
+
+    def _cleanup_ryuk_container(self) -> None:
+        if self._ryuk_container_id is not None:
+            subprocess.run(
+                ["docker", "rm", "-f", f"{self._instance_prefix}-ryuk"],
+                capture_output=True,
+            )
+            logger.info("Removed Ryuk container")
+            self._ryuk_container_id = None
+
+    def stop_all(self) -> None:
+        """Stop and remove all OpenShrimp-managed containers."""
+        result = subprocess.run(
+            [
+                "docker", "ps", "-a",
+                "--filter", f"label={self._container_label}=true",
+                "--format", "{{.Names}}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        for name in result.stdout.strip().splitlines():
+            name = name.strip()
+            if name:
+                subprocess.run(
+                    ["docker", "rm", "-f", name], capture_output=True,
+                )
+                logger.info("Removed container %s", name)
+
+    # -- Factory --------------------------------------------------------------
+
+    def create_sandbox(
+        self, context_name: str, context: ContextConfig,
+    ) -> Sandbox:
+        assert context.container is not None
+        from open_shrimp.sandbox_docker import DockerSandbox
+
+        return DockerSandbox(
+            context_name=context_name,
+            project_dir=context.directory,
+            additional_directories=context.additional_directories or None,
+            docker_in_docker=context.container.docker_in_docker,
+            computer_use=context.container.computer_use,
+            custom_dockerfile=context.container.dockerfile,
+        )
+
+    # -- Build logging --------------------------------------------------------
+
+    def register_build(self, context_name: str) -> Path:
+        self._build_log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._build_log_dir / f"{context_name}.log"
+        log_path.write_bytes(b"")
+        with self._active_builds_lock:
+            self._active_builds[context_name] = log_path
+        logger.info(
+            "Registered build log for context '%s': %s",
+            context_name, log_path,
+        )
+        return log_path
+
+    def unregister_build(self, context_name: str) -> None:
+        with self._active_builds_lock:
+            self._active_builds.pop(context_name, None)
+        logger.info("Unregistered build for context '%s'", context_name)
+
+        log_path = self._build_log_dir / f"{context_name}.log"
+
+        def _cleanup() -> None:
+            try:
+                log_path.unlink(missing_ok=True)
+                logger.debug("Cleaned up build log %s", log_path)
+            except Exception:
+                logger.debug("Failed to clean up build log %s", log_path)
+
+        timer = threading.Timer(3600, _cleanup)
+        timer.daemon = True
+        timer.start()
+
+    def is_build_active(self, context_name: str) -> bool:
+        with self._active_builds_lock:
+            return context_name in self._active_builds
+
+    @property
+    def build_log_dir(self) -> Path:
+        return self._build_log_dir
+
+    @property
+    def state_dir(self) -> Path:
+        return self._state_dir
+
+
+# ---------------------------------------------------------------------------
+# macOS (no-op) implementation
+# ---------------------------------------------------------------------------
+
+
+class MacOSSandboxManager:
+    """No-op :class:`SandboxManager` for macOS (sandbox-exec, no Docker)."""
+
+    def __init__(self) -> None:
+        self._instance_prefix = "openshrimp"
+        self._container_label = "openshrimp"
+        self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
+        self._state_dir = user_data_path("openshrimp") / "containers"
+
+    def set_instance_prefix(self, instance_name: str | None) -> None:
+        if instance_name:
+            self._instance_prefix = f"openshrimp-{instance_name}"
+            self._container_label = f"openshrimp-{instance_name}"
+        else:
+            self._instance_prefix = "openshrimp"
+            self._container_label = "openshrimp"
+
+    @property
+    def instance_prefix(self) -> str:
+        return self._instance_prefix
+
+    @property
+    def container_label(self) -> str:
+        return self._container_label
+
+    def start_reaper(self) -> None:
+        pass
+
+    def stop_reaper(self) -> None:
+        pass
+
+    def stop_all(self) -> None:
+        pass
+
+    def create_sandbox(
+        self, context_name: str, context: ContextConfig,
+    ) -> Sandbox:
+        from open_shrimp.sandbox_macos import MacOSSandbox
+
+        return MacOSSandbox(
+            context_name=context_name,
+            project_dir=context.directory,
+            additional_directories=context.additional_directories or None,
+        )
+
+    def register_build(self, context_name: str) -> Path:
+        self._build_log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._build_log_dir / f"{context_name}.log"
+        log_path.write_bytes(b"")
+        return log_path
+
+    def unregister_build(self, context_name: str) -> None:
+        pass
+
+    def is_build_active(self, context_name: str) -> bool:
+        return False
+
+    @property
+    def build_log_dir(self) -> Path:
+        return self._build_log_dir
+
+    @property
+    def state_dir(self) -> Path:
+        return self._state_dir
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+
+def create_sandbox_manager(config: Config) -> SandboxManager:
+    """Instantiate the appropriate :class:`SandboxManager` for the platform.
+
+    On macOS, uses :class:`MacOSSandboxManager` (sandbox-exec, no Docker).
+    On Linux, uses :class:`DockerSandboxManager`.
+    """
+    if sys.platform == "darwin":
+        return MacOSSandboxManager()
+
+    # On Linux, check if any context uses containers — if so, use Docker.
+    has_containers = any(
+        ctx.container is not None and ctx.container.enabled
+        for ctx in config.contexts.values()
+    )
+    if has_containers:
+        return DockerSandboxManager()
+
+    # No containerized contexts — still use Docker manager (it handles
+    # the no-op case gracefully), but a Null manager would also work.
+    return DockerSandboxManager()

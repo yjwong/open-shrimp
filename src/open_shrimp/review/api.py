@@ -528,10 +528,15 @@ async def commit_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
-def create_review_app(config: Config, db: aiosqlite.Connection) -> Starlette:
+def create_review_app(
+    config: Config,
+    db: aiosqlite.Connection,
+    sandbox_manager: "SandboxManager | None" = None,
+) -> Starlette:
     """Create the Starlette application for the review API.
 
-    The config and db are stored on app.state so route handlers can access them.
+    The config, db, and sandbox_manager are stored on app.state so
+    route handlers can access them.
     Serves the review Mini App frontend at /app/ and API routes at /api/review/.
     """
     # Resolve the frontend dist directory.  Check the package-bundled location
@@ -579,5 +584,6 @@ def create_review_app(config: Config, db: aiosqlite.Connection) -> Starlette:
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db
+    app.state.sandbox_manager = sandbox_manager
 
     return app

@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from open_shrimp.container import BUILD_LOG_DIR, CONTAINER_STATE_DIR, is_build_active
+from open_shrimp.sandbox_manager import SandboxManager
 from open_shrimp.handlers.state import is_task_active
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,9 @@ def _resolve_container_symlink(
     return None
 
 
-def _find_task_output_file(task_id: str) -> Path | None:
+def _find_task_output_file(
+    task_id: str, sandbox_manager: SandboxManager | None = None,
+) -> Path | None:
     """Find the output file for a background task by ID.
 
     Searches the host Claude CLI tmp directory and all container state
@@ -127,8 +129,9 @@ def _find_task_output_file(task_id: str) -> Path | None:
 
     # Search container state directories: each has a tmp/ subdirectory
     # that is bind-mounted as /tmp/claude-<uid>/ inside the container.
-    if CONTAINER_STATE_DIR.is_dir():
-        for context_dir in CONTAINER_STATE_DIR.iterdir():
+    state_dir = sandbox_manager.state_dir if sandbox_manager else None
+    if state_dir is not None and state_dir.is_dir():
+        for context_dir in state_dir.iterdir():
             tmp_dir = context_dir / "tmp"
             result = _search_tmp_base(tmp_dir, filename)
             if result:
@@ -163,9 +166,13 @@ def _is_agent_output(path: Path, task_type: str | None) -> bool:
 _CONTEXT_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
-def resolve_task(source_id: str, task_type: str | None = None) -> LogSource | None:
+def resolve_task(
+    source_id: str,
+    task_type: str | None = None,
+    sandbox_manager: SandboxManager | None = None,
+) -> LogSource | None:
     """Resolve a background task ID to a ``LogSource``."""
-    path = _find_task_output_file(source_id)
+    path = _find_task_output_file(source_id, sandbox_manager=sandbox_manager)
     if path is None:
         return None
 
@@ -179,25 +186,38 @@ def resolve_task(source_id: str, task_type: str | None = None) -> LogSource | No
     )
 
 
-def resolve_container_build(source_id: str) -> LogSource | None:
+def resolve_container_build(
+    source_id: str,
+    sandbox_manager: SandboxManager | None = None,
+) -> LogSource | None:
     """Resolve a container build context name to a ``LogSource``."""
     if not _CONTEXT_NAME_RE.match(source_id):
         return None
 
-    log_path = BUILD_LOG_DIR / f"{source_id}.log"
+    build_log_dir = sandbox_manager.build_log_dir if sandbox_manager else None
+    if build_log_dir is None:
+        return None
+
+    log_path = build_log_dir / f"{source_id}.log"
     if not log_path.is_file():
         return None
 
     ctx = source_id  # capture for closure
+    _mgr = sandbox_manager  # capture for closure
 
     return LogSource(
         path=log_path,
-        is_active=lambda: is_build_active(ctx),
+        is_active=lambda: _mgr.is_build_active(ctx) if _mgr else False,
         render="raw",
     )
 
 
-def resolve(source_type: str, source_id: str, task_type: str | None = None) -> LogSource | None:
+def resolve(
+    source_type: str,
+    source_id: str,
+    task_type: str | None = None,
+    sandbox_manager: SandboxManager | None = None,
+) -> LogSource | None:
     """Resolve a ``(type, id)`` pair to a ``LogSource``.
 
     Args:
@@ -205,14 +225,19 @@ def resolve(source_type: str, source_id: str, task_type: str | None = None) -> L
             ``"container_build"``).
         source_id: The identifier (task ID or context name).
         task_type: Optional task type hint (only for ``type=task``).
+        sandbox_manager: Optional manager for build log and state dirs.
 
     Returns:
         A ``LogSource`` or ``None`` if the source cannot be found.
     """
     if source_type == "task":
-        return resolve_task(source_id, task_type=task_type)
+        return resolve_task(
+            source_id, task_type=task_type, sandbox_manager=sandbox_manager,
+        )
     elif source_type == "container_build":
-        return resolve_container_build(source_id)
+        return resolve_container_build(
+            source_id, sandbox_manager=sandbox_manager,
+        )
     else:
         logger.warning("Unknown log source type: %s", source_type)
         return None
