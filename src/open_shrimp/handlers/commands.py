@@ -1385,9 +1385,9 @@ def _format_tier(name: str, tier: dict[str, Any] | None) -> str | None:
     if not tier or tier.get("utilization") is None:
         return None
     util = tier["utilization"]
-    remaining = max(0, 100 - util)
-    bar = _usage_bar(remaining)
-    line = f"*{_escape_mdv2(name)}:* {bar} {_escape_mdv2(f'{remaining:.0f}% remaining')}"
+    used = min(100, util)
+    bar = _usage_bar(used)
+    line = f"*{_escape_mdv2(name)}:* {bar} {_escape_mdv2(f'{used:.0f}% used')}"
     resets_at = tier.get("resets_at")
     if resets_at:
         try:
@@ -1406,9 +1406,9 @@ def _format_tier(name: str, tier: dict[str, Any] | None) -> str | None:
     return line
 
 
-def _usage_bar(remaining: float) -> str:
+def _usage_bar(used: float) -> str:
     """Build a small text-based usage bar (10 segments)."""
-    filled = round(remaining / 10)
+    filled = round(used / 10)
     return _escape_mdv2("[" + "█" * filled + "░" * (10 - filled) + "]")
 
 
