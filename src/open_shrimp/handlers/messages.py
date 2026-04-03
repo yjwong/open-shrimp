@@ -12,7 +12,13 @@ import aiosqlite
 from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
-from open_shrimp.agent import FileAttachment, cleanup_attachments, prepare_prompt
+from open_shrimp.agent import (
+    FileAttachment,
+    build_prompt_with_attachments,
+    cleanup_attachments,
+    copy_attachments_to_container,
+    save_attachments,
+)
 from open_shrimp.stt import transcribe as stt_transcribe
 from claude_agent_sdk import ProcessError
 from open_shrimp.client_manager import (
@@ -438,7 +444,7 @@ async def _dispatch_to_agent(
     # Task is running -- try to inject into the live session.
     session = _injectable_sessions.get(scope)
     if session is not None:
-        await _inject_message(session, prompt, attachments, scope, context.bot)
+        await _inject_message(session, prompt, attachments, scope, context.bot, config)
     else:
         # Session is still being set up -- queue for injection once ready.
         if scope not in _setup_queues:
@@ -465,6 +471,7 @@ async def _inject_message(
     attachments: list[FileAttachment],
     scope: ChatScope,
     bot: Bot,
+    config: Config | None = None,
 ) -> None:
     """Inject a user message into a live agent session.
 
@@ -472,9 +479,24 @@ async def _inject_message(
     the CLI subprocess stdin.  The already-running ``receive_response()``
     iterator will pick up the resulting events naturally.
     """
-    actual_prompt, attachment_paths = prepare_prompt(
-        prompt, attachments if attachments else None, chat_id=scope.chat_id,
-    )
+    attachment_paths: list[Path] = []
+    if attachments:
+        attachment_paths = save_attachments(attachments, scope.chat_id)
+
+        # For containerized contexts, copy into the container and use
+        # container-side paths in the prompt.
+        prompt_paths = attachment_paths
+        if config and session.context_name:
+            ctx_cfg = config.contexts.get(session.context_name)
+            if ctx_cfg and ctx_cfg.container and ctx_cfg.container.enabled:
+                from open_shrimp.container import container_name as _cn
+                prompt_paths = await copy_attachments_to_container(
+                    attachment_paths, _cn(session.context_name),
+                )
+
+        actual_prompt = build_prompt_with_attachments(prompt, prompt_paths)
+    else:
+        actual_prompt = prompt
 
     # Track attachment paths for cleanup in _run()'s finally block.
     if attachment_paths:
@@ -531,9 +553,26 @@ async def _start_agent_task(
             user_id=user_id, is_private_chat=is_private_chat,
             bot_token=config.telegram.token,
         )
-        actual_prompt, attachment_paths = prepare_prompt(
-            prompt, attachments if attachments else None, chat_id=scope.chat_id,
+        is_containerized = (
+            ctx_config.container is not None
+            and ctx_config.container.enabled
         )
+
+        attachment_paths: list[Path] = []
+        if attachments:
+            attachment_paths = save_attachments(attachments, scope.chat_id)
+            prompt_paths = attachment_paths
+            # For containerized contexts, copy into the container and use
+            # container-side paths in the prompt.
+            if is_containerized:
+                from open_shrimp.container import container_name as _cn
+                prompt_paths = await copy_attachments_to_container(
+                    attachment_paths, _cn(ctx_name),
+                )
+            actual_prompt = build_prompt_with_attachments(prompt, prompt_paths)
+        else:
+            actual_prompt = prompt
+
         # Collect all attachment paths (original + injected) for cleanup.
         all_attachment_paths: list[Path] = list(attachment_paths)
 
@@ -623,10 +662,22 @@ async def _start_agent_task(
             # Drain any messages that arrived during the setup phase.
             setup_queue = _setup_queues.pop(scope, [])
             for queued_prompt, queued_attachments in setup_queue:
-                queued_actual, queued_paths = prepare_prompt(
-                    queued_prompt, queued_attachments if queued_attachments else None,
-                    chat_id=scope.chat_id,
-                )
+                queued_paths: list[Path] = []
+                if queued_attachments:
+                    queued_paths = save_attachments(
+                        queued_attachments, scope.chat_id,
+                    )
+                    prompt_paths = queued_paths
+                    if is_containerized:
+                        from open_shrimp.container import container_name as _cn
+                        prompt_paths = await copy_attachments_to_container(
+                            queued_paths, _cn(ctx_name),
+                        )
+                    queued_actual = build_prompt_with_attachments(
+                        queued_prompt, prompt_paths,
+                    )
+                else:
+                    queued_actual = queued_prompt
                 all_attachment_paths.extend(queued_paths)
                 try:
                     await session.client.query(queued_actual)
@@ -642,10 +693,6 @@ async def _start_agent_task(
 
             container_retries = 0
             max_container_retries = 2
-            is_containerized = (
-                ctx_config.container is not None
-                and ctx_config.container.enabled
-            )
 
             while True:
                 try:

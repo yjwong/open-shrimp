@@ -742,9 +742,13 @@ def _cleanup_ryuk_container() -> None:
 # Persistent container lifecycle
 # ---------------------------------------------------------------------------
 
-def _container_name(context_name: str) -> str:
+def container_name(context_name: str) -> str:
     """Return the fixed Docker container name for a context."""
     return f"{_INSTANCE_PREFIX}-{context_name}"
+
+
+# Keep private alias for internal callers.
+_container_name = container_name
 
 
 def _get_container_state(name: str) -> str | None:

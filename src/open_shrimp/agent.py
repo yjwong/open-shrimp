@@ -5,6 +5,7 @@ streaming messages (text chunks, tool events, results) for the caller
 to consume and bridge to Telegram.
 """
 
+import asyncio
 import logging
 import re
 import tempfile
@@ -91,7 +92,7 @@ def _sanitize_filename(name: str) -> str:
     return re.sub(r"[^\w.\-]", "_", name)
 
 
-def _save_attachments_to_temp(
+def save_attachments(
     attachments: list[FileAttachment],
     chat_id: int,
 ) -> list[Path]:
@@ -128,7 +129,7 @@ def _save_attachments_to_temp(
     return paths
 
 
-def _build_prompt_with_attachments(prompt: str, attachment_paths: list[Path]) -> str:
+def build_prompt_with_attachments(prompt: str, attachment_paths: list[Path]) -> str:
     """Prepend file references to the user prompt."""
     parts: list[str] = []
     if len(attachment_paths) == 1:
@@ -144,32 +145,6 @@ def _build_prompt_with_attachments(prompt: str, attachment_paths: list[Path]) ->
     return "\n".join(parts)
 
 
-def prepare_prompt(
-    prompt: str,
-    attachments: list[FileAttachment] | None = None,
-    *,
-    chat_id: int = 0,
-) -> tuple[str, list[Path]]:
-    """Build the actual prompt and save attachments to temp files.
-
-    Args:
-        prompt: The user's message text.
-        attachments: Optional file attachments to include.
-        chat_id: Telegram chat ID, used to scope the temp directory so
-            each chat's uploads are isolated.
-
-    Returns ``(actual_prompt, attachment_paths)`` where *attachment_paths*
-    should be cleaned up by the caller after the query completes.
-    """
-    attachment_paths: list[Path] = []
-    if attachments:
-        attachment_paths = _save_attachments_to_temp(attachments, chat_id)
-        actual_prompt = _build_prompt_with_attachments(prompt, attachment_paths)
-    else:
-        actual_prompt = prompt
-    return actual_prompt, attachment_paths
-
-
 def cleanup_attachments(paths: list[Path]) -> None:
     """Remove temporary attachment files."""
     for p in paths:
@@ -177,6 +152,67 @@ def cleanup_attachments(paths: list[Path]) -> None:
             p.unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to remove temp file %s", p)
+
+
+# Container destination for copied attachments.
+_CONTAINER_UPLOAD_DIR = "/tmp/openshrimp_uploads"
+
+
+async def copy_attachments_to_container(
+    attachment_paths: list[Path],
+    container_name: str,
+) -> list[Path]:
+    """Copy attachment files into a running Docker container.
+
+    Uses ``docker cp`` to copy each file into the container at
+    :data:`_CONTAINER_UPLOAD_DIR`.  Returns a list of container-side
+    paths (same order and length as *attachment_paths*).  If a copy
+    fails for a particular file, the original host path is kept as a
+    fallback.
+    """
+    if not attachment_paths:
+        return []
+
+    # Ensure the destination directory exists inside the container.
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", container_name,
+        "mkdir", "-p", _CONTAINER_UPLOAD_DIR,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.error(
+            "Failed to create upload dir in container %s: %s",
+            container_name, stderr.decode().strip(),
+        )
+        return list(attachment_paths)
+
+    result: list[Path] = []
+    for host_path in attachment_paths:
+        container_path = Path(_CONTAINER_UPLOAD_DIR) / host_path.name
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "cp", str(host_path),
+            f"{container_name}:{container_path}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error(
+                "docker cp failed for %s -> %s:%s: %s",
+                host_path, container_name, container_path,
+                stderr.decode().strip(),
+            )
+            result.append(host_path)
+            continue
+        result.append(container_path)
+        logger.info(
+            "Copied attachment into container: %s -> %s:%s",
+            host_path, container_name, container_path,
+        )
+
+    return result
 
 
 async def run_agent(
@@ -242,8 +278,8 @@ async def run_agent(
     # Save attachments to temp files and build the prompt with file references.
     attachment_paths: list[Path] = []
     if attachments:
-        attachment_paths = _save_attachments_to_temp(attachments, chat_id=0)
-        actual_prompt = _build_prompt_with_attachments(prompt, attachment_paths)
+        attachment_paths = save_attachments(attachments, chat_id=0)
+        actual_prompt = build_prompt_with_attachments(prompt, attachment_paths)
     else:
         actual_prompt = prompt
 
