@@ -38,8 +38,7 @@ from open_shrimp.hooks import (
     EditNotifyCallback,
     QuestionCallback,
 )
-from open_shrimp.sandbox_base import Sandbox
-from open_shrimp.sandbox_manager import SandboxManager
+from open_shrimp.sandbox import Sandbox, SandboxManager
 from open_shrimp.tools import create_openshrimp_mcp_server
 
 logger = logging.getLogger(__name__)

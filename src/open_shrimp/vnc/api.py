@@ -19,7 +19,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
 from open_shrimp.config import Config
-from open_shrimp.container import (
+from open_shrimp.sandbox.docker_helpers import (
     get_text_input_active,
     get_text_input_state_path,
     get_vnc_port,

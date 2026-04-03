@@ -24,7 +24,7 @@ import aiosqlite
 
 from open_shrimp.client_manager import close_all_sessions
 from open_shrimp.config import Config, load_config
-from open_shrimp.sandbox_manager import SandboxManager, create_sandbox_manager
+from open_shrimp.sandbox import SandboxManager, create_sandbox_manager
 from open_shrimp.dispatch_registry import register_dispatch
 from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (

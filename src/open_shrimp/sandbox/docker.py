@@ -1,6 +1,6 @@
 """Docker-based sandbox for isolated Claude CLI execution.
 
-Wraps the free functions in :mod:`open_shrimp.container` into a
+Wraps the free functions in :mod:`open_shrimp.sandbox.docker_helpers` into a
 :class:`DockerSandbox` class that implements the :class:`Sandbox` protocol.
 """
 
@@ -11,7 +11,7 @@ import logging
 import subprocess
 from pathlib import Path
 
-from open_shrimp.container import (
+from open_shrimp.sandbox.docker_helpers import (
     COMPUTER_USE_IMAGE,
     CONTAINER_IMAGE,
     build_cli_wrapper as _build_cli_wrapper,
@@ -33,7 +33,7 @@ class DockerSandbox:
     """Docker container sandbox implementing the :class:`Sandbox` protocol.
 
     Each instance wraps a single context's Docker lifecycle.  The underlying
-    functions in :mod:`open_shrimp.container` are called with the stored
+    functions in :mod:`open_shrimp.sandbox.docker_helpers` are called with the stored
     configuration, so callers only need the protocol methods.
     """
 

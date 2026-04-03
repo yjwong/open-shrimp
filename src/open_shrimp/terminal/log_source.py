@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from open_shrimp.sandbox_manager import SandboxManager
+from open_shrimp.sandbox import SandboxManager
 from open_shrimp.handlers.state import is_task_active
 
 logger = logging.getLogger(__name__)

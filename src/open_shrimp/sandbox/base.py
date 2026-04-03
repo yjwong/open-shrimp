@@ -7,7 +7,7 @@ wrapper script produced by :meth:`Sandbox.build_cli_wrapper`; all other SDK
 machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.
 
 Use :meth:`SandboxManager.create_sandbox
-<open_shrimp.sandbox_manager.SandboxManager.create_sandbox>` to instantiate
+<open_shrimp.sandbox.manager.SandboxManager.create_sandbox>` to instantiate
 the appropriate backend.
 """
 

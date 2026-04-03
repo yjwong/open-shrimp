@@ -5,7 +5,7 @@ would run a Linux VM and break the native Claude CLI binary), we use Apple's
 ``sandbox-exec`` to restrict the CLI process to only the project directory,
 session storage, and network access.
 
-The approach mirrors ``container.py``: a thin wrapper script is generated that
+The approach mirrors ``docker_helpers.py``: a thin wrapper script is generated that
 invokes ``sandbox-exec -f <profile>`` with the right paths.  The SDK's
 ``cli_path`` option points at this wrapper, so everything else (stdin/stdout
 streaming, canUseTool callbacks, MCP) works unchanged.
@@ -28,7 +28,7 @@ from platformdirs import user_data_path
 logger = logging.getLogger(__name__)
 
 
-from open_shrimp.container import find_claude_binary as _find_claude_binary
+from open_shrimp.sandbox.docker_helpers import find_claude_binary as _find_claude_binary
 
 # Base directory for per-context sandbox state (session storage, etc.).
 SANDBOX_STATE_DIR = user_data_path("openshrimp") / "containers"

@@ -13,7 +13,7 @@ from pathlib import Path
 from open_shrimp.bot import run_bot
 from open_shrimp.config import DEFAULT_CONFIG_PATH, load_config
 from open_shrimp.db import init_db
-from open_shrimp.sandbox_manager import SandboxManager, create_sandbox_manager
+from open_shrimp.sandbox import SandboxManager, create_sandbox_manager
 
 logger = logging.getLogger("open_shrimp")
 

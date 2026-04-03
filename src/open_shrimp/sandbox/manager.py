@@ -2,7 +2,7 @@
 
 The :class:`SandboxManager` protocol abstracts global sandbox concerns
 (reaper lifecycle, instance naming, container cleanup, build logging)
-away from the per-instance :class:`~open_shrimp.sandbox_base.Sandbox`
+away from the per-instance :class:`~open_shrimp.sandbox.base.Sandbox`
 protocol.  Callers interact with a single manager instance threaded
 through ``bot_data``; individual sandboxes are obtained via
 :meth:`SandboxManager.create_sandbox`.
@@ -26,7 +26,7 @@ from typing import Protocol, runtime_checkable
 from platformdirs import user_data_path
 
 from open_shrimp.config import Config, ContextConfig
-from open_shrimp.sandbox_base import Sandbox
+from open_shrimp.sandbox.base import Sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ class SandboxManager(Protocol):
 class DockerSandboxManager:
     """Docker-backed :class:`SandboxManager` implementation.
 
-    Lifts the module-level globals from :mod:`open_shrimp.container` into
+    Lifts the module-level globals from :mod:`open_shrimp.sandbox.docker_helpers` into
     instance attributes so the manager can be injected and tested.
     """
 
@@ -135,7 +135,7 @@ class DockerSandboxManager:
             self._container_label = "openshrimp"
         # Keep the legacy module globals in sync so that free functions in
         # container.py (called by DockerSandbox) see the right prefix.
-        import open_shrimp.container as _c
+        import open_shrimp.sandbox.docker_helpers as _c
         _c._INSTANCE_PREFIX = self._instance_prefix  # noqa: SLF001
         _c._CONTAINER_LABEL = self._container_label  # noqa: SLF001
 
@@ -155,7 +155,7 @@ class DockerSandboxManager:
         Ryuk watches a TCP connection as a liveness signal.  When the
         connection drops (bot crash/exit), Ryuk reaps labelled containers.
         """
-        from open_shrimp.container import RYUK_IMAGE, check_docker_available
+        from open_shrimp.sandbox.docker_helpers import RYUK_IMAGE, check_docker_available
 
         if not check_docker_available():
             return
@@ -307,7 +307,7 @@ class DockerSandboxManager:
         self, context_name: str, context: ContextConfig,
     ) -> Sandbox:
         assert context.container is not None
-        from open_shrimp.sandbox_docker import DockerSandbox
+        from open_shrimp.sandbox.docker import DockerSandbox
 
         return DockerSandbox(
             context_name=context_name,
@@ -405,7 +405,7 @@ class MacOSSandboxManager:
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
     ) -> Sandbox:
-        from open_shrimp.sandbox_macos import MacOSSandbox
+        from open_shrimp.sandbox.macos import MacOSSandbox
 
         return MacOSSandbox(
             context_name=context_name,

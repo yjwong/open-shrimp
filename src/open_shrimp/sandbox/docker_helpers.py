@@ -148,7 +148,7 @@ def _find_seccomp_profile() -> Path:
     written to a real file on disk because ``docker run --security-opt
     seccomp=`` requires a filesystem path.
     """
-    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
     repo_profile = repo_root / "seccomp-dind.json"
     if repo_profile.is_file():
         return repo_profile
@@ -271,7 +271,7 @@ def ensure_image(
         )
     else:
         # Default: bundled Dockerfile.claude in a temp build context.
-        repo_root = Path(__file__).resolve().parent.parent.parent
+        repo_root = Path(__file__).resolve().parent.parent.parent.parent
         repo_dockerfile = repo_root / "Dockerfile.claude"
         if repo_dockerfile.is_file():
             dockerfile_text = repo_dockerfile.read_text()
@@ -336,7 +336,7 @@ def ensure_computer_use_image(
     else:
         logger.info("Computer-use image %s not found, building...", image_name)
 
-    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
     repo_dockerfile = repo_root / "Dockerfile.computer-use"
     computer_use_dir = repo_root / "computer-use"
 
@@ -561,7 +561,9 @@ fi
 echo "claude:100000:65536" > /etc/subuid
 echo "claude:100000:65536" > /etc/subgid
 
-# XDG_RUNTIME_DIR is required by rootless dockerd.
+# XDG_RUNTIME_DIR is required by rootless dockerd.  It must be outside
+# /run because rootlesskit's --copy-up=/run overlays /run with a tmpfs
+# inside its namespace, shadowing anything the outer namespace writes there.
 export XDG_RUNTIME_DIR="/tmp/runtime-${MY_UID}"
 mkdir -p "$XDG_RUNTIME_DIR"
 
@@ -591,9 +593,9 @@ for _i in $(seq 1 30); do
     sleep 1
 done
 
-# Symlink the rootless socket to the standard path so that all Docker
-# clients (Testcontainers/Ryuk, SDK libraries, etc.) find the daemon at
-# the default location without needing DOCKER_HOST or Docker contexts.
+# Symlink the rootless socket to the standard path so that tools like
+# Testcontainers/Ryuk find the daemon at /var/run/docker.sock without
+# needing DOCKER_HOST.
 mkdir -p /var/run
 ln -sf "${XDG_RUNTIME_DIR}/docker.sock" /var/run/docker.sock
 

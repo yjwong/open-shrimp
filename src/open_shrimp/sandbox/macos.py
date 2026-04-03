@@ -1,6 +1,6 @@
 """macOS sandbox-exec sandbox for isolated Claude CLI execution.
 
-Wraps the free functions in :mod:`open_shrimp.sandbox` into a
+Wraps the free functions in :mod:`open_shrimp.sandbox.macos_helpers` into a
 :class:`MacOSSandbox` class that implements the :class:`Sandbox` protocol.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from open_shrimp.sandbox import (
+from open_shrimp.sandbox.macos_helpers import (
     build_cli_wrapper as _build_cli_wrapper,
     cleanup_wrapper as _cleanup_wrapper,
 )
