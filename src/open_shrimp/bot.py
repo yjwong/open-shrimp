@@ -33,6 +33,7 @@ from open_shrimp.handlers.commands import (
     context_handler,
     handle_context_callback,
     handle_resume_callback,
+    login_handler,
     mcp_handler,
     model_handler,
     resume_handler,
@@ -163,6 +164,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CommandHandler("usage", usage_handler))
     app.add_handler(CommandHandler("vnc", vnc_handler))
+    app.add_handler(CommandHandler("login", login_handler))
 
     # Callback query handler for tool approval buttons
     app.add_handler(CallbackQueryHandler(callback_query_handler))
@@ -218,6 +220,7 @@ async def run_bot(
         BotCommand("tasks", "List or stop background tasks"),
         BotCommand("usage", "Show Claude quota and usage stats"),
         BotCommand("vnc", "View computer-use desktop"),
+        BotCommand("login", "Re-authenticate Claude Code OAuth"),
     ])
     await app.start()
     await app.updater.start_polling()

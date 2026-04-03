@@ -1,24 +1,32 @@
 """HTTP API routes for the terminal Mini App.
 
 Provides an SSE endpoint for tailing log sources (background task output,
-container build logs, etc.) and a REST endpoint for reading their content.
+container build logs, etc.), a REST endpoint for reading their content,
+and a WebSocket PTY endpoint for interactive ``claude auth login``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
+import os
+import pty
+import shutil
+import struct
+import termios
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
-from starlette.routing import Mount, Route
+from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from open_shrimp.config import Config
-from open_shrimp.review.auth import AuthError, authenticate
+from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
 from open_shrimp.terminal.log_source import LogSource, resolve
 
@@ -209,6 +217,236 @@ async def read_endpoint(request: Request) -> JSONResponse:
     })
 
 
+# ── Login PTY WebSocket endpoint ──
+#
+# The PTY process is decoupled from the WebSocket lifetime so that the
+# user can switch to a browser to complete OAuth and come back without
+# the session being killed.  A single ``_LoginSession`` lives at module
+# level; WebSocket clients attach/detach freely.
+#
+# Runs ``claude`` in TUI mode and sends ``/login\n`` to trigger the
+# interactive OAuth flow.  The TUI has a built-in paste prompt that
+# accepts ``code#state`` via stdin — no localhost callback proxy needed.
+
+
+class _LoginSession:
+    """Background PTY session for ``claude`` TUI login."""
+
+    def __init__(
+        self,
+        proc: asyncio.subprocess.Process,
+        master_fd: int,
+    ) -> None:
+        self.proc = proc
+        self.master_fd = master_fd
+        # Circular buffer of terminal output for replay on reconnect.
+        self._output_chunks: list[str] = []
+        self._output_bytes = 0
+        self._MAX_BUFFER = 64 * 1024  # 64 KiB
+        self._websocket: WebSocket | None = None
+        self._reader_task: asyncio.Task | None = None
+        self._done = asyncio.Event()
+
+    def start_background(self) -> None:
+        self._reader_task = asyncio.create_task(self._pty_reader())
+
+    # ── Attach / detach WebSocket ──
+
+    async def attach(self, websocket: WebSocket) -> None:
+        """Send buffered output, then start forwarding."""
+        self._websocket = websocket
+        for chunk in self._output_chunks:
+            await websocket.send_text(chunk)
+
+    def detach(self) -> None:
+        self._websocket = None
+
+    @property
+    def alive(self) -> bool:
+        return self.proc.returncode is None
+
+    async def wait(self) -> None:
+        await self._done.wait()
+
+    # ── Background tasks ──
+
+    async def _pty_reader(self) -> None:
+        loop = asyncio.get_event_loop()
+        try:
+            while True:
+                data = await loop.run_in_executor(
+                    None, os.read, self.master_fd, 4096
+                )
+                if not data:
+                    break
+                text = data.decode("utf-8", errors="replace")
+                # Buffer for replay.
+                self._output_chunks.append(text)
+                self._output_bytes += len(text)
+                while self._output_bytes > self._MAX_BUFFER:
+                    removed = self._output_chunks.pop(0)
+                    self._output_bytes -= len(removed)
+                # Forward to attached WebSocket.
+                ws = self._websocket
+                if ws is not None:
+                    try:
+                        await ws.send_text(text)
+                    except Exception:
+                        self._websocket = None
+        except OSError:
+            pass
+        finally:
+            self._done.set()
+
+    # ── Cleanup ──
+
+    async def destroy(self) -> None:
+        if self._reader_task:
+            self._reader_task.cancel()
+        try:
+            os.close(self.master_fd)
+        except OSError:
+            pass
+        if self.proc.returncode is None:
+            self.proc.terminate()
+            await self.proc.wait()
+        logger.info("Login session destroyed: pid=%d", self.proc.pid or 0)
+
+
+# The single active login session (if any).
+_login_session: _LoginSession | None = None
+
+
+async def login_ws_endpoint(websocket: WebSocket) -> None:
+    """WebSocket PTY: spawn or attach to ``claude`` TUI for /login.
+
+    Runs ``claude`` in interactive TUI mode and sends ``/login`` to
+    trigger the OAuth flow.  The TUI's built-in paste prompt accepts
+    ``code#state`` via stdin — the user copies the code from the
+    Anthropic callback page and pastes it in the mini app.
+
+    The PTY process lives independently of the WebSocket so the user
+    can switch to the browser and come back without losing the session.
+
+    Query params:
+        token: Telegram initData or HMAC token for authentication.
+    """
+    global _login_session
+
+    config: Config = websocket.app.state.config
+    token = websocket.query_params.get("token", "")
+
+    try:
+        await validate_token_param(
+            token, config.telegram.token, config.allowed_users
+        )
+    except AuthError:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    await websocket.accept()
+
+    # If there's an existing live session, reattach to it.
+    if _login_session is not None and _login_session.alive:
+        logger.info("Login WS: reattaching to existing session")
+        await _login_session.attach(websocket)
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                _handle_ws_input(raw, _login_session)
+        except WebSocketDisconnect:
+            _login_session.detach()
+            logger.info("Login WS: client detached (session stays alive)")
+        except Exception:
+            _login_session.detach()
+        return
+
+    # Clean up any dead session.
+    if _login_session is not None:
+        await _login_session.destroy()
+        _login_session = None
+
+    # ── Start a new session ──
+
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        await websocket.send_text(
+            "\x1b[31mError: claude CLI not found in PATH.\x1b[0m\r\n"
+        )
+        await websocket.close()
+        return
+
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(
+        slave_fd,
+        termios.TIOCSWINSZ,
+        struct.pack("HHHH", 24, 80, 0, 0),
+    )
+
+    # BROWSER=echo: openBrowser() "succeeds" without opening anything,
+    # and the TUI falls back to showing the paste prompt after 3s.
+    # TERM/COLORTERM: enable 256-color and truecolor output in the TUI.
+    env = {
+        **os.environ,
+        "BROWSER": "echo",
+        "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
+    }
+
+    proc = await asyncio.create_subprocess_exec(
+        claude_bin, "/login",
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env=env,
+        preexec_fn=os.setsid,
+    )
+    os.close(slave_fd)
+
+    logger.info("Login PTY started: pid=%d", proc.pid or 0)
+
+    session = _LoginSession(proc, master_fd)
+    _login_session = session
+    session.start_background()
+    await session.attach(websocket)
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            _handle_ws_input(raw, session)
+    except WebSocketDisconnect:
+        session.detach()
+        logger.info("Login WS: client detached (session stays alive)")
+    except Exception:
+        logger.exception("Login WS error")
+        session.detach()
+
+    # Don't destroy the session here — it stays alive for reconnection.
+    # It will be cleaned up when the process exits and the next connect
+    # finds a dead session, or on a fresh /login.
+
+
+def _handle_ws_input(raw: str, session: _LoginSession) -> None:
+    """Parse a WebSocket message and write to the PTY or resize."""
+    try:
+        msg = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        os.write(session.master_fd, raw.encode("utf-8"))
+        return
+
+    msg_type = msg.get("type")
+    if msg_type == "stdin":
+        os.write(session.master_fd, msg["data"].encode("utf-8"))
+    elif msg_type == "resize":
+        cols = msg.get("cols", 80)
+        rows = msg.get("rows", 24)
+        fcntl.ioctl(
+            session.master_fd,
+            termios.TIOCSWINSZ,
+            struct.pack("HHHH", rows, cols, 0, 0),
+        )
+
+
 def create_terminal_routes() -> list[Route | Mount]:
     """Create the routes for the terminal API and Mini App frontend.
 
@@ -226,6 +464,7 @@ def create_terminal_routes() -> list[Route | Mount]:
     routes: list[Route | Mount] = [
         Route("/api/terminal/tail", tail_endpoint, methods=["GET"]),
         Route("/api/terminal/read", read_endpoint, methods=["GET"]),
+        WebSocketRoute("/ws/terminal/login", login_ws_endpoint),
     ]
 
     if _dist_dir.is_dir():

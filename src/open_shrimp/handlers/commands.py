@@ -1,5 +1,5 @@
 """Telegram command handlers (/context, /clear, /status, /cancel, /model,
-/resume, /review, /mcp, /tasks, /usage).
+/resume, /review, /mcp, /tasks, /usage, /login).
 """
 
 from __future__ import annotations
@@ -949,6 +949,46 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     escaped_context = _escape_mdv2(context_name)
     await update.message.reply_text(
         f"Desktop for *{escaped_context}*",
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard,
+    )
+
+
+# ── /login ──
+
+
+async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /login -- open the login Mini App to re-authenticate Claude Code OAuth."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+
+    if not _is_authorized(update.effective_user.id, config):
+        return
+
+    # Build the Mini App URL.
+    if config.review.public_url:
+        base_url = config.review.public_url.rstrip("/")
+    else:
+        base_url = f"https://{config.review.host}:{config.review.port}"
+
+    chat_type = update.effective_chat.type if update.effective_chat else "private"
+    scope = chat_scope_from_message(update.message)
+    login_url = f"{base_url}/terminal/?mode=login"
+    keyboard = InlineKeyboardMarkup([
+        [make_web_app_button(
+            text="Open login",
+            url=login_url,
+            chat_id=scope.chat_id,
+            user_id=update.effective_user.id,
+            bot_token=config.telegram.token,
+            is_private_chat=chat_type == "private",
+        )]
+    ])
+
+    await update.message.reply_text(
+        "Re\\-authenticate Claude Code OAuth",
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
     )
