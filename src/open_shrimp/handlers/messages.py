@@ -26,7 +26,7 @@ from open_shrimp.client_manager import (
     receive_events,
     reconnect_session,
 )
-from open_shrimp.config import Config
+from open_shrimp.config import Config, ContextConfig, is_sandboxed
 from open_shrimp.db import ChatScope, get_pinned_message_id, get_session_id, set_session_id
 from open_shrimp.handlers.approval import _send_approval_keyboard, _send_auto_approved_diff
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
@@ -63,6 +63,19 @@ from open_shrimp.stream import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _select_sandbox_manager(
+    bot_data: dict[str, Any],
+    ctx_config: ContextConfig,
+) -> "SandboxManager | None":
+    """Pick the right SandboxManager for a context's backend."""
+    from open_shrimp.sandbox import SandboxManager
+
+    managers: dict[str, SandboxManager] | None = bot_data.get("sandbox_managers")
+    if managers and ctx_config.sandbox:
+        return managers.get(ctx_config.sandbox.backend)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -549,10 +562,7 @@ async def _start_agent_task(
             user_id=user_id, is_private_chat=is_private_chat,
             bot_token=config.telegram.token,
         )
-        is_containerized = (
-            ctx_config.container is not None
-            and ctx_config.container.enabled
-        )
+        is_containerized = is_sandboxed(ctx_config)
 
         attachment_paths: list[Path] = []
         if attachments:
@@ -635,7 +645,7 @@ async def _start_agent_task(
                 terminal_base_url=_base_url,
                 user_id=user_id,
                 is_private_chat=is_private_chat,
-                sandbox_manager=context.bot_data.get("sandbox_manager"),
+                sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
             )
 
             # Copy attachments into sandbox (if applicable) and build prompt.
@@ -752,7 +762,7 @@ async def _start_agent_task(
                         terminal_base_url=_base_url,
                         user_id=user_id,
                         is_private_chat=is_private_chat,
-                        sandbox_manager=context.bot_data.get("sandbox_manager"),
+                        sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
                     )
                     if new_session is None:
                         raise

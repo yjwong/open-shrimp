@@ -3,17 +3,17 @@
 from open_shrimp.sandbox.base import Sandbox
 from open_shrimp.sandbox.manager import (
     DockerSandboxManager,
+    LibvirtSandboxManager,
     MacOSSandboxManager,
     SandboxManager,
-    create_sandbox_manager,
     create_sandbox_managers,
 )
 
 __all__ = [
     "DockerSandboxManager",
+    "LibvirtSandboxManager",
     "MacOSSandboxManager",
     "Sandbox",
     "SandboxManager",
-    "create_sandbox_manager",
     "create_sandbox_managers",
 ]

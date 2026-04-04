@@ -50,10 +50,10 @@ def _resolve_source(request: Request) -> LogSource | None:
     task_type = request.query_params.get("task_type")
     if not source_type or not source_id:
         return None
-    sandbox_manager = getattr(request.app.state, "sandbox_manager", None)
+    sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
     return resolve(
         source_type, source_id, task_type=task_type,
-        sandbox_manager=sandbox_manager,
+        sandbox_managers=sandbox_managers,
     )
 
 

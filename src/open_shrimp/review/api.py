@@ -531,11 +531,11 @@ async def commit_endpoint(request: Request) -> JSONResponse:
 def create_review_app(
     config: Config,
     db: aiosqlite.Connection,
-    sandbox_manager: "SandboxManager | None" = None,
+    sandbox_managers: "dict[str, SandboxManager] | None" = None,
 ) -> Starlette:
     """Create the Starlette application for the review API.
 
-    The config, db, and sandbox_manager are stored on app.state so
+    The config, db, and sandbox_managers are stored on app.state so
     route handlers can access them.
     Serves the review Mini App frontend at /app/ and API routes at /api/review/.
     """
@@ -584,6 +584,6 @@ def create_review_app(
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db
-    app.state.sandbox_manager = sandbox_manager
+    app.state.sandbox_managers = sandbox_managers
 
     return app

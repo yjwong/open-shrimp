@@ -362,6 +362,12 @@ wheels = [
 ]
 
 [[package]]
+name = "libvirt-python"
+version = "12.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/ab/ba985048cc24be7b7050c479634d50c42cc1c0225735e516a81d609135c0/libvirt_python-12.2.0.tar.gz", hash = "sha256:742147988bba7d400f6892beeeb7e0a27758f10ff65421b569b7b4b6a2572e44", size = 244689, upload-time = "2026-04-01T07:43:05.709Z" }
+
+[[package]]
 name = "mcp"
 version = "1.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -413,6 +419,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+libvirt = [
+    { name = "libvirt-python" },
+]
 macos = [
     { name = "rumps" },
 ]
@@ -428,6 +437,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite" },
     { name = "claude-agent-sdk" },
+    { name = "libvirt-python", marker = "extra == 'libvirt'", specifier = ">=10.0" },
     { name = "mistune", specifier = ">=3.0,<4.0" },
     { name = "platformdirs", specifier = ">=4.0" },
     { name = "python-telegram-bot", extras = ["httpx", "job-queue"] },
@@ -439,7 +449,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"] },
     { name = "watchfiles", specifier = ">=1.0" },
 ]
-provides-extras = ["macos"]
+provides-extras = ["libvirt", "macos"]
 
 [package.metadata.requires-dev]
 dev = [

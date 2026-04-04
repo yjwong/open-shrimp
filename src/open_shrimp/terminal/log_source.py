@@ -105,12 +105,13 @@ def _resolve_container_symlink(
 
 
 def _find_task_output_file(
-    task_id: str, sandbox_manager: SandboxManager | None = None,
+    task_id: str,
+    sandbox_managers: dict[str, SandboxManager] | None = None,
 ) -> Path | None:
     """Find the output file for a background task by ID.
 
-    Searches the host Claude CLI tmp directory and all container state
-    directories (where containerized contexts write their tmp files).
+    Searches the host Claude CLI tmp directory and all sandbox managers'
+    state directories (where containerized/VM contexts write their tmp files).
 
     For containerized agent tasks the ``.output`` file is a symlink whose
     target uses a container-internal path.  When a broken symlink is found
@@ -127,22 +128,24 @@ def _find_task_output_file(
     if result:
         return result
 
-    # Search container state directories: each has a tmp/ subdirectory
-    # that is bind-mounted as /tmp/claude-<uid>/ inside the container.
-    state_dir = sandbox_manager.state_dir if sandbox_manager else None
-    if state_dir is not None and state_dir.is_dir():
-        for context_dir in state_dir.iterdir():
-            tmp_dir = context_dir / "tmp"
-            result = _search_tmp_base(tmp_dir, filename)
-            if result:
-                # Broken symlink — resolve container path to host path.
-                if result.is_symlink() and not result.exists():
-                    resolved = _resolve_container_symlink(
-                        result, context_dir,
-                    )
-                    if resolved:
-                        return resolved
-                return result
+    # Search all sandbox managers' state directories.
+    if sandbox_managers:
+        for mgr in sandbox_managers.values():
+            state_dir = mgr.state_dir
+            if not state_dir.is_dir():
+                continue
+            for context_dir in state_dir.iterdir():
+                tmp_dir = context_dir / "tmp"
+                result = _search_tmp_base(tmp_dir, filename)
+                if result:
+                    # Broken symlink — resolve container path to host path.
+                    if result.is_symlink() and not result.exists():
+                        resolved = _resolve_container_symlink(
+                            result, context_dir,
+                        )
+                        if resolved:
+                            return resolved
+                    return result
 
     return None
 
@@ -169,10 +172,10 @@ _CONTEXT_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 def resolve_task(
     source_id: str,
     task_type: str | None = None,
-    sandbox_manager: SandboxManager | None = None,
+    sandbox_managers: dict[str, SandboxManager] | None = None,
 ) -> LogSource | None:
     """Resolve a background task ID to a ``LogSource``."""
-    path = _find_task_output_file(source_id, sandbox_manager=sandbox_manager)
+    path = _find_task_output_file(source_id, sandbox_managers=sandbox_managers)
     if path is None:
         return None
 
@@ -188,35 +191,36 @@ def resolve_task(
 
 def resolve_container_build(
     source_id: str,
-    sandbox_manager: SandboxManager | None = None,
+    sandbox_managers: dict[str, SandboxManager] | None = None,
 ) -> LogSource | None:
     """Resolve a container build context name to a ``LogSource``."""
     if not _CONTEXT_NAME_RE.match(source_id):
         return None
 
-    build_log_dir = sandbox_manager.build_log_dir if sandbox_manager else None
-    if build_log_dir is None:
+    if not sandbox_managers:
         return None
 
-    log_path = build_log_dir / f"{source_id}.log"
-    if not log_path.is_file():
-        return None
+    # Search all managers for the build log.
+    for mgr in sandbox_managers.values():
+        build_log_dir = mgr.build_log_dir
+        log_path = build_log_dir / f"{source_id}.log"
+        if log_path.is_file():
+            ctx = source_id  # capture for closure
+            _mgr = mgr  # capture for closure
+            return LogSource(
+                path=log_path,
+                is_active=lambda: _mgr.is_build_active(ctx),
+                render="raw",
+            )
 
-    ctx = source_id  # capture for closure
-    _mgr = sandbox_manager  # capture for closure
-
-    return LogSource(
-        path=log_path,
-        is_active=lambda: _mgr.is_build_active(ctx) if _mgr else False,
-        render="raw",
-    )
+    return None
 
 
 def resolve(
     source_type: str,
     source_id: str,
     task_type: str | None = None,
-    sandbox_manager: SandboxManager | None = None,
+    sandbox_managers: dict[str, SandboxManager] | None = None,
 ) -> LogSource | None:
     """Resolve a ``(type, id)`` pair to a ``LogSource``.
 
@@ -225,18 +229,18 @@ def resolve(
             ``"container_build"``).
         source_id: The identifier (task ID or context name).
         task_type: Optional task type hint (only for ``type=task``).
-        sandbox_manager: Optional manager for build log and state dirs.
+        sandbox_managers: Managers dict for build log and state dirs.
 
     Returns:
         A ``LogSource`` or ``None`` if the source cannot be found.
     """
     if source_type == "task":
         return resolve_task(
-            source_id, task_type=task_type, sandbox_manager=sandbox_manager,
+            source_id, task_type=task_type, sandbox_managers=sandbox_managers,
         )
     elif source_type == "container_build":
         return resolve_container_build(
-            source_id, sandbox_manager=sandbox_manager,
+            source_id, sandbox_managers=sandbox_managers,
         )
     else:
         logger.warning("Unknown log source type: %s", source_type)

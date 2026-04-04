@@ -68,6 +68,19 @@ class Sandbox(Protocol):
         """
         ...
 
+    def provision_workspace(self) -> None:
+        """Provision the workspace filesystem inside the sandbox.
+
+        Called after :meth:`ensure_running` and before
+        :meth:`build_cli_wrapper`.  For backends where the workspace is
+        already available (bind mounts, shared filesystems), this is a
+        no-op.  VM backends may use this to clone repositories or sync
+        files.
+
+        Idempotent — safe to call on every session start.
+        """
+        ...
+
     def build_cli_wrapper(self) -> str:
         """Generate a shell script that execs into the sandbox.
 

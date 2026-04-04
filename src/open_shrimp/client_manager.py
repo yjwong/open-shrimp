@@ -31,7 +31,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from open_shrimp.web_app_button import make_web_app_button
 
 from open_shrimp.agent import AgentEvent
-from open_shrimp.config import ContextConfig
+from open_shrimp.config import ContextConfig, is_sandboxed
 from open_shrimp.db import ChatScope
 from open_shrimp.hooks import (
     ApprovalCallback,
@@ -141,7 +141,7 @@ async def get_or_create_session(
         notify_auto_approved_edit=_make_edit_notify_proxy(callback_context),
         chat_id=scope.chat_id,
         is_tool_auto_approved=_make_tool_approved_proxy(callback_context),
-        is_containerized=context.container is not None and context.container.enabled,
+        is_containerized=is_sandboxed(context),
     )
 
     _last_stderr: list[str] = [""]
@@ -232,7 +232,7 @@ async def get_or_create_session(
     # streaming, canUseTool, MCP) is unchanged.
     sandbox: Sandbox | None = None
     cli_path: str | None = None
-    is_containerized = context.container is not None and context.container.enabled
+    is_containerized = is_sandboxed(context)
     if is_containerized:
         assert sandbox_manager is not None, (
             "sandbox_manager is required for containerized contexts"

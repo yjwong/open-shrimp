@@ -7,7 +7,7 @@ protocol.  Callers interact with a single manager instance threaded
 through ``bot_data``; individual sandboxes are obtained via
 :meth:`SandboxManager.create_sandbox`.
 
-Use :func:`create_sandbox_manager` to instantiate the correct backend
+Use :func:`create_sandbox_managers` to instantiate the correct backends
 for the current platform and configuration.
 """
 
@@ -435,6 +435,214 @@ class MacOSSandboxManager:
 
 
 # ---------------------------------------------------------------------------
+# Libvirt implementation
+# ---------------------------------------------------------------------------
+
+
+class LibvirtSandboxManager:
+    """Libvirt/QEMU-backed :class:`SandboxManager` implementation.
+
+    Manages VM lifecycle via ``qemu:///session`` (rootless libvirt).
+    One persistent ``libvirt.virConnect`` connection for the process lifetime.
+    """
+
+    def __init__(self) -> None:
+        self._instance_prefix = "openshrimp"
+        self._container_label = "openshrimp"  # not used, but protocol requires it
+        self._conn: "libvirt.virConnect | None" = None  # type: ignore[name-defined]
+
+        self._active_builds: dict[str, Path] = {}
+        self._active_builds_lock = threading.Lock()
+
+        self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
+        self._state_dir = user_data_path("openshrimp") / "vms"
+
+    # -- Instance naming ------------------------------------------------------
+
+    def set_instance_prefix(self, instance_name: str | None) -> None:
+        if instance_name:
+            self._instance_prefix = f"openshrimp-{instance_name}"
+            self._container_label = f"openshrimp-{instance_name}"
+        else:
+            self._instance_prefix = "openshrimp"
+            self._container_label = "openshrimp"
+
+    @property
+    def instance_prefix(self) -> str:
+        return self._instance_prefix
+
+    @property
+    def container_label(self) -> str:
+        return self._container_label
+
+    # -- Global lifecycle -----------------------------------------------------
+
+    def start_reaper(self) -> None:
+        """Open a persistent connection to ``qemu:///session``.
+
+        No Ryuk equivalent needed — libvirt session domains don't survive
+        user logout, and we track domain names for cleanup.
+        """
+        try:
+            import libvirt
+        except ImportError:
+            logger.error(
+                "libvirt-python not installed — install with: "
+                "pip install libvirt-python  (and: sudo apt install "
+                "libvirt-daemon qemu-system-x86)"
+            )
+            raise
+
+        try:
+            import libvirtaio
+            import asyncio
+
+            # Register libvirt events on the asyncio event loop if one is
+            # running.  This is non-blocking; individual API calls are fast
+            # local socket RPCs (~sub-10ms) so true async/await isn't needed.
+            try:
+                loop = asyncio.get_running_loop()
+                libvirtaio.virEventRegisterAsyncIOImpl(loop)
+            except RuntimeError:
+                # No running event loop — skip async registration.
+                pass
+        except ImportError:
+            pass
+
+        self._conn = libvirt.open("qemu:///session")
+        if self._conn is None:
+            raise RuntimeError("Failed to connect to qemu:///session")
+        logger.info("Connected to qemu:///session")
+
+    def stop_reaper(self) -> None:
+        """Close the libvirt connection."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+            logger.info("Closed qemu:///session connection")
+
+    def stop_all(self) -> None:
+        """Gracefully shutdown all openshrimp-* domains (with destroy fallback)."""
+        if self._conn is None:
+            return
+
+        import libvirt
+        import time
+
+        prefix = self._instance_prefix + "-"
+        try:
+            domains = self._conn.listAllDomains()
+        except libvirt.libvirtError:
+            return
+
+        for domain in domains:
+            name = domain.name()
+            if not name.startswith(prefix):
+                continue
+
+            if not domain.isActive():
+                continue
+
+            # Graceful ACPI shutdown.
+            try:
+                domain.shutdown()
+                logger.info("Sent ACPI shutdown to %s", name)
+            except libvirt.libvirtError:
+                try:
+                    domain.destroy()
+                except libvirt.libvirtError:
+                    pass
+                logger.info("Force-destroyed %s", name)
+                continue
+
+            # Wait for graceful shutdown (up to 10s).
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    if not domain.isActive():
+                        logger.info("Domain %s shut down", name)
+                        break
+                except libvirt.libvirtError:
+                    break
+                time.sleep(0.5)
+            else:
+                # Timeout — force destroy.
+                try:
+                    domain.destroy()
+                    logger.warning("Force-destroyed %s after timeout", name)
+                except libvirt.libvirtError:
+                    pass
+
+        # Stop any virtiofsd processes (they write PID files or we just
+        # let them be — they'll die when the socket is removed).
+
+    # -- Factory --------------------------------------------------------------
+
+    def create_sandbox(
+        self, context_name: str, context: ContextConfig,
+    ) -> Sandbox:
+        assert self._conn is not None, "call start_reaper() first"
+        assert context.sandbox is not None
+
+        from open_shrimp.sandbox.libvirt import LibvirtSandbox
+
+        return LibvirtSandbox(
+            context_name=context_name,
+            config=context.sandbox,
+            project_dir=context.directory,
+            conn=self._conn,
+            additional_directories=context.additional_directories or None,
+            instance_prefix=self._instance_prefix,
+        )
+
+    # -- Build logging --------------------------------------------------------
+
+    def register_build(self, context_name: str) -> Path:
+        self._build_log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._build_log_dir / f"{context_name}.log"
+        log_path.write_bytes(b"")
+        with self._active_builds_lock:
+            self._active_builds[context_name] = log_path
+        logger.info(
+            "Registered build log for context '%s': %s",
+            context_name, log_path,
+        )
+        return log_path
+
+    def unregister_build(self, context_name: str) -> None:
+        with self._active_builds_lock:
+            self._active_builds.pop(context_name, None)
+        logger.info("Unregistered build for context '%s'", context_name)
+
+        log_path = self._build_log_dir / f"{context_name}.log"
+
+        def _cleanup() -> None:
+            try:
+                log_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        timer = threading.Timer(3600, _cleanup)
+        timer.daemon = True
+        timer.start()
+
+    def is_build_active(self, context_name: str) -> bool:
+        with self._active_builds_lock:
+            return context_name in self._active_builds
+
+    @property
+    def build_log_dir(self) -> Path:
+        return self._build_log_dir
+
+    @property
+    def state_dir(self) -> Path:
+        return self._state_dir
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -463,22 +671,6 @@ def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
     managers: dict[str, SandboxManager] = {}
     if "docker" in backends or not backends:
         managers["docker"] = DockerSandboxManager()
-    # libvirt manager will be added in Phase 3.
+    if "libvirt" in backends:
+        managers["libvirt"] = LibvirtSandboxManager()
     return managers
-
-
-def create_sandbox_manager(config: Config) -> SandboxManager:
-    """Instantiate the appropriate :class:`SandboxManager` for the platform.
-
-    On macOS, uses :class:`MacOSSandboxManager` (sandbox-exec, no Docker).
-    On Linux, uses :class:`DockerSandboxManager`.
-
-    .. deprecated::
-        Use :func:`create_sandbox_managers` instead, which returns a dict
-        of managers keyed by backend name to support multiple backends.
-    """
-    managers = create_sandbox_managers(config)
-    # Return the first (and typically only) manager.  For backwards
-    # compatibility, this always returns a single manager — callers that
-    # need multi-backend support should use create_sandbox_managers().
-    return next(iter(managers.values()))

@@ -24,7 +24,7 @@ import aiosqlite
 
 from open_shrimp.client_manager import close_all_sessions
 from open_shrimp.config import Config, load_config
-from open_shrimp.sandbox import SandboxManager, create_sandbox_manager
+from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
 from open_shrimp.dispatch_registry import register_dispatch
 from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
@@ -186,7 +186,7 @@ async def run_bot(
     config: Config,
     db: aiosqlite.Connection,
     config_path: str | None = None,
-    sandbox_manager: "SandboxManager | None" = None,
+    sandbox_managers: "dict[str, SandboxManager] | None" = None,
 ) -> None:
     """Start the bot with long polling."""
     app = build_application(config, db)
@@ -229,13 +229,15 @@ async def run_bot(
     await app.updater.start_polling()
     logger.info("Bot is running")
 
-    # Use the provided sandbox manager or create one.
-    sandbox_mgr = sandbox_manager or create_sandbox_manager(config)
-    sandbox_mgr.set_instance_prefix(config.instance_name)
-    app.bot_data["sandbox_manager"] = sandbox_mgr
+    # Instantiate one SandboxManager per backend used in the config.
+    _sandbox_managers = sandbox_managers or create_sandbox_managers(config)
+    for mgr in _sandbox_managers.values():
+        mgr.set_instance_prefix(config.instance_name)
+    app.bot_data["sandbox_managers"] = _sandbox_managers
 
-    # Start Ryuk reaper for crash-safe container cleanup.
-    await asyncio.to_thread(sandbox_mgr.start_reaper)
+    # Start reapers for all sandbox managers.
+    for mgr in _sandbox_managers.values():
+        await asyncio.to_thread(mgr.start_reaper)
 
     # Reload scheduled tasks from the database.
     from open_shrimp.scheduler import reload_tasks
@@ -264,8 +266,10 @@ async def run_bot(
         if watcher_task:
             watcher_task.cancel()
         await close_all_sessions()
-        await asyncio.to_thread(sandbox_mgr.stop_all)
-        sandbox_mgr.stop_reaper()
+        # Stop all sandbox managers.
+        for mgr in _sandbox_managers.values():
+            await asyncio.to_thread(mgr.stop_all)
+            mgr.stop_reaper()
         await app.updater.stop()
         await app.stop()
         await app.shutdown()

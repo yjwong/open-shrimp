@@ -36,9 +36,25 @@ class SandboxConfig:
     dockerfile: str | None = None
     computer_use: bool = False
 
+    # VM-specific (libvirt)
+    memory: int = 2048  # MB ceiling (free-page-reporting returns unused to host)
+    cpus: int = 2
+    disk_size: int = 20  # GB, for qcow2 overlay
+    base_image: str | None = None  # path to base qcow2/cloud image
+    provision: str | None = None  # shell script to run on first boot
+
 
 # Valid values for sandbox config fields.
 _SANDBOX_BACKENDS = {"docker", "libvirt", "macos"}
+
+
+def is_sandboxed(context: "ContextConfig") -> bool:
+    """Return True if the context uses any sandbox backend."""
+    if context.sandbox is not None and context.sandbox.enabled:
+        return True
+    if context.container is not None and context.container.enabled:
+        return True
+    return False
 
 
 @dataclass
@@ -173,6 +189,27 @@ def _validate_raw(raw: dict) -> None:
                 f"Context '{name}': sandbox.dockerfile must be a string"
             )
 
+        # Validate libvirt-specific fields.
+        for int_field in ("memory", "cpus", "disk_size"):
+            val = sandbox.get(int_field)
+            if val is not None and not isinstance(val, int):
+                raise ValueError(
+                    f"Context '{name}': sandbox.{int_field} must be "
+                    f"an integer, got: {val!r}"
+                )
+
+        base_image = sandbox.get("base_image")
+        if base_image is not None and not isinstance(base_image, str):
+            raise ValueError(
+                f"Context '{name}': sandbox.base_image must be a string"
+            )
+
+        provision = sandbox.get("provision")
+        if provision is not None and not isinstance(provision, str):
+            raise ValueError(
+                f"Context '{name}': sandbox.provision must be a string"
+            )
+
     # default_context references a defined context
     default = raw["default_context"]
     if default not in contexts:
@@ -190,6 +227,11 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
         docker_in_docker=bool(raw.get("docker_in_docker", False)),
         dockerfile=raw.get("dockerfile"),
         computer_use=bool(raw.get("computer_use", False)),
+        memory=int(raw.get("memory", 2048)),
+        cpus=int(raw.get("cpus", 2)),
+        disk_size=int(raw.get("disk_size", 20)),
+        base_image=raw.get("base_image"),
+        provision=raw.get("provision"),
     )
 
 

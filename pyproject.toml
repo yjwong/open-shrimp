@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 macos = ["rumps>=0.4"]
+libvirt = ["libvirt-python>=10.0"]
 
 [project.scripts]
 openshrimp = "open_shrimp.main:main"
