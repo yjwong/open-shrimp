@@ -180,7 +180,11 @@ async def get_or_create_session(
             "mcp__openshrimp__delete_schedule",
         ])
     # Auto-approve computer use tools when enabled.
-    if (context.container is not None and context.container.computer_use):
+    _computer_use_enabled = (
+        (context.container is not None and context.container.computer_use)
+        or (context.sandbox is not None and context.sandbox.computer_use)
+    )
+    if _computer_use_enabled:
         allowed_tools.extend([
             "mcp__openshrimp__computer_screenshot",
             "mcp__openshrimp__computer_click",
@@ -322,34 +326,30 @@ async def get_or_create_session(
             "the title again."
         )
 
-    # Determine computer-use container name and screenshots dir for MCP.
-    _cu_container: str | None = None
-    _cu_screenshots_dir: str | None = None
-    if sandbox is not None and sandbox.container_name is not None:
-        screenshots_dir = sandbox.get_screenshots_dir()
-        if screenshots_dir is not None:
-            _cu_container = sandbox.container_name
-            _cu_screenshots_dir = str(screenshots_dir)
-
-            system_prompt_parts.append(
-                "This context has computer use (GUI interaction) enabled. "
-                "You have access to a headless 1280x720 Linux desktop with "
-                "a Wayland compositor (labwc), a web browser (Chromium), "
-                "and a terminal (foot).\n\n"
-                "For browser/web testing, prefer the Playwright MCP tools "
-                "(browser_navigate, browser_click, browser_type, browser_snapshot, "
-                "browser_screenshot, etc.) — they provide structured DOM access "
-                "via accessibility snapshots which is far more reliable than "
-                "pixel-based interaction. Use browser_snapshot to read the page "
-                "structure before interacting.\n\n"
-                "For non-browser GUI interaction (terminal, native apps, or when "
-                "Playwright tools are insufficient), use the pixel-based tools: "
-                "computer_screenshot to see the screen, computer_click to click "
-                "at coordinates, computer_type to type text, computer_key for "
-                "special keys and combos, computer_scroll to scroll, and "
-                "computer_toplevel to switch between windows. Always take a "
-                "screenshot first to understand the current state."
-            )
+    # Check if this sandbox supports computer-use (has a screenshots dir).
+    _computer_use_sandbox = sandbox if (
+        sandbox is not None and sandbox.get_screenshots_dir() is not None
+    ) else None
+    if _computer_use_sandbox is not None:
+        system_prompt_parts.append(
+            "This context has computer use (GUI interaction) enabled. "
+            "You have access to a headless 1280x720 Linux desktop with "
+            "a Wayland compositor (labwc), a web browser (Chromium), "
+            "and a terminal (foot).\n\n"
+            "For browser/web testing, prefer the Playwright MCP tools "
+            "(browser_navigate, browser_click, browser_type, browser_snapshot, "
+            "browser_screenshot, etc.) — they provide structured DOM access "
+            "via accessibility snapshots which is far more reliable than "
+            "pixel-based interaction. Use browser_snapshot to read the page "
+            "structure before interacting.\n\n"
+            "For non-browser GUI interaction (terminal, native apps, or when "
+            "Playwright tools are insufficient), use the pixel-based tools: "
+            "computer_screenshot to see the screen, computer_click to click "
+            "at coordinates, computer_type to type text, computer_key for "
+            "special keys and combos, computer_scroll to scroll, and "
+            "computer_toplevel to switch between windows. Always take a "
+            "screenshot first to understand the current state."
+        )
 
     if system_prompt_parts:
         options.system_prompt = {
@@ -364,8 +364,7 @@ async def get_or_create_session(
         openshrimp_server = create_openshrimp_mcp_server(
             bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
             db=db, config=config, job_queue=job_queue,
-            computer_use_container=_cu_container,
-            screenshots_dir=_cu_screenshots_dir,
+            sandbox=_computer_use_sandbox,
             context_name=context_name,
             user_id=user_id,
             is_private_chat=is_private_chat,
@@ -373,10 +372,10 @@ async def get_or_create_session(
         mcp_servers: dict[str, Any] = {"openshrimp": openshrimp_server}
 
         # Add Playwright MCP for structured browser automation in
-        # computer-use contexts.  The CLI runs inside the container,
+        # computer-use contexts.  The CLI runs inside the sandbox,
         # so it spawns the Playwright MCP server as a child process
-        # inside the container automatically.
-        if _cu_container is not None:
+        # inside the sandbox automatically.
+        if _computer_use_sandbox is not None:
             mcp_servers["playwright"] = {
                 "command": "npx",
                 "args": [

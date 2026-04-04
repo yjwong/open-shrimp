@@ -1,7 +1,7 @@
 """HTTP/WebSocket API routes for the VNC Mini App.
 
 Provides a WebSocket-to-TCP proxy for connecting noVNC clients to
-the wayvnc server running inside computer-use containers.
+the VNC server running inside computer-use containers or VMs.
 """
 
 from __future__ import annotations
@@ -18,15 +18,62 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
-from open_shrimp.config import Config
+from open_shrimp.config import Config, ContextConfig
 from open_shrimp.sandbox.docker_helpers import (
     get_text_input_active,
     get_text_input_state_path,
-    get_vnc_port,
+    get_vnc_port as docker_get_vnc_port,
 )
 from open_shrimp.review.auth import AuthError, validate_token_param
 
 logger = logging.getLogger(__name__)
+
+
+def _is_computer_use_context(ctx: ContextConfig) -> bool:
+    """Check whether a context has computer-use enabled (any backend)."""
+    if ctx.container is not None and ctx.container.computer_use:
+        return True
+    if ctx.sandbox is not None and ctx.sandbox.computer_use:
+        return True
+    return False
+
+
+def _get_vnc_port_for_context(
+    context_name: str,
+    ctx: ContextConfig,
+    sandbox_manager: object | None = None,
+) -> int | None:
+    """Discover the VNC port for a context, supporting both backends.
+
+    Docker: reads the VNC port from the container's state directory.
+    Libvirt: parses ``domain.XMLDesc()`` for the auto-assigned VNC port.
+    """
+    if ctx.container is not None and ctx.container.computer_use:
+        return docker_get_vnc_port(context_name)
+
+    if ctx.sandbox is not None and ctx.sandbox.computer_use:
+        # Libvirt backend — need the sandbox manager's connection.
+        if sandbox_manager is not None:
+            try:
+                from open_shrimp.sandbox.libvirt_helpers import (
+                    domain_name,
+                    extract_vnc_port_from_xml,
+                )
+                dom_name = domain_name(context_name, getattr(
+                    sandbox_manager, "instance_prefix", "openshrimp",
+                ))
+                conn = getattr(sandbox_manager, "_conn", None)
+                if conn is not None:
+                    import libvirt
+                    try:
+                        domain = conn.lookupByName(dom_name)
+                        if domain.isActive():
+                            return extract_vnc_port_from_xml(domain.XMLDesc(0))
+                    except libvirt.libvirtError:
+                        pass
+            except ImportError:
+                pass
+    return None
 
 
 async def vnc_ws_endpoint(websocket: WebSocket) -> None:
@@ -57,14 +104,17 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         return
 
     ctx = config.contexts[context_name]
-    if ctx.container is None or not ctx.container.computer_use:
+    if not _is_computer_use_context(ctx):
         await websocket.close(
             code=4003, reason="Context does not have computer_use enabled"
         )
         return
 
     # Discover the VNC port.
-    port = await asyncio.to_thread(get_vnc_port, context_name)
+    sandbox_manager = getattr(websocket.app.state, "sandbox_manager", None)
+    port = await asyncio.to_thread(
+        _get_vnc_port_for_context, context_name, ctx, sandbox_manager,
+    )
     if port is None:
         await websocket.close(
             code=4004, reason="VNC port not available (container not running?)"
@@ -147,7 +197,7 @@ async def text_input_state_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Unknown context"}, status_code=400)
 
     ctx = config.contexts[context_name]
-    if ctx.container is None or not ctx.container.computer_use:
+    if not _is_computer_use_context(ctx):
         return JSONResponse({"error": "Not a computer_use context"}, status_code=400)
 
     active = await asyncio.to_thread(get_text_input_active, context_name)
@@ -180,7 +230,7 @@ async def text_input_state_stream_endpoint(
         return JSONResponse({"error": "Unknown context"}, status_code=400)
 
     ctx = config.contexts[context_name]
-    if ctx.container is None or not ctx.container.computer_use:
+    if not _is_computer_use_context(ctx):
         return JSONResponse({"error": "Not a computer_use context"}, status_code=400)
 
     state_path = get_text_input_state_path(context_name)

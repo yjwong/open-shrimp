@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -157,6 +158,96 @@ class DockerSandbox:
         if self._computer_use:
             return _get_text_input_active(self._context_name)
         return False
+
+    # -- Computer-use operations ------------------------------------------------
+
+    def _exec_in_container_sync(
+        self, cmd: list[str], timeout_secs: float = 10.0,
+    ) -> tuple[int, str, str]:
+        """Run a command inside the container (synchronous)."""
+        uid = os.getuid()
+        docker_cmd = [
+            "docker", "exec",
+            "-e", f"XDG_RUNTIME_DIR=/tmp/runtime-{uid}",
+            "-e", "WAYLAND_DISPLAY=wayland-0",
+            self.container_name,
+            *cmd,
+        ]
+        result = subprocess.run(
+            docker_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_secs,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def take_screenshot(self, output_path: Path) -> None:
+        ts = int(output_path.stem.split("-")[-1]) if "-" in output_path.stem else 0
+        container_path = f"/tmp/screenshots/screenshot-{ts}.png"
+        rc, _, stderr = self._exec_in_container_sync(["grim", container_path])
+        if rc != 0:
+            raise RuntimeError(f"grim failed: {stderr.strip()}")
+
+    def send_click(self, x: int, y: int, button: str = "left") -> None:
+        rc, _, stderr = self._exec_in_container_sync([
+            "sh", "-c",
+            f"wlrctl pointer move {x} {y} && wlrctl pointer click {button}",
+        ])
+        if rc != 0:
+            raise RuntimeError(f"click failed: {stderr.strip()}")
+
+    def send_type(self, text: str) -> None:
+        rc, _, stderr = self._exec_in_container_sync([
+            "wlrctl", "keyboard", "type", text,
+        ])
+        if rc != 0:
+            raise RuntimeError(f"type failed: {stderr.strip()}")
+
+    def send_key(self, key_str: str) -> None:
+        _named_key_chars: dict[str, str] = {
+            "return": "\n", "enter": "\n",
+            "tab": "\t", "escape": "\x1b",
+            "backspace": "\x08", "space": " ",
+        }
+
+        parts = key_str.split("+")
+        if len(parts) > 1:
+            modifiers = ",".join(parts[:-1])
+            key_name = parts[-1]
+            char = _named_key_chars.get(key_name.lower(), key_name)
+            cmd = ["wlrctl", "keyboard", "type", char, "modifiers", modifiers]
+        else:
+            char = _named_key_chars.get(key_str.lower())
+            if char is not None:
+                cmd = ["wlrctl", "keyboard", "type", char]
+            else:
+                cmd = ["wlrctl", "keyboard", "type", key_str]
+
+        rc, _, stderr = self._exec_in_container_sync(cmd)
+        if rc != 0:
+            raise RuntimeError(f"key press failed: {stderr.strip()}")
+
+    def send_scroll(
+        self, x: int, y: int, direction: str, amount: int = 3,
+    ) -> None:
+        scroll_map = {
+            "up": (0, -amount), "down": (0, amount),
+            "left": (-amount, 0), "right": (amount, 0),
+        }
+        dx, dy = scroll_map.get(direction, (0, amount))
+        rc, _, stderr = self._exec_in_container_sync([
+            "sh", "-c",
+            f"wlrctl pointer move {x} {y} && wlrctl pointer scroll {dx} {dy}",
+        ])
+        if rc != 0:
+            raise RuntimeError(f"scroll failed: {stderr.strip()}")
+
+    def focus_window(self, name: str) -> None:
+        rc, _, stderr = self._exec_in_container_sync([
+            "wlrctl", "toplevel", "focus", name,
+        ])
+        if rc != 0:
+            raise RuntimeError(f"focus failed: {stderr.strip()}")
 
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         if not host_paths:

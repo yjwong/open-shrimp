@@ -26,15 +26,24 @@ from open_shrimp.sandbox.libvirt_helpers import (
     cleanup_wrapper as _cleanup_wrapper,
     create_overlay,
     domain_name as _domain_name,
+    domain_screenshot_png,
     ensure_base_image,
     ensure_mounts,
     ensure_ssh_key,
     extract_fs_tags_from_xml,
+    extract_vnc_port_from_xml,
     find_free_port,
     find_virtiofsd,
     generate_cloud_init_iso,
     generate_domain_xml,
+    cloud_init_fingerprint,
+    load_cloud_init_fingerprint,
     load_ssh_port,
+    qmp_send_key_combo,
+    qmp_send_mouse_event,
+    qmp_send_scroll_event,
+    qmp_type_text,
+    save_cloud_init_fingerprint,
     save_ssh_port,
     ssh_check_alive,
     start_virtiofsd,
@@ -47,6 +56,10 @@ logger = logging.getLogger(__name__)
 
 # Graceful shutdown timeout before falling back to destroy.
 _SHUTDOWN_TIMEOUT = 10
+
+# UID of the ``claude`` user inside the VM.  Cloud-init creates it as the
+# first non-system user, which gets UID 1000 on Ubuntu.
+_VM_CLAUDE_UID = 1000
 
 
 class LibvirtSandbox:
@@ -64,6 +77,7 @@ class LibvirtSandbox:
         conn: "libvirt.virConnect",  # type: ignore[name-defined]
         additional_directories: list[str] | None = None,
         instance_prefix: str = "openshrimp",
+        computer_use: bool = False,
     ) -> None:
         self._context_name = context_name
         self._config = config
@@ -71,6 +85,7 @@ class LibvirtSandbox:
         self._additional_directories = additional_directories or []
         self._conn = conn
         self._instance_prefix = instance_prefix
+        self._computer_use = computer_use
         self._wrapper_path: str | None = None
         self._virtiofsd_procs: list[subprocess.Popen[bytes]] = []
         self._use_virtiofs: bool = find_virtiofsd() is not None
@@ -78,6 +93,17 @@ class LibvirtSandbox:
         self._sdir = state_dir_for(context_name)
         self._dom_name = _domain_name(context_name, instance_prefix)
         self._ssh_port: int | None = load_ssh_port(self._sdir)
+
+        # Screenshots directory for computer-use (host-side).
+        self._screenshots_dir = self._sdir / "screenshots" if computer_use else None
+        if self._screenshots_dir:
+            self._screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Host-side directories shared into the VM to mirror Docker's
+        # bind-mount approach: task output files and .claude session data
+        # are written to the host so the terminal mini app can read them.
+        self._tmp_dir = self._sdir / "tmp"
+        self._claude_home_dir = self._sdir / "claude-home"
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -128,6 +154,7 @@ class LibvirtSandbox:
         cloud_init_iso = generate_cloud_init_iso(
             sdir, public_key,
             provision_script=self._config.provision,
+            computer_use=self._computer_use,
         )
 
         # 5. Allocate SSH port (persistent across restarts).
@@ -138,10 +165,14 @@ class LibvirtSandbox:
         # 6. Generate and define the domain XML.
         serial_log = sdir / "serial.log"
 
+        # Ensure host-side shared directories exist.
+        self._tmp_dir.mkdir(parents=True, exist_ok=True)
+        self._claude_home_dir.mkdir(parents=True, exist_ok=True)
+
         # Build shared_dirs list for domain XML: (host_dir, socket | None).
         # The domain must declare virtiofs/9p devices for all dirs even
         # though the guest-side mount is managed via SSH later.
-        all_dirs = [self._project_dir] + self._additional_directories
+        all_dirs, _ = self._shared_dirs_and_overrides()
         shared_dirs_xml: list[tuple[str, Path | None]] = []
         for host_dir in all_dirs:
             if self._use_virtiofs:
@@ -160,6 +191,7 @@ class LibvirtSandbox:
             vcpus=self._config.cpus,
             shared_dirs=shared_dirs_xml,
             use_virtiofs=self._use_virtiofs,
+            computer_use=self._computer_use,
         )
 
         # Define domain (idempotent — overwrites if exists).
@@ -269,13 +301,14 @@ class LibvirtSandbox:
         # Configure filesystem mounts via SSH (idempotent).
         # This handles config changes (added/removed additional_directories)
         # without requiring a VM rebuild.
-        all_dirs = [self._project_dir] + self._additional_directories
+        all_dirs, mount_overrides = self._shared_dirs_and_overrides()
         fs_type = "virtiofs" if self._use_virtiofs else "9p"
         ensure_mounts(
             ssh_port=self._ssh_port,
             ssh_key=self._sdir / "ssh_key",
             shared_dirs=all_dirs,
             fs_type=fs_type,
+            mount_overrides=mount_overrides,
         )
 
     def provision_workspace(self) -> None:
@@ -395,18 +428,62 @@ class LibvirtSandbox:
         self._stop_virtiofsd()
 
     def get_screenshots_dir(self) -> Path | None:
-        # No computer-use in Phase 3.
-        return None
+        return self._screenshots_dir
 
     def get_vnc_port(self) -> int | None:
-        # VNC support added in Phase 4.
-        return None
+        """Discover the auto-assigned VNC port from the live domain XML."""
+        if not self._computer_use:
+            return None
+        import libvirt
+        try:
+            domain = self._conn.lookupByName(self._dom_name)
+            if not domain.isActive():
+                return None
+            return extract_vnc_port_from_xml(domain.XMLDesc(0))
+        except libvirt.libvirtError:
+            return None
 
     def get_text_input_state_path(self) -> Path | None:
         return None
 
     def get_text_input_active(self) -> bool:
         return False
+
+    # -- Computer-use operations (Phase 4) -----------------------------------
+
+    def take_screenshot(self, output_path: Path) -> None:
+        """Take a screenshot via ``domain.screenshot()`` and save as PNG."""
+        domain_screenshot_png(self._conn, self._dom_name, output_path)
+
+    def send_click(self, x: int, y: int, button: str = "left") -> None:
+        """Click at screen coordinates via QMP."""
+        qmp_send_mouse_event(
+            self._conn, self._dom_name, x, y, button=button,
+        )
+
+    def send_type(self, text: str) -> None:
+        """Type text via QMP key events."""
+        qmp_type_text(self._conn, self._dom_name, text)
+
+    def send_key(self, key_str: str) -> None:
+        """Press a key or combo (e.g. ``"ctrl+a"``) via QMP."""
+        qmp_send_key_combo(self._conn, self._dom_name, key_str)
+
+    def send_scroll(
+        self, x: int, y: int, direction: str, amount: int = 3,
+    ) -> None:
+        """Scroll at screen coordinates via QMP."""
+        qmp_send_scroll_event(
+            self._conn, self._dom_name, x, y, direction, amount,
+        )
+
+    def focus_window(self, name: str) -> None:
+        """Focus a window by name — not supported in VM contexts."""
+        raise NotImplementedError(
+            "Window focus via toplevel is not supported in VM contexts. "
+            "Use computer_click to click on the desired window, or use "
+            "alt+Tab to switch windows."
+        )
 
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files into the VM via scp."""
@@ -473,6 +550,24 @@ class LibvirtSandbox:
 
     # -- Internal helpers -----------------------------------------------------
 
+    def _shared_dirs_and_overrides(self) -> tuple[list[str], dict[str, str]]:
+        """Return ``(all_dirs, mount_overrides)`` for domain XML / mounts.
+
+        ``all_dirs`` is the list of host directories that need virtiofs/9p
+        filesystem devices.  ``mount_overrides`` maps host paths that
+        should be mounted at a *different* guest path (tmp and .claude).
+        """
+        all_dirs = [self._project_dir] + self._additional_directories
+        if self._screenshots_dir is not None:
+            all_dirs.append(str(self._screenshots_dir))
+        all_dirs.append(str(self._tmp_dir))
+        all_dirs.append(str(self._claude_home_dir))
+        mount_overrides = {
+            str(self._tmp_dir): f"/tmp/claude-{_VM_CLAUDE_UID}",
+            str(self._claude_home_dir): "/home/claude/.claude",
+        }
+        return all_dirs, mount_overrides
+
     def _virtiofs_socket_for(self, host_dir: str) -> Path:
         """Return the virtiofsd socket path for a host directory."""
         tag = _fs_tag_for_dir(host_dir)
@@ -480,7 +575,7 @@ class LibvirtSandbox:
 
     def _start_all_virtiofsd(self) -> None:
         """Start virtiofsd instances for all shared directories."""
-        all_dirs = [self._project_dir] + self._additional_directories
+        all_dirs, _ = self._shared_dirs_and_overrides()
         for host_dir in all_dirs:
             sock = self._virtiofs_socket_for(host_dir)
             proc = start_virtiofsd(sock, host_dir)

@@ -596,6 +596,7 @@ class LibvirtSandboxManager:
             conn=self._conn,
             additional_directories=context.additional_directories or None,
             instance_prefix=self._instance_prefix,
+            computer_use=context.sandbox.computer_use,
         )
 
     # -- Build logging --------------------------------------------------------

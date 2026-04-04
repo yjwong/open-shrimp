@@ -10,9 +10,12 @@ import asyncio
 import logging
 import mimetypes
 import os
-import subprocess
 import time
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from open_shrimp.sandbox.base import Sandbox
 
 from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
@@ -53,8 +56,7 @@ def create_openshrimp_mcp_server(
     db: Any | None = None,
     config: Any | None = None,
     job_queue: Any | None = None,
-    computer_use_container: str | None = None,
-    screenshots_dir: str | None = None,
+    sandbox: "Sandbox | None" = None,
     context_name: str | None = None,
     user_id: int = 0,
     is_private_chat: bool = True,
@@ -68,9 +70,9 @@ def create_openshrimp_mcp_server(
     When *db*, *config*, and *job_queue* are provided, scheduling tools
     (create_schedule, list_schedules, delete_schedule) are also registered.
 
-    When *computer_use_container* and *screenshots_dir* are provided,
-    computer use tools (screenshot, click, type, key, scroll, toplevel)
-    are registered for GUI interaction inside the container.
+    Computer-use tools are registered when *sandbox* has a non-``None``
+    :meth:`~Sandbox.get_screenshots_dir`, indicating the backend supports
+    GUI interaction.
 
     Args:
         bot: Telegram Bot instance.
@@ -79,8 +81,7 @@ def create_openshrimp_mcp_server(
         db: Optional aiosqlite connection for scheduled task persistence.
         config: Optional Config for context validation.
         job_queue: Optional JobQueue for registering scheduled jobs.
-        computer_use_container: Docker container name for computer-use.
-        screenshots_dir: Host-side directory for screenshots.
+        sandbox: Optional sandbox with computer-use support.
 
     Returns:
         An ``McpSdkServerConfig`` ready for ``ClaudeAgentOptions.mcp_servers``.
@@ -584,33 +585,18 @@ def create_openshrimp_mcp_server(
 
         tools_list.extend([create_schedule, list_schedules, delete_schedule])
 
-    # --- Computer use tools (GUI interaction in containerized contexts) ---
-    if computer_use_container is not None and screenshots_dir is not None:
-        _uid = os.getuid()
-        _wayland_env = [
-            "-e", f"XDG_RUNTIME_DIR=/tmp/runtime-{_uid}",
-            "-e", "WAYLAND_DISPLAY=wayland-0",
-        ]
+    # --- Computer use tools (GUI interaction) ---
+    # All backends implement the same Sandbox protocol methods
+    # (take_screenshot, send_click, send_type, send_key, send_scroll,
+    # focus_window), so the tool handlers are backend-agnostic.
+    _cu_sandbox = sandbox
+    _screenshots_dir: str | None = None
+    if _cu_sandbox is not None:
+        sd = _cu_sandbox.get_screenshots_dir()
+        if sd is not None:
+            _screenshots_dir = str(sd)
 
-        async def _exec_in_container(
-            cmd: list[str],
-            timeout_secs: float = 10.0,
-        ) -> tuple[int, str, str]:
-            """Run a command inside the computer-use container."""
-            docker_cmd = (
-                ["docker", "exec"]
-                + _wayland_env
-                + [computer_use_container]
-                + cmd
-            )
-            result = await asyncio.to_thread(
-                subprocess.run,
-                docker_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_secs,
-            )
-            return result.returncode, result.stdout, result.stderr
+    if _cu_sandbox is not None and _screenshots_dir is not None:
 
         @tool(
             "computer_screenshot",
@@ -627,21 +613,17 @@ def create_openshrimp_mcp_server(
         )
         async def computer_screenshot(args: dict[str, Any]) -> dict[str, Any]:
             ts = int(time.time() * 1000)
-            container_path = f"/tmp/screenshots/screenshot-{ts}.png"
-            host_path = os.path.join(screenshots_dir, f"screenshot-{ts}.png")
+            host_path = os.path.join(
+                _screenshots_dir or "/tmp", f"screenshot-{ts}.png",
+            )
 
             try:
-                rc, stdout, stderr = await _exec_in_container(
-                    ["grim", container_path],
+                await asyncio.to_thread(
+                    _cu_sandbox.take_screenshot, Path(host_path),
                 )
-                if rc != 0:
-                    return _text_result(
-                        f"Error taking screenshot: {stderr.strip()}",
-                        is_error=True,
-                    )
-            except subprocess.TimeoutExpired:
+            except Exception as exc:
                 return _text_result(
-                    "Error: screenshot timed out", is_error=True,
+                    f"Error taking screenshot: {exc}", is_error=True,
                 )
 
             # Send screenshot to Telegram for user observability.
@@ -682,7 +664,7 @@ def create_openshrimp_mcp_server(
                 )
 
             return _text_result(
-                f"Screenshot saved to {container_path}. "
+                f"Screenshot saved to {host_path}. "
                 f"Use the Read tool to view the image."
             )
 
@@ -724,22 +706,18 @@ def create_openshrimp_mcp_server(
                     is_error=True,
                 )
 
-            button_map = {"left": "left", "right": "right", "middle": "middle"}
-            btn = button_map.get(button, "left")
+            btn = {"left": "left", "right": "right", "middle": "middle"}.get(
+                button, "left",
+            )
 
             try:
-                # Move pointer to absolute position then click.
-                rc, _, stderr = await _exec_in_container([
-                    "sh", "-c",
-                    f"wlrctl pointer move {x} {y} && "
-                    f"wlrctl pointer click {btn}",
-                ])
-                if rc != 0:
-                    return _text_result(
-                        f"Error clicking: {stderr.strip()}", is_error=True,
-                    )
-            except subprocess.TimeoutExpired:
-                return _text_result("Error: click timed out", is_error=True)
+                await asyncio.to_thread(
+                    _cu_sandbox.send_click, x, y, btn,
+                )
+            except Exception as exc:
+                return _text_result(
+                    f"Error clicking: {exc}", is_error=True,
+                )
 
             return _text_result(f"Clicked {btn} at ({x}, {y}).")
 
@@ -764,15 +742,13 @@ def create_openshrimp_mcp_server(
                 return _text_result("Error: text is required.", is_error=True)
 
             try:
-                rc, _, stderr = await _exec_in_container([
-                    "wlrctl", "keyboard", "type", text,
-                ])
-                if rc != 0:
-                    return _text_result(
-                        f"Error typing: {stderr.strip()}", is_error=True,
-                    )
-            except subprocess.TimeoutExpired:
-                return _text_result("Error: type timed out", is_error=True)
+                await asyncio.to_thread(
+                    _cu_sandbox.send_type, text,
+                )
+            except Exception as exc:
+                return _text_result(
+                    f"Error typing: {exc}", is_error=True,
+                )
 
             preview = text[:50] + ("..." if len(text) > 50 else "")
             return _text_result(f"Typed: {preview!r}")
@@ -801,49 +777,13 @@ def create_openshrimp_mcp_server(
             if not key:
                 return _text_result("Error: key is required.", is_error=True)
 
-            # Map named keys to the ASCII control characters that
-            # wlrctl's custom keymap assigns to those keycodes.
-            # See wlrctl ascii_raw_keymap.c: <BKSP>=8, <TAB>=9,
-            # <RTRN>=10, <ESC>=27, <SPCE>=32.
-            _named_key_chars: dict[str, str] = {
-                "return": "\n",
-                "enter": "\n",
-                "tab": "\t",
-                "escape": "\x1b",
-                "backspace": "\x08",
-                "space": " ",
-            }
-
-            parts = key.split("+")
-            if len(parts) > 1:
-                # Modifier combo: "ctrl+a" -> modifiers ctrl, key a
-                modifiers = ",".join(parts[:-1])
-                key_name = parts[-1]
-                # Resolve the key part if it's a named key.
-                char = _named_key_chars.get(key_name.lower(), key_name)
-                cmd = [
-                    "wlrctl", "keyboard", "type", char,
-                    "modifiers", modifiers,
-                ]
-            else:
-                char = _named_key_chars.get(key.lower())
-                if char is not None:
-                    # Named key — send the mapped control character.
-                    cmd = ["wlrctl", "keyboard", "type", char]
-                else:
-                    # Single character — just type it.
-                    cmd = ["wlrctl", "keyboard", "type", key]
-
             try:
-                rc, _, stderr = await _exec_in_container(cmd)
-                if rc != 0:
-                    return _text_result(
-                        f"Error pressing key: {stderr.strip()}",
-                        is_error=True,
-                    )
-            except subprocess.TimeoutExpired:
+                await asyncio.to_thread(
+                    _cu_sandbox.send_key, key,
+                )
+            except Exception as exc:
                 return _text_result(
-                    "Error: key press timed out", is_error=True,
+                    f"Error pressing key: {exc}", is_error=True,
                 )
 
             return _text_result(f"Pressed key: {args.get('key', '')}")
@@ -890,27 +830,15 @@ def create_openshrimp_mcp_server(
                     is_error=True,
                 )
 
-            # wlrctl pointer scroll takes dx/dy values.
-            scroll_map = {
-                "up": (0, -amount),
-                "down": (0, amount),
-                "left": (-amount, 0),
-                "right": (amount, 0),
-            }
-            dx, dy = scroll_map.get(direction, (0, amount))
-
             try:
-                rc, _, stderr = await _exec_in_container([
-                    "sh", "-c",
-                    f"wlrctl pointer move {x} {y} && "
-                    f"wlrctl pointer scroll {dx} {dy}",
-                ])
-                if rc != 0:
-                    return _text_result(
-                        f"Error scrolling: {stderr.strip()}", is_error=True,
-                    )
-            except subprocess.TimeoutExpired:
-                return _text_result("Error: scroll timed out", is_error=True)
+                await asyncio.to_thread(
+                    _cu_sandbox.send_scroll,
+                    x, y, direction, amount,
+                )
+            except Exception as exc:
+                return _text_result(
+                    f"Error scrolling: {exc}", is_error=True,
+                )
 
             return _text_result(
                 f"Scrolled {direction} by {amount} at ({x}, {y})."
@@ -940,17 +868,14 @@ def create_openshrimp_mcp_server(
                 return _text_result("Error: name is required.", is_error=True)
 
             try:
-                rc, _, stderr = await _exec_in_container([
-                    "wlrctl", "toplevel", "focus", name,
-                ])
-                if rc != 0:
-                    return _text_result(
-                        f"Error focusing window: {stderr.strip()}",
-                        is_error=True,
-                    )
-            except subprocess.TimeoutExpired:
+                await asyncio.to_thread(
+                    _cu_sandbox.focus_window, name,
+                )
+            except NotImplementedError as exc:
+                return _text_result(str(exc), is_error=True)
+            except Exception as exc:
                 return _text_result(
-                    "Error: focus timed out", is_error=True,
+                    f"Error focusing window: {exc}", is_error=True,
                 )
 
             return _text_result(f"Focused window matching: {name!r}")

@@ -119,6 +119,50 @@ class Sandbox(Protocol):
         """Return ``True`` if a text input field is focused in the sandbox."""
         ...
 
+    def take_screenshot(self, output_path: Path) -> None:
+        """Take a screenshot and save as PNG to *output_path*.
+
+        Raises :class:`NotImplementedError` for backends without computer-use.
+        """
+        ...
+
+    def send_click(self, x: int, y: int, button: str = "left") -> None:
+        """Click at screen coordinates (*x*, *y*) with *button*.
+
+        Raises :class:`NotImplementedError` for backends without computer-use.
+        """
+        ...
+
+    def send_type(self, text: str) -> None:
+        """Type *text* as keyboard input.
+
+        Raises :class:`NotImplementedError` for backends without computer-use.
+        """
+        ...
+
+    def send_key(self, key_str: str) -> None:
+        """Press a key or combo (e.g. ``"ctrl+a"``) .
+
+        Raises :class:`NotImplementedError` for backends without computer-use.
+        """
+        ...
+
+    def send_scroll(
+        self, x: int, y: int, direction: str, amount: int = 3,
+    ) -> None:
+        """Scroll at screen coordinates (*x*, *y*).
+
+        Raises :class:`NotImplementedError` for backends without computer-use.
+        """
+        ...
+
+    def focus_window(self, name: str) -> None:
+        """Focus a window by name or title substring.
+
+        Raises :class:`NotImplementedError` for backends without this capability.
+        """
+        ...
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files from the host into the sandbox.
 

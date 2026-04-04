@@ -142,6 +142,7 @@ def generate_cloud_init_iso(
     public_key: str,
     *,
     provision_script: str | None = None,
+    computer_use: bool = False,
 ) -> Path:
     """Generate a cloud-init ``cloud-init.iso`` with SSH key + user setup.
 
@@ -150,24 +151,23 @@ def generate_cloud_init_iso(
     (adding/removing ``additional_directories``) take effect without
     rebuilding the VM overlay.
 
+    When *computer_use* is True, adds a systemd service that starts the
+    labwc Wayland compositor on the virtio-gpu DRM device, plus installs
+    required GUI packages (labwc, foot terminal, Chromium).
+
     Args:
         sdir: State directory for this context.
         public_key: SSH public key contents.
         provision_script: Optional shell script to run on first boot.
+        computer_use: Enable GUI compositor setup.
 
     Returns:
         Path to the generated ISO.
     """
     iso_path = sdir / "cloud-init.iso"
 
-    user_data = textwrap.dedent(f"""\
-        #cloud-config
-        users:
-          - name: claude
-            shell: /bin/bash
-            sudo: ALL=(ALL) NOPASSWD:ALL
-            ssh_authorized_keys:
-              - {public_key}
+    # Build write_files entries.
+    write_files = textwrap.dedent("""\
         write_files:
           # AcceptEnv for API key forwarding via SSH.
           - path: /etc/ssh/sshd_config.d/openshrimp.conf
@@ -185,10 +185,90 @@ def generate_cloud_init_iso(
               ExecStart=/bin/bash -c 'for f in /etc/ssh/ssh_host_*_key; do ssh-keygen -l -f "$f" >/dev/null 2>&1 || {{ rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub; ssh-keygen -A; break; }}; done'
               [Install]
               WantedBy=multi-user.target
+    """)
+
+    if computer_use:
+        # Items appended here are already dedented — use exact indentation
+        # (2-space indent for YAML list items under write_files:).
+        write_files += (
+            "  # labwc Wayland compositor on virtio-gpu DRM (computer-use).\n"
+            "  - path: /etc/systemd/system/wayland-compositor.service\n"
+            "    content: |\n"
+            "      [Unit]\n"
+            "      Description=labwc Wayland compositor on DRM\n"
+            "      Requires=seatd.service\n"
+            "      After=seatd.service\n"
+            "      [Service]\n"
+            "      User=claude\n"
+            "      SupplementaryGroups=video render\n"
+            "      Environment=WLR_BACKENDS=drm\n"
+            "      Environment=WLR_LIBINPUT_NO_DEVICES=1\n"
+            "      Environment=XDG_RUNTIME_DIR=/run/user/1000\n"
+            "      Environment=WAYLAND_DISPLAY=wayland-0\n"
+            "      ExecStartPre=/bin/bash -c 'mkdir -p /run/user/1000 && chown claude:claude /run/user/1000'\n"
+            "      ExecStart=/usr/bin/labwc\n"
+            "      Restart=on-failure\n"
+            "      [Install]\n"
+            "      WantedBy=multi-user.target\n"
+            "  # Minimal labwc config for computer-use.\n"
+            "  # Deferred so the claude user exists when the file is written.\n"
+            "  - path: /home/claude/.config/labwc/rc.xml\n"
+            "    owner: claude:claude\n"
+            "    defer: true\n"
+            "    content: |\n"
+            '      <?xml version="1.0"?>\n'
+            "      <labwc_config>\n"
+            "        <theme><name></name><cornerRadius>0</cornerRadius></theme>\n"
+            '        <keyboard><default /><keybind key="A-F4"><action name="Close" /></keybind></keyboard>\n'
+            "        <mouse><default /></mouse>\n"
+            "      </labwc_config>\n"
+            "  # Chromium autostart (opens after compositor is up).\n"
+            "  - path: /home/claude/.config/labwc/autostart\n"
+            "    owner: claude:claude\n"
+            "    defer: true\n"
+            "    permissions: '0755'\n"
+            "    content: |\n"
+            "      #!/bin/sh\n"
+            "      # Start Chromium with --no-sandbox (we're in a VM) and\n"
+            "      # Wayland native rendering on virtio-gpu.\n"
+            "      chromium-browser --no-sandbox --ozone-platform=wayland \\\n"
+            "        --remote-debugging-port=9222 \\\n"
+            "        --disable-background-networking \\\n"
+            "        --disable-default-apps \\\n"
+            "        --no-first-run \\\n"
+            "        --window-size=1280,720 &\n"
+            "      # Start a foot terminal.\n"
+            "      foot &\n"
+        )
+
+    # Build runcmd entries.
+    runcmd = textwrap.dedent("""\
         runcmd:
           - systemctl enable ssh-hostkeys-guard.service
           - systemctl enable --now fstrim.timer
     """)
+
+    if computer_use:
+        runcmd += (
+            "  - apt-get update -qq\n"
+            "  - apt-get install -y -qq labwc foot seatd chromium-browser > /dev/null 2>&1\n"
+            # Node.js for npx (Playwright MCP is fetched on demand).
+            "  - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -\n"
+            "  - apt-get install -y -qq nodejs > /dev/null 2>&1\n"
+            "  - usermod -aG video,render claude\n"
+            "  - systemctl enable --now seatd.service\n"
+            "  - systemctl enable --now wayland-compositor.service\n"
+        )
+
+    user_data = textwrap.dedent(f"""\
+        #cloud-config
+        users:
+          - name: claude
+            shell: /bin/bash
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - {public_key}
+    """) + write_files + runcmd
 
     if provision_script:
         user_data += f"  - |\n"
@@ -223,6 +303,7 @@ def ensure_mounts(
     ssh_key: Path,
     shared_dirs: list[str],
     fs_type: str = "virtiofs",
+    mount_overrides: dict[str, str] | None = None,
 ) -> None:
     """Ensure shared directories are mounted inside the VM via SSH.
 
@@ -240,6 +321,12 @@ def ensure_mounts(
         shared_dirs: Host directories that should be mounted at their
             original paths inside the VM.
         fs_type: ``"virtiofs"`` or ``"9p"``.
+        mount_overrides: Optional mapping of host directory path to
+            guest mount path.  When a host directory appears in this
+            dict, the systemd mount unit uses the override as the
+            guest-side ``Where=`` path instead of the host path.
+            The virtiofs/9p tag (``What=``) is still derived from
+            the host path so it matches the domain XML.
     """
     ssh_opts = _ssh_common_opts(ssh_key, ssh_port)
 
@@ -252,12 +339,16 @@ def ensure_mounts(
     # Build the desired set of mount units.
     # Use systemd-escape to get correct unit names (e.g. paths with dashes
     # need \x2d escaping — simple str.replace("/", "-") is wrong).
+    _overrides = mount_overrides or {}
     desired: dict[str, tuple[str, str]] = {}  # unit_name -> (mount_path, unit_content)
     for host_dir in shared_dirs:
         tag = _fs_tag_for_dir(host_dir)
+        # Use override guest path if provided, otherwise mount at the
+        # same path as on the host.
+        guest_path = _overrides.get(host_dir, host_dir)
         # systemd-escape --path produces the correct unit name stem.
         esc = subprocess.run(
-            ["systemd-escape", "--path", host_dir],
+            ["systemd-escape", "--path", guest_path],
             capture_output=True, text=True, check=True,
         )
         unit_name = esc.stdout.strip() + ".mount"
@@ -273,14 +364,14 @@ def ensure_mounts(
             After=local-fs.target
             [Mount]
             What={tag}
-            Where={host_dir}
+            Where={guest_path}
             Type={fs_type}
             {options_line}
             [Install]
             WantedBy=multi-user.target
         """).strip() + "\n"
 
-        desired[unit_name] = (host_dir, unit_content)
+        desired[unit_name] = (guest_path, unit_content)
 
     # Discover existing openshrimp-managed mount units in the VM.
     # We identify ours by the "Description=Mount ... via virtiofs/9p" pattern.
@@ -454,6 +545,7 @@ def generate_domain_xml(
     vcpus: int,
     shared_dirs: list[tuple[str, Path | None]] | None = None,
     use_virtiofs: bool = False,
+    computer_use: bool = False,
 ) -> str:
     """Generate libvirt domain XML for a VM sandbox.
 
@@ -473,6 +565,8 @@ def generate_domain_xml(
             tuples.  In virtiofs mode each entry has a socket path; in 9p
             mode the socket is ``None``.
         use_virtiofs: Whether virtiofs is available.
+        computer_use: Enable GUI support — adds VNC display (auto-port),
+            virtio-gpu video model, and virtio-keyboard/mouse input devices.
 
     Returns:
         Domain XML string.
@@ -565,6 +659,20 @@ def generate_domain_xml(
             )
             ET.SubElement(fs, "source", dir=host_dir)
             ET.SubElement(fs, "target", dir=tag)
+
+    # Computer-use: VNC display + virtio-gpu + input devices.
+    if computer_use:
+        # VNC graphics — QEMU auto-assigns a port in the 5900+ range.
+        ET.SubElement(
+            devices, "graphics",
+            type="vnc", port="-1", autoport="yes", listen="127.0.0.1",
+        )
+        # virtio-gpu gives 1280x800 natively (built-in kernel driver).
+        video = ET.SubElement(devices, "video")
+        ET.SubElement(video, "model", type="virtio")
+        # Virtio keyboard + tablet (absolute pointer) for QMP input.
+        ET.SubElement(devices, "input", type="keyboard", bus="virtio")
+        ET.SubElement(devices, "input", type="tablet", bus="virtio")
 
     # QEMU commandline args for SLIRP networking with SSH port forward.
     qemu_cmdline = ET.SubElement(domain, f"{{{qemu_ns}}}commandline")
@@ -839,6 +947,428 @@ def load_ssh_port(sdir: Path) -> int | None:
         except ValueError:
             return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# VNC port discovery
+# ---------------------------------------------------------------------------
+
+
+def extract_vnc_port_from_xml(domain_xml: str) -> int | None:
+    """Extract the auto-assigned VNC port from live domain XML.
+
+    Parses ``<graphics type="vnc" port="NNNN" ...>`` from the domain's
+    XML description.  Returns ``None`` if no VNC graphics device is
+    configured or the port hasn't been assigned yet (port="-1").
+    """
+    root = ET.fromstring(domain_xml)
+    for graphics in root.iter("graphics"):
+        if graphics.get("type") == "vnc":
+            port_str = graphics.get("port")
+            if port_str and port_str != "-1":
+                try:
+                    return int(port_str)
+                except ValueError:
+                    pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# QMP input injection
+# ---------------------------------------------------------------------------
+
+
+def qmp_send_mouse_event(
+    conn: "libvirt.virConnect",  # type: ignore[name-defined]
+    domain_name: str,
+    x: int,
+    y: int,
+    *,
+    button: str = "left",
+    click: bool = True,
+) -> None:
+    """Send a mouse move + optional click via QMP ``input-send-event``.
+
+    Uses absolute coordinates on the virtio-tablet device.  QMP absolute
+    coordinates range from 0–32767; the caller provides screen coordinates
+    (e.g. 0–1279 for x, 0–799 for y) which are scaled accordingly.
+
+    Args:
+        conn: Active libvirt connection.
+        domain_name: Libvirt domain name.
+        x: Screen X coordinate.
+        y: Screen Y coordinate.
+        button: ``"left"``, ``"right"``, or ``"middle"``.
+        click: If True, send button press+release after moving.
+    """
+    import json
+
+    try:
+        import libvirt_qemu  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise RuntimeError(
+            "libvirt_qemu not available — install libvirt-python "
+            "with QMP support"
+        ) from exc
+
+    import libvirt
+    domain = conn.lookupByName(domain_name)
+
+    # Scale screen coordinates to QMP absolute range (0–32767).
+    abs_x = int(x * 32767 / 1279) if x > 0 else 0
+    abs_y = int(y * 32767 / 799) if y > 0 else 0
+
+    # Move pointer.
+    move_cmd = json.dumps({
+        "execute": "input-send-event",
+        "arguments": {
+            "events": [
+                {"type": "abs", "data": {"axis": "x", "value": abs_x}},
+                {"type": "abs", "data": {"axis": "y", "value": abs_y}},
+            ],
+        },
+    })
+    libvirt_qemu.qemuMonitorCommand(
+        domain, move_cmd, libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
+    )
+
+    if click:
+        btn_map = {"left": 0, "middle": 1, "right": 2}
+        btn_code = btn_map.get(button, 0)
+
+        # Press.
+        press_cmd = json.dumps({
+            "execute": "input-send-event",
+            "arguments": {
+                "events": [
+                    {"type": "btn", "data": {"button": f"mouse-{button}", "down": True}},
+                ],
+            },
+        })
+        libvirt_qemu.qemuMonitorCommand(
+            domain, press_cmd,
+            libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
+        )
+
+        # Release.
+        release_cmd = json.dumps({
+            "execute": "input-send-event",
+            "arguments": {
+                "events": [
+                    {"type": "btn", "data": {"button": f"mouse-{button}", "down": False}},
+                ],
+            },
+        })
+        libvirt_qemu.qemuMonitorCommand(
+            domain, release_cmd,
+            libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
+        )
+
+
+def qmp_send_key_event(
+    conn: "libvirt.virConnect",  # type: ignore[name-defined]
+    domain_name: str,
+    qcode: str,
+    *,
+    down: bool | None = None,
+) -> None:
+    """Send a single key press/release via QMP ``input-send-event``.
+
+    Args:
+        conn: Active libvirt connection.
+        domain_name: Libvirt domain name.
+        qcode: QCode key name (e.g. ``"ret"``, ``"tab"``, ``"a"``).
+        down: If ``None`` (default), sends press then release.
+            If ``True``/``False``, sends only the specified event.
+    """
+    import json
+
+    try:
+        import libvirt_qemu  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise RuntimeError(
+            "libvirt_qemu not available — install libvirt-python "
+            "with QMP support"
+        ) from exc
+
+    import libvirt
+    domain = conn.lookupByName(domain_name)
+
+    def _send(is_down: bool) -> None:
+        cmd = json.dumps({
+            "execute": "input-send-event",
+            "arguments": {
+                "events": [
+                    {"type": "key", "data": {"key": {"type": "qcode", "data": qcode}, "down": is_down}},
+                ],
+            },
+        })
+        libvirt_qemu.qemuMonitorCommand(
+            domain, cmd,
+            libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
+        )
+
+    if down is None:
+        _send(True)
+        _send(False)
+    else:
+        _send(down)
+
+
+def qmp_send_scroll_event(
+    conn: "libvirt.virConnect",  # type: ignore[name-defined]
+    domain_name: str,
+    x: int,
+    y: int,
+    direction: str,
+    amount: int = 3,
+) -> None:
+    """Send a scroll event via QMP: move pointer then send button events.
+
+    Scroll wheel buttons: ``wheel-up`` (4), ``wheel-down`` (5).
+
+    Args:
+        conn: Active libvirt connection.
+        domain_name: Libvirt domain name.
+        x: Screen X coordinate.
+        y: Screen Y coordinate.
+        direction: ``"up"``, ``"down"``, ``"left"``, or ``"right"``.
+        amount: Number of scroll steps.
+    """
+    import json
+
+    try:
+        import libvirt_qemu  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise RuntimeError(
+            "libvirt_qemu not available — install libvirt-python "
+            "with QMP support"
+        ) from exc
+
+    import libvirt
+    domain = conn.lookupByName(domain_name)
+
+    # Move pointer first.
+    abs_x = int(x * 32767 / 1279) if x > 0 else 0
+    abs_y = int(y * 32767 / 799) if y > 0 else 0
+
+    move_cmd = json.dumps({
+        "execute": "input-send-event",
+        "arguments": {
+            "events": [
+                {"type": "abs", "data": {"axis": "x", "value": abs_x}},
+                {"type": "abs", "data": {"axis": "y", "value": abs_y}},
+            ],
+        },
+    })
+    libvirt_qemu.qemuMonitorCommand(
+        domain, move_cmd,
+        libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
+    )
+
+    # Map direction to QMP wheel button names.
+    btn_name_map = {
+        "up": "wheel-up",
+        "down": "wheel-down",
+        "left": "wheel-left",   # May not be supported by all guests.
+        "right": "wheel-right",
+    }
+    btn_name = btn_name_map.get(direction, "wheel-down")
+
+    # Send N scroll steps as press+release pairs.
+    for _ in range(amount):
+        for is_down in (True, False):
+            cmd = json.dumps({
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [
+                        {"type": "btn", "data": {"button": btn_name, "down": is_down}},
+                    ],
+                },
+            })
+            libvirt_qemu.qemuMonitorCommand(
+                domain, cmd,
+                libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
+            )
+
+
+def qmp_type_text(
+    conn: "libvirt.virConnect",  # type: ignore[name-defined]
+    domain_name: str,
+    text: str,
+) -> None:
+    """Type a string by sending QMP key events for each character.
+
+    Handles lowercase/uppercase ASCII, digits, and common symbols.
+    Special characters are mapped to their shifted QCode equivalents.
+    """
+    # Map characters to (qcode, needs_shift).
+    _CHAR_TO_QCODE: dict[str, tuple[str, bool]] = {}
+    for c in "abcdefghijklmnopqrstuvwxyz":
+        _CHAR_TO_QCODE[c] = (c, False)
+        _CHAR_TO_QCODE[c.upper()] = (c, True)
+    for i, c in enumerate("1234567890"):
+        _CHAR_TO_QCODE[c] = (c, False)
+    _CHAR_TO_QCODE[" "] = ("spc", False)
+    _CHAR_TO_QCODE["\n"] = ("ret", False)
+    _CHAR_TO_QCODE["\t"] = ("tab", False)
+    # Shifted digit-row symbols.
+    for sym, qc in [
+        ("!", "1"), ("@", "2"), ("#", "3"), ("$", "4"), ("%", "5"),
+        ("^", "6"), ("&", "7"), ("*", "8"), ("(", "9"), (")", "0"),
+    ]:
+        _CHAR_TO_QCODE[sym] = (qc, True)
+    # Common punctuation.
+    for sym, qc, shifted in [
+        ("-", "minus", False), ("_", "minus", True),
+        ("=", "equal", False), ("+", "equal", True),
+        ("[", "bracket_left", False), ("{", "bracket_left", True),
+        ("]", "bracket_right", False), ("}", "bracket_right", True),
+        (";", "semicolon", False), (":", "semicolon", True),
+        ("'", "apostrophe", False), ('"', "apostrophe", True),
+        (",", "comma", False), ("<", "comma", True),
+        (".", "dot", False), (">", "dot", True),
+        ("/", "slash", False), ("?", "slash", True),
+        ("\\", "backslash", False), ("|", "backslash", True),
+        ("`", "grave_accent", False), ("~", "grave_accent", True),
+    ]:
+        _CHAR_TO_QCODE[sym] = (qc, shifted)
+
+    for ch in text:
+        entry = _CHAR_TO_QCODE.get(ch)
+        if entry is None:
+            # Skip unknown characters.
+            logger.debug("qmp_type_text: skipping unknown char %r", ch)
+            continue
+        qcode, needs_shift = entry
+        if needs_shift:
+            qmp_send_key_event(conn, domain_name, "shift", down=True)
+        qmp_send_key_event(conn, domain_name, qcode)
+        if needs_shift:
+            qmp_send_key_event(conn, domain_name, "shift", down=False)
+
+
+# QCode name mapping for common special keys and modifiers.
+NAMED_KEY_TO_QCODE: dict[str, str] = {
+    "return": "ret",
+    "enter": "ret",
+    "tab": "tab",
+    "escape": "esc",
+    "backspace": "backspace",
+    "space": "spc",
+    "delete": "delete",
+    "insert": "insert",
+    "home": "home",
+    "end": "end",
+    "pageup": "pgup",
+    "pagedown": "pgdn",
+    "up": "up",
+    "down": "down",
+    "left": "left",
+    "right": "right",
+    "f1": "f1", "f2": "f2", "f3": "f3", "f4": "f4",
+    "f5": "f5", "f6": "f6", "f7": "f7", "f8": "f8",
+    "f9": "f9", "f10": "f10", "f11": "f11", "f12": "f12",
+    # Modifiers.
+    "ctrl": "ctrl",
+    "alt": "alt",
+    "shift": "shift",
+    "super": "meta_l",
+}
+
+
+def qmp_send_key_combo(
+    conn: "libvirt.virConnect",  # type: ignore[name-defined]
+    domain_name: str,
+    key_str: str,
+) -> None:
+    """Send a key or key combination (e.g. ``"ctrl+a"``, ``"Return"``).
+
+    Parses modifier+key combos separated by ``+``.  Named keys are
+    mapped to QCode via :data:`NAMED_KEY_TO_QCODE`.  Single ASCII
+    characters are used as-is.
+    """
+    parts = key_str.split("+")
+
+    if len(parts) == 1:
+        # Single key.
+        key = parts[0]
+        qcode = NAMED_KEY_TO_QCODE.get(key.lower())
+        if qcode:
+            qmp_send_key_event(conn, domain_name, qcode)
+        elif len(key) == 1:
+            # Single printable character — type it.
+            qmp_type_text(conn, domain_name, key)
+        else:
+            # Try as literal qcode.
+            qmp_send_key_event(conn, domain_name, key.lower())
+    else:
+        # Modifier combo: press modifiers, press key, release all.
+        modifiers = parts[:-1]
+        key = parts[-1]
+
+        mod_qcodes = [
+            NAMED_KEY_TO_QCODE.get(m.lower(), m.lower())
+            for m in modifiers
+        ]
+        key_qcode = NAMED_KEY_TO_QCODE.get(key.lower())
+        if key_qcode is None:
+            key_qcode = key.lower() if len(key) == 1 else key.lower()
+
+        # Press modifiers.
+        for mq in mod_qcodes:
+            qmp_send_key_event(conn, domain_name, mq, down=True)
+        # Press and release the main key.
+        qmp_send_key_event(conn, domain_name, key_qcode)
+        # Release modifiers (reverse order).
+        for mq in reversed(mod_qcodes):
+            qmp_send_key_event(conn, domain_name, mq, down=False)
+
+
+# ---------------------------------------------------------------------------
+# domain.screenshot() helper
+# ---------------------------------------------------------------------------
+
+
+def domain_screenshot_png(
+    conn: "libvirt.virConnect",  # type: ignore[name-defined]
+    domain_name: str,
+    output_path: Path,
+) -> None:
+    """Take a screenshot via ``domain.screenshot()`` and save as PNG.
+
+    ``domain.screenshot()`` returns PNG data directly when using
+    virtio-gpu.  The data is streamed via a libvirt stream object and
+    written to *output_path*.
+
+    Args:
+        conn: Active libvirt connection.
+        domain_name: Libvirt domain name.
+        output_path: Path to write the PNG file.
+    """
+    import libvirt
+
+    domain = conn.lookupByName(domain_name)
+    stream = conn.newStream(0)
+
+    try:
+        _mime = domain.screenshot(stream, 0)
+        chunks: list[bytes] = []
+        while True:
+            data = stream.recv(65536)
+            if not data:
+                break
+            chunks.append(data)
+        stream.finish()
+    except Exception:
+        try:
+            stream.abort()
+        except Exception:
+            pass
+        raise
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"".join(chunks))
 
 
 # ---------------------------------------------------------------------------

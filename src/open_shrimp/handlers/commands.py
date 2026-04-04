@@ -919,8 +919,12 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     context_name, ctx = await _get_context(scope, config, db)
 
-    # Check that the context has computer_use enabled.
-    if ctx.container is None or not ctx.container.computer_use:
+    # Check that the context has computer_use enabled (any backend).
+    _has_cu = (
+        (ctx.container is not None and ctx.container.computer_use)
+        or (ctx.sandbox is not None and ctx.sandbox.computer_use)
+    )
+    if not _has_cu:
         await update.message.reply_text(
             f"Context `{_escape_mdv2(context_name)}` does not have computer use enabled\\.",
             parse_mode="MarkdownV2",

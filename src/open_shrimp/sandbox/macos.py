@@ -87,6 +87,26 @@ class MacOSSandbox:
     def get_text_input_active(self) -> bool:
         return False
 
+    def take_screenshot(self, output_path: Path) -> None:
+        raise NotImplementedError("Computer-use not supported on macOS sandbox")
+
+    def send_click(self, x: int, y: int, button: str = "left") -> None:
+        raise NotImplementedError("Computer-use not supported on macOS sandbox")
+
+    def send_type(self, text: str) -> None:
+        raise NotImplementedError("Computer-use not supported on macOS sandbox")
+
+    def send_key(self, key_str: str) -> None:
+        raise NotImplementedError("Computer-use not supported on macOS sandbox")
+
+    def send_scroll(
+        self, x: int, y: int, direction: str, amount: int = 3,
+    ) -> None:
+        raise NotImplementedError("Computer-use not supported on macOS sandbox")
+
+    def focus_window(self, name: str) -> None:
+        raise NotImplementedError("Computer-use not supported on macOS sandbox")
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         # macOS sandbox shares the host filesystem — no copy needed.
         return list(host_paths)
