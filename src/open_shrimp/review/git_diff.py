@@ -456,8 +456,19 @@ async def get_hunks(
     staged_hunks = parse_diff(staged_out, staged=True)
     untracked_hunks = parse_diff(untracked_diff, staged=False) if untracked_diff else []
 
-    # Combine: staged first, then unstaged (tracked), then untracked.
-    all_hunks = staged_hunks + unstaged_hunks + untracked_hunks
+    # Combine hunks grouped by file path so that all hunks for the same
+    # file are contiguous (staged before unstaged within each file).
+    # This prevents pagination from splitting a file's hunks across pages.
+    from collections import OrderedDict
+
+    hunks_by_file: OrderedDict[str, list[Hunk]] = OrderedDict()
+    for h in staged_hunks + unstaged_hunks + untracked_hunks:
+        hunks_by_file.setdefault(h.file_path, []).append(h)
+
+    all_hunks: list[Hunk] = []
+    for file_hunks in hunks_by_file.values():
+        all_hunks.extend(file_hunks)
+
     total = len(all_hunks)
 
     # Apply pagination.

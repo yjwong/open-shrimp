@@ -173,9 +173,16 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
                 if h.staged:
                     file_map[h.file_path]["staged_count"] += 1
 
-        # Apply pagination.
+        # Apply pagination, ensuring we never split a file's hunks
+        # across page boundaries.
         total = all_result.total_hunks
-        paginated = all_result.hunks[offset : offset + limit]
+        end = min(offset + limit, total)
+        # Extend the page to include all remaining hunks of the last file.
+        if end < total and end > offset:
+            last_file = all_result.hunks[end - 1].file_path
+            while end < total and all_result.hunks[end].file_path == last_file:
+                end += 1
+        paginated = all_result.hunks[offset:end]
 
         result = {
             "context": context_name,
