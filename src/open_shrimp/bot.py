@@ -231,6 +231,22 @@ async def run_bot(
     await app.updater.start_polling()
     logger.info("Bot is running")
 
+    # If we were restarted via /restart, send a confirmation message.
+    import os as _os
+
+    restart_chat = _os.environ.pop("OPENSHRIMP_RESTART_CHAT_ID", None)
+    if restart_chat is not None:
+        restart_thread = _os.environ.pop("OPENSHRIMP_RESTART_THREAD_ID", None)
+        try:
+            await app.bot.send_message(
+                chat_id=int(restart_chat),
+                message_thread_id=int(restart_thread) if restart_thread else None,
+                text="Back online\\.",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            logger.warning("Failed to send restart confirmation", exc_info=True)
+
     # Instantiate one SandboxManager per backend used in the config.
     _sandbox_managers = sandbox_managers or create_sandbox_managers(config)
     for mgr in _sandbox_managers.values():
