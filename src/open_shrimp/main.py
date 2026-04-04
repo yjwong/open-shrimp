@@ -17,6 +17,14 @@ from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
 
 logger = logging.getLogger("open_shrimp")
 
+_restart_requested = False
+
+
+def request_restart() -> None:
+    """Signal that the process should re-exec after shutdown."""
+    global _restart_requested
+    _restart_requested = True
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OpenShrimp - Telegram bot for remote Claude access")
@@ -196,6 +204,10 @@ def main() -> None:
         asyncio.run(_async_main(args.config))
     except KeyboardInterrupt:
         pass
+
+    if _restart_requested:
+        logger.info("Re-executing process for restart...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ from open_shrimp.handlers.commands import (
     login_handler,
     mcp_handler,
     model_handler,
+    restart_handler,
     resume_handler,
     review_handler,
     schedule_handler,
@@ -165,6 +166,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("usage", usage_handler))
     app.add_handler(CommandHandler("vnc", vnc_handler))
     app.add_handler(CommandHandler("login", login_handler))
+    app.add_handler(CommandHandler("restart", restart_handler))
 
     # Callback query handler for tool approval buttons
     app.add_handler(CallbackQueryHandler(callback_query_handler))

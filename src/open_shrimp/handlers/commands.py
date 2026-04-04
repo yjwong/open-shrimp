@@ -1485,3 +1485,23 @@ async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     text = "\n".join(lines)
     await message.reply_text(text, parse_mode="MarkdownV2")
+
+
+# ── /restart ──
+
+
+async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /restart command: restart the bot process."""
+    config: Config = context.bot_data["config"]
+    message = update.effective_message
+    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    import os
+    import signal
+
+    from open_shrimp.main import request_restart
+
+    await message.reply_text("Restarting\\.\\.\\.", parse_mode="MarkdownV2")
+    request_restart()
+    os.kill(os.getpid(), signal.SIGTERM)
