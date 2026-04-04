@@ -98,6 +98,14 @@ class SandboxManager(Protocol):
         """Base directory for per-context sandbox state."""
         ...
 
+    def claude_home_dir(self, context_name: str) -> Path:
+        """Host-side directory mapped to ``~/.claude`` inside the sandbox.
+
+        Used to locate session ``.jsonl`` files without creating a full
+        :class:`Sandbox` instance (e.g. for ``/resume`` session listing).
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Docker implementation
@@ -362,6 +370,9 @@ class DockerSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
+    def claude_home_dir(self, context_name: str) -> Path:
+        return self._state_dir / context_name
+
 
 # ---------------------------------------------------------------------------
 # macOS (no-op) implementation
@@ -432,6 +443,9 @@ class MacOSSandboxManager:
     @property
     def state_dir(self) -> Path:
         return self._state_dir
+
+    def claude_home_dir(self, context_name: str) -> Path:
+        return self._state_dir / context_name
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +660,9 @@ class LibvirtSandboxManager:
     @property
     def state_dir(self) -> Path:
         return self._state_dir
+
+    def claude_home_dir(self, context_name: str) -> Path:
+        return self._state_dir / context_name / "claude-home"
 
 
 # ---------------------------------------------------------------------------

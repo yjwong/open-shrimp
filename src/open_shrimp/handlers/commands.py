@@ -457,13 +457,16 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def _list_sessions_for_context(
-    ctx_name: str, ctx: ContextConfig, **kwargs: Any,
+    ctx_name: str,
+    ctx: ContextConfig,
+    sandbox_managers: "dict[str, Any] | None" = None,
+    **kwargs: Any,
 ) -> "list[Any]":
-    """Call ``list_sessions`` respecting containerized session storage.
+    """Call ``list_sessions`` respecting sandboxed session storage.
 
-    For containerized contexts the session ``.jsonl`` files live under the
-    per-context state directory (bind-mounted as ``~/.claude`` inside the
-    container), not the host's ``~/.claude``.  We scan that directory
+    For sandboxed contexts the session ``.jsonl`` files live under the
+    per-context claude-home directory (mapped as ``~/.claude`` inside the
+    sandbox), not the host's ``~/.claude``.  We scan that directory
     directly using the SDK's internal helpers to avoid mutating global
     process state (``CLAUDE_CONFIG_DIR``).
     """
@@ -475,11 +478,16 @@ def _list_sessions_for_context(
         _read_sessions_from_dir,
         _sanitize_path,
     )
-    from platformdirs import user_data_path
 
-    if ctx.container is not None and ctx.container.enabled:
-        state_dir = user_data_path("openshrimp") / "containers" / ctx_name
-        projects_dir = state_dir / "projects"
+    # Resolve the host-side claude-home directory for sandboxed contexts.
+    claude_home: Path | None = None
+    if ctx.sandbox is not None and ctx.sandbox.enabled and sandbox_managers:
+        mgr = sandbox_managers.get(ctx.sandbox.backend)
+        if mgr is not None:
+            claude_home = mgr.claude_home_dir(ctx_name)
+
+    if claude_home is not None:
+        projects_dir = claude_home / "projects"
         canonical = _canonicalize_path(ctx.directory)
         sanitized = _sanitize_path(canonical)
         candidate = projects_dir / sanitized
@@ -536,6 +544,7 @@ async def _build_resume_page(
     db: aiosqlite.Connection,
     scope: ChatScope,
     page: int,
+    sandbox_managers: "dict[str, Any] | None" = None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Build a single page of the resume session list.
 
@@ -547,6 +556,7 @@ async def _build_resume_page(
     # Fetch one extra to detect whether a next page exists.
     sessions = await asyncio.to_thread(
         _list_sessions_for_context, ctx_name, ctx,
+        sandbox_managers=sandbox_managers,
         limit=per_page + 1, offset=offset,
     )
 
@@ -557,7 +567,10 @@ async def _build_resume_page(
                 None,
             )
         # Edge case: page beyond last – go back.
-        return await _build_resume_page(ctx_name, ctx, db, scope, page - 1)
+        return await _build_resume_page(
+            ctx_name, ctx, db, scope, page - 1,
+            sandbox_managers=sandbox_managers,
+        )
 
     has_next = len(sessions) > per_page
     sessions = sessions[:per_page]
@@ -669,6 +682,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """
     config: Config = context.bot_data["config"]
     db: aiosqlite.Connection = context.bot_data["db"]
+    sandbox_managers = context.bot_data.get("sandbox_managers")
     message = update.effective_message
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
@@ -683,6 +697,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         target = args[1]
         sessions = await asyncio.to_thread(
             _list_sessions_for_context, ctx_name, ctx,
+            sandbox_managers=sandbox_managers,
         )
         match = None
         for s in sessions:
@@ -708,7 +723,10 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # List recent sessions for the current context (page 0)
-    text, keyboard = await _build_resume_page(ctx_name, ctx, db, scope, page=0)
+    text, keyboard = await _build_resume_page(
+        ctx_name, ctx, db, scope, page=0,
+        sandbox_managers=sandbox_managers,
+    )
 
     if keyboard is None:
         await message.reply_text(text, parse_mode="MarkdownV2")
@@ -729,6 +747,7 @@ async def handle_resume_callback(
         return False
 
     db: aiosqlite.Connection = context.bot_data["db"]
+    sandbox_managers = context.bot_data.get("sandbox_managers")
 
     # Handle pagination
     if data.startswith("resume_page:"):
@@ -751,6 +770,7 @@ async def handle_resume_callback(
         ctx = config.contexts.get(ctx_name_req, ctx)
         text, keyboard = await _build_resume_page(
             ctx_name_req, ctx, db, scope, page,
+            sandbox_managers=sandbox_managers,
         )
         await query.answer()
         try:
