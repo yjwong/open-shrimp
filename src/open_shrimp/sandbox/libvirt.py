@@ -135,6 +135,26 @@ class LibvirtSandbox:
         sdir = self._sdir
         sdir.mkdir(parents=True, mode=0o700, exist_ok=True)
 
+        # Detect cloud-init config drift.  Cloud-init only runs on first
+        # boot, so if any input that affects the user-data has changed
+        # (computer_use, provision script, …) the overlay must be rebuilt.
+        desired_fp = cloud_init_fingerprint(self._config, self._computer_use)
+        saved_fp = load_cloud_init_fingerprint(sdir)
+        if saved_fp is not None and saved_fp != desired_fp:
+            _log(
+                log_file,
+                "Cloud-init config changed — rebuilding VM from scratch...",
+            )
+            logger.info(
+                "Cloud-init fingerprint drifted for %s — triggering rebuild",
+                self._dom_name,
+            )
+            # Delete fingerprint before rebuild to prevent infinite
+            # recursion (_rebuild_vm calls ensure_environment again).
+            (sdir / "cloud-init.sha256").unlink(missing_ok=True)
+            self._rebuild_vm()
+            return
+
         _log(log_file, f"Setting up VM environment for '{self._context_name}'...")
 
         # 1. Base image.
@@ -245,6 +265,7 @@ class LibvirtSandbox:
             else:
                 raise
 
+        save_cloud_init_fingerprint(sdir, desired_fp)
         _log(log_file, "VM environment ready.")
 
     def ensure_running(self) -> None:

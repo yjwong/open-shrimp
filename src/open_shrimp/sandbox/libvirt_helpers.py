@@ -933,6 +933,37 @@ def cleanup_wrapper(wrapper_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def cloud_init_fingerprint(config: SandboxConfig, computer_use: bool) -> str:
+    """Compute a SHA-256 fingerprint of inputs that affect cloud-init.
+
+    Cloud-init only runs on first boot, so if any of these inputs change
+    the VM overlay must be rebuilt from scratch.
+
+    Fingerprinted inputs:
+    - ``computer_use`` flag (installs GUI packages + compositor service)
+    - ``provision`` script (custom first-boot shell commands)
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(f"computer_use={computer_use}\n".encode())
+    h.update(f"provision={config.provision or ''}\n".encode())
+    return h.hexdigest()
+
+
+def save_cloud_init_fingerprint(sdir: Path, fingerprint: str) -> None:
+    """Persist the cloud-init fingerprint for drift detection."""
+    (sdir / "cloud-init.sha256").write_text(fingerprint)
+
+
+def load_cloud_init_fingerprint(sdir: Path) -> str | None:
+    """Load the saved cloud-init fingerprint, or ``None`` if absent."""
+    fp_file = sdir / "cloud-init.sha256"
+    if fp_file.exists():
+        return fp_file.read_text().strip()
+    return None
+
+
 def save_ssh_port(sdir: Path, port: int) -> None:
     """Persist the SSH port for a context."""
     (sdir / "ssh_port").write_text(str(port))
