@@ -41,7 +41,7 @@ def _is_computer_use_context(ctx: ContextConfig) -> bool:
 def _get_vnc_port_for_context(
     context_name: str,
     ctx: ContextConfig,
-    sandbox_manager: object | None = None,
+    sandbox_managers: dict[str, object] | None = None,
 ) -> int | None:
     """Discover the VNC port for a context, supporting both backends.
 
@@ -53,6 +53,7 @@ def _get_vnc_port_for_context(
 
     if ctx.sandbox is not None and ctx.sandbox.computer_use:
         # Libvirt backend — need the sandbox manager's connection.
+        sandbox_manager = (sandbox_managers or {}).get(ctx.sandbox.backend)
         if sandbox_manager is not None:
             try:
                 from open_shrimp.sandbox.libvirt_helpers import (
@@ -111,9 +112,9 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         return
 
     # Discover the VNC port.
-    sandbox_manager = getattr(websocket.app.state, "sandbox_manager", None)
+    sandbox_managers = getattr(websocket.app.state, "sandbox_managers", None)
     port = await asyncio.to_thread(
-        _get_vnc_port_for_context, context_name, ctx, sandbox_manager,
+        _get_vnc_port_for_context, context_name, ctx, sandbox_managers,
     )
     if port is None:
         await websocket.close(
