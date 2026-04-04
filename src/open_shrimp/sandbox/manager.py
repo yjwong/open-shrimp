@@ -584,7 +584,12 @@ class LibvirtSandboxManager:
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
     ) -> Sandbox:
-        assert self._conn is not None, "call start_reaper() first"
+        if self._conn is None:
+            raise RuntimeError(
+                "Libvirt connection not available — either start_reaper() was "
+                "not called or libvirt-python is not installed. Install with: "
+                "pip install libvirt-python"
+            )
         assert context.sandbox is not None
 
         from open_shrimp.sandbox.libvirt import LibvirtSandbox
