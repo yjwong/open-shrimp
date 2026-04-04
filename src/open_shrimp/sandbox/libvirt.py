@@ -342,17 +342,6 @@ class LibvirtSandbox:
 
         cli_binary = find_claude_binary()
         ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
-
-        # Check if claude is already available in the VM.
-        result = subprocess.run(
-            ["ssh", *ssh_opts, "claude@localhost", "which", "claude"],
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            return
-
-        # SCP the Claude CLI binary into the VM.
-        # Note: scp uses -P (uppercase) for port, not -p like ssh.
         scp_opts = [
             "-i", str(ssh_key),
             "-P", str(self._ssh_port),
@@ -360,28 +349,46 @@ class LibvirtSandbox:
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "LogLevel=ERROR",
         ]
-        logger.info("Installing Claude CLI into VM %s...", self._dom_name)
-        subprocess.run(
-            [
-                "scp", *scp_opts,
-                str(cli_binary),
-                "claude@localhost:/tmp/claude",
-            ],
-            check=True,
+
+        # Check if claude is already available in the VM.
+        result = subprocess.run(
+            ["ssh", *ssh_opts, "claude@localhost", "which", "claude"],
             capture_output=True,
         )
-        # Move to /usr/local/bin (needs sudo).
-        subprocess.run(
-            [
-                "ssh", *ssh_opts,
-                "claude@localhost",
-                "--",
-                "sudo mv /tmp/claude /usr/local/bin/claude && sudo chmod +x /usr/local/bin/claude",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        logger.info("Claude CLI installed in VM %s", self._dom_name)
+        if result.returncode != 0:
+            # SCP the Claude CLI binary into the VM.
+            logger.info("Installing Claude CLI into VM %s...", self._dom_name)
+            subprocess.run(
+                [
+                    "scp", *scp_opts,
+                    str(cli_binary),
+                    "claude@localhost:/tmp/claude",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            # Move to /usr/local/bin (needs sudo).
+            subprocess.run(
+                [
+                    "ssh", *ssh_opts,
+                    "claude@localhost",
+                    "--",
+                    "sudo mv /tmp/claude /usr/local/bin/claude && sudo chmod +x /usr/local/bin/claude",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            logger.info("Claude CLI installed in VM %s", self._dom_name)
+
+        # Copy credentials into the host-side claude-home directory.
+        # This directory is shared into the VM as /home/claude/.claude
+        # via virtiofs/9p, so the CLI picks them up automatically.
+        host_credentials = Path.home() / ".claude" / ".credentials.json"
+        if host_credentials.exists():
+            import shutil
+            dest = self._claude_home_dir / ".credentials.json"
+            shutil.copy2(str(host_credentials), str(dest))
+            logger.info("Copied credentials to %s", dest)
 
     def build_cli_wrapper(self) -> str:
         assert self._ssh_port is not None
@@ -391,6 +398,7 @@ class LibvirtSandbox:
             self._ssh_port,
             project_dir=self._project_dir,
             instance_prefix=self._instance_prefix,
+            claude_home_dir=self._claude_home_dir,
         )
         return self._wrapper_path
 
