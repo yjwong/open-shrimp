@@ -882,6 +882,29 @@ def build_cli_wrapper(
             fi
         """)
 
+    # Git identity — read from host and export in the remote shell.
+    git_env_parts: list[str] = []
+    for git_key, env_vars in [
+        ("user.name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
+        ("user.email", ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL")),
+    ]:
+        try:
+            value = subprocess.check_output(
+                ["git", "config", "--global", git_key],
+                text=True,
+            ).strip()
+            if value:
+                for env_var in env_vars:
+                    git_env_parts.append(
+                        f"export {env_var}={shlex.quote(value)}"
+                    )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+    git_env_export = ""
+    if git_env_parts:
+        git_env_export = " && " + " && ".join(git_env_parts)
+
     script = textwrap.dedent(f"""\
         #!/bin/bash
         set -euo pipefail
@@ -921,7 +944,7 @@ def build_cli_wrapper(
         # Source /etc/profile so the remote shell picks up the full PATH
         # (needed for npx / Playwright MCP).  SSH non-login shells get a
         # minimal PATH that may not include /usr/bin.
-        REMOTE_CMD=". /etc/profile && cd {shlex.quote(project_dir)} && claude"
+        REMOTE_CMD=". /etc/profile{git_env_export} && cd {shlex.quote(project_dir)} && claude"
         for arg in "$@"; do
             REMOTE_CMD+=" $(printf '%q' "$arg")"
         done
