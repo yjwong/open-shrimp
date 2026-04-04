@@ -6,7 +6,8 @@ Telegram bot for remote Claude access via the Agent SDK. A personal, self-hosted
 
 - **PRD**: `docs/prd.md` - full requirements, architecture, feasibility assessment
 - **Language**: Python 3.11+, managed with `uv`
-- **Key deps**: `claude-agent-sdk`, `python-telegram-bot[httpx,job-queue]`, `aiosqlite`, `pyyaml`, `tree-sitter`, `tree-sitter-bash`
+- **Key deps**: `claude-agent-sdk`, `python-telegram-bot[httpx,job-queue]`, `aiosqlite`, `pyyaml`, `mistune`, `starlette`, `uvicorn`, `tree-sitter`, `tree-sitter-bash`, `platformdirs`, `watchfiles`
+- **Optional deps**: `rumps` (macOS menu bar app), `libvirt-python` (Libvirt/QEMU VM sandbox)
 
 ## Architecture
 
@@ -24,8 +25,13 @@ Telegram <-> OpenShrimp (Python, async) <-> Claude Agent SDK
 - **ChatScope**: A `(chat_id, thread_id)` pair that identifies a unique conversation scope. In private/group chats, `thread_id` is `None`. In forum topics, each topic thread has its own `thread_id`, so multiple topics in the same chat get independent contexts and sessions.
 - **Session**: A persistent Claude conversation. The Agent SDK handles persistence as `.jsonl` files under `~/.claude/projects/<encoded-cwd>/`. OpenShrimp maps `(chat_id, thread_id, context_name) -> session_id` in SQLite.
 - **Tool approval**: Uses the SDK's `allowedTools` for auto-approved tools (patterns like `Bash(git *)`) and a `canUseTool` callback for everything else. Read-only file tools (Read, Glob, Grep) are auto-approved within the context working directory. Mutating tools (Edit, Write) always require explicit approval via Telegram inline keyboard, even within cwd, unless the user opts into "accept all edits" for the session. Non-path tools use pattern-based session-scoped approval rules: for Bash, the user can approve by command prefix (e.g. "Accept all git" creates a `git *` pattern) or blanket-approve the entire tool. Approval rules are `ApprovalRule(tool_name, pattern)` with `fnmatch` glob matching.
-- **Containerization**: Optional per-context Docker isolation via the `container:` config key. The Claude CLI runs inside a container with only the project directory bind-mounted (at the same host path). Session storage is isolated under `~/.config/openshrimp/containers/<context>/`, mounted as `~/.claude` inside the container. The container runs as the host user's uid/gid to avoid root-owned files. The SDK's `cli_path` is pointed at a generated wrapper script that invokes `docker run`; all other SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged. Containerized contexts auto-approve all Bash commands since Docker provides the safety boundary. Custom Dockerfiles can be specified per-context via `container.dockerfile` to install dev tools (Go, Node, Rust, etc.); images are tagged `openshrimp-claude:<context-name>` and built lazily.
-- **Computer use**: Optional per-context GUI interaction via `container.computer_use: true`. Runs a headless Wayland desktop (labwc compositor, 1280x720) inside the container with Chromium and a foot terminal. Claude interacts via MCP tools: `computer_screenshot` (grim), `computer_click`/`computer_type`/`computer_key`/`computer_scroll` (wlrctl), and `computer_toplevel` for window management. Screenshots are saved to a bind-mounted directory and sent to Telegram for user observability. A VNC server (wayvnc) is exposed on a dynamic port for live viewing. The computer-use image (`openshrimp-computer-use:latest`) extends the base image with `Dockerfile.computer-use`.
+- **Sandbox**: Optional per-context isolated execution via the `sandbox:` config key (the older `container:` key is a backwards-compatible alias for `sandbox.backend: docker`). Multiple backends are supported:
+  - **Docker** (`backend: docker`): Linux containers with the project directory bind-mounted. Session storage isolated under `~/.config/openshrimp/containers/<context>/`. Runs as host uid/gid. Custom Dockerfiles supported; images tagged `openshrimp-claude:<context-name>`, built lazily. `docker_in_docker: true` enables rootless Docker inside the container.
+  - **Libvirt/QEMU** (`backend: libvirt`): Full VM isolation via libvirt. Requires `libvirt-python` optional dep. Supports `base_image` and `provision` (shell script for first boot) config fields.
+  - **macOS** (`backend: macos`): Local execution with macOS-native sandboxing.
+  The SDK's `cli_path` is pointed at a generated wrapper script; all other SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged. Sandboxed contexts auto-approve all Bash commands since the sandbox provides the safety boundary. The `Sandbox` protocol (`sandbox/base.py`) defines the lifecycle: `ensure_environment()` -> `ensure_running()` -> `provision_workspace()` -> `build_cli_wrapper()` -> `cleanup()` -> `stop()`. A `SandboxManager` (`sandbox/manager.py`) provides the factory and global lifecycle.
+- **Computer use**: Optional per-context GUI interaction via `sandbox.computer_use: true`. Runs a headless Wayland desktop (labwc compositor, 1280x720) inside the sandbox with Chromium and a foot terminal. Claude interacts via MCP tools: `computer_screenshot` (grim), `computer_click`/`computer_type`/`computer_key`/`computer_scroll` (wlrctl), and `computer_toplevel` for window management. Screenshots are saved to a bind-mounted directory and sent to Telegram for user observability. A VNC server (wayvnc) is exposed on a dynamic port for live viewing; the `/vnc` command opens a noVNC Mini App. The computer-use image (`openshrimp-computer-use:latest`) extends the base image with `Dockerfile.computer-use`.
+- **Client manager**: Persistent `ClaudeSDKClient` instances keyed by ChatScope (`client_manager.py`). Keeps the CLI subprocess alive across multiple messages in the same conversation, avoiding the "Continue from where you left off" injection on session resume. Only the first message uses `--resume`; subsequent messages call `client.query()` on the already-connected client.
 - **Scheduled tasks**: Cron-like recurring and one-shot Claude prompts. Users describe schedules in natural language; Claude calls MCP tools (`create_schedule`, `list_schedules`, `delete_schedule`) to manage them. Tasks run in isolated sessions with read-only tools only (no approval UI needed). Persistence via SQLite `scheduled_tasks` table, scheduling via `python-telegram-bot` JobQueue (APScheduler). Safety: 5-minute minimum interval, max 20 tasks per chat, max 3 concurrent executions (global semaphore), per-task timeout (default 10 minutes). One-shot tasks auto-delete after execution.
 
 ### Key SDK Patterns
@@ -60,35 +66,80 @@ Both `open-shrimp` and `moonshine-stt` share a single version from the `VERSION`
 ## Project Structure
 
 ```
-VERSION                   # Single source of truth for version (shared)
+VERSION                        # Single source of truth for version (shared)
 src/open_shrimp/
     __init__.py
-    main.py          # Entry point, arg parsing, config loading
-    bot.py            # Telegram bot setup, handlers, long polling
-    agent.py          # Claude Agent SDK wrapper, session management
-    hooks.py          # canUseTool callback, tool approval logic
-    bash_parse.py     # tree-sitter bash command parsing and security checks
-    stream.py         # Stream bridge: SDK messages -> sendMessageDraft
-    config.py         # Config loading and validation (YAML)
-    container.py      # Docker container wrapper for isolated CLI execution
-    tools.py          # MCP tool registration (edit_topic, scheduling tools)
-    db.py             # SQLite persistence: sessions, contexts, scheduled tasks
-    scheduler.py      # Scheduled task execution, JobQueue integration
-    markdown.py       # GFM -> Telegram MarkdownV2 conversion
-    stt.py            # Speech-to-text: download/invoke moonshine-stt binary
-    service.py        # install/uninstall as systemd/launchd service
+    main.py                    # Entry point, arg parsing, config loading
+    setup.py                   # Interactive setup wizard for first-time config
+    bot.py                     # Telegram bot setup, handlers, long polling
+    agent.py                   # Claude Agent SDK wrapper, session management
+    client_manager.py          # Persistent ClaudeSDKClient lifecycle across messages
+    hooks.py                   # canUseTool callback, tool approval logic
+    bash_parse.py              # tree-sitter bash command parsing and security checks
+    stream.py                  # Stream bridge: SDK messages -> sendMessageDraft
+    config.py                  # Config loading and validation (YAML)
+    tools.py                   # MCP tool registration (edit_topic, scheduling tools)
+    db.py                      # SQLite persistence: sessions, contexts, scheduled tasks
+    scheduler.py               # Scheduled task execution, JobQueue integration
+    markdown.py                # GFM -> Telegram MarkdownV2 conversion
+    stt.py                     # Speech-to-text: download/invoke moonshine-stt binary
+    service.py                 # install/uninstall as systemd/launchd service
+    tunnel.py                  # Cloudflared tunnel management for public URLs
+    dispatch_registry.py       # Cross-component dispatch callback (API -> agent)
+    web_app_button.py          # Helper for Mini App buttons (private vs group chats)
+    handlers/
+        __init__.py
+        commands.py            # /context, /clear, /status, etc. command handlers
+        messages.py            # Message handler logic
+        approval.py            # Tool approval handling (inline keyboards)
+        questions.py           # Question/interaction handlers
+        state.py               # State management helpers
+        utils.py               # Handler utilities
+    sandbox/
+        __init__.py
+        base.py                # Sandbox protocol (lifecycle interface)
+        manager.py             # SandboxManager factory and global lifecycle
+        docker.py              # Docker container backend
+        docker_helpers.py      # Docker utility functions
+        libvirt.py             # Libvirt/QEMU VM backend
+        libvirt_helpers.py     # Libvirt utility functions
+        macos.py               # macOS sandbox backend
+        macos_helpers.py       # macOS utility functions
     terminal/
-        api.py       # SSE tail + read endpoints for background task output
-web/terminal-app/         # Terminal Mini App frontend (TypeScript, xterm.js)
-    src/main.ts      # Entry point: xterm.js terminal, SSE streaming
-moonshine-stt/            # Subproject: standalone STT binary (packaged via PyApp)
+        __init__.py
+        api.py                 # SSE tail + read endpoints for background task output
+        log_source.py          # Task output log source discovery
+        jsonl_render.py        # JSONL rendering for terminal output
+    review/
+        __init__.py
+        api.py                 # Review Mini App HTTP endpoints
+        auth.py                # Mini App authentication
+        git_diff.py            # Git diff hunk parsing
+        git_stage.py           # Git staging operations
+    preview/
+        __init__.py
+        api.py                 # Markdown preview Mini App (ephemeral content store)
+    vnc/
+        __init__.py
+        api.py                 # WebSocket-to-TCP proxy for noVNC, VNC Mini App routes
+    platform/
+        macos/
+            app.py             # macOS menu bar application (optional, requires rumps)
+            app_setup.py       # Native macOS setup wizard
+            resources/         # App resources (icons, etc.)
+web/
+    review-app/                # Review Mini App frontend
+    terminal-app/              # Terminal Mini App frontend (xterm.js)
+    markdown-app/              # Markdown preview Mini App frontend
+    vnc-app/                   # VNC viewer Mini App frontend (noVNC)
+moonshine-stt/                 # Subproject: standalone STT binary (packaged via PyApp)
     pyproject.toml
     src/moonshine_stt/
-        main.py      # CLI entry point (transcribe / download subcommands)
-        audio.py     # PyAV: OGG/Opus/any -> 16kHz mono float32 PCM
-        model.py     # ONNX Runtime: Moonshine V1 four-file inference
-        tokenizer.py # tokens.txt -> decoded text
-        download.py  # Auto-download models from sherpa-onnx releases
+        main.py                # CLI entry point (transcribe / download subcommands)
+        audio.py               # PyAV: OGG/Opus/any -> 16kHz mono float32 PCM
+        model.py               # ONNX Runtime: Moonshine V1 four-file inference
+        tokenizer.py           # tokens.txt -> decoded text
+        download.py            # Auto-download models from sherpa-onnx releases
 ```
 
 ## Config
@@ -98,8 +149,9 @@ Config lives at `~/.config/openshrimp/config.yaml`. See `config.example.yaml` fo
 Key fields:
 - `telegram.token` - Bot token from @BotFather
 - `allowed_users` - List of Telegram user IDs (integers)
-- `contexts` - Map of context name -> {directory, description, model, allowed_tools, default_for_chats, container}
+- `contexts` - Map of context name -> {directory, description, model, allowed_tools, default_for_chats, locked_for_chats, additional_directories, sandbox}
 - `default_context` - Context name to use when none is specified
+- `review` - Optional: `host`, `port`, `public_url`, `tunnel` (cloudflared) for Mini App HTTP server
 
 `ANTHROPIC_API_KEY` is read from the environment, not the config file.
 
@@ -111,6 +163,9 @@ Key fields:
 - **Inline keyboards**: Use `InlineKeyboardMarkup` for tool approval buttons. Handle via `CallbackQueryHandler`.
 - **Forum topics**: Full support for Telegram forum (threaded) chats. Each forum topic gets its own independent ChatScope — separate context, session, and state. The bot responds to all messages in forum topics (no @mention required). In forum topics, an `edit_topic` MCP tool is auto-registered so Claude can set descriptive topic titles with optional emoji icons.
 - **Terminal Mini App**: When a Bash tool runs with `run_in_background`, the tool result message includes a "View output" `web_app` button that opens an xterm.js-based terminal viewer. The viewer loads existing output via `/api/terminal/read`, then streams new output via SSE at `/api/terminal/tail`. Task output files are discovered under `/tmp/claude-<uid>/`. Served at `/terminal/`.
+- **VNC Mini App**: For computer-use contexts, the `/vnc` command opens a noVNC-based viewer. The backend proxies WebSocket connections to the sandbox's VNC server via a WebSocket-to-TCP bridge. Served at `/vnc/`.
+- **Markdown Preview Mini App**: Ephemeral content store for rendering markdown previews. Served at `/preview/`.
+- **Tunnel support**: When `review.tunnel: cloudflared` is set, a cloudflared quick tunnel is auto-started to expose Mini Apps publicly (for group chats). The binary is auto-downloaded if not installed.
 - **Parse mode**: Use `MarkdownV2` parse mode. Escape special characters: `_*[]()~>#+-=|{}.!`
 
 ## Commands
@@ -127,6 +182,9 @@ Key fields:
 | `/mcp` | `mcp_handler` | List and manage MCP servers (reset/enable/disable) |
 | `/schedule` | `schedule_handler` | List and manage scheduled tasks |
 | `/tasks` | `tasks_handler` | List or stop background tasks |
+| `/usage` | `usage_handler` | Show Claude quota/usage statistics |
+| `/vnc` | `vnc_handler` | Open VNC viewer for computer-use contexts |
+| `/login` | `login_handler` | Token-based authentication for Mini Apps |
 
 ## Conventions
 
