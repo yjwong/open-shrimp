@@ -24,9 +24,10 @@ class Sandbox(Protocol):
     Lifecycle:
         1. ``ensure_environment()`` — build image / provision VM (slow, idempotent)
         2. ``ensure_running()`` — start container / check SSH (fast when warm)
-        3. ``build_cli_wrapper()`` — generate shell script for ``cli_path``
-        4. ``cleanup()`` — remove wrapper script and temp files
-        5. ``stop()`` — tear down runtime
+        3. ``provision_workspace()`` — sync files into sandbox (idempotent)
+        4. ``build_cli_wrapper()`` — generate shell script for ``cli_path``
+        5. ``cleanup()`` — remove wrapper script and temp files
+        6. ``stop()`` — tear down runtime
     """
 
     @property

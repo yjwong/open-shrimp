@@ -44,11 +44,11 @@ contexts:
     #   - -1001234567890  # Sets initial context for this group chat
     # locked_for_chats:
     #   - -1001234567890  # Locks this group chat to this context (cannot switch)
-    # container:                   # Run the Claude CLI inside a Docker container.
-    #   enabled: true              # Default true when container key is present.
+    # sandbox:                     # Run the Claude CLI in an isolated sandbox.
+    #   backend: docker            # "docker" (Linux) or "macos"
     #                              # Provides strong filesystem isolation — the agent
-    #                              # can only access the project directory (bind-mounted
-    #                              # at the same path) and its own session storage.
+    #                              # can only access the project directory and its
+    #                              # own session storage.
     #   docker_in_docker: true     # Enable rootless Docker inside the container.
     #                              # The agent can run docker build/run/compose etc.
     #                              # Adds --cap-add SYS_ADMIN (reduced isolation).
@@ -59,12 +59,10 @@ contexts:
     #                              # The Claude CLI binary is copied in as "claude"
     #                              # (available via CLAUDE_CLI build arg).
     #   computer_use: true         # Enable GUI interaction (computer use).
-    #                              # Runs a headless Wayland desktop (labwc) with
-    #                              # Chromium and a terminal (foot) inside the
-    #                              # container. Claude can take screenshots, click,
-    #                              # type, scroll, and switch windows via MCP tools.
-    #                              # A VNC server (wayvnc) is exposed for
-    #                              # observability (dynamic port, check /status).
+    #                              # Runs a desktop environment inside the sandbox.
+    #                              # Claude can take screenshots, click, type, scroll,
+    #                              # and switch windows via MCP tools. A VNC server
+    #                              # is exposed for observability (check /status).
 
 default_context: default
 

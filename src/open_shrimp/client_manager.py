@@ -286,6 +286,7 @@ async def get_or_create_session(
                     assert _mgr is not None
                     _mgr.unregister_build(context_name)
             _sandbox.ensure_running()
+            _sandbox.provision_workspace()
             return _sandbox.build_cli_wrapper()
 
         wrapper_path = await asyncio.to_thread(_ensure_and_build_wrapper)

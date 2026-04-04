@@ -112,6 +112,10 @@ class DockerSandbox:
             image_name=self._image_name,
         )
 
+    def provision_workspace(self) -> None:
+        # Docker uses bind mounts — workspace is already in place.
+        pass
+
     def build_cli_wrapper(self) -> str:
         self._wrapper_path = _build_cli_wrapper(
             context_name=self._context_name,

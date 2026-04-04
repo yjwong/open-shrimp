@@ -55,6 +55,10 @@ class MacOSSandbox:
     def ensure_running(self) -> None:
         pass
 
+    def provision_workspace(self) -> None:
+        # macOS shares the host filesystem — no provisioning needed.
+        pass
+
     def build_cli_wrapper(self) -> str:
         self._wrapper_path = _build_cli_wrapper(
             context_name=self._context_name,

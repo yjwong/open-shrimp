@@ -439,23 +439,46 @@ class MacOSSandboxManager:
 # ---------------------------------------------------------------------------
 
 
+def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
+    """Instantiate one :class:`SandboxManager` per backend used in the config.
+
+    On macOS, always returns a single ``"macos"`` manager.
+    On Linux, returns one manager per backend (``"docker"``, ``"libvirt"``)
+    that is actually referenced by at least one context.
+
+    Returns:
+        A dict mapping backend name to its :class:`SandboxManager` instance.
+    """
+    if sys.platform == "darwin":
+        return {"macos": MacOSSandboxManager()}
+
+    # Collect all backends used by sandboxed contexts.
+    backends: set[str] = set()
+    for ctx in config.contexts.values():
+        if ctx.sandbox is not None and ctx.sandbox.enabled:
+            backends.add(ctx.sandbox.backend)
+        elif ctx.container is not None and ctx.container.enabled:
+            backends.add("docker")
+
+    managers: dict[str, SandboxManager] = {}
+    if "docker" in backends or not backends:
+        managers["docker"] = DockerSandboxManager()
+    # libvirt manager will be added in Phase 3.
+    return managers
+
+
 def create_sandbox_manager(config: Config) -> SandboxManager:
     """Instantiate the appropriate :class:`SandboxManager` for the platform.
 
     On macOS, uses :class:`MacOSSandboxManager` (sandbox-exec, no Docker).
     On Linux, uses :class:`DockerSandboxManager`.
+
+    .. deprecated::
+        Use :func:`create_sandbox_managers` instead, which returns a dict
+        of managers keyed by backend name to support multiple backends.
     """
-    if sys.platform == "darwin":
-        return MacOSSandboxManager()
-
-    # On Linux, check if any context uses containers — if so, use Docker.
-    has_containers = any(
-        ctx.container is not None and ctx.container.enabled
-        for ctx in config.contexts.values()
-    )
-    if has_containers:
-        return DockerSandboxManager()
-
-    # No containerized contexts — still use Docker manager (it handles
-    # the no-op case gracefully), but a Null manager would also work.
-    return DockerSandboxManager()
+    managers = create_sandbox_managers(config)
+    # Return the first (and typically only) manager.  For backwards
+    # compatibility, this always returns a single manager — callers that
+    # need multi-backend support should use create_sandbox_managers().
+    return next(iter(managers.values()))

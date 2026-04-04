@@ -25,6 +25,23 @@ class ContainerConfig:
 
 
 @dataclass
+class SandboxConfig:
+    """Unified sandbox configuration for all backends."""
+
+    backend: str  # "docker", "libvirt", "macos"
+    enabled: bool = True
+
+    # Docker-specific
+    docker_in_docker: bool = False
+    dockerfile: str | None = None
+    computer_use: bool = False
+
+
+# Valid values for sandbox config fields.
+_SANDBOX_BACKENDS = {"docker", "libvirt", "macos"}
+
+
+@dataclass
 class ContextConfig:
     directory: str
     description: str
@@ -34,6 +51,7 @@ class ContextConfig:
     default_for_chats: list[int] = field(default_factory=list)
     locked_for_chats: list[int] = field(default_factory=list)
     container: ContainerConfig | None = None
+    sandbox: SandboxConfig | None = None
 
 
 @dataclass
@@ -119,6 +137,42 @@ def _validate_raw(raw: dict) -> None:
                         f"a string"
                     )
 
+    # Validate sandbox config
+    for name, ctx in contexts.items():
+        sandbox = ctx.get("sandbox")
+        if sandbox is None:
+            continue
+
+        # Cannot specify both container and sandbox
+        if ctx.get("container") is not None:
+            raise ValueError(
+                f"Context '{name}': cannot specify both 'container' and "
+                f"'sandbox' — use 'sandbox' (the 'container' key is a "
+                f"backwards-compatible alias for sandbox.backend: docker)"
+            )
+
+        if not isinstance(sandbox, dict):
+            raise ValueError(
+                f"Context '{name}': sandbox must be a mapping"
+            )
+
+        backend = sandbox.get("backend")
+        if backend is None:
+            raise ValueError(
+                f"Context '{name}': sandbox.backend is required"
+            )
+        if backend not in _SANDBOX_BACKENDS:
+            raise ValueError(
+                f"Context '{name}': sandbox.backend must be one of "
+                f"{sorted(_SANDBOX_BACKENDS)}, got: {backend!r}"
+            )
+
+        dockerfile = sandbox.get("dockerfile")
+        if dockerfile is not None and not isinstance(dockerfile, str):
+            raise ValueError(
+                f"Context '{name}': sandbox.dockerfile must be a string"
+            )
+
     # default_context references a defined context
     default = raw["default_context"]
     if default not in contexts:
@@ -128,6 +182,17 @@ def _validate_raw(raw: dict) -> None:
         )
 
 
+def _parse_sandbox_config(raw: dict) -> SandboxConfig:
+    """Parse a sandbox config dict into a SandboxConfig dataclass."""
+    return SandboxConfig(
+        backend=raw["backend"],
+        enabled=bool(raw.get("enabled", True)),
+        docker_in_docker=bool(raw.get("docker_in_docker", False)),
+        dockerfile=raw.get("dockerfile"),
+        computer_use=bool(raw.get("computer_use", False)),
+    )
+
+
 def _parse(raw: dict) -> Config:
     """Parse validated raw dict into Config dataclass."""
     contexts = {}
@@ -135,6 +200,8 @@ def _parse(raw: dict) -> Config:
         # Parse container config: presence of the key implies enabled.
         container_raw = ctx.get("container")
         container: ContainerConfig | None = None
+        sandbox: SandboxConfig | None = None
+
         if container_raw is not None:
             if isinstance(container_raw, dict):
                 container = ContainerConfig(
@@ -151,6 +218,30 @@ def _parse(raw: dict) -> Config:
                 # e.g. `container: true` as shorthand
                 container = ContainerConfig(enabled=bool(container_raw))
 
+            # Also create a SandboxConfig from the container config
+            # for forward compatibility.
+            sandbox = SandboxConfig(
+                backend="docker",
+                enabled=container.enabled,
+                docker_in_docker=container.docker_in_docker,
+                dockerfile=container.dockerfile,
+                computer_use=container.computer_use,
+            )
+
+        # Parse sandbox config (new-style, takes precedence).
+        sandbox_raw = ctx.get("sandbox")
+        if sandbox_raw is not None:
+            sandbox = _parse_sandbox_config(sandbox_raw)
+            # Also populate ContainerConfig for backward compatibility
+            # when the backend is Docker.
+            if sandbox.backend == "docker":
+                container = ContainerConfig(
+                    enabled=sandbox.enabled,
+                    docker_in_docker=sandbox.docker_in_docker,
+                    dockerfile=sandbox.dockerfile,
+                    computer_use=sandbox.computer_use,
+                )
+
         contexts[name] = ContextConfig(
             directory=ctx["directory"],
             description=ctx["description"],
@@ -160,6 +251,7 @@ def _parse(raw: dict) -> Config:
             default_for_chats=ctx.get("default_for_chats", []),
             locked_for_chats=ctx.get("locked_for_chats", []),
             container=container,
+            sandbox=sandbox,
         )
 
     # Parse optional review config.

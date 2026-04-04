@@ -6,6 +6,7 @@ from open_shrimp.sandbox.manager import (
     MacOSSandboxManager,
     SandboxManager,
     create_sandbox_manager,
+    create_sandbox_managers,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "Sandbox",
     "SandboxManager",
     "create_sandbox_manager",
+    "create_sandbox_managers",
 ]
