@@ -192,15 +192,15 @@ def _build_cloud_init_user_data(
             '        <keyboard><default /><keybind key="A-F4"><action name="Close" /></keybind></keyboard>\n'
             "        <mouse><default /></mouse>\n"
             "      </labwc_config>\n"
-            "  # Chromium autostart (opens after compositor is up).\n"
+            "  # Chrome autostart (opens after compositor is up).\n"
             "  - path: /home/claude/.config/labwc/autostart\n"
             "    owner: claude:claude\n"
             "    defer: true\n"
             "    permissions: '0755'\n"
             "    content: |\n"
             "      #!/bin/sh\n"
-            "      # Start Chromium with Wayland native rendering on virtio-gpu.\n"
-            "      chromium-browser --ozone-platform=wayland \\\n"
+            "      # Start Chrome with Wayland native rendering on virtio-gpu.\n"
+            "      google-chrome --ozone-platform=wayland \\\n"
             "        --remote-debugging-port=9222 \\\n"
             "        --disable-background-networking \\\n"
             "        --disable-default-apps \\\n"
@@ -219,7 +219,12 @@ def _build_cloud_init_user_data(
     if computer_use:
         runcmd += (
             "  - apt-get update -qq\n"
-            "  - apt-get install -y -qq labwc foot seatd chromium-browser > /dev/null 2>&1\n"
+            "  - |\n"
+            "    # Install Google Chrome (deb, not snap).\n"
+            "    wget -q -O /tmp/google-chrome.deb 'https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'\n"
+            "    apt-get install -y -qq /tmp/google-chrome.deb > /dev/null 2>&1\n"
+            "    rm /tmp/google-chrome.deb\n"
+            "  - apt-get install -y -qq labwc foot seatd > /dev/null 2>&1\n"
             # Node.js for npx (Playwright MCP is fetched on demand).
             "  - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -\n"
             "  - apt-get install -y -qq nodejs > /dev/null 2>&1\n"
@@ -262,7 +267,7 @@ def generate_cloud_init_iso(
 
     When *computer_use* is True, adds a systemd service that starts the
     labwc Wayland compositor on the virtio-gpu DRM device, plus installs
-    required GUI packages (labwc, foot terminal, Chromium).
+    required GUI packages (labwc, foot terminal, Google Chrome).
 
     Args:
         sdir: State directory for this context.

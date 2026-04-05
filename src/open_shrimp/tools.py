@@ -847,7 +847,7 @@ def create_openshrimp_mcp_server(
         @tool(
             "computer_toplevel",
             "Focus a window by name or part of its title. Use this to "
-            "switch between applications (e.g. 'Chromium', 'foot').",
+            "switch between applications (e.g. 'Chromium', 'Google Chrome', 'foot').",
             {
                 "type": "object",
                 "properties": {

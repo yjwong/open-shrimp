@@ -398,7 +398,7 @@ class LibvirtSandbox:
                     )
 
                 # Wait for cloud-init to finish on cold starts so that all
-                # provisioned services (Chromium, compositor, etc.) are
+                # provisioned services (Chrome, compositor, etc.) are
                 # running before we declare the VM ready.
                 if cold_start:
                     _log(log_file, "Waiting for cloud-init to finish...")
