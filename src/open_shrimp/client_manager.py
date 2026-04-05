@@ -318,7 +318,7 @@ async def get_or_create_session(
             logger.info(
                 "Sandbox context '%s': using wrapper %s",
                 context_name,
-                wrapper_path,
+                cli_path,
             )
 
     options = ClaudeAgentOptions(
