@@ -333,7 +333,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lines = [
         f"*Context:* `{ctx_name}`",
         f"*Directory:* `{ctx.directory}`",
-        f"*Model:* `{ctx.model or 'CLI default'}`" + (" \\(override\\)" if scope in _model_overrides else ""),
+        f"*Model:* `{ctx.model or 'CLI default'}`" + (" (override)" if scope in _model_overrides else ""),
         f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
         f"*Running:* {'Yes' if running else 'No'}",
         f"*Injectable:* {'Yes' if injectable else 'No'}",
@@ -354,9 +354,9 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"  • `{tid_short}` {ttype}: "
                 f"{task.description or 'N/A'} ({duration})"
             )
-    # Escape dots and dashes for MarkdownV2
+    # Escape reserved MarkdownV2 characters (outside * and ` markup)
     text = "\n".join(lines)
-    for ch in ".-/":
+    for ch in ".-/()!>#+={|}~[]":
         text = text.replace(ch, f"\\{ch}")
     await message.reply_text(text, parse_mode="MarkdownV2")
 
