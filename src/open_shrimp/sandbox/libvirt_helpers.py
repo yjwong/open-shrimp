@@ -187,7 +187,7 @@ def _build_cloud_init_user_data(
             "      Environment=WLR_BACKENDS=drm,libinput\n"
             "      Environment=XDG_RUNTIME_DIR=/run/user/1000\n"
             "      Environment=WAYLAND_DISPLAY=wayland-0\n"
-            "      ExecStartPre=/bin/bash -c 'mkdir -p /run/user/1000 && chown claude:claude /run/user/1000'\n"
+            "      ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/1000 && chown claude:claude /run/user/1000'\n"
             "      ExecStart=/usr/bin/labwc\n"
             "      Restart=on-failure\n"
             "      [Install]\n"
