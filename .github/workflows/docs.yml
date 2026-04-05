@@ -19,7 +19,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python dependencies
-        run: uv sync
+        run: uv sync --no-install-project
 
       - uses: actions/setup-node@v6
         with:
@@ -28,8 +28,7 @@ jobs:
       - run: npm ci
         working-directory: website
 
-      - run: npm run build
-        working-directory: website
+      - run: uv run --no-sync npm run --prefix website build
 
       - uses: cloudflare/wrangler-action@v3
         with:
