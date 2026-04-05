@@ -1,0 +1,29 @@
+/* OpenShrimp theme — shrimp-inspired coral/ocean palette */
+
+:root {
+	--sl-color-accent-low: #3d1e0f;
+	--sl-color-accent: #ff6b47;
+	--sl-color-accent-high: #ffe0d6;
+	--sl-color-white: #ffffff;
+	--sl-color-gray-1: #eeeef0;
+	--sl-color-gray-2: #c2c2c6;
+	--sl-color-gray-3: #8b8b96;
+	--sl-color-gray-4: #585864;
+	--sl-color-gray-5: #383841;
+	--sl-color-gray-6: #24242d;
+	--sl-color-black: #17171c;
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #ffe0d6;
+	--sl-color-accent: #d94f2e;
+	--sl-color-accent-high: #3d1e0f;
+	--sl-color-white: #17171c;
+	--sl-color-gray-1: #24242d;
+	--sl-color-gray-2: #383841;
+	--sl-color-gray-3: #585864;
+	--sl-color-gray-4: #8b8b96;
+	--sl-color-gray-5: #c2c2c6;
+	--sl-color-gray-6: #eeeef0;
+	--sl-color-black: #ffffff;
+}

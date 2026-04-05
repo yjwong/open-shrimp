@@ -1,0 +1,166 @@
+---
+title: Configuration
+description: Walk through config.yaml and set up your first context.
+sidebar:
+  order: 3
+---
+
+OpenShrimp is configured via a YAML file at `~/.config/openshrimp/config.yaml`. If you ran the setup wizard, this file already exists. Here's what each section does.
+
+## Minimal config
+
+```yaml
+telegram:
+  token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+
+allowed_users:
+  - 123456789  # your Telegram user ID
+
+contexts:
+  myproject:
+    directory: /home/you/Documents/myproject
+    description: "My main project"
+    allowed_tools:
+      - LSP
+      - AskUserQuestion
+
+default_context: myproject
+```
+
+## Telegram
+
+```yaml
+telegram:
+  token: "YOUR_BOT_TOKEN"
+```
+
+The bot token from [@BotFather](https://t.me/BotFather). This is the only required field under `telegram`.
+
+## Allowed users
+
+```yaml
+allowed_users:
+  - 123456789
+  - 987654321
+```
+
+A list of Telegram user IDs (integers) that are allowed to use the bot. Messages from other users are silently ignored.
+
+## Contexts
+
+Each context defines a project the bot can work on:
+
+```yaml
+contexts:
+  myproject:
+    directory: /home/you/Documents/myproject
+    description: "My main project"
+    allowed_tools:
+      - LSP
+      - AskUserQuestion
+```
+
+### Required fields
+
+| Field | Description |
+|-------|-------------|
+| `directory` | Absolute path to the project directory |
+| `description` | Short description shown in context list |
+| `allowed_tools` | Tools auto-approved without prompting |
+
+### Tool approval behavior
+
+Tools listed in `allowed_tools` are passed to the Claude CLI as `--allowedTools` and are always approved. Patterns are supported:
+
+```yaml
+allowed_tools:
+  - LSP
+  - AskUserQuestion
+  - "Bash(git *)"     # allow all git commands
+  - "Bash(npm test)"  # allow npm test
+```
+
+Tools **not** in this list go through OpenShrimp's path-scoped approval:
+
+- **Read, Glob, Grep** — auto-approved when the target path is within the context directory
+- **Edit, Write** — always require manual approval via Telegram inline keyboard (with an option to "Accept all edits" for the session)
+- **Bash** — requires approval; you can approve by command prefix (e.g. "Accept all `git`")
+- Paths outside the context directory always require manual approval
+
+:::caution
+If you add `Read`, `Write`, `Edit`, `Glob`, or `Grep` to `allowed_tools`, they bypass path checking entirely and the agent can access any file the process can read.
+:::
+
+### Optional fields
+
+```yaml
+contexts:
+  myproject:
+    directory: /home/you/Documents/myproject
+    description: "My main project"
+    allowed_tools:
+      - LSP
+      - AskUserQuestion
+    model: sonnet                    # model override (sonnet, opus, haiku, or full ID)
+    additional_directories:
+      - /home/you/Documents/shared-lib
+    default_for_chats:
+      - -1001234567890               # auto-select this context for a group chat
+    locked_for_chats:
+      - -1001234567890               # lock a group chat to this context
+```
+
+| Field | Description |
+|-------|-------------|
+| `model` | Override the model for this context. Short names: `sonnet`, `opus`, `haiku`. |
+| `additional_directories` | Extra directories the agent can access (path-scoped approval extends to these). |
+| `default_for_chats` | List of chat IDs where this context is auto-selected on first use. |
+| `locked_for_chats` | List of chat IDs locked to this context (users cannot switch). |
+
+### Sandbox
+
+Run the Claude CLI inside an isolated environment:
+
+```yaml
+contexts:
+  myproject:
+    # ...
+    sandbox:
+      backend: docker          # "docker", "libvirt", or "macos"
+      docker_in_docker: true   # enable Docker inside the container
+      dockerfile: /path/to/Dockerfile.claude  # custom Dockerfile
+      computer_use: true       # enable GUI interaction
+```
+
+When a sandbox is enabled, all Bash commands and path-scoped tools are auto-approved since the sandbox provides the safety boundary.
+
+See the dedicated guides for [Docker sandbox](/guides/docker-sandbox/), [VM sandbox](/guides/vm-sandbox/), and [macOS sandbox](/guides/macos-sandbox/).
+
+## Default context
+
+```yaml
+default_context: myproject
+```
+
+The context used when no context has been selected. Must match a key in `contexts`.
+
+## Review (optional)
+
+```yaml
+review:
+  host: "127.0.0.1"
+  port: 8080
+  tunnel: cloudflared    # auto-start a public tunnel for Mini Apps
+```
+
+Enables the HTTP server for Mini Apps (Review, Terminal, VNC, Markdown preview). The `tunnel: cloudflared` option auto-starts a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) — free, no account needed.
+
+## Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | Anthropic API key. Optional if using Claude Code OAuth. |
+
+## Next steps
+
+Time to send your first message — see [First Conversation](/getting-started/first-conversation/).
