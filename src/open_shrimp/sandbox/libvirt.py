@@ -328,7 +328,9 @@ class LibvirtSandbox:
             return False
         return ssh_check_alive(self._ssh_port, self._sdir / "ssh_key")
 
-    def ensure_running(self, *, log_file: Path | None = None) -> None:
+    def ensure_running(
+        self, *, log_file: Path | None = None, _rebuild_attempted: bool = False,
+    ) -> None:
         """Start the VM if not already running, wait for SSH."""
         import libvirt
 
@@ -389,23 +391,11 @@ class LibvirtSandbox:
 
             try:
                 if not wait_for_ssh(self._ssh_port, ssh_key, timeout=60):
-                    # SSH unreachable — likely corrupt host keys from a hard
-                    # kill.  Destroy the VM, delete the overlay to force a
-                    # fresh cloud-init, and retry once.
-                    logger.warning(
-                        "SSH unreachable for %s — rebuilding VM "
-                        "(likely corrupt SSH host keys from hard kill)",
-                        self._dom_name,
+                    raise RuntimeError(
+                        f"VM {self._dom_name} SSH not reachable "
+                        f"on port {self._ssh_port} — VM left running "
+                        f"for debugging (virsh console, serial.log)"
                     )
-                    _log(log_file, "SSH unreachable — rebuilding VM...")
-                    self._rebuild_vm(log_file=log_file)
-                    cold_start = True  # rebuild is a fresh boot
-                    _log(log_file, "Waiting for SSH after rebuild...")
-                    if not wait_for_ssh(self._ssh_port, ssh_key, timeout=90):
-                        raise RuntimeError(
-                            f"VM {self._dom_name} SSH not reachable after "
-                            f"rebuild on port {self._ssh_port}"
-                        )
 
                 # Wait for cloud-init to finish on cold starts so that all
                 # provisioned services (Chromium, compositor, etc.) are
@@ -419,10 +409,25 @@ class LibvirtSandbox:
                     if not wait_for_cloud_init(
                         self._ssh_port, self._sdir / "ssh_key",
                     ):
+                        if _rebuild_attempted:
+                            raise RuntimeError(
+                                f"cloud-init failed on {self._dom_name} after "
+                                f"rebuild — VM may require manual intervention"
+                            )
+                        _log(
+                            log_file,
+                            "cloud-init failed — rebuilding VM from scratch...",
+                        )
                         logger.warning(
-                            "cloud-init did not complete cleanly on %s",
+                            "cloud-init did not complete cleanly on %s "
+                            "— triggering rebuild",
                             self._dom_name,
                         )
+                        self._rebuild_vm(log_file=log_file)
+                        self.ensure_running(
+                            log_file=log_file, _rebuild_attempted=True,
+                        )
+                        return
             finally:
                 stop_tail.set()
                 if tail_thread is not None:
