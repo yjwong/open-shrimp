@@ -26,6 +26,13 @@ from open_shrimp.db import ChatScope
 _running_tasks: dict[ChatScope, asyncio.Task[Any]] = {}
 
 # ---------------------------------------------------------------------------
+# Per-scope dispatch lock: serialises _dispatch_to_agent so two messages
+# for the same scope cannot both slip through the "no task running" check
+# before either sets _running_tasks[scope].
+# ---------------------------------------------------------------------------
+_scope_dispatch_locks: dict[ChatScope, asyncio.Lock] = {}
+
+# ---------------------------------------------------------------------------
 # Per-scope live session reference for message injection.
 # Set once get_or_create_session + initial query() completes inside _run(),
 # cleared in the finally block.

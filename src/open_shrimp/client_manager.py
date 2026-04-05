@@ -74,6 +74,10 @@ class AgentSession:
 
 _active_sessions: dict[ChatScope, AgentSession] = {}
 
+# Per-context lock: serialises sandbox creation so two scopes sharing
+# the same libvirt context don't race on VM boot / virtiofsd / ports.
+_context_locks: dict[str, asyncio.Lock] = {}
+
 
 async def get_or_create_session(
     scope: ChatScope,
@@ -241,65 +245,71 @@ async def get_or_create_session(
         assert sandbox_manager is not None, (
             "sandbox_manager is required for containerized contexts"
         )
-        sandbox = sandbox_manager.create_sandbox(context_name, context)
 
-        # Check if the environment needs building — send user feedback
-        # before the potentially slow build.
-        needs_build = not sandbox.environment_ready()
-        if needs_build and bot is not None:
-            log_file = sandbox_manager.register_build(context_name)
+        # Serialise sandbox boot per context_name so two scopes sharing
+        # the same libvirt domain (or Docker container) don't race on VM
+        # boot, virtiofsd startup, port allocation, etc.
+        ctx_lock = _context_locks.setdefault(context_name, asyncio.Lock())
+        async with ctx_lock:
+            sandbox = sandbox_manager.create_sandbox(context_name, context)
 
-            build_text = (
-                "Building container image for the first time, "
-                "this may take a few minutes\\.\\.\\."
-            )
-            keyboard = None
-            if terminal_base_url and config is not None:
-                app_url = (
-                    f"{terminal_base_url}/terminal/"
-                    f"?type=container_build&id={context_name}"
+            # Check if the environment needs building — send user feedback
+            # before the potentially slow build.
+            needs_build = not sandbox.environment_ready()
+            if needs_build and bot is not None:
+                log_file = sandbox_manager.register_build(context_name)
+
+                build_text = (
+                    "Building container image for the first time, "
+                    "this may take a few minutes\\.\\.\\."
                 )
-                keyboard = InlineKeyboardMarkup([[
-                    make_web_app_button(
-                        "📺 View build log",
-                        app_url,
-                        chat_id=scope.chat_id,
-                        user_id=user_id,
-                        bot_token=config.telegram.token,
-                        is_private_chat=is_private_chat,
+                keyboard = None
+                if terminal_base_url and config is not None:
+                    app_url = (
+                        f"{terminal_base_url}/terminal/"
+                        f"?type=container_build&id={context_name}"
                     )
-                ]])
-            await bot.send_message(
-                chat_id=scope.chat_id,
-                message_thread_id=scope.thread_id,
-                text=build_text,
-                parse_mode="MarkdownV2",
-                reply_markup=keyboard,
+                    keyboard = InlineKeyboardMarkup([[
+                        make_web_app_button(
+                            "📺 View build log",
+                            app_url,
+                            chat_id=scope.chat_id,
+                            user_id=user_id,
+                            bot_token=config.telegram.token,
+                            is_private_chat=is_private_chat,
+                        )
+                    ]])
+                await bot.send_message(
+                    chat_id=scope.chat_id,
+                    message_thread_id=scope.thread_id,
+                    text=build_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=keyboard,
+                )
+            else:
+                log_file = None
+
+            _sandbox = sandbox  # capture for closure
+            _mgr = sandbox_manager  # capture for closure
+
+            def _ensure_and_build_wrapper() -> str:
+                try:
+                    _sandbox.ensure_environment(log_file=log_file)
+                finally:
+                    if log_file is not None:
+                        assert _mgr is not None
+                        _mgr.unregister_build(context_name)
+                _sandbox.ensure_running()
+                _sandbox.provision_workspace()
+                return _sandbox.build_cli_wrapper()
+
+            wrapper_path = await asyncio.to_thread(_ensure_and_build_wrapper)
+            cli_path = wrapper_path
+            logger.info(
+                "Sandbox context '%s': using wrapper %s",
+                context_name,
+                wrapper_path,
             )
-        else:
-            log_file = None
-
-        _sandbox = sandbox  # capture for closure
-        _mgr = sandbox_manager  # capture for closure
-
-        def _ensure_and_build_wrapper() -> str:
-            try:
-                _sandbox.ensure_environment(log_file=log_file)
-            finally:
-                if log_file is not None:
-                    assert _mgr is not None
-                    _mgr.unregister_build(context_name)
-            _sandbox.ensure_running()
-            _sandbox.provision_workspace()
-            return _sandbox.build_cli_wrapper()
-
-        wrapper_path = await asyncio.to_thread(_ensure_and_build_wrapper)
-        cli_path = wrapper_path
-        logger.info(
-            "Sandbox context '%s': using wrapper %s",
-            context_name,
-            wrapper_path,
-        )
 
     options = ClaudeAgentOptions(
         cwd=context.directory,

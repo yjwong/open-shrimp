@@ -41,6 +41,7 @@ from open_shrimp.handlers.state import (
     _media_group_messages,
     _media_group_tasks,
     _MEDIA_GROUP_WAIT,
+    _scope_dispatch_locks,
     _tool_approved_sessions,
     _pending_other_input,
     _question_states,
@@ -435,46 +436,51 @@ async def _dispatch_to_agent(
     start), a short feedback message is sent to the chat immediately
     so the user doesn't see silence while the session initialises.
     """
-    # No task running -- start a new one.
-    if scope not in _running_tasks or _running_tasks[scope].done():
-        if placeholder:
+    # Serialise per scope so two messages arriving together cannot both
+    # slip through the "no task running" check before either has set
+    # _running_tasks[scope].
+    lock = _scope_dispatch_locks.setdefault(scope, asyncio.Lock())
+    async with lock:
+        # No task running -- start a new one.
+        if scope not in _running_tasks or _running_tasks[scope].done():
+            if placeholder:
+                try:
+                    await context.bot.send_message(
+                        chat_id=scope.chat_id,
+                        text=placeholder,
+                        parse_mode="MarkdownV2",
+                        **_thread_kwargs(scope),
+                    )
+                except Exception:
+                    logger.debug("Failed to send placeholder for scope %s", scope)
+            await _start_agent_task(
+                prompt, attachments, scope, config, db, context,
+                user_id=user_id, is_private_chat=is_private_chat,
+            )
+            return
+
+        # Task is running -- try to inject into the live session.
+        session = _injectable_sessions.get(scope)
+        if session is not None:
+            await _inject_message(session, prompt, attachments, scope, context.bot, config)
+        else:
+            # Session is still being set up -- queue for injection once ready.
+            if scope not in _setup_queues:
+                _setup_queues[scope] = []
+            _setup_queues[scope].append((prompt, attachments))
+            logger.info(
+                "Session not ready for scope %s, queued for injection (depth: %d)",
+                scope, len(_setup_queues[scope]),
+            )
             try:
                 await context.bot.send_message(
                     chat_id=scope.chat_id,
-                    text=placeholder,
+                    text="\u23f3 Setting up session\\.\\.\\. message will be injected shortly\\.",
                     parse_mode="MarkdownV2",
                     **_thread_kwargs(scope),
                 )
             except Exception:
-                logger.debug("Failed to send placeholder for scope %s", scope)
-        await _start_agent_task(
-            prompt, attachments, scope, config, db, context,
-            user_id=user_id, is_private_chat=is_private_chat,
-        )
-        return
-
-    # Task is running -- try to inject into the live session.
-    session = _injectable_sessions.get(scope)
-    if session is not None:
-        await _inject_message(session, prompt, attachments, scope, context.bot, config)
-    else:
-        # Session is still being set up -- queue for injection once ready.
-        if scope not in _setup_queues:
-            _setup_queues[scope] = []
-        _setup_queues[scope].append((prompt, attachments))
-        logger.info(
-            "Session not ready for scope %s, queued for injection (depth: %d)",
-            scope, len(_setup_queues[scope]),
-        )
-        try:
-            await context.bot.send_message(
-                chat_id=scope.chat_id,
-                text="\u23f3 Setting up session\\.\\.\\. message will be injected shortly\\.",
-                parse_mode="MarkdownV2",
-                **_thread_kwargs(scope),
-            )
-        except Exception:
-            logger.debug("Failed to send setup-queue notification for scope %s", scope)
+                logger.debug("Failed to send setup-queue notification for scope %s", scope)
 
 
 async def _inject_message(
