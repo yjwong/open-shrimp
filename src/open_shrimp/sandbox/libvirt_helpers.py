@@ -137,35 +137,18 @@ def find_free_port() -> int:
 # ---------------------------------------------------------------------------
 
 
-def generate_cloud_init_iso(
-    sdir: Path,
+def _build_cloud_init_user_data(
     public_key: str,
     *,
     provision_script: str | None = None,
     computer_use: bool = False,
-) -> Path:
-    """Generate a cloud-init ``cloud-init.iso`` with SSH key + user setup.
+) -> str:
+    """Build the cloud-init user-data YAML string.
 
-    Filesystem mounts are **not** handled here — they are managed
-    dynamically via SSH in :func:`ensure_mounts`, so that config changes
-    (adding/removing ``additional_directories``) take effect without
-    rebuilding the VM overlay.
-
-    When *computer_use* is True, adds a systemd service that starts the
-    labwc Wayland compositor on the virtio-gpu DRM device, plus installs
-    required GUI packages (labwc, foot terminal, Chromium).
-
-    Args:
-        sdir: State directory for this context.
-        public_key: SSH public key contents.
-        provision_script: Optional shell script to run on first boot.
-        computer_use: Enable GUI compositor setup.
-
-    Returns:
-        Path to the generated ISO.
+    Extracted so :func:`cloud_init_fingerprint` can hash the same content
+    that :func:`generate_cloud_init_iso` writes, ensuring any template
+    change triggers a VM rebuild.
     """
-    iso_path = sdir / "cloud-init.iso"
-
     # Build write_files entries.
     write_files = textwrap.dedent("""\
         write_files:
@@ -273,6 +256,44 @@ def generate_cloud_init_iso(
         user_data += f"  - |\n"
         for line in provision_script.splitlines():
             user_data += f"    {line}\n"
+
+    return user_data
+
+
+def generate_cloud_init_iso(
+    sdir: Path,
+    public_key: str,
+    *,
+    provision_script: str | None = None,
+    computer_use: bool = False,
+) -> Path:
+    """Generate a cloud-init ``cloud-init.iso`` with SSH key + user setup.
+
+    Filesystem mounts are **not** handled here — they are managed
+    dynamically via SSH in :func:`ensure_mounts`, so that config changes
+    (adding/removing ``additional_directories``) take effect without
+    rebuilding the VM overlay.
+
+    When *computer_use* is True, adds a systemd service that starts the
+    labwc Wayland compositor on the virtio-gpu DRM device, plus installs
+    required GUI packages (labwc, foot terminal, Chromium).
+
+    Args:
+        sdir: State directory for this context.
+        public_key: SSH public key contents.
+        provision_script: Optional shell script to run on first boot.
+        computer_use: Enable GUI compositor setup.
+
+    Returns:
+        Path to the generated ISO.
+    """
+    iso_path = sdir / "cloud-init.iso"
+
+    user_data = _build_cloud_init_user_data(
+        public_key,
+        provision_script=provision_script,
+        computer_use=computer_use,
+    )
 
     meta_data = textwrap.dedent(f"""\
         instance-id: openshrimp-{sdir.name}
@@ -977,21 +998,24 @@ def cleanup_wrapper(wrapper_path: str) -> None:
 
 
 def cloud_init_fingerprint(config: SandboxConfig, computer_use: bool) -> str:
-    """Compute a SHA-256 fingerprint of inputs that affect cloud-init.
+    """Compute a SHA-256 fingerprint of the cloud-init user-data content.
 
-    Cloud-init only runs on first boot, so if any of these inputs change
-    the VM overlay must be rebuilt from scratch.
-
-    Fingerprinted inputs:
-    - ``computer_use`` flag (installs GUI packages + compositor service)
-    - ``provision`` script (custom first-boot shell commands)
+    Cloud-init only runs on first boot, so if any of the template content
+    changes the VM overlay must be rebuilt from scratch.  We hash the
+    actual rendered user-data (with a placeholder SSH key) so that any
+    change — including edits to systemd units, package lists, etc. —
+    triggers a rebuild automatically.
     """
     import hashlib
 
-    h = hashlib.sha256()
-    h.update(f"computer_use={computer_use}\n".encode())
-    h.update(f"provision={config.provision or ''}\n".encode())
-    return h.hexdigest()
+    # Use a placeholder key so the fingerprint is stable across SSH key
+    # regeneration (the key doesn't affect cloud-init behavior).
+    user_data = _build_cloud_init_user_data(
+        "FINGERPRINT_PLACEHOLDER_KEY",
+        provision_script=config.provision,
+        computer_use=computer_use,
+    )
+    return hashlib.sha256(user_data.encode()).hexdigest()
 
 
 def save_cloud_init_fingerprint(sdir: Path, fingerprint: str) -> None:

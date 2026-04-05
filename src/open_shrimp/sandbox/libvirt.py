@@ -196,7 +196,7 @@ class LibvirtSandbox:
             # Delete fingerprint before rebuild to prevent infinite
             # recursion (_rebuild_vm calls ensure_environment again).
             (sdir / "cloud-init.sha256").unlink(missing_ok=True)
-            self._rebuild_vm()
+            self._rebuild_vm(log_file=log_file)
             return
 
         _log(log_file, f"Setting up VM environment for '{self._context_name}'...")
@@ -396,7 +396,7 @@ class LibvirtSandbox:
                         self._dom_name,
                     )
                     _log(log_file, "SSH unreachable — rebuilding VM...")
-                    self._rebuild_vm()
+                    self._rebuild_vm(log_file=log_file)
                     _log(log_file, "Waiting for SSH after rebuild...")
                     if not wait_for_ssh(self._ssh_port, ssh_key, timeout=90):
                         raise RuntimeError(
@@ -729,7 +729,7 @@ class LibvirtSandbox:
         except libvirt.libvirtError:
             return False
 
-    def _rebuild_vm(self) -> None:
+    def _rebuild_vm(self, *, log_file: Path | None = None) -> None:
         """Destroy the VM, delete the overlay, and recreate from scratch.
 
         Used when SSH is unreachable after boot — typically due to corrupt
@@ -758,12 +758,14 @@ class LibvirtSandbox:
         logger.info("Deleted overlay and cloud-init for rebuild")
 
         # 4. Re-run ensure_environment + ensure_running (without SSH wait).
-        self.ensure_environment()
+        self.ensure_environment(log_file=log_file)
         # Re-start virtiofsd instances.
         if self._use_virtiofs:
+            _log(log_file, "Starting virtiofs daemons...")
             self._start_all_virtiofsd()
 
         # Start the domain.
+        _log(log_file, "Starting rebuilt VM...")
         try:
             domain = self._conn.lookupByName(self._dom_name)
             domain.create()
