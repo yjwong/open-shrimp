@@ -52,7 +52,10 @@ class MacOSSandbox:
     def ensure_environment(self, *, log_file: Path | None = None) -> None:
         pass
 
-    def ensure_running(self) -> None:
+    def running(self) -> bool:
+        return True
+
+    def ensure_running(self, *, log_file: Path | None = None) -> None:
         pass
 
     def provision_workspace(self) -> None:

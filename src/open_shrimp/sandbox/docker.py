@@ -103,7 +103,18 @@ class DockerSandbox:
                 log_file=log_file,
             )
 
-    def ensure_running(self) -> None:
+    def running(self) -> bool:
+        result = subprocess.run(
+            [
+                "docker", "inspect", "-f", "{{.State.Running}}",
+                _container_name_fn(self._context_name),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "true"
+
+    def ensure_running(self, *, log_file: Path | None = None) -> None:
         _ensure_container_running(
             context_name=self._context_name,
             project_dir=self._project_dir,

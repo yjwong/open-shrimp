@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -60,6 +61,49 @@ _SHUTDOWN_TIMEOUT = 180
 # UID of the ``claude`` user inside the VM.  Cloud-init creates it as the
 # first non-system user, which gets UID 1000 on Ubuntu.
 _VM_CLAUDE_UID = 1000
+
+
+def _tail_file(
+    source: Path, dest: Path, stop: threading.Event,
+) -> None:
+    """Tail *source* and append new content to *dest* until *stop* is set.
+
+    Runs in a background thread during VM boot so serial console output
+    streams into the build log for the terminal mini app.  Uses
+    ``watchfiles`` (inotify on Linux) to wake immediately on writes,
+    like ``tail -f``.
+    """
+    from watchfiles import watch
+
+    # Wait for the source file to appear (QEMU creates it on domain start).
+    while not stop.is_set():
+        try:
+            src_fh = open(source, "r", encoding="utf-8", errors="replace")
+            break
+        except FileNotFoundError:
+            stop.wait(0.5)
+    else:
+        return
+
+    try:
+        with src_fh, open(dest, "a", encoding="utf-8") as dst_fh:
+            # Flush any content already in the file.
+            chunk = src_fh.read(8192)
+            if chunk:
+                dst_fh.write(chunk)
+                dst_fh.flush()
+
+            for _changes in watch(
+                source, stop_event=stop, rust_timeout=500,
+            ):
+                while True:
+                    chunk = src_fh.read(8192)
+                    if not chunk:
+                        break
+                    dst_fh.write(chunk)
+                    dst_fh.flush()
+    except Exception:
+        pass
 
 
 class LibvirtSandbox:
@@ -268,7 +312,21 @@ class LibvirtSandbox:
         save_cloud_init_fingerprint(sdir, desired_fp)
         _log(log_file, "VM environment ready.")
 
-    def ensure_running(self) -> None:
+    def running(self) -> bool:
+        """Check if the VM is active and SSH-reachable."""
+        import libvirt
+
+        if self._ssh_port is None:
+            return False
+        try:
+            domain = self._conn.lookupByName(self._dom_name)
+            if not domain.isActive():
+                return False
+        except libvirt.libvirtError:
+            return False
+        return ssh_check_alive(self._ssh_port, self._sdir / "ssh_key")
+
+    def ensure_running(self, *, log_file: Path | None = None) -> None:
         """Start the VM if not already running, wait for SSH."""
         import libvirt
 
@@ -279,13 +337,22 @@ class LibvirtSandbox:
         # Start virtiofsd instances if needed (must be running before the VM).
         # One virtiofsd per shared directory.
         if self._use_virtiofs and not self._virtiofsd_procs:
+            _log(log_file, "Starting virtiofs daemons...")
             self._start_all_virtiofsd()
 
         # Start domain if not active.
+        cold_start = False
         try:
             domain = self._conn.lookupByName(self._dom_name)
             if not domain.isActive():
+                # Truncate serial.log before boot so the log only shows
+                # this boot's output.
+                serial_log = self._sdir / "serial.log"
+                serial_log.write_bytes(b"")
+
+                _log(log_file, "Starting VM...")
                 domain.create()
+                cold_start = True
                 logger.info("Started domain %s", self._dom_name)
         except libvirt.libvirtError as e:
             if e.get_error_code() == 42:  # VIR_ERR_NO_DOMAIN
@@ -298,25 +365,50 @@ class LibvirtSandbox:
             else:
                 raise
 
-        # Wait for SSH connectivity.
+        # Wait for SSH connectivity.  While waiting, tail the serial log
+        # so the user can see boot progress in the terminal mini app.
         ssh_key = self._sdir / "ssh_key"
         if not ssh_check_alive(self._ssh_port, ssh_key):
+            _log(log_file, "Waiting for SSH...")
             logger.info("Waiting for SSH on port %d...", self._ssh_port)
-            if not wait_for_ssh(self._ssh_port, ssh_key, timeout=60):
-                # SSH unreachable — likely corrupt host keys from a hard
-                # kill.  Destroy the VM, delete the overlay to force a
-                # fresh cloud-init, and retry once.
-                logger.warning(
-                    "SSH unreachable for %s — rebuilding VM "
-                    "(likely corrupt SSH host keys from hard kill)",
-                    self._dom_name,
+
+            # Start tailing serial.log to the build log in a background
+            # thread so boot output streams to the terminal mini app.
+            stop_tail = threading.Event()
+            tail_thread: threading.Thread | None = None
+            if log_file is not None and cold_start:
+                serial_log = self._sdir / "serial.log"
+                tail_thread = threading.Thread(
+                    target=_tail_file,
+                    args=(serial_log, log_file, stop_tail),
+                    daemon=True,
                 )
-                self._rebuild_vm()
-                if not wait_for_ssh(self._ssh_port, ssh_key, timeout=90):
-                    raise RuntimeError(
-                        f"VM {self._dom_name} SSH not reachable after "
-                        f"rebuild on port {self._ssh_port}"
+                tail_thread.start()
+
+            try:
+                if not wait_for_ssh(self._ssh_port, ssh_key, timeout=60):
+                    # SSH unreachable — likely corrupt host keys from a hard
+                    # kill.  Destroy the VM, delete the overlay to force a
+                    # fresh cloud-init, and retry once.
+                    logger.warning(
+                        "SSH unreachable for %s — rebuilding VM "
+                        "(likely corrupt SSH host keys from hard kill)",
+                        self._dom_name,
                     )
+                    _log(log_file, "SSH unreachable — rebuilding VM...")
+                    self._rebuild_vm()
+                    _log(log_file, "Waiting for SSH after rebuild...")
+                    if not wait_for_ssh(self._ssh_port, ssh_key, timeout=90):
+                        raise RuntimeError(
+                            f"VM {self._dom_name} SSH not reachable after "
+                            f"rebuild on port {self._ssh_port}"
+                        )
+            finally:
+                stop_tail.set()
+                if tail_thread is not None:
+                    tail_thread.join(timeout=2)
+
+        _log(log_file, "VM ready.")
         logger.info("VM %s SSH ready on port %d", self._dom_name, self._ssh_port)
 
         # Configure filesystem mounts via SSH (idempotent).

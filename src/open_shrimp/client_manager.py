@@ -253,16 +253,22 @@ async def get_or_create_session(
         async with ctx_lock:
             sandbox = sandbox_manager.create_sandbox(context_name, context)
 
-            # Check if the environment needs building — send user feedback
-            # before the potentially slow build.
+            # Check if the environment needs building or the sandbox
+            # needs starting — send user feedback before potentially
+            # slow operations.
             needs_build = not sandbox.environment_ready()
-            if needs_build and bot is not None:
+            needs_start = not needs_build and not sandbox.running()
+            if (needs_build or needs_start) and bot is not None:
                 log_file = sandbox_manager.register_build(context_name)
 
-                build_text = (
-                    "Building container image for the first time, "
-                    "this may take a few minutes\\.\\.\\."
-                )
+                if needs_build:
+                    progress_text = (
+                        "Building container image for the first time, "
+                        "this may take a few minutes\\.\\.\\."
+                    )
+                else:
+                    progress_text = "Starting sandbox\\.\\.\\."
+
                 keyboard = None
                 if terminal_base_url and config is not None:
                     app_url = (
@@ -282,7 +288,7 @@ async def get_or_create_session(
                 await bot.send_message(
                     chat_id=scope.chat_id,
                     message_thread_id=scope.thread_id,
-                    text=build_text,
+                    text=progress_text,
                     parse_mode="MarkdownV2",
                     reply_markup=keyboard,
                 )
@@ -295,11 +301,11 @@ async def get_or_create_session(
             def _ensure_and_build_wrapper() -> str:
                 try:
                     _sandbox.ensure_environment(log_file=log_file)
+                    _sandbox.ensure_running(log_file=log_file)
                 finally:
                     if log_file is not None:
                         assert _mgr is not None
                         _mgr.unregister_build(context_name)
-                _sandbox.ensure_running()
                 _sandbox.provision_workspace()
                 return _sandbox.build_cli_wrapper()
 

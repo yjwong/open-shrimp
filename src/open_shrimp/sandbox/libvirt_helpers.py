@@ -624,16 +624,14 @@ def generate_domain_xml(
     ET.SubElement(cdrom, "readonly")
 
     # Primary serial console on PTY (enables `virsh console`).
+    # The <log> element tees ttyS0 output to a file so we can stream
+    # boot progress to the terminal mini app without changing guest config.
     serial0 = ET.SubElement(devices, "serial", type="pty")
     ET.SubElement(serial0, "target", port="0")
+    ET.SubElement(serial0, "log", file=str(serial_log.resolve()), append="off")
 
     console = ET.SubElement(devices, "console", type="pty")
     ET.SubElement(console, "target", type="serial", port="0")
-
-    # Secondary serial logging to file (boot diagnostics).
-    serial1 = ET.SubElement(devices, "serial", type="file")
-    ET.SubElement(serial1, "source", path=str(serial_log.resolve()))
-    ET.SubElement(serial1, "target", port="1")
 
     # Virtio-balloon with free-page-reporting.
     ET.SubElement(

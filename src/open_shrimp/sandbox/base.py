@@ -61,10 +61,23 @@ class Sandbox(Protocol):
         """
         ...
 
-    def ensure_running(self) -> None:
+    def running(self) -> bool:
+        """Return ``True`` if the runtime is already up.
+
+        Used by the caller to decide whether to show a "starting..." progress
+        message before calling :meth:`ensure_running`.  Must be cheap (no
+        side effects, no waiting).
+        """
+        ...
+
+    def ensure_running(self, *, log_file: Path | None = None) -> None:
         """Ensure the runtime is up (container started, SSH reachable, etc.).
 
         Called before each CLI invocation.  Fast path when already running.
+
+        Args:
+            log_file: Optional path where startup output is streamed
+                line-by-line (continuation of the build log).
         """
         ...
 
