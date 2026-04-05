@@ -214,7 +214,9 @@ async def test_get_hunks_missing_chat_id(transport) -> None:
 @pytest.mark.asyncio
 async def test_get_hunks_pagination(transport) -> None:
     """Pagination via offset/limit works correctly."""
-    hunks = [_make_hunk(hunk_id=f"hunk{i}") for i in range(5)]
+    # Use distinct file_paths so the "never split a file" pagination
+    # logic doesn't extend the page beyond the requested limit.
+    hunks = [_make_hunk(hunk_id=f"hunk{i}", file_path=f"src/file{i}.py") for i in range(5)]
     result = _make_hunk_result(hunks)
 
     with patch("open_shrimp.review.api.get_hunks", new_callable=AsyncMock) as mock_get:
