@@ -13,7 +13,7 @@ function getParams() {
 
 export default function App() {
   const { chatId, dir, threadId } = useMemo(() => getParams(), []);
-  const { hunks, totalHunks, files, loading, error, refresh, loadMore } = useHunks(chatId, dir, threadId);
+  const { hunks, totalHunks, files, loading, error, refresh, loadMore, updateFileStagedCount } = useHunks(chatId, dir, threadId);
 
   if (loading) {
     return (
@@ -51,6 +51,7 @@ export default function App() {
       threadId={threadId}
       onRefresh={refresh}
       onNeedMore={loadMore}
+      onUpdateFileStagedCount={updateFileStagedCount}
     />
   );
 }

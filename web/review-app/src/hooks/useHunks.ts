@@ -12,6 +12,7 @@ interface UseHunksResult {
   error: string | null;
   refresh: () => void;
   loadMore: () => void;
+  updateFileStagedCount: (filePath: string, delta: number) => void;
 }
 
 export function useHunks(
@@ -99,7 +100,6 @@ export function useHunks(
       .then((result) => {
         setHunks((prev) => [...prev, ...result.hunks]);
         setTotalHunks(result.total_hunks);
-        setFiles(result.files);
         nextOffsetRef.current = offset + result.hunks.length;
         if (offset + result.hunks.length >= result.total_hunks) {
           allLoadedRef.current = true;
@@ -113,5 +113,24 @@ export function useHunks(
       });
   }, [chatId, dir, threadId]);
 
-  return { hunks, totalHunks, files, loading, error, refresh, loadMore };
+  const updateFileStagedCount = useCallback(
+    (filePath: string, delta: number) => {
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.path === filePath
+            ? {
+                ...f,
+                staged_count: Math.max(
+                  0,
+                  Math.min(f.hunk_count, f.staged_count + delta),
+                ),
+              }
+            : f,
+        ),
+      );
+    },
+    [],
+  );
+
+  return { hunks, totalHunks, files, loading, error, refresh, loadMore, updateFileStagedCount };
 }

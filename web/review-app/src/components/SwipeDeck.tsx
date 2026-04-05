@@ -16,10 +16,12 @@ interface SwipeDeckProps {
   threadId: string | null;
   onRefresh: () => void;
   onNeedMore?: () => void;
+  onUpdateFileStagedCount: (filePath: string, delta: number) => void;
 }
 
 interface Decision {
   hunkId: string;
+  filePath: string;
   action: "staged" | "skipped";
   wasAlreadyStaged: boolean;
 }
@@ -33,6 +35,7 @@ export function SwipeDeck({
   threadId,
   onRefresh,
   onNeedMore,
+  onUpdateFileStagedCount,
 }: SwipeDeckProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [history, setHistory] = useState<Decision[]>([]);
@@ -78,6 +81,12 @@ export function SwipeDeck({
           // If we staged the hunk, unstage it
           if (lastDecision.action === "staged" && !lastDecision.wasAlreadyStaged) {
             await unstageHunk(lastDecision.hunkId, chatId, dir, threadId);
+            onUpdateFileStagedCount(lastDecision.filePath, -1);
+          }
+          // If we unstaged an already-staged hunk (skipped), re-stage it
+          if (lastDecision.action === "skipped" && lastDecision.wasAlreadyStaged) {
+            await stageHunk(lastDecision.hunkId, chatId, dir, threadId);
+            onUpdateFileStagedCount(lastDecision.filePath, +1);
           }
 
           setHistory((h) => h.slice(0, -1));
@@ -106,11 +115,13 @@ export function SwipeDeck({
         try {
           if (!currentHunk.staged) {
             await stageHunk(currentHunk.id, chatId, dir, threadId);
+            onUpdateFileStagedCount(currentHunk.file_path, +1);
           }
           setHistory((h) => [
             ...h,
             {
               hunkId: currentHunk.id,
+              filePath: currentHunk.file_path,
               action: "staged",
               wasAlreadyStaged: currentHunk.staged,
             },
@@ -135,6 +146,7 @@ export function SwipeDeck({
         try {
           if (currentHunk.staged) {
             await unstageHunk(currentHunk.id, chatId, dir, threadId);
+            onUpdateFileStagedCount(currentHunk.file_path, -1);
           } else if (currentHunk.is_new_file) {
             // Clean up the intent-to-add index entry so the file
             // goes back to being truly untracked in git status.
@@ -144,6 +156,7 @@ export function SwipeDeck({
             ...h,
             {
               hunkId: currentHunk.id,
+              filePath: currentHunk.file_path,
               action: "skipped",
               wasAlreadyStaged: currentHunk.staged,
             },
@@ -161,7 +174,7 @@ export function SwipeDeck({
         }
       }
     },
-    [currentHunk, history, chatId, dir],
+    [currentHunk, history, chatId, dir, onUpdateFileStagedCount],
   );
 
   // When swipe threshold is reached, clear the drag overlay immediately
@@ -252,6 +265,7 @@ export function SwipeDeck({
             for (let j = fromIndex; j < i; j++) {
               newDecisions.push({
                 hunkId: hunks[j]!.id,
+                filePath: hunks[j]!.file_path,
                 action: "skipped",
                 wasAlreadyStaged: hunks[j]!.staged,
               });
