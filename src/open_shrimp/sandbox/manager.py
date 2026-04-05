@@ -34,6 +34,44 @@ logger = logging.getLogger(__name__)
 _SHUTDOWN_TIMEOUT = 180
 
 
+# ---------------------------------------------------------------------------
+# Global build registry
+# ---------------------------------------------------------------------------
+# Authoritative source of truth for active builds.  Each
+# ``register_build`` / ``unregister_build`` call updates this registry so
+# that ``resolve_container_build`` can look up the owning manager without
+# iterating managers and guessing based on shared file paths.
+
+_build_registry: dict[str, tuple[Path, SandboxManager]] = {}
+_build_registry_lock = threading.Lock()
+
+
+def register_active_build(
+    context_name: str, log_path: Path, manager: SandboxManager,
+) -> None:
+    """Record an active build in the global registry."""
+    with _build_registry_lock:
+        _build_registry[context_name] = (log_path, manager)
+
+
+def unregister_active_build(context_name: str) -> None:
+    """Remove a build from the global registry."""
+    with _build_registry_lock:
+        _build_registry.pop(context_name, None)
+
+
+def lookup_active_build(
+    context_name: str,
+) -> tuple[Path, SandboxManager] | None:
+    """Look up an active build by context name.
+
+    Returns ``(log_path, manager)`` if the build is registered, else
+    ``None``.
+    """
+    with _build_registry_lock:
+        return _build_registry.get(context_name)
+
+
 @runtime_checkable
 class SandboxManager(Protocol):
     """Manages global sandbox lifecycle and acts as a factory for sandboxes."""
@@ -350,6 +388,7 @@ class DockerSandboxManager:
         log_path.write_bytes(b"")
         with self._active_builds_lock:
             self._active_builds[context_name] = log_path
+        register_active_build(context_name, log_path, self)
         logger.info(
             "Registered build log for context '%s': %s",
             context_name, log_path,
@@ -359,6 +398,7 @@ class DockerSandboxManager:
     def unregister_build(self, context_name: str) -> None:
         with self._active_builds_lock:
             self._active_builds.pop(context_name, None)
+        unregister_active_build(context_name)
         logger.info("Unregistered build for context '%s'", context_name)
 
         log_path = self._build_log_dir / f"{context_name}.log"
@@ -451,13 +491,14 @@ class MacOSSandboxManager:
         self._build_log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._build_log_dir / f"{context_name}.log"
         log_path.write_bytes(b"")
+        register_active_build(context_name, log_path, self)
         return log_path
 
     def unregister_build(self, context_name: str) -> None:
-        pass
+        unregister_active_build(context_name)
 
     def is_build_active(self, context_name: str) -> bool:
-        return False
+        return lookup_active_build(context_name) is not None
 
     @property
     def build_log_dir(self) -> Path:
@@ -690,6 +731,7 @@ class LibvirtSandboxManager:
         log_path.write_bytes(b"")
         with self._active_builds_lock:
             self._active_builds[context_name] = log_path
+        register_active_build(context_name, log_path, self)
         logger.info(
             "Registered build log for context '%s': %s",
             context_name, log_path,
@@ -699,6 +741,7 @@ class LibvirtSandboxManager:
     def unregister_build(self, context_name: str) -> None:
         with self._active_builds_lock:
             self._active_builds.pop(context_name, None)
+        unregister_active_build(context_name)
         logger.info("Unregistered build for context '%s'", context_name)
 
         log_path = self._build_log_dir / f"{context_name}.log"

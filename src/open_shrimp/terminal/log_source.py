@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from open_shrimp.sandbox import SandboxManager
+from open_shrimp.sandbox.manager import lookup_active_build
 from open_shrimp.handlers.state import is_task_active
 
 logger = logging.getLogger(__name__)
@@ -205,17 +206,22 @@ def resolve_container_build(
     source_id: str,
     sandbox_managers: dict[str, SandboxManager] | None = None,
 ) -> LogSource | None:
-    """Resolve a container build context name to a ``LogSource``."""
+    """Resolve a container build context name to a ``LogSource``.
+
+    Uses the global build registry as the authoritative source for active
+    builds.  This avoids the bug where multiple sandbox managers share the
+    same ``build_log_dir`` and the wrong manager's ``is_build_active`` is
+    captured.  Falls back to scanning managers for finished builds (log
+    file exists but no active registration).
+    """
     if not _CONTEXT_NAME_RE.match(source_id):
         return None
 
-    if not sandbox_managers:
-        return None
-
-    # Search all managers for the build log.
-    for mgr in sandbox_managers.values():
-        build_log_dir = mgr.build_log_dir
-        log_path = build_log_dir / f"{source_id}.log"
+    # Primary: look up the global build registry (populated by
+    # register_build, cleared by unregister_build).
+    entry = lookup_active_build(source_id)
+    if entry is not None:
+        log_path, mgr = entry
         if log_path.is_file():
             ctx = source_id  # capture for closure
             _mgr = mgr  # capture for closure
@@ -224,6 +230,17 @@ def resolve_container_build(
                 is_active=lambda: _mgr.is_build_active(ctx),
                 render="raw",
             )
+
+    # Fallback: build already finished — find the log file for reading.
+    if sandbox_managers:
+        for mgr in sandbox_managers.values():
+            log_path = mgr.build_log_dir / f"{source_id}.log"
+            if log_path.is_file():
+                return LogSource(
+                    path=log_path,
+                    is_active=lambda: False,
+                    render="raw",
+                )
 
     return None
 
