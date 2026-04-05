@@ -24,7 +24,6 @@ from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.libvirt_helpers import (
     _fs_tag_for_dir,
     build_cli_wrapper as _build_cli_wrapper,
-    cleanup_wrapper as _cleanup_wrapper,
     create_overlay,
     domain_name as _domain_name,
     domain_screenshot_png,
@@ -505,7 +504,7 @@ class LibvirtSandbox:
 
     def build_cli_wrapper(self) -> str:
         assert self._ssh_port is not None
-        self._wrapper_path = _build_cli_wrapper(
+        return _build_cli_wrapper(
             self._context_name,
             self._sdir,
             self._ssh_port,
@@ -513,13 +512,11 @@ class LibvirtSandbox:
             instance_prefix=self._instance_prefix,
             claude_home_dir=self._claude_home_dir,
         )
-        return self._wrapper_path
 
     def cleanup(self) -> None:
-        if self._wrapper_path:
-            _cleanup_wrapper(self._wrapper_path)
-            self._wrapper_path = None
-        self._stop_virtiofsd()
+        # No-op: wrapper scripts are cleaned up per-session by
+        # close_session(), and virtiofsd/VM lifecycle is managed by stop().
+        pass
 
     def stop(self) -> None:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""

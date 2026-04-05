@@ -11,7 +11,6 @@ from pathlib import Path
 
 from open_shrimp.sandbox.macos_helpers import (
     build_cli_wrapper as _build_cli_wrapper,
-    cleanup_wrapper as _cleanup_wrapper,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,7 +33,6 @@ class MacOSSandbox:
         self._context_name = context_name
         self._project_dir = project_dir
         self._additional_directories = additional_directories
-        self._wrapper_path: str | None = None
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -63,17 +61,16 @@ class MacOSSandbox:
         pass
 
     def build_cli_wrapper(self) -> str:
-        self._wrapper_path = _build_cli_wrapper(
+        return _build_cli_wrapper(
             context_name=self._context_name,
             project_dir=self._project_dir,
             additional_directories=self._additional_directories,
         )
-        return self._wrapper_path
 
     def cleanup(self) -> None:
-        if self._wrapper_path:
-            _cleanup_wrapper(self._wrapper_path)
-            self._wrapper_path = None
+        # No-op: wrapper scripts are cleaned up per-session by
+        # close_session(), and sandbox lifecycle is managed by stop().
+        pass
 
     def stop(self) -> None:
         pass

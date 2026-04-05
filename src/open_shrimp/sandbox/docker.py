@@ -16,7 +16,6 @@ from open_shrimp.sandbox.docker_helpers import (
     COMPUTER_USE_IMAGE,
     CONTAINER_IMAGE,
     build_cli_wrapper as _build_cli_wrapper,
-    cleanup_wrapper as _cleanup_wrapper,
     container_name as _container_name_fn,
     ensure_computer_use_image as _ensure_computer_use_image,
     ensure_container_running as _ensure_container_running,
@@ -53,7 +52,6 @@ class DockerSandbox:
         self._docker_in_docker = docker_in_docker
         self._computer_use = computer_use
         self._custom_dockerfile = custom_dockerfile
-        self._wrapper_path: str | None = None
 
         # Resolve image name (same logic as client_manager.py lines 273-280).
         if computer_use and custom_dockerfile:
@@ -129,7 +127,7 @@ class DockerSandbox:
         pass
 
     def build_cli_wrapper(self) -> str:
-        self._wrapper_path = _build_cli_wrapper(
+        return _build_cli_wrapper(
             context_name=self._context_name,
             project_dir=self._project_dir,
             additional_directories=self._additional_directories,
@@ -137,12 +135,11 @@ class DockerSandbox:
             computer_use=self._computer_use,
             image_name=self._image_name,
         )
-        return self._wrapper_path
 
     def cleanup(self) -> None:
-        if self._wrapper_path:
-            _cleanup_wrapper(self._wrapper_path)
-            self._wrapper_path = None
+        # No-op: wrapper scripts are cleaned up per-session by
+        # close_session(), and container lifecycle is managed by stop().
+        pass
 
     def stop(self) -> None:
         name = self.container_name

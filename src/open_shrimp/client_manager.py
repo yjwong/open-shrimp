@@ -70,6 +70,7 @@ class AgentSession:
     context_name: str = ""
     callback_context: CallbackContext = field(default_factory=CallbackContext)
     sandbox: Sandbox | None = None
+    wrapper_path: str | None = None
 
 
 _active_sessions: dict[ChatScope, AgentSession] = {}
@@ -443,6 +444,7 @@ async def get_or_create_session(
         context_name=context_name,
         callback_context=callback_context,
         sandbox=sandbox,
+        wrapper_path=cli_path,
     )
     _active_sessions[scope] = session
     return session
@@ -523,8 +525,12 @@ async def close_session(scope: ChatScope) -> None:
         logger.info("Closed client for scope %s", scope)
     except (Exception, TimeoutError):
         logger.debug("Error/timeout closing client for scope %s", scope, exc_info=True)
-    if session.sandbox is not None:
-        session.sandbox.cleanup()
+    # Clean up the per-session wrapper script.  The sandbox itself is
+    # shared across sessions and managed by the SandboxManager.
+    if session.wrapper_path is not None:
+        from pathlib import Path
+        Path(session.wrapper_path).unlink(missing_ok=True)
+        logger.debug("Removed wrapper script %s", session.wrapper_path)
 
 
 async def close_all_sessions() -> None:

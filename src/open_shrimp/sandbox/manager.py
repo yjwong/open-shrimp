@@ -74,7 +74,12 @@ class SandboxManager(Protocol):
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
     ) -> Sandbox:
-        """Create a per-context :class:`Sandbox` instance."""
+        """Return a cached or new per-context :class:`Sandbox` instance.
+
+        The same instance is returned for the same *context_name* across
+        multiple calls.  The sandbox's lifecycle (VM/container) is
+        independent of individual sessions.
+        """
         ...
 
     # -- Build logging --------------------------------------------------------
@@ -127,6 +132,7 @@ class DockerSandboxManager:
         self._container_label = "openshrimp"
         self._ryuk_socket: socket.socket | None = None
         self._ryuk_container_id: str | None = None
+        self._sandbox_cache: dict[str, Sandbox] = {}
 
         # Build logging state.
         self._active_builds: dict[str, Path] = {}
@@ -295,6 +301,7 @@ class DockerSandboxManager:
 
     def stop_all(self) -> None:
         """Stop and remove all OpenShrimp-managed containers."""
+        self._sandbox_cache.clear()
         result = subprocess.run(
             [
                 "docker", "ps", "-a",
@@ -317,10 +324,14 @@ class DockerSandboxManager:
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
     ) -> Sandbox:
+        cached = self._sandbox_cache.get(context_name)
+        if cached is not None:
+            return cached
+
         assert context.container is not None
         from open_shrimp.sandbox.docker import DockerSandbox
 
-        return DockerSandbox(
+        sandbox = DockerSandbox(
             context_name=context_name,
             project_dir=context.directory,
             additional_directories=context.additional_directories or None,
@@ -328,6 +339,8 @@ class DockerSandboxManager:
             computer_use=context.container.computer_use,
             custom_dockerfile=context.container.dockerfile,
         )
+        self._sandbox_cache[context_name] = sandbox
+        return sandbox
 
     # -- Build logging --------------------------------------------------------
 
@@ -388,6 +401,7 @@ class MacOSSandboxManager:
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
         self._container_label = "openshrimp"
+        self._sandbox_cache: dict[str, Sandbox] = {}
         self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
         self._state_dir = user_data_path("openshrimp") / "containers"
 
@@ -414,18 +428,24 @@ class MacOSSandboxManager:
         pass
 
     def stop_all(self) -> None:
-        pass
+        self._sandbox_cache.clear()
 
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
     ) -> Sandbox:
+        cached = self._sandbox_cache.get(context_name)
+        if cached is not None:
+            return cached
+
         from open_shrimp.sandbox.macos import MacOSSandbox
 
-        return MacOSSandbox(
+        sandbox = MacOSSandbox(
             context_name=context_name,
             project_dir=context.directory,
             additional_directories=context.additional_directories or None,
         )
+        self._sandbox_cache[context_name] = sandbox
+        return sandbox
 
     def register_build(self, context_name: str) -> Path:
         self._build_log_dir.mkdir(parents=True, exist_ok=True)
@@ -467,6 +487,7 @@ class LibvirtSandboxManager:
         self._instance_prefix = "openshrimp"
         self._container_label = "openshrimp"  # not used, but protocol requires it
         self._conn: "libvirt.virConnect | None" = None  # type: ignore[name-defined]
+        self._sandbox_cache: dict[str, Sandbox] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
@@ -593,10 +614,10 @@ class LibvirtSandboxManager:
                 except libvirt.libvirtError:
                     pass
 
+        self._sandbox_cache.clear()
+
         # Kill any orphaned virtiofsd processes whose sockets live under
-        # our state directory.  Individual LibvirtSandbox.cleanup() should
-        # have stopped them already, but on restart the sandbox instances
-        # may have been discarded before cleanup ran.
+        # our state directory.
         self._stop_all_virtiofsd()
 
     def _stop_all_virtiofsd(self) -> None:
@@ -634,6 +655,10 @@ class LibvirtSandboxManager:
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
     ) -> Sandbox:
+        cached = self._sandbox_cache.get(context_name)
+        if cached is not None:
+            return cached
+
         if self._conn is None:
             raise RuntimeError(
                 "Libvirt connection not available — either start_reaper() was "
@@ -644,7 +669,7 @@ class LibvirtSandboxManager:
 
         from open_shrimp.sandbox.libvirt import LibvirtSandbox
 
-        return LibvirtSandbox(
+        sandbox = LibvirtSandbox(
             context_name=context_name,
             config=context.sandbox,
             project_dir=context.directory,
@@ -654,6 +679,8 @@ class LibvirtSandboxManager:
             computer_use=context.sandbox.computer_use,
             virgl=context.sandbox.virgl,
         )
+        self._sandbox_cache[context_name] = sandbox
+        return sandbox
 
     # -- Build logging --------------------------------------------------------
 

@@ -21,13 +21,17 @@ from typing import Protocol, runtime_checkable
 class Sandbox(Protocol):
     """Isolated execution environment for the Claude CLI.
 
+    A single instance represents one VM/container and is shared across
+    multiple sessions (ChatScopes) using the same context.  Instances
+    are cached by context name in the :class:`SandboxManager`.
+
     Lifecycle:
         1. ``ensure_environment()`` — build image / provision VM (slow, idempotent)
         2. ``ensure_running()`` — start container / check SSH (fast when warm)
         3. ``provision_workspace()`` — sync files into sandbox (idempotent)
         4. ``build_cli_wrapper()`` — generate shell script for ``cli_path``
-        5. ``cleanup()`` — remove wrapper script and temp files
-        6. ``stop()`` — tear down runtime
+        5. ``cleanup()`` — no-op (kept for protocol compatibility)
+        6. ``stop()`` — tear down runtime (VM, container, daemons)
     """
 
     @property
@@ -109,7 +113,11 @@ class Sandbox(Protocol):
         ...
 
     def cleanup(self) -> None:
-        """Remove the wrapper script and any ephemeral resources."""
+        """No-op.  Wrapper scripts are cleaned up per-session externally.
+
+        Must NOT stop VMs, containers, or daemons — those are managed
+        by :meth:`stop` and the :class:`SandboxManager`.
+        """
         ...
 
     def stop(self) -> None:
