@@ -60,17 +60,17 @@ class MacOSSandbox:
         # macOS shares the host filesystem — no provisioning needed.
         pass
 
-    def build_cli_wrapper(self) -> str:
-        return _build_cli_wrapper(
+    def build_cli_wrapper(self) -> tuple[str, list[str]]:
+        from open_shrimp.sandbox.macos_helpers import (
+            cleanup_paths_for_wrapper,
+        )
+
+        path = _build_cli_wrapper(
             context_name=self._context_name,
             project_dir=self._project_dir,
             additional_directories=self._additional_directories,
         )
-
-    def cleanup(self) -> None:
-        # No-op: wrapper scripts are cleaned up per-session by
-        # close_session(), and sandbox lifecycle is managed by stop().
-        pass
+        return path, cleanup_paths_for_wrapper(path)
 
     def stop(self) -> None:
         pass

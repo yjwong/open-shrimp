@@ -126,8 +126,8 @@ class DockerSandbox:
         # Docker uses bind mounts — workspace is already in place.
         pass
 
-    def build_cli_wrapper(self) -> str:
-        return _build_cli_wrapper(
+    def build_cli_wrapper(self) -> tuple[str, list[str]]:
+        path = _build_cli_wrapper(
             context_name=self._context_name,
             project_dir=self._project_dir,
             additional_directories=self._additional_directories,
@@ -135,11 +135,7 @@ class DockerSandbox:
             computer_use=self._computer_use,
             image_name=self._image_name,
         )
-
-    def cleanup(self) -> None:
-        # No-op: wrapper scripts are cleaned up per-session by
-        # close_session(), and container lifecycle is managed by stop().
-        pass
+        return path, [path]
 
     def stop(self) -> None:
         name = self.container_name

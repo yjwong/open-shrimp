@@ -30,8 +30,7 @@ class Sandbox(Protocol):
         2. ``ensure_running()`` — start container / check SSH (fast when warm)
         3. ``provision_workspace()`` — sync files into sandbox (idempotent)
         4. ``build_cli_wrapper()`` — generate shell script for ``cli_path``
-        5. ``cleanup()`` — no-op (kept for protocol compatibility)
-        6. ``stop()`` — tear down runtime (VM, container, daemons)
+        5. ``stop()`` — tear down runtime (VM, container, daemons)
     """
 
     @property
@@ -98,7 +97,7 @@ class Sandbox(Protocol):
         """
         ...
 
-    def build_cli_wrapper(self) -> str:
+    def build_cli_wrapper(self) -> tuple[str, list[str]]:
         """Generate a shell script that execs into the sandbox.
 
         The script must:
@@ -108,15 +107,10 @@ class Sandbox(Protocol):
         - Self-heal if the runtime died
 
         Returns:
-            Absolute path to the generated wrapper script.
-        """
-        ...
-
-    def cleanup(self) -> None:
-        """No-op.  Wrapper scripts are cleaned up per-session externally.
-
-        Must NOT stop VMs, containers, or daemons — those are managed
-        by :meth:`stop` and the :class:`SandboxManager`.
+            A ``(cli_path, cleanup_paths)`` tuple.  *cli_path* is the
+            absolute path to the wrapper script.  *cleanup_paths* lists
+            all temp files (including the wrapper) that should be deleted
+            when the session ends.
         """
         ...
 

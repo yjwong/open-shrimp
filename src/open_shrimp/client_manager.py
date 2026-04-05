@@ -16,6 +16,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
@@ -70,7 +71,7 @@ class AgentSession:
     context_name: str = ""
     callback_context: CallbackContext = field(default_factory=CallbackContext)
     sandbox: Sandbox | None = None
-    wrapper_path: str | None = None
+    wrapper_cleanup_paths: list[str] = field(default_factory=list)
 
 
 _active_sessions: dict[ChatScope, AgentSession] = {}
@@ -241,6 +242,7 @@ async def get_or_create_session(
     # streaming, canUseTool, MCP) is unchanged.
     sandbox: Sandbox | None = None
     cli_path: str | None = None
+    wrapper_cleanup_paths: list[str] = []
     is_containerized = is_sandboxed(context)
     if is_containerized:
         assert sandbox_manager is not None, (
@@ -299,7 +301,7 @@ async def get_or_create_session(
             _sandbox = sandbox  # capture for closure
             _mgr = sandbox_manager  # capture for closure
 
-            def _ensure_and_build_wrapper() -> str:
+            def _ensure_and_build_wrapper() -> tuple[str, list[str]]:
                 try:
                     _sandbox.ensure_environment(log_file=log_file)
                     _sandbox.ensure_running(log_file=log_file)
@@ -310,8 +312,9 @@ async def get_or_create_session(
                 _sandbox.provision_workspace()
                 return _sandbox.build_cli_wrapper()
 
-            wrapper_path = await asyncio.to_thread(_ensure_and_build_wrapper)
-            cli_path = wrapper_path
+            cli_path, wrapper_cleanup_paths = await asyncio.to_thread(
+                _ensure_and_build_wrapper,
+            )
             logger.info(
                 "Sandbox context '%s': using wrapper %s",
                 context_name,
@@ -444,7 +447,7 @@ async def get_or_create_session(
         context_name=context_name,
         callback_context=callback_context,
         sandbox=sandbox,
-        wrapper_path=cli_path,
+        wrapper_cleanup_paths=wrapper_cleanup_paths,
     )
     _active_sessions[scope] = session
     return session
@@ -525,12 +528,12 @@ async def close_session(scope: ChatScope) -> None:
         logger.info("Closed client for scope %s", scope)
     except (Exception, TimeoutError):
         logger.debug("Error/timeout closing client for scope %s", scope, exc_info=True)
-    # Clean up the per-session wrapper script.  The sandbox itself is
-    # shared across sessions and managed by the SandboxManager.
-    if session.wrapper_path is not None:
-        from pathlib import Path
-        Path(session.wrapper_path).unlink(missing_ok=True)
-        logger.debug("Removed wrapper script %s", session.wrapper_path)
+    # Clean up per-session temp files (wrapper script, sandbox profile, etc.).
+    # The sandbox itself is shared across sessions and managed by the
+    # SandboxManager.
+    for path in session.wrapper_cleanup_paths:
+        Path(path).unlink(missing_ok=True)
+        logger.debug("Removed temp file %s", path)
 
 
 async def close_all_sessions() -> None:

@@ -254,30 +254,23 @@ def build_cli_wrapper(
     return wrapper_path
 
 
-def cleanup_wrapper(wrapper_path: str) -> None:
-    """Remove a previously generated wrapper script and its profile."""
-    # The profile path is embedded in the wrapper — extract and clean it up.
+def cleanup_paths_for_wrapper(wrapper_path: str) -> list[str]:
+    """Return all temp file paths associated with a wrapper script.
+
+    Parses the wrapper to find the embedded ``.sb`` sandbox profile path.
+    Returns a list containing the wrapper itself and any extra files.
+    """
+    paths = [wrapper_path]
     try:
         with open(wrapper_path, encoding="utf-8") as f:
             content = f.read()
-        # Extract profile path from: sandbox-exec -f "<profile_path>"
         for line in content.splitlines():
             if "sandbox-exec -f" in line:
-                # Parse: exec sandbox-exec -f "/path/to/profile.sb" ...
                 parts = line.split('"')
-                for i, part in enumerate(parts):
+                for part in parts:
                     if part.endswith(".sb"):
-                        try:
-                            os.unlink(part)
-                        except OSError:
-                            logger.debug(
-                                "Failed to remove sandbox profile: %s", part
-                            )
+                        paths.append(part)
                         break
     except OSError:
-        logger.debug("Failed to read wrapper for profile cleanup: %s", wrapper_path)
-
-    try:
-        os.unlink(wrapper_path)
-    except OSError:
-        logger.debug("Failed to remove wrapper script: %s", wrapper_path)
+        pass
+    return paths

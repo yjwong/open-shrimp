@@ -502,9 +502,9 @@ class LibvirtSandbox:
             shutil.copy2(str(host_credentials), str(dest))
             logger.info("Copied credentials to %s", dest)
 
-    def build_cli_wrapper(self) -> str:
+    def build_cli_wrapper(self) -> tuple[str, list[str]]:
         assert self._ssh_port is not None
-        return _build_cli_wrapper(
+        path = _build_cli_wrapper(
             self._context_name,
             self._sdir,
             self._ssh_port,
@@ -512,11 +512,7 @@ class LibvirtSandbox:
             instance_prefix=self._instance_prefix,
             claude_home_dir=self._claude_home_dir,
         )
-
-    def cleanup(self) -> None:
-        # No-op: wrapper scripts are cleaned up per-session by
-        # close_session(), and virtiofsd/VM lifecycle is managed by stop().
-        pass
+        return path, [path]
 
     def stop(self) -> None:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""

@@ -1061,11 +1061,3 @@ def build_cli_wrapper(
         wrapper_path,
     )
     return wrapper_path
-
-
-def cleanup_wrapper(wrapper_path: str) -> None:
-    """Remove a previously generated wrapper script."""
-    try:
-        os.unlink(wrapper_path)
-    except OSError:
-        logger.debug("Failed to remove wrapper script: %s", wrapper_path)

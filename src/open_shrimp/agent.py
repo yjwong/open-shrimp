@@ -154,66 +154,6 @@ def cleanup_attachments(paths: list[Path]) -> None:
             logger.debug("Failed to remove temp file %s", p)
 
 
-# Container destination for copied attachments.
-_CONTAINER_UPLOAD_DIR = "/tmp/openshrimp_uploads"
-
-
-async def copy_attachments_to_container(
-    attachment_paths: list[Path],
-    container_name: str,
-) -> list[Path]:
-    """Copy attachment files into a running Docker container.
-
-    Uses ``docker cp`` to copy each file into the container at
-    :data:`_CONTAINER_UPLOAD_DIR`.  Returns a list of container-side
-    paths (same order and length as *attachment_paths*).  If a copy
-    fails for a particular file, the original host path is kept as a
-    fallback.
-    """
-    if not attachment_paths:
-        return []
-
-    # Ensure the destination directory exists inside the container.
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", container_name,
-        "mkdir", "-p", _CONTAINER_UPLOAD_DIR,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        logger.error(
-            "Failed to create upload dir in container %s: %s",
-            container_name, stderr.decode().strip(),
-        )
-        return list(attachment_paths)
-
-    result: list[Path] = []
-    for host_path in attachment_paths:
-        container_path = Path(_CONTAINER_UPLOAD_DIR) / host_path.name
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "cp", str(host_path),
-            f"{container_name}:{container_path}",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error(
-                "docker cp failed for %s -> %s:%s: %s",
-                host_path, container_name, container_path,
-                stderr.decode().strip(),
-            )
-            result.append(host_path)
-            continue
-        result.append(container_path)
-        logger.info(
-            "Copied attachment into container: %s -> %s:%s",
-            host_path, container_name, container_path,
-        )
-
-    return result
-
 
 async def run_agent(
     prompt: str,

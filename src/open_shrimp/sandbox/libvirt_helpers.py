@@ -1044,14 +1044,6 @@ def build_cli_wrapper(
     return str(wrapper_path)
 
 
-def cleanup_wrapper(wrapper_path: str) -> None:
-    """Remove a CLI wrapper script."""
-    try:
-        Path(wrapper_path).unlink(missing_ok=True)
-    except OSError:
-        logger.debug("Failed to remove wrapper %s", wrapper_path)
-
-
 # ---------------------------------------------------------------------------
 # Port persistence
 # ---------------------------------------------------------------------------
