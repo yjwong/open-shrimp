@@ -413,12 +413,16 @@ def ensure_mounts(
             _ssh_run(f"mountpoint -q {shlex.quote(mount_path)} || sudo systemctl start {shlex.quote(unit_name)}")
             continue
 
-        # Write new/updated unit.
+        # Write new/updated unit.  Use printf '%s' (not echo) to avoid
+        # appending a trailing newline — otherwise the file won't match
+        # unit_content on the next idempotency check, causing every call
+        # to rewrite the unit and run systemctl enable --now (which can
+        # hang when multiple callers race on the same mount unit).
         escaped_content = shlex.quote(unit_content)
         _ssh_run(
             f"sudo mkdir -p {shlex.quote(mount_path)} && "
             f"sudo chown claude:claude {shlex.quote(mount_path)} && "
-            f"echo {escaped_content} | sudo tee {shlex.quote(unit_file)} > /dev/null && "
+            f"printf '%s' {escaped_content} | sudo tee {shlex.quote(unit_file)} > /dev/null && "
             f"sudo systemctl daemon-reload && "
             f"sudo systemctl enable --now {shlex.quote(unit_name)}"
         )
