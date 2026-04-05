@@ -1,0 +1,196 @@
+{
+  "type": "object",
+  "properties": {
+    "telegram": {
+      "$ref": "#/$defs/TelegramConfig",
+      "description": "Telegram bot settings."
+    },
+    "allowed_users": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "description": "Telegram user IDs allowed to use the bot."
+    },
+    "contexts": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ContextConfig"
+      },
+      "description": "Named project contexts."
+    },
+    "default_context": {
+      "type": "string",
+      "description": "Context to use when none is selected."
+    },
+    "review": {
+      "$ref": "#/$defs/ReviewConfig",
+      "description": "Mini App HTTP server settings."
+    },
+    "instance_name": {
+      "description": "Display name for this instance.",
+      "default": null
+    }
+  },
+  "required": [
+    "telegram",
+    "allowed_users",
+    "contexts",
+    "default_context"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenShrimp Configuration",
+  "description": "Schema for ~/.config/openshrimp/config.yaml",
+  "$defs": {
+    "TelegramConfig": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string",
+          "description": "Bot token from @BotFather."
+        }
+      },
+      "required": [
+        "token"
+      ]
+    },
+    "SandboxConfig": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "description": "Sandbox backend: \"docker\", \"libvirt\", or \"macos\"."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable or disable the sandbox.",
+          "default": true
+        },
+        "docker_in_docker": {
+          "type": "boolean",
+          "description": "Enable rootless Docker inside the container (Docker backend).",
+          "default": false
+        },
+        "dockerfile": {
+          "description": "Path to a custom Dockerfile (Docker backend).",
+          "default": null
+        },
+        "computer_use": {
+          "type": "boolean",
+          "description": "Enable GUI interaction with a headless desktop.",
+          "default": false
+        },
+        "memory": {
+          "type": "integer",
+          "description": "Memory ceiling in MB (Libvirt backend).",
+          "default": 2048
+        },
+        "cpus": {
+          "type": "integer",
+          "description": "Number of vCPUs (Libvirt backend).",
+          "default": 2
+        },
+        "disk_size": {
+          "type": "integer",
+          "description": "Disk size in GB for qcow2 overlay (Libvirt backend).",
+          "default": 20
+        },
+        "base_image": {
+          "description": "Path to base qcow2/cloud image (Libvirt backend).",
+          "default": null
+        },
+        "provision": {
+          "description": "Shell script to run on first boot (Libvirt backend).",
+          "default": null
+        }
+      },
+      "required": [
+        "backend"
+      ]
+    },
+    "ContextConfig": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Absolute path to the project directory."
+        },
+        "description": {
+          "type": "string",
+          "description": "Short description shown in the context list."
+        },
+        "allowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tools auto-approved without prompting. Glob patterns supported."
+        },
+        "model": {
+          "description": "Model override. Short names: sonnet, opus, haiku.",
+          "default": null
+        },
+        "additional_directories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra directories the agent can access.",
+          "default": []
+        },
+        "default_for_chats": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Chat IDs where this context is auto-selected.",
+          "default": []
+        },
+        "locked_for_chats": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Chat IDs locked to this context.",
+          "default": []
+        },
+        "container": {
+          "description": "Legacy Docker sandbox config (use sandbox instead).",
+          "default": null
+        },
+        "sandbox": {
+          "description": "Sandbox configuration.",
+          "default": null
+        }
+      },
+      "required": [
+        "directory",
+        "description",
+        "allowed_tools"
+      ]
+    },
+    "ReviewConfig": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "HTTP server bind address.",
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "type": "integer",
+          "description": "HTTP server port.",
+          "default": 8080
+        },
+        "public_url": {
+          "description": "Public URL for Mini Apps (behind a reverse proxy).",
+          "default": null
+        },
+        "tunnel": {
+          "description": "Auto-start a public tunnel. Supported: \"cloudflared\".",
+          "default": null
+        }
+      }
+    }
+  }
+}

@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "astro build",
+    "gen-schema": "cd .. && python3 website/scripts/gen-config-schema.py || echo 'Schema generation skipped (missing deps)'",
+    "build": "npm run gen-schema && astro build",
     "preview": "astro preview",
     "astro": "astro"
   },

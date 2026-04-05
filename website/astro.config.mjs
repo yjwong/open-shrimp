@@ -11,6 +11,12 @@ export default defineConfig({
 			logo: { src: './src/assets/logo.svg' },
 			customCss: ['./src/styles/custom.css'],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/yjwong/open-shrimp' }],
+			head: [
+				{
+					tag: 'meta',
+					attrs: { property: 'og:image', content: 'https://shrimp.wong.place/og-image.png' },
+				},
+			],
 			sidebar: [
 				{
 					label: 'Getting Started',

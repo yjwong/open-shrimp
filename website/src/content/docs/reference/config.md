@@ -1,0 +1,286 @@
+---
+title: Configuration Reference
+description: Complete reference for all config.yaml fields.
+---
+
+Full reference for `~/.config/openshrimp/config.yaml`. For a guided walkthrough, see [Configuration](/getting-started/configuration/).
+
+## Top-level fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `telegram` | object | Yes | — | Telegram bot settings |
+| `allowed_users` | list of int | Yes | — | Telegram user IDs allowed to use the bot |
+| `contexts` | map | Yes | — | Named project contexts |
+| `default_context` | string | Yes | — | Context to use when none is selected |
+| `review` | object | No | — | Mini App HTTP server settings |
+| `instance_name` | string | No | `null` | Display name for this instance (shown in status) |
+
+## `telegram`
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `token` | string | Yes | — | Bot token from [@BotFather](https://t.me/BotFather) |
+
+```yaml
+telegram:
+  token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+```
+
+## `allowed_users`
+
+A non-empty list of Telegram user IDs (integers). Messages from users not in this list are silently ignored.
+
+```yaml
+allowed_users:
+  - 123456789
+  - 987654321
+```
+
+:::tip
+Send `/start` to [@userinfobot](https://t.me/userinfobot) to find your Telegram user ID.
+:::
+
+## `contexts`
+
+A map of context name to context configuration. At least one context is required.
+
+```yaml
+contexts:
+  myproject:
+    directory: /home/you/Documents/myproject
+    description: "My main project"
+    allowed_tools:
+      - LSP
+      - AskUserQuestion
+```
+
+### Context fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `directory` | string | Yes | — | Absolute path to the project directory |
+| `description` | string | Yes | — | Short description shown in the context list |
+| `allowed_tools` | list of string | Yes | — | Tools auto-approved without prompting |
+| `model` | string | No | `null` | Model override. Short names: `sonnet`, `opus`, `haiku`, or a full model ID |
+| `additional_directories` | list of string | No | `[]` | Extra directories the agent can access |
+| `default_for_chats` | list of int | No | `[]` | Chat IDs where this context is auto-selected on first use |
+| `locked_for_chats` | list of int | No | `[]` | Chat IDs locked to this context (users cannot switch) |
+| `sandbox` | object | No | `null` | Sandbox configuration (see below) |
+| `container` | object or bool | No | `null` | Legacy Docker sandbox config (use `sandbox` instead) |
+
+:::caution
+You cannot specify both `container` and `sandbox` on the same context. The `container` key is a backwards-compatible alias for `sandbox` with `backend: docker`.
+:::
+
+### `allowed_tools`
+
+Tools listed here are passed to the Claude CLI as `--allowedTools` and are always approved without prompting. Glob patterns are supported:
+
+```yaml
+allowed_tools:
+  - LSP
+  - AskUserQuestion
+  - "Bash(git *)"        # allow all git commands
+  - "Bash(npm test)"     # allow npm test specifically
+```
+
+Tools **not** in this list go through OpenShrimp's path-scoped approval:
+
+- **Read, Glob, Grep** — auto-approved when the target path is within the context directory (or `additional_directories`)
+- **Edit, Write** — always require manual approval via Telegram inline keyboard, with an option to "Accept all edits" for the session
+- **Bash** — requires approval; you can approve by command prefix (e.g. "Accept all `git`") or blanket-approve the entire tool
+- Paths outside the context directory always require manual approval
+
+:::caution
+Adding `Read`, `Write`, `Edit`, `Glob`, or `Grep` to `allowed_tools` bypasses path checking entirely — the agent can access any file the process can read.
+:::
+
+### `additional_directories`
+
+Extra directories passed to the SDK as `--add-dir`. Path-scoped auto-approval (Read, Glob, Grep) extends to these directories.
+
+```yaml
+additional_directories:
+  - /home/you/Documents/shared-lib
+  - /home/you/Documents/api-service
+```
+
+### `default_for_chats` and `locked_for_chats`
+
+Control which context is used in group chats:
+
+```yaml
+contexts:
+  frontend:
+    # ...
+    default_for_chats:
+      - -1001234567890    # this group starts with the frontend context
+    locked_for_chats:
+      - -1009876543210    # this group can only use the frontend context
+```
+
+- `default_for_chats` — sets the initial context for a group chat. Users can still switch with `/context`.
+- `locked_for_chats` — locks the group chat to this context. The `/context` command is disabled.
+
+Chat IDs for groups are negative numbers. You can find them from the bot's logs or via `/status` in the group.
+
+## `contexts.<name>.sandbox`
+
+Run the Claude CLI inside an isolated environment. When a sandbox is enabled, all Bash commands and path-scoped tools are auto-approved since the sandbox provides the safety boundary.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `backend` | string | Yes | — | `"docker"`, `"libvirt"`, or `"macos"` |
+| `enabled` | bool | No | `true` | Enable or disable the sandbox |
+| `docker_in_docker` | bool | No | `false` | Enable rootless Docker inside the container (Docker backend only) |
+| `dockerfile` | string | No | `null` | Path to a custom Dockerfile (Docker backend only) |
+| `computer_use` | bool | No | `false` | Enable GUI interaction with a headless desktop |
+| `memory` | int | No | `2048` | Memory ceiling in MB (Libvirt backend only) |
+| `cpus` | int | No | `2` | Number of vCPUs (Libvirt backend only) |
+| `disk_size` | int | No | `20` | Disk size in GB for qcow2 overlay (Libvirt backend only) |
+| `base_image` | string | No | `null` | Path to base qcow2/cloud image (Libvirt backend only) |
+| `provision` | string | No | `null` | Shell script to run on first boot (Libvirt backend only) |
+
+### Docker backend
+
+```yaml
+sandbox:
+  backend: docker
+  docker_in_docker: true
+  dockerfile: /path/to/Dockerfile.claude
+  computer_use: true
+```
+
+- The project directory is bind-mounted into the container
+- Session storage is isolated under `~/.config/openshrimp/containers/<context>/`
+- Container runs as host uid/gid
+- Custom Dockerfiles should `FROM openshrimp-claude:latest`; images are tagged `openshrimp-claude:<context-name>` and built lazily
+- `docker_in_docker: true` adds `--cap-add SYS_ADMIN` (reduced isolation)
+
+See the [Docker Sandbox guide](/guides/docker-sandbox/) for detailed setup instructions.
+
+### Libvirt backend
+
+```yaml
+sandbox:
+  backend: libvirt
+  memory: 4096
+  cpus: 4
+  disk_size: 40
+  base_image: /var/lib/libvirt/images/ubuntu-24.04-minimal.qcow2
+  provision: |
+    apt-get update && apt-get install -y git nodejs npm
+```
+
+Requires the `libvirt-python` optional dependency (`uv pip install libvirt-python`).
+
+See the [VM Sandbox guide](/guides/vm-sandbox/) for detailed setup instructions.
+
+### macOS backend
+
+```yaml
+sandbox:
+  backend: macos
+```
+
+Uses macOS-native sandboxing (`sandbox-exec`). No additional configuration fields.
+
+See the [macOS Sandbox guide](/guides/macos-sandbox/) for detailed setup instructions.
+
+### Computer use
+
+When `computer_use: true` is set, the sandbox runs a headless Wayland desktop (labwc compositor, 1280x720) with Chromium and a foot terminal. Claude interacts via MCP tools: `computer_screenshot`, `computer_click`, `computer_type`, `computer_key`, `computer_scroll`, and `computer_toplevel`.
+
+A VNC server is exposed for live viewing — use `/vnc` to open the noVNC viewer.
+
+See the [Computer Use guide](/guides/computer-use/) for more details.
+
+## `default_context`
+
+The context used when no context has been selected for a chat. Must match a key in `contexts`.
+
+```yaml
+default_context: myproject
+```
+
+## `review`
+
+Optional HTTP server configuration for Mini Apps (Review, Terminal, VNC, Markdown preview).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `host` | string | No | `"127.0.0.1"` | HTTP server bind address |
+| `port` | int | No | `8080` | HTTP server port |
+| `public_url` | string | No | `null` | Public URL for Mini Apps (when behind a reverse proxy) |
+| `tunnel` | string | No | `null` | `"cloudflared"` to auto-start a public tunnel |
+
+```yaml
+review:
+  host: "127.0.0.1"
+  port: 8080
+  tunnel: cloudflared
+```
+
+- `public_url` — set this when you have your own reverse proxy or domain pointing to the HTTP server
+- `tunnel: cloudflared` — auto-starts a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) (free, no account needed). Downloads `cloudflared` automatically if not installed. Ignored if `public_url` is already set.
+
+:::note
+Mini Apps require either `public_url` or `tunnel` to be configured. Without a public URL, Telegram cannot load the web apps.
+:::
+
+## `instance_name`
+
+Optional display name for this OpenShrimp instance. Shown in `/status` output. Useful if you run multiple instances.
+
+```yaml
+instance_name: "home-server"
+```
+
+## Complete example
+
+```yaml
+telegram:
+  token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+
+allowed_users:
+  - 123456789
+
+contexts:
+  default:
+    directory: /home/you/Documents/your-project
+    description: "Default context"
+    allowed_tools:
+      - LSP
+      - AskUserQuestion
+
+  webapp:
+    directory: /home/you/Documents/webapp
+    description: "Web application"
+    model: sonnet
+    allowed_tools:
+      - LSP
+      - AskUserQuestion
+      - "Bash(npm *)"
+    additional_directories:
+      - /home/you/Documents/shared-components
+    sandbox:
+      backend: docker
+      docker_in_docker: true
+      computer_use: true
+
+  infrastructure:
+    directory: /home/you/Documents/infra
+    description: "Infrastructure (locked to ops group)"
+    allowed_tools:
+      - LSP
+      - AskUserQuestion
+    locked_for_chats:
+      - -1001234567890
+
+default_context: default
+
+review:
+  port: 8080
+  tunnel: cloudflared
+```
