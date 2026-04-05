@@ -396,7 +396,7 @@ def ensure_mounts(
     # We identify ours by the "Description=Mount ... via virtiofs/9p" pattern.
     result = _ssh_run(
         "grep -rl 'Description=Mount .* via' /etc/systemd/system/*.mount 2>/dev/null "
-        "| xargs -r -n1 basename"
+        "| xargs -r -n1 -d '\\n' basename"
     )
     existing_units = set(result.stdout.decode().split()) if result.returncode == 0 else set()
 
