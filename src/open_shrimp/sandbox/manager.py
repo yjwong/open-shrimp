@@ -30,6 +30,9 @@ from open_shrimp.sandbox.base import Sandbox
 
 logger = logging.getLogger(__name__)
 
+# Graceful shutdown timeout before falling back to destroy.
+_SHUTDOWN_TIMEOUT = 180
+
 
 @runtime_checkable
 class SandboxManager(Protocol):
@@ -572,8 +575,8 @@ class LibvirtSandboxManager:
                 logger.info("Force-destroyed %s", name)
                 continue
 
-            # Wait for graceful shutdown (up to 10s).
-            deadline = time.monotonic() + 10
+            # Wait for graceful shutdown.
+            deadline = time.monotonic() + _SHUTDOWN_TIMEOUT
             while time.monotonic() < deadline:
                 try:
                     if not domain.isActive():
