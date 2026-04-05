@@ -123,6 +123,7 @@ class LibvirtSandbox:
         additional_directories: list[str] | None = None,
         instance_prefix: str = "openshrimp",
         computer_use: bool = False,
+        virgl: bool = False,
     ) -> None:
         self._context_name = context_name
         self._config = config
@@ -131,7 +132,7 @@ class LibvirtSandbox:
         self._conn = conn
         self._instance_prefix = instance_prefix
         self._computer_use = computer_use
-        self._wrapper_path: str | None = None
+        self._virgl = virgl
         self._virtiofsd_procs: list[subprocess.Popen[bytes]] = []
         self._use_virtiofs: bool = find_virtiofsd() is not None
 
@@ -257,6 +258,7 @@ class LibvirtSandbox:
             shared_dirs=shared_dirs_xml,
             use_virtiofs=self._use_virtiofs,
             computer_use=self._computer_use,
+            virgl=self._virgl,
         )
 
         # Define domain (idempotent — overwrites if exists).

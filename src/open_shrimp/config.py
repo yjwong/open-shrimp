@@ -35,6 +35,7 @@ class SandboxConfig:
     docker_in_docker: bool = False
     dockerfile: str | None = None
     computer_use: bool = False
+    virgl: bool = False  # VirGL 3D GPU acceleration (requires host GPU)
 
     # VM-specific (libvirt)
     memory: int = 2048  # MB ceiling (free-page-reporting returns unused to host)
@@ -227,6 +228,7 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
         docker_in_docker=bool(raw.get("docker_in_docker", False)),
         dockerfile=raw.get("dockerfile"),
         computer_use=bool(raw.get("computer_use", False)),
+        virgl=bool(raw.get("virgl", False)),
         memory=int(raw.get("memory", 2048)),
         cpus=int(raw.get("cpus", 2)),
         disk_size=int(raw.get("disk_size", 20)),

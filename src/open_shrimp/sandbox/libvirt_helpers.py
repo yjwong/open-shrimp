@@ -565,6 +565,7 @@ def generate_domain_xml(
     shared_dirs: list[tuple[str, Path | None]] | None = None,
     use_virtiofs: bool = False,
     computer_use: bool = False,
+    virgl: bool = False,
 ) -> str:
     """Generate libvirt domain XML for a VM sandbox.
 
@@ -586,6 +587,9 @@ def generate_domain_xml(
         use_virtiofs: Whether virtiofs is available.
         computer_use: Enable GUI support — adds VNC display (auto-port),
             virtio-gpu video model, and virtio-keyboard/mouse input devices.
+        virgl: Enable VirGL 3D GPU acceleration.  Adds an ``egl-headless``
+            graphics device for the GL context and ``accel3d="yes"`` on the
+            virtio-gpu model.  Requires a host GPU with a DRM render node.
 
     Returns:
         Domain XML string.
@@ -684,9 +688,19 @@ def generate_domain_xml(
             devices, "graphics",
             type="vnc", port="-1", autoport="yes", listen="127.0.0.1",
         )
+        if virgl:
+            # egl-headless provides the GL context that VirGL needs;
+            # VNC picks up the rendered framebuffer for remote display.
+            egl = ET.SubElement(devices, "graphics", type="egl-headless")
+            ET.SubElement(egl, "gl", rendernode="/dev/dri/renderD128")
         # virtio-gpu gives 1280x800 natively (built-in kernel driver).
         video = ET.SubElement(devices, "video")
-        ET.SubElement(video, "model", type="virtio")
+        model_attrs: dict[str, str] = {"type": "virtio"}
+        if virgl:
+            model_attrs["heads"] = "1"
+        model = ET.SubElement(video, "model", **model_attrs)
+        if virgl:
+            ET.SubElement(model, "acceleration", accel3d="yes")
         # Virtio keyboard + tablet (absolute pointer) for QMP input.
         ET.SubElement(devices, "input", type="keyboard", bus="virtio")
         ET.SubElement(devices, "input", type="tablet", bus="virtio")
