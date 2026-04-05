@@ -212,7 +212,7 @@ async def run_bot(
 
     register_dispatch(_dispatch)
 
-    await app.bot.set_my_commands([
+    common_commands = [
         BotCommand("context", "List or switch contexts"),
         BotCommand("clear", "Start a fresh session"),
         BotCommand("status", "Show current context, session, and state"),
@@ -226,9 +226,10 @@ async def run_bot(
         BotCommand("usage", "Show Claude quota and usage stats"),
         BotCommand("vnc", "View computer-use desktop"),
         BotCommand("login", "Re-authenticate Claude Code OAuth"),
-    ])
+    ]
+    await app.bot.set_my_commands(common_commands)
     await app.bot.set_my_commands(
-        [BotCommand("restart", "Restart the bot process")],
+        common_commands + [BotCommand("restart", "Restart the bot process")],
         scope=BotCommandScopeAllPrivateChats(),
     )
     await app.start()
