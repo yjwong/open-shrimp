@@ -593,8 +593,41 @@ class LibvirtSandboxManager:
                 except libvirt.libvirtError:
                     pass
 
-        # Stop any virtiofsd processes (they write PID files or we just
-        # let them be — they'll die when the socket is removed).
+        # Kill any orphaned virtiofsd processes whose sockets live under
+        # our state directory.  Individual LibvirtSandbox.cleanup() should
+        # have stopped them already, but on restart the sandbox instances
+        # may have been discarded before cleanup ran.
+        self._stop_all_virtiofsd()
+
+    def _stop_all_virtiofsd(self) -> None:
+        """Kill virtiofsd processes with socket paths under our state dir.
+
+        Walks ``/proc`` directly instead of shelling out to ``pgrep``.
+        """
+        import os
+        import signal
+
+        state_prefix = str(self._state_dir)
+        proc = Path("/proc")
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes()
+            except (OSError, PermissionError):
+                continue
+            # /proc/<pid>/cmdline uses \0 as separator.
+            parts = cmdline.decode(errors="replace").split("\0")
+            if not parts or not parts[0].endswith("virtiofsd"):
+                continue
+            if not any(state_prefix in arg for arg in parts):
+                continue
+            try:
+                pid = int(entry.name)
+                os.kill(pid, signal.SIGTERM)
+                logger.info("Sent SIGTERM to orphaned virtiofsd (pid=%d)", pid)
+            except (ProcessLookupError, PermissionError):
+                pass
 
     # -- Factory --------------------------------------------------------------
 

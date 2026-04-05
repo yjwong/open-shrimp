@@ -498,6 +498,7 @@ class LibvirtSandbox:
         if self._wrapper_path:
             _cleanup_wrapper(self._wrapper_path)
             self._wrapper_path = None
+        self._stop_virtiofsd()
 
     def stop(self) -> None:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""
