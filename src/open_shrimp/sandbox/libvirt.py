@@ -49,6 +49,7 @@ from open_shrimp.sandbox.libvirt_helpers import (
     ssh_check_alive,
     start_virtiofsd,
     state_dir_for,
+    wait_for_cloud_init,
     wait_for_ssh,
     _log,
 )
@@ -397,11 +398,29 @@ class LibvirtSandbox:
                     )
                     _log(log_file, "SSH unreachable — rebuilding VM...")
                     self._rebuild_vm(log_file=log_file)
+                    cold_start = True  # rebuild is a fresh boot
                     _log(log_file, "Waiting for SSH after rebuild...")
                     if not wait_for_ssh(self._ssh_port, ssh_key, timeout=90):
                         raise RuntimeError(
                             f"VM {self._dom_name} SSH not reachable after "
                             f"rebuild on port {self._ssh_port}"
+                        )
+
+                # Wait for cloud-init to finish on cold starts so that all
+                # provisioned services (Chromium, compositor, etc.) are
+                # running before we declare the VM ready.
+                if cold_start:
+                    _log(log_file, "Waiting for cloud-init to finish...")
+                    logger.info(
+                        "Waiting for cloud-init on %s (port %d)...",
+                        self._dom_name, self._ssh_port,
+                    )
+                    if not wait_for_cloud_init(
+                        self._ssh_port, self._sdir / "ssh_key",
+                    ):
+                        logger.warning(
+                            "cloud-init did not complete cleanly on %s",
+                            self._dom_name,
                         )
             finally:
                 stop_tail.set()

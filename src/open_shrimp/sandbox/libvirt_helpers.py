@@ -800,6 +800,53 @@ def wait_for_ssh(
     return False
 
 
+def wait_for_cloud_init(
+    ssh_port: int,
+    ssh_key: Path,
+    *,
+    timeout: int = 300,
+    user: str = "claude",
+) -> bool:
+    """Wait for cloud-init to finish inside the VM.
+
+    Runs ``cloud-init status --wait`` via SSH, which blocks until
+    cloud-init reaches a terminal state (done or error).
+
+    Args:
+        ssh_port: Host port forwarded to guest SSH.
+        ssh_key: Path to the SSH private key.
+        timeout: Maximum seconds to wait.
+        user: SSH username.
+
+    Returns:
+        ``True`` if cloud-init completed, ``False`` if timed out.
+    """
+    ssh_opts = _ssh_common_opts(ssh_key, ssh_port)
+
+    result = subprocess.run(
+        [
+            "ssh", *ssh_opts,
+            "-o", f"ConnectTimeout={timeout}",
+            f"{user}@localhost",
+            "cloud-init", "status", "--wait",
+        ],
+        capture_output=True,
+        timeout=timeout + 10,
+    )
+    if result.returncode == 0:
+        logger.info("cloud-init finished (port %d)", ssh_port)
+        return True
+
+    stderr = result.stderr.decode(errors="replace").strip()
+    logger.warning(
+        "cloud-init wait returned %d on port %d: %s",
+        result.returncode, ssh_port, stderr,
+    )
+    # Return code 2 means cloud-init finished with errors/recoverable —
+    # still consider it "done" so the VM is usable.
+    return result.returncode == 2
+
+
 def ssh_check_alive(
     ssh_port: int,
     ssh_key: Path,
