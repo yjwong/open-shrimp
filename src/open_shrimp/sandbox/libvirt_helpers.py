@@ -156,18 +156,6 @@ def _build_cloud_init_user_data(
           - path: /etc/ssh/sshd_config.d/openshrimp.conf
             content: |
               AcceptEnv ANTHROPIC_API_KEY
-          # Regenerate empty SSH host keys on boot (defense-in-depth
-          # against virsh destroy / power loss corrupting host keys).
-          - path: /etc/systemd/system/ssh-hostkeys-guard.service
-            content: |
-              [Unit]
-              Description=Regenerate empty SSH host keys
-              Before=ssh.socket
-              [Service]
-              Type=oneshot
-              ExecStart=/bin/bash -c 'for f in /etc/ssh/ssh_host_*_key; do ssh-keygen -l -f "$f" >/dev/null 2>&1 || {{ rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub; ssh-keygen -A; break; }}; done'
-              [Install]
-              WantedBy=multi-user.target
     """)
 
     if computer_use:
@@ -225,7 +213,6 @@ def _build_cloud_init_user_data(
     # Build runcmd entries.
     runcmd = textwrap.dedent("""\
         runcmd:
-          - systemctl enable ssh-hostkeys-guard.service
           - systemctl enable --now fstrim.timer
     """)
 
