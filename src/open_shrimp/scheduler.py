@@ -29,7 +29,7 @@ import aiosqlite
 from telegram import Bot
 from telegram.ext import JobQueue
 
-from open_shrimp.config import Config, ContextConfig
+from open_shrimp.config import Config, ContextConfig, is_sandboxed
 from open_shrimp.db import (
     ChatScope,
     ScheduledTask,
@@ -418,7 +418,7 @@ async def _run_scheduled_prompt(
         "WebSearch",
         "WebFetch",
     ]
-    if ctx_config.container and ctx_config.container.enabled:
+    if is_sandboxed(ctx_config):
         allowed_tools.append("Bash")
 
     options = ClaudeAgentOptions(
