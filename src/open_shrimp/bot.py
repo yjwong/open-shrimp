@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, BotCommandScopeAllPrivateChats, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -227,6 +227,10 @@ async def run_bot(
         BotCommand("vnc", "View computer-use desktop"),
         BotCommand("login", "Re-authenticate Claude Code OAuth"),
     ])
+    await app.bot.set_my_commands(
+        [BotCommand("restart", "Restart the bot process")],
+        scope=BotCommandScopeAllPrivateChats(),
+    )
     await app.start()
     await app.updater.start_polling()
     logger.info("Bot is running")

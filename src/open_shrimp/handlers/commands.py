@@ -1497,6 +1497,11 @@ async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
+    chat = update.effective_chat
+    if chat and chat.type != chat.PRIVATE:
+        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        return
+
     import os
     import signal
 
