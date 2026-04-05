@@ -169,6 +169,7 @@ body {
   border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
   font-size: 12px;
   white-space: nowrap;
   cursor: pointer;
