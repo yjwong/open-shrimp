@@ -200,9 +200,8 @@ def generate_cloud_init_iso(
             "      After=seatd.service\n"
             "      [Service]\n"
             "      User=claude\n"
-            "      SupplementaryGroups=video render\n"
-            "      Environment=WLR_BACKENDS=drm\n"
-            "      Environment=WLR_LIBINPUT_NO_DEVICES=1\n"
+            "      SupplementaryGroups=video render input\n"
+            "      Environment=WLR_BACKENDS=drm,libinput\n"
             "      Environment=XDG_RUNTIME_DIR=/run/user/1000\n"
             "      Environment=WAYLAND_DISPLAY=wayland-0\n"
             "      ExecStartPre=/bin/bash -c 'mkdir -p /run/user/1000 && chown claude:claude /run/user/1000'\n"
@@ -255,7 +254,7 @@ def generate_cloud_init_iso(
             # Node.js for npx (Playwright MCP is fetched on demand).
             "  - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -\n"
             "  - apt-get install -y -qq nodejs > /dev/null 2>&1\n"
-            "  - usermod -aG video,render claude\n"
+            "  - usermod -aG video,render,input claude\n"
             "  - systemctl enable --now seatd.service\n"
             "  - systemctl enable --now wayland-compositor.service\n"
         )
@@ -1054,6 +1053,24 @@ def extract_vnc_port_from_xml(domain_xml: str) -> int | None:
 # QMP input injection
 # ---------------------------------------------------------------------------
 
+# All QMP input events target ``device="video0"`` (the virtio-vga).
+# Without an explicit device, QEMU routes events to implicit PS/2
+# input devices that the guest Wayland compositor (labwc) ignores.
+
+
+def _check_qmp_response(resp: str, context: str) -> None:
+    """Log a warning if a QMP response contains an error."""
+    import json
+    try:
+        parsed = json.loads(resp)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if "error" in parsed:
+        logger.warning(
+            "QMP error during %s: %s",
+            context, parsed["error"].get("desc", parsed["error"]),
+        )
+
 
 def qmp_send_mouse_event(
     conn: "libvirt.virConnect",  # type: ignore[name-defined]
@@ -1069,6 +1086,10 @@ def qmp_send_mouse_event(
     Uses absolute coordinates on the virtio-tablet device.  QMP absolute
     coordinates range from 0–32767; the caller provides screen coordinates
     (e.g. 0–1279 for x, 0–799 for y) which are scaled accordingly.
+
+    Events are sent to the ``video0`` device (virtio-vga) so they reach
+    the guest compositor.  Without an explicit device, QEMU routes events
+    to implicit PS/2 devices that the Wayland compositor ignores.
 
     Args:
         conn: Active libvirt connection.
@@ -1099,47 +1120,51 @@ def qmp_send_mouse_event(
     move_cmd = json.dumps({
         "execute": "input-send-event",
         "arguments": {
+            "device": "video0",
             "events": [
                 {"type": "abs", "data": {"axis": "x", "value": abs_x}},
                 {"type": "abs", "data": {"axis": "y", "value": abs_y}},
             ],
         },
     })
-    libvirt_qemu.qemuMonitorCommand(
+    resp = libvirt_qemu.qemuMonitorCommand(
         domain, move_cmd, libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
     )
+    _check_qmp_response(resp, "mouse move")
 
     if click:
-        btn_map = {"left": 0, "middle": 1, "right": 2}
-        btn_code = btn_map.get(button, 0)
-
+        # QMP InputButton enum values: "left", "right", "middle".
         # Press.
         press_cmd = json.dumps({
             "execute": "input-send-event",
             "arguments": {
+                "device": "video0",
                 "events": [
-                    {"type": "btn", "data": {"button": f"mouse-{button}", "down": True}},
+                    {"type": "btn", "data": {"button": button, "down": True}},
                 ],
             },
         })
-        libvirt_qemu.qemuMonitorCommand(
+        resp = libvirt_qemu.qemuMonitorCommand(
             domain, press_cmd,
             libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
         )
+        _check_qmp_response(resp, f"mouse {button} press")
 
         # Release.
         release_cmd = json.dumps({
             "execute": "input-send-event",
             "arguments": {
+                "device": "video0",
                 "events": [
-                    {"type": "btn", "data": {"button": f"mouse-{button}", "down": False}},
+                    {"type": "btn", "data": {"button": button, "down": False}},
                 ],
             },
         })
-        libvirt_qemu.qemuMonitorCommand(
+        resp = libvirt_qemu.qemuMonitorCommand(
             domain, release_cmd,
             libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
         )
+        _check_qmp_response(resp, f"mouse {button} release")
 
 
 def qmp_send_key_event(
@@ -1175,15 +1200,17 @@ def qmp_send_key_event(
         cmd = json.dumps({
             "execute": "input-send-event",
             "arguments": {
+                "device": "video0",
                 "events": [
                     {"type": "key", "data": {"key": {"type": "qcode", "data": qcode}, "down": is_down}},
                 ],
             },
         })
-        libvirt_qemu.qemuMonitorCommand(
+        resp = libvirt_qemu.qemuMonitorCommand(
             domain, cmd,
             libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
         )
+        _check_qmp_response(resp, f"key {qcode} {'down' if is_down else 'up'}")
 
     if down is None:
         _send(True)
@@ -1232,18 +1259,20 @@ def qmp_send_scroll_event(
     move_cmd = json.dumps({
         "execute": "input-send-event",
         "arguments": {
+            "device": "video0",
             "events": [
                 {"type": "abs", "data": {"axis": "x", "value": abs_x}},
                 {"type": "abs", "data": {"axis": "y", "value": abs_y}},
             ],
         },
     })
-    libvirt_qemu.qemuMonitorCommand(
+    resp = libvirt_qemu.qemuMonitorCommand(
         domain, move_cmd,
         libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
     )
+    _check_qmp_response(resp, "scroll move")
 
-    # Map direction to QMP wheel button names.
+    # QMP InputButton enum values for scroll.
     btn_name_map = {
         "up": "wheel-up",
         "down": "wheel-down",
@@ -1258,15 +1287,17 @@ def qmp_send_scroll_event(
             cmd = json.dumps({
                 "execute": "input-send-event",
                 "arguments": {
+                    "device": "video0",
                     "events": [
                         {"type": "btn", "data": {"button": btn_name, "down": is_down}},
                     ],
                 },
             })
-            libvirt_qemu.qemuMonitorCommand(
+            resp = libvirt_qemu.qemuMonitorCommand(
                 domain, cmd,
                 libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
             )
+            _check_qmp_response(resp, f"scroll {direction}")
 
 
 def qmp_type_text(
