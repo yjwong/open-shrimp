@@ -55,7 +55,7 @@ from open_shrimp.sandbox.libvirt_helpers import (
 logger = logging.getLogger(__name__)
 
 # Graceful shutdown timeout before falling back to destroy.
-_SHUTDOWN_TIMEOUT = 10
+_SHUTDOWN_TIMEOUT = 180
 
 # UID of the ``claude`` user inside the VM.  Cloud-init creates it as the
 # first non-system user, which gets UID 1000 on Ubuntu.
