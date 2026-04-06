@@ -559,9 +559,25 @@ class LibvirtSandboxManager:
     def start_reaper(self) -> None:
         """Open a persistent connection to ``qemu:///session``.
 
+        Also ensures a suitable virtiofsd binary is available,
+        downloading one from GitHub releases if the system version
+        is missing or too old.
+
         No Ryuk equivalent needed — libvirt session domains don't survive
         user logout, and we track domain names for cleanup.
         """
+        # Ensure virtiofsd is available (auto-download if needed).
+        from open_shrimp.sandbox.libvirt_helpers import ensure_virtiofsd
+
+        try:
+            ensure_virtiofsd()
+        except Exception:
+            logger.warning(
+                "virtiofsd not available — VMs will fall back to 9p "
+                "filesystem sharing (slower)",
+                exc_info=True,
+            )
+
         try:
             import libvirt
         except ImportError:

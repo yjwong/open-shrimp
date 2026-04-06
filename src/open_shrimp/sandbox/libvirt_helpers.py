@@ -127,6 +127,89 @@ def find_virtiofsd() -> str | None:
     return None
 
 
+_VIRTIOFSD_DOWNLOAD_BASE = (
+    "https://github.com/yjwong/open-shrimp/releases/latest/download"
+)
+
+_VIRTIOFSD_BINARY_MAP: dict[str, str] = {
+    "x86_64": "virtiofsd-linux-x86_64",
+    "aarch64": "virtiofsd-linux-aarch64",
+}
+
+
+def _download_virtiofsd() -> str:
+    """Download the virtiofsd binary for this platform.
+
+    Synchronous — called from ``start_reaper()`` which runs before any
+    async code.
+
+    Returns:
+        Absolute path to the downloaded binary.
+
+    Raises:
+        RuntimeError: If the platform is unsupported or download fails.
+    """
+    import platform as _platform
+    import urllib.request
+
+    machine = _platform.machine()
+    binary_name = _VIRTIOFSD_BINARY_MAP.get(machine)
+    if binary_name is None:
+        raise RuntimeError(
+            f"No pre-built virtiofsd for {_platform.system()} {machine}. "
+            f"Please install virtiofsd >= {'.'.join(str(v) for v in _MIN_VIRTIOFSD_VERSION)} manually."
+        )
+
+    bin_dir = user_data_path("openshrimp") / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    target = bin_dir / "virtiofsd"
+    url = f"{_VIRTIOFSD_DOWNLOAD_BASE}/{binary_name}"
+
+    logger.info("Downloading virtiofsd from %s ...", url)
+
+    tmp = target.with_suffix(".tmp")
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            with open(tmp, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        tmp.rename(target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    logger.info("virtiofsd %s downloaded to %s", binary_name, target)
+    return str(target)
+
+
+def ensure_virtiofsd() -> str:
+    """Find or download virtiofsd, returning the binary path.
+
+    Called during libvirt sandbox manager startup to guarantee a
+    working virtiofsd is available before any VM is started.
+
+    Returns:
+        Absolute path to a virtiofsd binary meeting the minimum version.
+
+    Raises:
+        RuntimeError: If virtiofsd cannot be found or downloaded.
+    """
+    path = find_virtiofsd()
+    if path is not None:
+        return path
+
+    logger.warning(
+        "No virtiofsd >= %s found — downloading from GitHub releases...",
+        ".".join(str(v) for v in _MIN_VIRTIOFSD_VERSION),
+    )
+    return _download_virtiofsd()
+
+
 # ---------------------------------------------------------------------------
 # SSH key management
 # ---------------------------------------------------------------------------
@@ -782,7 +865,9 @@ def start_virtiofsd(
     virtiofsd_bin = find_virtiofsd()
     if not virtiofsd_bin:
         raise FileNotFoundError(
-            "virtiofsd not found — install with: sudo apt install virtiofsd"
+            "virtiofsd not found or version too old (need >= "
+            f"{'.'.join(str(v) for v in _MIN_VIRTIOFSD_VERSION)}) — "
+            "run ensure_virtiofsd() first or install manually"
         )
 
     # Remove stale socket.
