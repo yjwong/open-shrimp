@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 from pathlib import Path
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.lima_helpers import (
     _lima_env,
     _log,
+    _read_credentials_json,
     build_cli_wrapper as _build_cli_wrapper,
     ensure_claude_cli_in_vm,
     generate_lima_yaml,
@@ -197,11 +197,11 @@ class LimaSandbox:
         ensure_claude_cli_in_vm(self._limactl, self._inst_name)
 
         # Copy credentials to host-side shared directory.
-        host_credentials = Path.home() / ".claude" / ".credentials.json"
-        if host_credentials.exists():
+        creds = _read_credentials_json()
+        if creds:
             dest = self._claude_home_dir / ".credentials.json"
-            shutil.copy2(str(host_credentials), str(dest))
-            logger.info("Copied credentials to %s", dest)
+            dest.write_text(creds)
+            logger.info("Wrote credentials to %s", dest)
 
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         path = _build_cli_wrapper(

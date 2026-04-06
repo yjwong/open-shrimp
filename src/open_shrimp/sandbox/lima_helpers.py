@@ -29,6 +29,34 @@ from open_shrimp.config import SandboxConfig
 
 logger = logging.getLogger(__name__)
 
+
+def _read_credentials_json() -> str | None:
+    """Read Claude Code credentials from the macOS Keychain.
+
+    Returns the raw JSON string, or ``None`` if unavailable.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-a",
+                os.getlogin(),
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            logger.info("Read credentials from macOS Keychain")
+            return result.stdout.strip()
+    except Exception:
+        logger.debug("Failed to read credentials from macOS Keychain", exc_info=True)
+    return None
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -293,11 +321,13 @@ def _build_mounts(
         mounts.append({"location": d, "writable": True})
 
     # Host-side .claude home (shared into VM).
+    # Lima creates the VM user as <username> with home /home/<username>.guest.
+    vm_home = f"/home/{os.getlogin()}.guest"
     claude_home = str(sdir / "claude-home")
     Path(claude_home).mkdir(parents=True, exist_ok=True)
     mounts.append({
         "location": claude_home,
-        "mountPoint": "/home/claude.linux/.claude",
+        "mountPoint": f"{vm_home}/.claude",
         "writable": True,
     })
 
@@ -646,18 +676,16 @@ def build_cli_wrapper(
 
     Returns the absolute path to the generated wrapper script.
     """
-    # Credential copy block (via host-side VirtioFS-shared directory).
-    claude_dir = Path.home() / ".claude"
-    host_credentials = claude_dir / ".credentials.json"
-
+    # Credential copy block — extract from macOS Keychain into host-side
+    # VirtioFS-shared directory so the Linux VM can pick it up.
     cred_block = ""
     if claude_home_dir is not None:
+        cred_dest = shlex.quote(str(claude_home_dir / ".credentials.json"))
         cred_block = textwrap.dedent(f"""\
-            # Copy fresh credentials via host-side shared directory.
-            HOST_CREDENTIALS={shlex.quote(str(host_credentials))}
-            CLAUDE_HOME_DIR={shlex.quote(str(claude_home_dir))}
-            if [ -f "$HOST_CREDENTIALS" ]; then
-                cp "$HOST_CREDENTIALS" "$CLAUDE_HOME_DIR/.credentials.json" 2>/dev/null || true
+            # Extract fresh credentials from macOS Keychain.
+            CRED_JSON=$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null) || true
+            if [ -n "$CRED_JSON" ]; then
+                printf '%s' "$CRED_JSON" > {cred_dest}
             fi
         """)
 
