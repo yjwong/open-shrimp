@@ -19,9 +19,10 @@ from open_shrimp.agent import (
     save_attachments,
 )
 from open_shrimp.stt import transcribe as stt_transcribe
-from claude_agent_sdk import ProcessError
+from claude_agent_sdk import CLIConnectionError, ProcessError
 from open_shrimp.client_manager import (
     CallbackContext,
+    close_session,
     get_or_create_session,
     receive_events,
     reconnect_session,
@@ -747,12 +748,12 @@ async def _start_agent_task(
                     # Reset retry counter on successful iteration.
                     container_retries = 0
 
-                except ProcessError:
+                except (ProcessError, CLIConnectionError):
                     if not is_containerized or container_retries >= max_container_retries:
                         raise
                     container_retries += 1
                     logger.warning(
-                        "Container crash detected for scope %s "
+                        "Sandbox crash detected for scope %s "
                         "(attempt %d/%d), reconnecting...",
                         scope, container_retries, max_container_retries,
                     )
@@ -786,6 +787,34 @@ async def _start_agent_task(
 
         except asyncio.CancelledError:
             logger.info("Agent task cancelled for scope %s", scope)
+        except (CLIConnectionError, ProcessError) as exc:
+            logger.exception("Agent task failed for scope %s", scope)
+            # Close the dead session so the next message starts fresh
+            # instead of reusing a broken client.
+            try:
+                await close_session(scope)
+            except Exception:
+                logger.debug("Failed to close dead session for scope %s", scope)
+            try:
+                if is_sandboxed(ctx_config):
+                    error_text = (
+                        "The sandbox process terminated unexpectedly "
+                        "\\(possibly due to a VM shutdown\\)\\. "
+                        "Send a new message to restart the session\\."
+                    )
+                else:
+                    error_text = (
+                        "The Claude process terminated unexpectedly\\. "
+                        "Send a new message to restart the session\\."
+                    )
+                await context.bot.send_message(
+                    chat_id=scope.chat_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    **_thread_kwargs(scope),
+                )
+            except Exception:
+                logger.exception("Failed to send error message")
         except Exception:
             logger.exception("Agent task failed for scope %s", scope)
             try:

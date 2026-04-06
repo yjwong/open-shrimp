@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
+    CLIConnectionError,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ProcessError,
@@ -172,6 +173,25 @@ _active_sessions: dict[ChatScope, AgentSession] = {}
 _context_locks: dict[str, asyncio.Lock] = {}
 
 
+def _is_client_alive(client: ClaudeSDKClient) -> bool:
+    """Check if the CLI subprocess is still running.
+
+    Pokes into the transport's private state to detect a terminated
+    process.  Returns True if the process appears healthy or if the
+    state cannot be determined (fail-open).
+    """
+    try:
+        transport = client._transport
+        if transport is None:
+            return False
+        process = getattr(transport, "_process", None)
+        if process is None:
+            return False
+        return process.returncode is None
+    except Exception:
+        return True
+
+
 async def get_or_create_session(
     scope: ChatScope,
     context_name: str,
@@ -207,17 +227,25 @@ async def get_or_create_session(
     existing = _active_sessions.get(scope)
     if existing is not None:
         if existing.context_name == context_name:
-            existing.callback_context.request_approval = callback_context.request_approval
-            existing.callback_context.handle_user_questions = callback_context.handle_user_questions
-            existing.callback_context.is_edit_auto_approved = callback_context.is_edit_auto_approved
-            existing.callback_context.notify_auto_approved_edit = callback_context.notify_auto_approved_edit
-            existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
-            logger.info(
-                "Reusing live client for scope %s context %s",
-                scope,
-                context_name,
-            )
-            return existing
+            if _is_client_alive(existing.client):
+                existing.callback_context.request_approval = callback_context.request_approval
+                existing.callback_context.handle_user_questions = callback_context.handle_user_questions
+                existing.callback_context.is_edit_auto_approved = callback_context.is_edit_auto_approved
+                existing.callback_context.notify_auto_approved_edit = callback_context.notify_auto_approved_edit
+                existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
+                logger.info(
+                    "Reusing live client for scope %s context %s",
+                    scope,
+                    context_name,
+                )
+                return existing
+            else:
+                logger.warning(
+                    "CLI process dead for scope %s context %s, closing stale session",
+                    scope,
+                    context_name,
+                )
+                await close_session(scope)
         else:
             logger.info(
                 "Context changed for scope %s (%s -> %s), closing old client",
