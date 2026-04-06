@@ -33,11 +33,15 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-LIMA_VERSION = "1.0.6"
+LIMA_VERSION = "2.1.1"
 
 _BIN_DIR = user_data_path("openshrimp") / "bin"
 
-_LIMA_STATE_DIR = user_data_path("openshrimp") / "lima"
+# Lima creates Unix sockets under LIMA_HOME/<instance>/ssh.sock.* which
+# must stay below UNIX_PATH_MAX (104 on macOS).  The platformdirs data
+# path (~/Library/Application Support/…) is too long, so we use a short
+# path under $HOME instead.
+_LIMA_STATE_DIR = Path.home() / ".openshrimp" / "lima"
 
 _DOWNLOAD_BASE = (
     f"https://github.com/lima-vm/lima/releases/download/v{LIMA_VERSION}"
@@ -122,23 +126,33 @@ def _download_lima_sync() -> str:
                     for chunk in resp.iter_bytes(chunk_size=65536):
                         f.write(chunk)
 
+        # Lima expects share/lima/ (guest agents, templates) relative to
+        # the install prefix.  Since bin/ -> _BIN_DIR, the prefix is its
+        # parent, so share/ -> _BIN_DIR.parent / "share".
+        prefix_dir = _BIN_DIR.parent
         with tarfile.open(tmp_path, "r:gz") as tar:
             for member in tar.getmembers():
-                # Extract files from bin/ subdirectory.
-                if member.name.startswith("bin/") and member.isfile():
-                    basename = os.path.basename(member.name)
-                    dest = _BIN_DIR / basename
-                    f = tar.extractfile(member)
-                    if f is not None:
-                        with open(dest, "wb") as out:
-                            out.write(f.read())
-                        dest.chmod(
-                            dest.stat().st_mode
-                            | stat.S_IXUSR
-                            | stat.S_IXGRP
-                            | stat.S_IXOTH
-                        )
-                        logger.debug("Extracted %s to %s", member.name, dest)
+                name = member.name.lstrip("./")
+                if not member.isfile():
+                    continue
+                if name.startswith("bin/"):
+                    dest = _BIN_DIR / os.path.basename(name)
+                elif name.startswith("share/"):
+                    dest = prefix_dir / name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                else:
+                    continue
+                f = tar.extractfile(member)
+                if f is not None:
+                    with open(dest, "wb") as out:
+                        out.write(f.read())
+                    dest.chmod(
+                        dest.stat().st_mode
+                        | stat.S_IXUSR
+                        | stat.S_IXGRP
+                        | stat.S_IXOTH
+                    )
+                    logger.debug("Extracted %s to %s", member.name, dest)
     finally:
         os.unlink(tmp_path)
 
@@ -170,16 +184,24 @@ def ensure_limactl_sync() -> str:
 
 
 def state_dir_for(context_name: str) -> Path:
-    """Return per-context state dir under ``LIMA_HOME``."""
-    return _LIMA_STATE_DIR / context_name
+    """Return per-context state dir (separate from LIMA_HOME).
+
+    This must NOT live under ``_LIMA_STATE_DIR`` because Lima treats
+    any subdirectory there with a ``lima.yaml`` as an instance.
+    """
+    return user_data_path("openshrimp") / "lima-state" / context_name
 
 
 def instance_name(context_name: str, instance_prefix: str = "openshrimp") -> str:
     """Return sanitised Lima instance name.
 
     Lima instance names must match ``^[a-zA-Z][a-zA-Z0-9_.-]*$``.
+
+    The prefix is intentionally omitted from the name because LIMA_HOME
+    already isolates our instances, and the extra length can push Unix
+    socket paths past the 104-char UNIX_PATH_MAX limit.
     """
-    raw = f"{instance_prefix}-{context_name}"
+    raw = context_name
     # Replace invalid characters with hyphens.
     sanitised = re.sub(r"[^a-zA-Z0-9_.-]", "-", raw)
     # Ensure it starts with a letter.
@@ -235,7 +257,9 @@ def generate_lima_yaml(
 
     template: dict = {
         "vmType": "vz",
-        "rosetta": {"enabled": True, "binfmt": True},
+        "vmOpts": {
+            "vz": {"rosetta": {"enabled": True, "binfmt": True}},
+        },
         "cpus": config.cpus,
         "memory": f"{config.memory}MiB",
         "disk": f"{config.disk_size}GiB",
@@ -243,7 +267,6 @@ def generate_lima_yaml(
         "mountType": "virtiofs",
         "mounts": mounts,
         "provision": provision,
-        "portForward": port_forward,
         "containerd": {"system": False, "user": False},
         "ssh": {"forwardAgent": True},
     }
@@ -657,6 +680,11 @@ def build_cli_wrapper(
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
 
+    # Forward ANTHROPIC_API_KEY only if set in the host environment.
+    api_key_export = ""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        api_key_export = " && export ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+
     git_env_export = ""
     if git_env_parts:
         git_env_export = " && " + " && ".join(git_env_parts)
@@ -673,21 +701,21 @@ def build_cli_wrapper(
         # Self-heal: check if instance is running, start if needed.
         # All pre-flight commands redirect stdin from /dev/null to avoid
         # consuming the SDK's JSON stream on our stdin.
-        STATUS=$("$LIMACTL" list --json 2>/dev/null </dev/null | \\
+        STATUS=$("$LIMACTL" list --json 2>/dev/null </dev/null | \
             python3 -c "
-import json, sys
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        inst = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if inst.get('name') == '$INSTANCE_NAME':
-        print(inst.get('status', ''))
-        break
-" 2>/dev/null || echo "")
+        import json, sys
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                inst = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if inst.get('name') == '$INSTANCE_NAME':
+                print(inst.get('status', ''))
+                break
+        " 2>/dev/null || echo "")
 
         if [ "$STATUS" != "Running" ]; then
             "$LIMACTL" start "$INSTANCE_NAME" </dev/null 2>/dev/null || true
@@ -701,7 +729,7 @@ for line in sys.stdin:
 
         # Build remote command with proper shell-escaping.
         # Source /etc/profile for full PATH (needed for npx / Playwright MCP).
-        REMOTE_CMD=". /etc/profile && export ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY{git_env_export} && cd {shlex.quote(project_dir)} && claude"
+        REMOTE_CMD=". /etc/profile{api_key_export}{git_env_export} && cd {shlex.quote(project_dir)} && claude"
         for arg in "$@"; do
             REMOTE_CMD+=" $(printf '%q' "$arg")"
         done
