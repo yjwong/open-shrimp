@@ -323,6 +323,7 @@ def _build_cloud_init_user_data(
             "      #!/bin/sh\n"
             "      # Start Chrome with Wayland native rendering on virtio-gpu.\n"
             "      google-chrome --ozone-platform=wayland \\\n"
+            "        --user-data-dir=/home/claude/.config/google-chrome-debug \\\n"
             "        --remote-debugging-port=9222 \\\n"
             "        --disable-background-networking \\\n"
             "        --disable-default-apps \\\n"
