@@ -64,27 +64,66 @@ def domain_name(context_name: str, instance_prefix: str = _DOMAIN_PREFIX) -> str
 # ---------------------------------------------------------------------------
 
 
+_MIN_VIRTIOFSD_VERSION = (1, 11, 0)
+"""Minimum virtiofsd version required.
+
+v1.10.0 (shipped in Ubuntu Noble) has a vring notification deadlock:
+after a transient ``process_queue_*()`` error, notifications are never
+re-enabled, so the guest blocks forever.  Fixed in v1.11.0 (dbfe3c4).
+"""
+
+
+def _parse_virtiofsd_version(path: str) -> tuple[int, ...] | None:
+    """Run ``virtiofsd --version`` and parse the version tuple."""
+    try:
+        result = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=5,
+        )
+        # Output: "virtiofsd 1.13.3"
+        for token in result.stdout.strip().split():
+            parts = token.split(".")
+            if len(parts) >= 2 and parts[0].isdigit():
+                return tuple(int(p) for p in parts)
+    except Exception:
+        pass
+    return None
+
+
 def find_virtiofsd() -> str | None:
     """Locate the virtiofsd binary.
 
-    Checks ``$PATH`` first, then known system locations on Ubuntu/Debian.
+    Prefers the managed binary in ``~/.local/share/openshrimp/bin/``
+    (auto-downloaded, known-good version), then falls back to ``$PATH``
+    and known system locations — but only if they meet the minimum
+    version requirement.
 
     Returns:
         Absolute path to virtiofsd, or ``None`` if not found.
     """
-    # Check $PATH first.
+    # 1. Managed binary (auto-downloaded, always preferred).
+    managed = user_data_path("openshrimp") / "bin" / "virtiofsd"
+    if managed.is_file() and os.access(str(managed), os.X_OK):
+        return str(managed)
+
+    # 2. $PATH and known system locations — version-gated.
+    candidates: list[str] = []
     path = shutil.which("virtiofsd")
     if path:
-        return path
-
-    # Known system locations (Ubuntu, Debian).
-    for candidate in (
+        candidates.append(path)
+    for system_path in (
         "/usr/libexec/virtiofsd",
         "/usr/lib/qemu/virtiofsd",
     ):
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        if os.path.isfile(system_path) and os.access(system_path, os.X_OK):
+            candidates.append(system_path)
+
+    for candidate in candidates:
+        ver = _parse_virtiofsd_version(candidate)
+        if ver is not None and ver >= _MIN_VIRTIOFSD_VERSION:
             return candidate
 
+    # 3. If system versions are too old, return None so the caller can
+    #    trigger an auto-download or show an error.
     return None
 
 
