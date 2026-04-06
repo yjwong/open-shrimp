@@ -286,7 +286,6 @@ class LibvirtSandbox:
                         "current=%s desired=%s — stopping for re-define",
                         self._dom_name, current_tags, desired_tags,
                     )
-                    self._stop_virtiofsd()
                     self.stop()
                     # After stop, domain is inactive — undefine and re-define.
                     try:
@@ -338,11 +337,27 @@ class LibvirtSandbox:
             "SSH port not set — call ensure_environment() first"
         )
 
-        # Start virtiofsd instances if needed (must be running before the VM).
-        # One virtiofsd per shared directory.
-        if self._use_virtiofs and not self._virtiofsd_procs:
-            _log(log_file, "Starting virtiofs daemons...")
-            self._start_all_virtiofsd()
+        # Ensure virtiofsd daemons are available for domain start.
+        #
+        # virtiofsd removes its socket once a client (QEMU) connects, so
+        # socket existence is only meaningful *before* the VM is running.
+        # We use process liveness (_virtiofsd_procs / poll()) when the
+        # current OpenShrimp process started them, and domain-active
+        # status when we inherited a running VM from a previous process.
+        if self._use_virtiofs:
+            if self._virtiofsd_procs:
+                # We started these — check if they're still alive.
+                if any(p.poll() is not None for p in self._virtiofsd_procs):
+                    self._reap_dead_virtiofsd()
+                    _log(log_file, "Starting virtiofs daemons...")
+                    self._start_all_virtiofsd()
+            elif not self._is_domain_active():
+                # Fresh process and VM is not running — need fresh daemons
+                # before domain.create().  If the VM *is* active, old
+                # virtiofsd (from a previous OpenShrimp process) is already
+                # connected and serving the VM.
+                _log(log_file, "Starting virtiofs daemons...")
+                self._start_all_virtiofsd()
 
         # Start domain if not active.
         cold_start = False
@@ -541,7 +556,9 @@ class LibvirtSandbox:
                 self._dom_name,
             )
             domain.destroy()
-            self._stop_virtiofsd()
+            # virtiofsd self-terminates when the VM disconnects; reap
+            # the child processes so they don't linger as zombies.
+            self._reap_dead_virtiofsd()
             return
 
         # Wait for shutdown to complete.
@@ -550,10 +567,10 @@ class LibvirtSandbox:
             try:
                 if not domain.isActive():
                     logger.info("Domain %s shut down gracefully", self._dom_name)
-                    self._stop_virtiofsd()
+                    self._reap_dead_virtiofsd()
                     return
             except libvirt.libvirtError:
-                self._stop_virtiofsd()
+                self._reap_dead_virtiofsd()
                 return
             time.sleep(0.5)
 
@@ -566,7 +583,7 @@ class LibvirtSandbox:
             domain.destroy()
         except libvirt.libvirtError:
             pass
-        self._stop_virtiofsd()
+        self._reap_dead_virtiofsd()
 
     def get_screenshots_dir(self) -> Path | None:
         return self._screenshots_dir
@@ -758,16 +775,22 @@ class LibvirtSandbox:
                 break
             _time.sleep(0.1)
 
-    def _stop_virtiofsd(self) -> None:
-        """Stop all virtiofsd processes."""
+    def _reap_dead_virtiofsd(self) -> None:
+        """Reap exited virtiofsd child processes to avoid zombies.
+
+        Does not kill live processes — virtiofsd self-terminates when the
+        VM disconnects.  This only collects exit status so the kernel can
+        release the process table entries.
+        """
+        alive: list[subprocess.Popen[bytes]] = []
         for proc in self._virtiofsd_procs:
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                proc.kill()
-            logger.info("Stopped virtiofsd (pid=%d)", proc.pid)
-        self._virtiofsd_procs.clear()
+            if proc.poll() is not None:
+                logger.info(
+                    "Reaped virtiofsd (pid=%d, rc=%d)", proc.pid, proc.returncode,
+                )
+            else:
+                alive.append(proc)
+        self._virtiofsd_procs = alive
 
     def _is_domain_active(self) -> bool:
         """Check if the domain is currently active."""
@@ -786,10 +809,7 @@ class LibvirtSandbox:
         """
         import libvirt
 
-        # 1. Stop virtiofsd.
-        self._stop_virtiofsd()
-
-        # 2. Destroy + undefine the domain.
+        # 1. Destroy + undefine the domain (virtiofsd self-terminates).
         try:
             domain = self._conn.lookupByName(self._dom_name)
             if domain.isActive():
@@ -799,14 +819,14 @@ class LibvirtSandbox:
         except libvirt.libvirtError:
             pass
 
-        # 3. Delete the overlay (forces fresh cloud-init on next boot).
+        # 2. Delete the overlay (forces fresh cloud-init on next boot).
         overlay = self._sdir / "overlay.qcow2"
         overlay.unlink(missing_ok=True)
         # Also delete cloud-init ISO so it gets regenerated.
         (self._sdir / "cloud-init.iso").unlink(missing_ok=True)
         logger.info("Deleted overlay and cloud-init for rebuild")
 
-        # 4. Re-run ensure_environment to regenerate overlay + cloud-init.
+        # 3. Re-run ensure_environment to regenerate overlay + cloud-init.
         # Do NOT start the domain here — let the caller's ensure_running()
         # handle it so it correctly detects a cold start and waits for
         # cloud-init to complete.
