@@ -789,6 +789,8 @@ class LibvirtSandboxManager:
         except libvirt.libvirtError:
             return
 
+        # Send ACPI shutdown to all active domains first.
+        pending: list[tuple[object, str]] = []
         for domain in domains:
             name = domain.name()
             if not name.startswith(prefix):
@@ -797,35 +799,40 @@ class LibvirtSandboxManager:
             if not domain.isActive():
                 continue
 
-            # Graceful ACPI shutdown.
             try:
                 domain.shutdown()
                 logger.info("Sent ACPI shutdown to %s", name)
+                pending.append((domain, name))
             except libvirt.libvirtError:
                 try:
                     domain.destroy()
                 except libvirt.libvirtError:
                     pass
                 logger.info("Force-destroyed %s", name)
-                continue
 
-            # Wait for graceful shutdown.
-            deadline = time.monotonic() + _SHUTDOWN_TIMEOUT
-            while time.monotonic() < deadline:
+        # Wait for all domains to shut down in parallel.
+        deadline = time.monotonic() + _SHUTDOWN_TIMEOUT
+        while pending and time.monotonic() < deadline:
+            still_alive: list[tuple[object, str]] = []
+            for domain, name in pending:
                 try:
-                    if not domain.isActive():
+                    if domain.isActive():
+                        still_alive.append((domain, name))
+                    else:
                         logger.info("Domain %s shut down", name)
-                        break
                 except libvirt.libvirtError:
-                    break
+                    logger.info("Domain %s shut down", name)
+            pending = still_alive
+            if pending:
                 time.sleep(0.5)
-            else:
-                # Timeout — force destroy.
-                try:
-                    domain.destroy()
-                    logger.warning("Force-destroyed %s after timeout", name)
-                except libvirt.libvirtError:
-                    pass
+
+        # Force-destroy any remaining domains.
+        for domain, name in pending:
+            try:
+                domain.destroy()
+                logger.warning("Force-destroyed %s after timeout", name)
+            except libvirt.libvirtError:
+                pass
 
         self._sandbox_cache.clear()
 
