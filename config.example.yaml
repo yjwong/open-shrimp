@@ -45,7 +45,7 @@ contexts:
     # locked_for_chats:
     #   - -1001234567890  # Locks this group chat to this context (cannot switch)
     # sandbox:                     # Run the Claude CLI in an isolated sandbox.
-    #   backend: docker            # "docker" (Linux) or "macos"
+    #   backend: docker            # "docker" (Linux), "macos", or "lima" (macOS VM)
     #                              # Provides strong filesystem isolation — the agent
     #                              # can only access the project directory and its
     #                              # own session storage.
@@ -63,6 +63,13 @@ contexts:
     #                              # Claude can take screenshots, click, type, scroll,
     #                              # and switch windows via MCP tools. A VNC server
     #                              # is exposed for observability (check /status).
+    #   # Lima backend (macOS only) — full VM isolation via Apple Virtualization.framework:
+    #   # backend: lima
+    #   # memory: 4096              # VM memory in MB (default: 2048)
+    #   # cpus: 4                   # VM CPU cores (default: 2)
+    #   # disk_size: 20             # VM disk in GB (default: 20)
+    #   # provision: |              # Shell script run on first boot
+    #   #   apt-get install -y nodejs npm
 
 default_context: default
 

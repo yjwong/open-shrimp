@@ -513,6 +513,162 @@ class MacOSSandboxManager:
 
 
 # ---------------------------------------------------------------------------
+# Lima implementation
+# ---------------------------------------------------------------------------
+
+
+class LimaSandboxManager:
+    """Lima-backed :class:`SandboxManager` for macOS VM isolation.
+
+    Uses Lima (Apple Virtualization.framework via the VZ driver) for full
+    VM isolation.  The ``limactl`` binary is auto-downloaded on first use.
+    """
+
+    def __init__(self) -> None:
+        self._instance_prefix = "openshrimp"
+        self._container_label = "openshrimp"  # unused, but protocol requires it
+        self._limactl_path: str | None = None
+        self._sandbox_cache: dict[str, Sandbox] = {}
+
+        self._active_builds: dict[str, Path] = {}
+        self._active_builds_lock = threading.Lock()
+
+        self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
+        self._state_dir = user_data_path("openshrimp") / "lima"
+
+    # -- Instance naming ------------------------------------------------------
+
+    def set_instance_prefix(self, instance_name: str | None) -> None:
+        if instance_name:
+            self._instance_prefix = f"openshrimp-{instance_name}"
+            self._container_label = f"openshrimp-{instance_name}"
+        else:
+            self._instance_prefix = "openshrimp"
+            self._container_label = "openshrimp"
+
+    @property
+    def instance_prefix(self) -> str:
+        return self._instance_prefix
+
+    @property
+    def container_label(self) -> str:
+        return self._container_label
+
+    # -- Global lifecycle -----------------------------------------------------
+
+    def start_reaper(self) -> None:
+        """Ensure limactl binary is available (auto-download if needed)."""
+        from open_shrimp.sandbox.lima_helpers import ensure_limactl_sync
+
+        self._limactl_path = ensure_limactl_sync()
+
+    def stop_reaper(self) -> None:
+        pass
+
+    def stop_all(self) -> None:
+        """Stop all OpenShrimp-managed Lima instances."""
+        if self._limactl_path is None:
+            self._sandbox_cache.clear()
+            return
+
+        from open_shrimp.sandbox.lima_helpers import (
+            limactl_list_json,
+            limactl_stop,
+            _lima_env,
+        )
+
+        prefix = self._instance_prefix + "-"
+        for inst in limactl_list_json(self._limactl_path):
+            name = inst.get("name", "")
+            if not name.startswith(prefix):
+                continue
+            if inst.get("status") == "Running":
+                limactl_stop(self._limactl_path, name)
+                logger.info("Stopped Lima instance %s", name)
+
+        self._sandbox_cache.clear()
+
+    # -- Factory --------------------------------------------------------------
+
+    def create_sandbox(
+        self, context_name: str, context: ContextConfig,
+    ) -> Sandbox:
+        cached = self._sandbox_cache.get(context_name)
+        if cached is not None:
+            return cached
+
+        if self._limactl_path is None:
+            raise RuntimeError(
+                "Lima not available — either start_reaper() was not called "
+                "or limactl could not be downloaded. Install with: "
+                "brew install lima"
+            )
+        assert context.sandbox is not None
+
+        from open_shrimp.sandbox.lima import LimaSandbox
+
+        sandbox = LimaSandbox(
+            context_name=context_name,
+            config=context.sandbox,
+            project_dir=context.directory,
+            limactl_path=self._limactl_path,
+            additional_directories=context.additional_directories or None,
+            instance_prefix=self._instance_prefix,
+            computer_use=context.sandbox.computer_use,
+        )
+        self._sandbox_cache[context_name] = sandbox
+        return sandbox
+
+    # -- Build logging --------------------------------------------------------
+
+    def register_build(self, context_name: str) -> Path:
+        self._build_log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._build_log_dir / f"{context_name}.log"
+        log_path.write_bytes(b"")
+        with self._active_builds_lock:
+            self._active_builds[context_name] = log_path
+        register_active_build(context_name, log_path, self)
+        logger.info(
+            "Registered build log for context '%s': %s",
+            context_name, log_path,
+        )
+        return log_path
+
+    def unregister_build(self, context_name: str) -> None:
+        with self._active_builds_lock:
+            self._active_builds.pop(context_name, None)
+        unregister_active_build(context_name)
+        logger.info("Unregistered build for context '%s'", context_name)
+
+        log_path = self._build_log_dir / f"{context_name}.log"
+
+        def _cleanup() -> None:
+            try:
+                log_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        timer = threading.Timer(3600, _cleanup)
+        timer.daemon = True
+        timer.start()
+
+    def is_build_active(self, context_name: str) -> bool:
+        with self._active_builds_lock:
+            return context_name in self._active_builds
+
+    @property
+    def build_log_dir(self) -> Path:
+        return self._build_log_dir
+
+    @property
+    def state_dir(self) -> Path:
+        return self._state_dir
+
+    def claude_home_dir(self, context_name: str) -> Path:
+        return self._state_dir / context_name / "claude-home"
+
+
+# ---------------------------------------------------------------------------
 # Libvirt implementation
 # ---------------------------------------------------------------------------
 
@@ -804,7 +960,17 @@ def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
         A dict mapping backend name to its :class:`SandboxManager` instance.
     """
     if sys.platform == "darwin":
-        return {"macos": MacOSSandboxManager()}
+        managers: dict[str, SandboxManager] = {}
+        uses_lima = any(
+            ctx.sandbox is not None
+            and ctx.sandbox.enabled
+            and ctx.sandbox.backend == "lima"
+            for ctx in config.contexts.values()
+        )
+        if uses_lima:
+            managers["lima"] = LimaSandboxManager()
+        managers["macos"] = MacOSSandboxManager()
+        return managers
 
     # Collect all backends used by sandboxed contexts.
     backends: set[str] = set()

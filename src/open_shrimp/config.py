@@ -46,7 +46,7 @@ class SandboxConfig:
 
 
 # Valid values for sandbox config fields.
-_SANDBOX_BACKENDS = {"docker", "libvirt", "macos"}
+_SANDBOX_BACKENDS = {"docker", "libvirt", "lima", "macos"}
 
 
 def is_sandboxed(context: "ContextConfig") -> bool:
