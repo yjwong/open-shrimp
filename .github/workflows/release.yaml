@@ -72,10 +72,12 @@ jobs:
             artifact: openshrimp-linux-x86_64
             sdist_artifact: sdist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
+            features: "libvirt"
           - os: ubuntu-24.04-arm
             artifact: openshrimp-linux-aarch64
             sdist_artifact: sdist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
+            features: "libvirt"
           - os: macos-latest
             artifact: openshrimp-macos-aarch64
             sdist_artifact: sdist-openshrimp
@@ -101,6 +103,10 @@ jobs:
           name: ${{ matrix.sdist_artifact }}
           path: dist
 
+      - name: Install libvirt development headers
+        if: matrix.features && contains(matrix.features, 'libvirt')
+        run: sudo apt-get update && sudo apt-get install -y libvirt-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -120,6 +126,7 @@ jobs:
       - name: Build with PyApp
         env:
           PYAPP_PROJECT_PATH: ${{ steps.sdist.outputs.filename }}
+          PYAPP_PROJECT_FEATURES: ${{ matrix.features || '' }}
           PYAPP_PYTHON_VERSION: "3.11"
           PYAPP_EXEC_CODE: ${{ matrix.exec_code }}
           PYAPP_DISTRIBUTION_EMBED: "1"
