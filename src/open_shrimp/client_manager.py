@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,96 @@ from open_shrimp.sandbox import Sandbox, SandboxManager
 from open_shrimp.tools import create_openshrimp_mcp_server
 
 logger = logging.getLogger(__name__)
+
+# Host-side credentials file that needs to be synced into sandboxes.
+_HOST_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
+
+# Single credentials watcher shared across all sandboxed sessions.
+# Maps context_name -> claude_home_dir for all active sandbox sessions.
+_cred_sync_targets: dict[str, Path] = {}
+_cred_sync_lock = threading.Lock()
+_cred_watcher_stop: threading.Event | None = None
+_cred_watcher_thread: threading.Thread | None = None
+
+
+def _watch_credentials(stop: threading.Event) -> None:
+    """Background thread: sync host credentials into all active sandboxes.
+
+    Uses ``watchfiles`` (inotify on Linux, FSEvents on macOS) to detect
+    writes to ``~/.claude/.credentials.json`` and copies the file into
+    every registered sandbox's host-side claude-home directory (which is
+    shared into the sandbox via volume mount / virtiofs / 9p).
+
+    This keeps long-lived SDK clients (where the wrapper script doesn't
+    re-run) in sync with host-side token refreshes.
+    """
+    import shutil
+
+    from watchfiles import watch
+
+    if not _HOST_CREDENTIALS.exists():
+        return
+
+    try:
+        for _changes in watch(
+            _HOST_CREDENTIALS, stop_event=stop, rust_timeout=1000,
+        ):
+            if stop.is_set():
+                break
+            if not _HOST_CREDENTIALS.exists():
+                continue
+            with _cred_sync_lock:
+                targets = list(_cred_sync_targets.items())
+            for ctx_name, claude_home in targets:
+                try:
+                    dest = claude_home / ".credentials.json"
+                    shutil.copy2(str(_HOST_CREDENTIALS), str(dest))
+                    logger.debug(
+                        "Synced credentials to %s (context %s)",
+                        dest, ctx_name,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to sync credentials for context %s",
+                        ctx_name, exc_info=True,
+                    )
+    except Exception:
+        if not stop.is_set():
+            logger.debug("Credentials watcher exited", exc_info=True)
+
+
+def _register_cred_sync(context_name: str, claude_home_dir: Path) -> None:
+    """Register a sandbox for credential syncing, starting the watcher if needed."""
+    global _cred_watcher_stop, _cred_watcher_thread
+
+    with _cred_sync_lock:
+        _cred_sync_targets[context_name] = claude_home_dir
+
+        if _cred_watcher_thread is None or not _cred_watcher_thread.is_alive():
+            _cred_watcher_stop = threading.Event()
+            _cred_watcher_thread = threading.Thread(
+                target=_watch_credentials,
+                args=(_cred_watcher_stop,),
+                daemon=True,
+            )
+            _cred_watcher_thread.start()
+            logger.debug("Started credentials watcher thread")
+
+
+def _unregister_cred_sync(context_name: str) -> None:
+    """Unregister a sandbox; stop the watcher if no targets remain."""
+    global _cred_watcher_stop, _cred_watcher_thread
+
+    with _cred_sync_lock:
+        _cred_sync_targets.pop(context_name, None)
+
+        if not _cred_sync_targets and _cred_watcher_stop is not None:
+            _cred_watcher_stop.set()
+            if _cred_watcher_thread is not None:
+                _cred_watcher_thread.join(timeout=2)
+            _cred_watcher_stop = None
+            _cred_watcher_thread = None
+            logger.debug("Stopped credentials watcher thread")
 
 
 @dataclass
@@ -449,6 +540,14 @@ async def get_or_create_session(
         sandbox=sandbox,
         wrapper_cleanup_paths=wrapper_cleanup_paths,
     )
+
+    # Register this sandbox for credential syncing (starts the watcher
+    # if not already running).
+    if sandbox is not None and sandbox_manager is not None and _HOST_CREDENTIALS.exists():
+        claude_home = sandbox_manager.claude_home_dir(context_name)
+        if claude_home.exists():
+            _register_cred_sync(context_name, claude_home)
+
     _active_sessions[scope] = session
     return session
 
@@ -522,6 +621,17 @@ async def close_session(scope: ChatScope) -> None:
     session = _active_sessions.pop(scope, None)
     if session is None:
         return
+    # Unregister from credential syncing if this was a sandboxed session.
+    # Check if any other active session still uses the same context before
+    # removing the sync target.
+    if session.sandbox is not None:
+        ctx = session.context_name
+        still_used = any(
+            s.context_name == ctx and s.sandbox is not None
+            for s in _active_sessions.values()
+        )
+        if not still_used:
+            _unregister_cred_sync(ctx)
     try:
         async with asyncio.timeout(5):
             await session.client.disconnect()
