@@ -806,20 +806,8 @@ class LibvirtSandbox:
         (self._sdir / "cloud-init.iso").unlink(missing_ok=True)
         logger.info("Deleted overlay and cloud-init for rebuild")
 
-        # 4. Re-run ensure_environment + ensure_running (without SSH wait).
+        # 4. Re-run ensure_environment to regenerate overlay + cloud-init.
+        # Do NOT start the domain here — let the caller's ensure_running()
+        # handle it so it correctly detects a cold start and waits for
+        # cloud-init to complete.
         self.ensure_environment(log_file=log_file)
-        # Re-start virtiofsd instances.
-        if self._use_virtiofs:
-            _log(log_file, "Starting virtiofs daemons...")
-            self._start_all_virtiofsd()
-
-        # Start the domain.
-        _log(log_file, "Starting rebuilt VM...")
-        try:
-            domain = self._conn.lookupByName(self._dom_name)
-            domain.create()
-            logger.info("Started rebuilt domain %s", self._dom_name)
-        except libvirt.libvirtError as e:
-            raise RuntimeError(
-                f"Failed to start rebuilt domain {self._dom_name}: {e}"
-            ) from e
