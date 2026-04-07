@@ -89,6 +89,13 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     if await handle_approval_callback(query, data, config, context):
         return
 
+    # Auto-update confirmation
+    if data.startswith(("update_confirm:", "update_skip:")):
+        from open_shrimp.updater import handle_update_callback
+
+        await handle_update_callback(query, data, config)
+        return
+
     # Unknown callback — ignore silently
     logger.debug("Unhandled callback data: %s", data)
 
@@ -241,8 +248,10 @@ async def run_bot(
     await app.updater.start_polling()
     logger.info("Bot is running")
 
-    # If we were restarted via /restart, send a confirmation message.
+    # If we were restarted via /restart or auto-update, send a confirmation.
     import os as _os
+
+    update_version = _os.environ.pop("OPENSHRIMP_UPDATE_VERSION", None)
 
     restart_chat = _os.environ.pop("OPENSHRIMP_RESTART_CHAT_ID", None)
     if restart_chat is not None:
@@ -256,6 +265,22 @@ async def run_bot(
             )
         except Exception:
             logger.warning("Failed to send restart confirmation", exc_info=True)
+
+    # Notify all allowed users about a successful auto-update.
+    if update_version is not None:
+        from open_shrimp.updater import _escape_md
+
+        for uid in config.allowed_users:
+            try:
+                await app.bot.send_message(
+                    chat_id=uid,
+                    text=f"Updated to `{_escape_md(update_version)}`\\. Back online\\.",
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to send update confirmation to %d", uid, exc_info=True
+                )
 
     # Instantiate one SandboxManager per backend used in the config.
     _sandbox_managers = sandbox_managers or create_sandbox_managers(config)
@@ -278,6 +303,11 @@ async def run_bot(
             "JobQueue not available — scheduled tasks disabled. "
             "Install python-telegram-bot[job-queue] to enable."
         )
+
+    # Register auto-update checker.
+    from open_shrimp.updater import register_update_checker
+
+    register_update_checker(app)
 
     # Start config file watcher for live reloading.
     watcher_task = None

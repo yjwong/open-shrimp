@@ -87,6 +87,7 @@ class Config:
     default_context: str
     review: ReviewConfig = field(default_factory=ReviewConfig)
     instance_name: str | None = None
+    auto_update: bool = True
 
 
 def _validate_raw(raw: dict) -> None:
@@ -321,6 +322,7 @@ def _parse(raw: dict) -> Config:
         default_context=raw["default_context"],
         review=review,
         instance_name=raw.get("instance_name"),
+        auto_update=bool(raw.get("auto_update", True)),
     )
 
 
@@ -432,6 +434,9 @@ def config_to_dict(config: Config) -> dict[str, Any]:
 
     if config.instance_name is not None:
         result["instance_name"] = config.instance_name
+
+    if not config.auto_update:
+        result["auto_update"] = False
 
     return result
 
