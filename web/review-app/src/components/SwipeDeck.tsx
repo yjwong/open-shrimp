@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { FileSummary, Hunk } from "../lib/types";
-import { stageHunk, unstageHunk, skipHunk, commitChanges, StaleHunkError } from "../lib/api";
+import { stageHunk, unstageHunk, skipHunk, stageFile, unstageFile, commitChanges, StaleHunkError } from "../lib/api";
 import { HunkCard } from "./HunkCard";
 import { FilePicker } from "./FilePicker";
 import { ProgressBar } from "./ProgressBar";
@@ -24,6 +24,8 @@ interface Decision {
   filePath: string;
   action: "staged" | "skipped";
   wasAlreadyStaged: boolean;
+  /** For batch stage-file operations: IDs of all hunks staged, and how many indices to rewind. */
+  batch?: { stagedIds: string[]; advancedBy: number };
 }
 
 export function SwipeDeck({
@@ -78,24 +80,33 @@ export function SwipeDeck({
 
         setIsProcessing(true);
         try {
-          // If we staged the hunk, unstage it
-          if (lastDecision.action === "staged" && !lastDecision.wasAlreadyStaged) {
-            await unstageHunk(lastDecision.hunkId, chatId, dir, threadId);
-            onUpdateFileStagedCount(lastDecision.filePath, -1);
-          }
-          // If we unstaged an already-staged hunk (skipped), re-stage it
-          if (lastDecision.action === "skipped" && lastDecision.wasAlreadyStaged) {
-            await stageHunk(lastDecision.hunkId, chatId, dir, threadId);
-            onUpdateFileStagedCount(lastDecision.filePath, +1);
-          }
-
-          setHistory((h) => h.slice(0, -1));
-          setCurrentIndex((i) => Math.max(0, i - 1));
-
-          if (lastDecision.action === "staged") {
-            setStagedCount((c) => Math.max(0, c - 1));
+          if (lastDecision.batch) {
+            // Undo a batch stage-file operation.
+            await unstageFile(lastDecision.batch.stagedIds, chatId, dir, threadId);
+            onUpdateFileStagedCount(lastDecision.filePath, -lastDecision.batch.stagedIds.length);
+            setHistory((h) => h.slice(0, -1));
+            setCurrentIndex((i) => Math.max(0, i - lastDecision.batch!.advancedBy));
+            setStagedCount((c) => Math.max(0, c - lastDecision.batch!.advancedBy));
           } else {
-            setSkippedCount((c) => Math.max(0, c - 1));
+            // If we staged the hunk, unstage it
+            if (lastDecision.action === "staged" && !lastDecision.wasAlreadyStaged) {
+              await unstageHunk(lastDecision.hunkId, chatId, dir, threadId);
+              onUpdateFileStagedCount(lastDecision.filePath, -1);
+            }
+            // If we unstaged an already-staged hunk (skipped), re-stage it
+            if (lastDecision.action === "skipped" && lastDecision.wasAlreadyStaged) {
+              await stageHunk(lastDecision.hunkId, chatId, dir, threadId);
+              onUpdateFileStagedCount(lastDecision.filePath, +1);
+            }
+
+            setHistory((h) => h.slice(0, -1));
+            setCurrentIndex((i) => Math.max(0, i - 1));
+
+            if (lastDecision.action === "staged") {
+              setStagedCount((c) => Math.max(0, c - 1));
+            } else {
+              setSkippedCount((c) => Math.max(0, c - 1));
+            }
           }
         } catch (err) {
           if (err instanceof StaleHunkError) {
@@ -184,6 +195,57 @@ export function SwipeDeck({
     overlayLeftRef.current?.classList.remove("active");
     overlayDownRef.current?.classList.remove("active");
   }, []);
+
+  const handleStageFile = useCallback(async () => {
+    if (!currentHunk) return;
+    const filePath = currentHunk.file_path;
+
+    setError(null);
+    setIsProcessing(true);
+
+    try {
+      const stagedIds = await stageFile(filePath, chatId, dir, threadId);
+
+      // Count how many hunks from currentIndex onward belong to this file
+      // so we can advance past them.
+      let advancedBy = 0;
+      for (let i = currentIndex; i < hunks.length; i++) {
+        if (hunks[i]!.file_path === filePath) {
+          advancedBy++;
+        } else {
+          break;
+        }
+      }
+
+      // Also count hunks before currentIndex in this file that were
+      // already staged (for accurate staged count tracking).
+      const newlyStagedCount = stagedIds.length;
+
+      // Record a single batch decision for undo.
+      setHistory((h) => [
+        ...h,
+        {
+          hunkId: currentHunk.id,
+          filePath,
+          action: "staged",
+          wasAlreadyStaged: false,
+          batch: { stagedIds, advancedBy },
+        },
+      ]);
+
+      setStagedCount((c) => c + advancedBy);
+      onUpdateFileStagedCount(filePath, newlyStagedCount);
+      setCurrentIndex((i) => i + advancedBy);
+    } catch (err) {
+      if (err instanceof StaleHunkError) {
+        setError("Changes detected — please refresh");
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to stage file");
+      }
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [currentHunk, currentIndex, hunks, chatId, dir, threadId, onUpdateFileStagedCount]);
 
   const { bind, cardRef, exitingRef } = useSwipe({
     onSwipe: handleSwipe,
@@ -459,7 +521,7 @@ export function SwipeDeck({
             >
               Undo
             </div>
-            <HunkCard hunk={currentHunk} />
+            <HunkCard hunk={currentHunk} onStageFile={handleStageFile} />
           </div>
         )}
 

@@ -1,12 +1,40 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import type { Hunk } from "../lib/types";
 import { highlightLines, type HighlightedLine } from "../lib/shiki";
 
 interface HunkCardProps {
   hunk: Hunk;
+  onStageFile?: () => void;
 }
 
-export function HunkCard({ hunk }: HunkCardProps) {
+export function HunkCard({ hunk, onStageFile }: HunkCardProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // Close menu on outside tap.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent | TouchEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("touchstart", handler);
+    };
+  }, [menuOpen]);
+
+  const handleStageFile = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      setMenuOpen(false);
+      onStageFile?.();
+    },
+    [onStageFile],
+  );
   const [lines, setLines] = useState<HighlightedLine[] | null>(null);
 
   useEffect(() => {
@@ -26,12 +54,42 @@ export function HunkCard({ hunk }: HunkCardProps) {
     };
   }, [hunk]);
 
+  const headerRight = (
+    <>
+      {hunk.staged && <span className="hunk-card-badge">Staged</span>}
+      {onStageFile && (
+        <div className="hunk-card-menu" ref={menuRef}>
+          <button
+            className="hunk-card-menu-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              setMenuOpen((o) => !o);
+            }}
+            aria-label="File actions"
+          >
+            ⋮
+          </button>
+          {menuOpen && (
+            <div className="hunk-card-menu-dropdown">
+              <button
+                className="hunk-card-menu-item"
+                onClick={handleStageFile}
+              >
+                Stage entire file
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+
   if (hunk.is_binary) {
     return (
       <div className="hunk-card">
         <div className={`hunk-card-header${hunk.staged ? " staged" : ""}`}>
           <span className="hunk-card-filepath">{hunk.file_path}</span>
-          {hunk.staged && <span className="hunk-card-badge">Staged</span>}
+          {headerRight}
         </div>
         <div className="hunk-card-binary">
           <div className="binary-icon">📦</div>
@@ -46,7 +104,7 @@ export function HunkCard({ hunk }: HunkCardProps) {
       <div className="hunk-card">
         <div className={`hunk-card-header${hunk.staged ? " staged" : ""}`}>
           <span className="hunk-card-filepath">{hunk.file_path}</span>
-          {hunk.staged && <span className="hunk-card-badge">Staged</span>}
+          {headerRight}
         </div>
         <div className="hunk-card-binary">
           <div className="binary-icon">📄</div>
@@ -60,7 +118,7 @@ export function HunkCard({ hunk }: HunkCardProps) {
     <div className="hunk-card">
       <div className={`hunk-card-header${hunk.staged ? " staged" : ""}`}>
         <span className="hunk-card-filepath">{hunk.file_path}</span>
-        {hunk.staged && <span className="hunk-card-badge">Staged</span>}
+        {headerRight}
       </div>
       <div className="hunk-card-meta">{hunk.hunk_header}</div>
       <div className="hunk-card-body">

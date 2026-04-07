@@ -264,14 +264,15 @@ export function useSwipe({
     const onTouchStart = (e: TouchEvent) => {
       // Allow native touch handling inside scrollable areas so the
       // browser can perform native scrolling on .hunk-card-body.
+      // Also allow taps on interactive elements like the kebab menu.
       const target = e.target as HTMLElement | null;
-      if (target?.closest(".hunk-card-body")) return;
+      if (target?.closest(".hunk-card-body") || target?.closest(".hunk-card-menu")) return;
       e.preventDefault();
     };
 
     const onTouchMove = (e: TouchEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target?.closest(".hunk-card-body")) return;
+      if (target?.closest(".hunk-card-body") || target?.closest(".hunk-card-menu")) return;
       e.preventDefault();
     };
 

@@ -506,6 +506,67 @@ body {
   border-radius: 4px;
 }
 
+/* --- Hunk Card Kebab Menu --- */
+
+.hunk-card-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.hunk-card-menu-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+  line-height: 1;
+}
+
+.hunk-card-menu-btn:active {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+
+.hunk-card-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 100;
+  min-width: 160px;
+  background: var(--bg-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+}
+
+.hunk-card-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s ease;
+}
+
+.hunk-card-menu-item:active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .hunk-card-meta {
   padding: 6px 14px;
   font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;

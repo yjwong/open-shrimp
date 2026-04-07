@@ -168,6 +168,88 @@ async def unstage_hunk(cwd: str, hunk: Hunk) -> StageResult:
     return StageResult(ok=True)
 
 
+async def stage_file(cwd: str, hunks: list[Hunk]) -> StageResult:
+    """Stage all hunks for a file in a single lock acquisition.
+
+    Concatenates patches for all provided hunks and applies them
+    in one ``git apply --cached`` invocation.
+
+    Args:
+        cwd: Working directory (must be inside a git repo).
+        hunks: The hunks to stage (should all belong to the same file).
+
+    Returns:
+        StageResult indicating success or failure.
+    """
+    if not hunks:
+        return StageResult(ok=True)
+
+    patches = [reconstruct_patch(h) for h in hunks]
+    combined = "".join(patches)
+
+    async with _get_lock(cwd):
+        proc = await asyncio.create_subprocess_exec(
+            "git", "apply", "--cached", "-",
+            cwd=cwd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate(input=combined.encode())
+
+    if proc.returncode != 0:
+        error_msg = stderr.decode().strip()
+        logger.error("git apply --cached (batch) failed: %s", error_msg)
+        return StageResult(
+            ok=False,
+            error="One or more hunks are stale — the working tree has changed. Refresh to get current hunks.",
+            stale=True,
+        )
+
+    return StageResult(ok=True)
+
+
+async def unstage_file(cwd: str, hunks: list[Hunk]) -> StageResult:
+    """Unstage all hunks for a file in a single lock acquisition.
+
+    Concatenates patches for all provided hunks and reverse-applies
+    them in one ``git apply --cached -R`` invocation.
+
+    Args:
+        cwd: Working directory (must be inside a git repo).
+        hunks: The hunks to unstage (should all belong to the same file).
+
+    Returns:
+        StageResult indicating success or failure.
+    """
+    if not hunks:
+        return StageResult(ok=True)
+
+    patches = [reconstruct_patch(h) for h in hunks]
+    combined = "".join(patches)
+
+    async with _get_lock(cwd):
+        proc = await asyncio.create_subprocess_exec(
+            "git", "apply", "--cached", "-R", "-",
+            cwd=cwd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate(input=combined.encode())
+
+    if proc.returncode != 0:
+        error_msg = stderr.decode().strip()
+        logger.error("git apply --cached -R (batch) failed: %s", error_msg)
+        return StageResult(
+            ok=False,
+            error="One or more hunks are stale — the working tree has changed. Refresh to get current hunks.",
+            stale=True,
+        )
+
+    return StageResult(ok=True)
+
+
 async def remove_intent_to_add(cwd: str, hunk: Hunk) -> StageResult:
     """Remove an intent-to-add index entry for a new file.
 

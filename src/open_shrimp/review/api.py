@@ -22,7 +22,13 @@ from open_shrimp.config import Config, ContextConfig
 from open_shrimp.db import ChatScope, get_active_context
 from open_shrimp.review.auth import AuthError, authenticate
 from open_shrimp.review.git_diff import Hunk, get_hunks
-from open_shrimp.review.git_stage import stage_hunk, unstage_hunk, remove_intent_to_add
+from open_shrimp.review.git_stage import (
+    stage_hunk,
+    unstage_hunk,
+    stage_file,
+    unstage_file,
+    remove_intent_to_add,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -480,6 +486,191 @@ async def skip_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def stage_file_endpoint(request: Request) -> JSONResponse:
+    """POST /api/review/stage-file — stage all unstaged hunks for a file."""
+    try:
+        user_id = await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    file_path = body.get("file_path")
+    if not file_path:
+        return JSONResponse(
+            {"error": "file_path is required"}, status_code=400
+        )
+
+    chat_id = body.get("chat_id")
+    dir_index_raw = body.get("dir", 0)
+    try:
+        dir_index = int(dir_index_raw)
+    except (TypeError, ValueError):
+        dir_index = 0
+
+    thread_id_raw = body.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
+    context_name_hint = None
+    if chat_id is not None:
+        try:
+            chat_id = int(chat_id)
+            context_name_hint, _ = await _resolve_context(
+                request, chat_id, dir_index, thread_id
+            )
+        except (ValueError, AuthError):
+            pass
+
+    # Find all unstaged hunks for this file in the cache.
+    cache_key = (chat_id, context_name_hint, dir_index) if chat_id is not None and context_name_hint else None
+    if cache_key is None:
+        # Try to find any cache entry containing this file.
+        for key, cached_hunks in _hunk_cache.items():
+            for h in cached_hunks:
+                if h.file_path == file_path:
+                    cache_key = key
+                    break
+            if cache_key:
+                break
+
+    if cache_key is None:
+        return JSONResponse(
+            {"error": "No cached hunks found. Refresh to load hunks first."},
+            status_code=409,
+        )
+
+    cached_hunks = _hunk_cache.get(cache_key, [])
+    unstaged_hunks = [h for h in cached_hunks if h.file_path == file_path and not h.staged]
+
+    if not unstaged_hunks:
+        return JSONResponse({"ok": True, "staged_ids": []})
+
+    # Resolve the working directory.
+    config: Config = request.app.state.config
+    resolved_context = cache_key[1]
+    if resolved_context not in config.contexts:
+        return JSONResponse(
+            {"error": f"Context '{resolved_context}' not found"},
+            status_code=404,
+        )
+    ctx = config.contexts[resolved_context]
+    dirs = _get_directories(ctx)
+    didx = cache_key[2]
+    if didx < 0 or didx >= len(dirs):
+        return JSONResponse(
+            {"error": f"Invalid directory index: {didx}"},
+            status_code=400,
+        )
+    directory = dirs[didx]
+
+    result = await stage_file(directory, unstaged_hunks)
+
+    if not result.ok:
+        status = 409 if result.stale else 500
+        if result.stale:
+            _hunk_cache.pop(cache_key, None)
+        return JSONResponse({"error": result.error}, status_code=status)
+
+    staged_ids = [h.id for h in unstaged_hunks]
+    return JSONResponse({"ok": True, "staged_ids": staged_ids})
+
+
+async def unstage_file_endpoint(request: Request) -> JSONResponse:
+    """POST /api/review/unstage-file — unstage all staged hunks for a file."""
+    try:
+        user_id = await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    hunk_ids = body.get("hunk_ids")
+    if not hunk_ids or not isinstance(hunk_ids, list):
+        return JSONResponse(
+            {"error": "hunk_ids is required (list of hunk IDs)"}, status_code=400
+        )
+
+    chat_id = body.get("chat_id")
+    dir_index_raw = body.get("dir", 0)
+    try:
+        dir_index = int(dir_index_raw)
+    except (TypeError, ValueError):
+        dir_index = 0
+
+    thread_id_raw = body.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
+    context_name_hint = None
+    if chat_id is not None:
+        try:
+            chat_id = int(chat_id)
+            context_name_hint, _ = await _resolve_context(
+                request, chat_id, dir_index, thread_id
+            )
+        except (ValueError, AuthError):
+            pass
+
+    # Find all requested hunks in the cache.
+    hunk_id_set = set(hunk_ids)
+    hunks_to_unstage: list[Hunk] = []
+    resolved_cache_key = None
+
+    cache_key = (chat_id, context_name_hint, dir_index) if chat_id is not None and context_name_hint else None
+    if cache_key and cache_key in _hunk_cache:
+        for h in _hunk_cache[cache_key]:
+            if h.id in hunk_id_set:
+                hunks_to_unstage.append(h)
+        resolved_cache_key = cache_key
+    else:
+        for key, cached_hunks in _hunk_cache.items():
+            for h in cached_hunks:
+                if h.id in hunk_id_set:
+                    hunks_to_unstage.append(h)
+                    resolved_cache_key = key
+            if hunks_to_unstage:
+                break
+
+    if not hunks_to_unstage:
+        return JSONResponse(
+            {"error": "Hunks not found. The diff may have changed — refresh to get current hunks."},
+            status_code=409,
+        )
+
+    # Resolve the working directory.
+    config: Config = request.app.state.config
+    resolved_context = resolved_cache_key[1]
+    if resolved_context not in config.contexts:
+        return JSONResponse(
+            {"error": f"Context '{resolved_context}' not found"},
+            status_code=404,
+        )
+    ctx = config.contexts[resolved_context]
+    dirs = _get_directories(ctx)
+    didx = resolved_cache_key[2]
+    if didx < 0 or didx >= len(dirs):
+        return JSONResponse(
+            {"error": f"Invalid directory index: {didx}"},
+            status_code=400,
+        )
+    directory = dirs[didx]
+
+    result = await unstage_file(directory, hunks_to_unstage)
+
+    if not result.ok:
+        status = 409 if result.stale else 500
+        if result.stale:
+            _hunk_cache.pop(resolved_cache_key, None)
+        return JSONResponse({"error": result.error}, status_code=status)
+
+    return JSONResponse({"ok": True})
+
+
 async def commit_endpoint(request: Request) -> JSONResponse:
     """POST /api/review/commit — request the bot to commit staged changes.
 
@@ -557,6 +748,8 @@ def create_review_app(
         Route("/api/review/hunks", hunks_endpoint, methods=["GET"]),
         Route("/api/review/stage", stage_endpoint, methods=["POST"]),
         Route("/api/review/unstage", unstage_endpoint, methods=["POST"]),
+        Route("/api/review/stage-file", stage_file_endpoint, methods=["POST"]),
+        Route("/api/review/unstage-file", unstage_file_endpoint, methods=["POST"]),
         Route("/api/review/skip", skip_endpoint, methods=["POST"]),
         Route("/api/review/commit", commit_endpoint, methods=["POST"]),
     ]
