@@ -59,13 +59,16 @@ def _create_http_server(
     config: "Config",  # noqa: F821
     db: "aiosqlite.Connection",  # noqa: F821
     sandbox_managers: dict[str, SandboxManager] | None = None,
+    config_path: str | None = None,
 ) -> "uvicorn.Server":  # noqa: F821
     """Create the review API HTTP server (call ``server.serve()`` to run)."""
     import uvicorn
 
     from open_shrimp.review.api import create_review_app
 
-    app = create_review_app(config, db, sandbox_managers=sandbox_managers)
+    app = create_review_app(
+        config, db, sandbox_managers=sandbox_managers, config_path=config_path
+    )
 
     server_config = uvicorn.Config(
         app,
@@ -120,7 +123,9 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
 
     sandbox_mgrs = create_sandbox_managers(config)
 
-    http_server = _create_http_server(config, db, sandbox_managers=sandbox_mgrs)
+    http_server = _create_http_server(
+        config, db, sandbox_managers=sandbox_mgrs, config_path=config_path
+    )
 
     bot_task = asyncio.create_task(
         run_bot(config, db, config_path=config_path, sandbox_managers=sandbox_mgrs)

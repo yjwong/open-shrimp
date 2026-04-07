@@ -30,6 +30,7 @@ from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
     cancel_handler,
     clear_handler,
+    config_handler,
     context_handler,
     handle_context_callback,
     handle_resume_callback,
@@ -166,6 +167,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("usage", usage_handler))
     app.add_handler(CommandHandler("vnc", vnc_handler))
     app.add_handler(CommandHandler("login", login_handler))
+    app.add_handler(CommandHandler("config", config_handler))
     app.add_handler(CommandHandler("restart", restart_handler))
 
     # Callback query handler for tool approval buttons
@@ -229,7 +231,10 @@ async def run_bot(
     ]
     await app.bot.set_my_commands(common_commands)
     await app.bot.set_my_commands(
-        common_commands + [BotCommand("restart", "Restart the bot process")],
+        common_commands + [
+            BotCommand("config", "Edit bot configuration"),
+            BotCommand("restart", "Restart the bot process"),
+        ],
         scope=BotCommandScopeAllPrivateChats(),
     )
     await app.start()

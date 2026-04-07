@@ -40,6 +40,10 @@ jobs:
         working-directory: web/vnc-app
         run: npm ci && npm run build
 
+      - name: Build config app frontend
+        working-directory: web/config-app
+        run: npm ci && npm run build
+
       - name: Build open-shrimp sdist
         run: uv build --sdist
 
@@ -221,6 +225,10 @@ jobs:
 
       - name: Build VNC app frontend
         working-directory: web/vnc-app
+        run: npm ci && npm run build
+
+      - name: Build config app frontend
+        working-directory: web/config-app
         run: npm ci && npm run build
 
       - name: Install dependencies

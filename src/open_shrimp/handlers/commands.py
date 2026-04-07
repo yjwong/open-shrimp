@@ -1520,3 +1520,45 @@ async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     request_restart()
     os.kill(os.getpid(), signal.SIGTERM)
+
+
+# ── /config ──
+
+
+async def config_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /config -- open the config Mini App."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+    message = update.message
+
+    if not _is_authorized(update.effective_user.id, config):
+        return
+
+    # Build the Mini App URL.
+    if config.review.public_url:
+        base_url = config.review.public_url.rstrip("/")
+    else:
+        base_url = f"https://{config.review.host}:{config.review.port}"
+
+    chat_type = update.effective_chat.type if update.effective_chat else "private"
+    _is_private = chat_type == "private"
+    _user_id = update.effective_user.id
+    scope = chat_scope_from_message(message)
+
+    app_url = f"{base_url}/config/"
+    keyboard = InlineKeyboardMarkup([
+        [make_web_app_button(
+            text="\u2699\ufe0f Edit Configuration",
+            url=app_url,
+            chat_id=scope.chat_id,
+            user_id=_user_id,
+            bot_token=config.telegram.token,
+            is_private_chat=_is_private,
+        )]
+    ])
+    await message.reply_text(
+        "OpenShrimp configuration",
+        reply_markup=keyboard,
+    )

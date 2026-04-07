@@ -347,10 +347,101 @@ def load_config(path: str | None = None) -> Config:
     return _parse(raw)
 
 
+def config_to_dict(config: Config) -> dict[str, Any]:
+    """Serialize a Config dataclass back into a YAML-compatible dict.
+
+    The telegram token is excluded for security — callers that need to
+    write a full config should merge the result with the existing raw
+    dict to preserve the token.
+    """
+    contexts: dict[str, Any] = {}
+    for name, ctx in config.contexts.items():
+        ctx_dict: dict[str, Any] = {
+            "directory": ctx.directory,
+            "description": ctx.description,
+            "allowed_tools": ctx.allowed_tools,
+        }
+        if ctx.model is not None:
+            ctx_dict["model"] = ctx.model
+        if ctx.additional_directories:
+            ctx_dict["additional_directories"] = ctx.additional_directories
+        if ctx.default_for_chats:
+            ctx_dict["default_for_chats"] = ctx.default_for_chats
+        if ctx.locked_for_chats:
+            ctx_dict["locked_for_chats"] = ctx.locked_for_chats
+
+        # Prefer sandbox over legacy container.
+        if ctx.sandbox is not None:
+            sandbox_dict: dict[str, Any] = {"backend": ctx.sandbox.backend}
+            if not ctx.sandbox.enabled:
+                sandbox_dict["enabled"] = False
+            if ctx.sandbox.docker_in_docker:
+                sandbox_dict["docker_in_docker"] = True
+            if ctx.sandbox.dockerfile is not None:
+                sandbox_dict["dockerfile"] = ctx.sandbox.dockerfile
+            if ctx.sandbox.computer_use:
+                sandbox_dict["computer_use"] = True
+            if ctx.sandbox.virgl:
+                sandbox_dict["virgl"] = True
+            # VM fields — only include non-defaults for VM backends.
+            if ctx.sandbox.backend in ("libvirt", "lima"):
+                if ctx.sandbox.memory != 2048:
+                    sandbox_dict["memory"] = ctx.sandbox.memory
+                if ctx.sandbox.cpus != 2:
+                    sandbox_dict["cpus"] = ctx.sandbox.cpus
+                if ctx.sandbox.disk_size != 20:
+                    sandbox_dict["disk_size"] = ctx.sandbox.disk_size
+                if ctx.sandbox.base_image is not None:
+                    sandbox_dict["base_image"] = ctx.sandbox.base_image
+                if ctx.sandbox.provision is not None:
+                    sandbox_dict["provision"] = ctx.sandbox.provision
+            ctx_dict["sandbox"] = sandbox_dict
+        elif ctx.container is not None:
+            container_dict: dict[str, Any] = {}
+            if not ctx.container.enabled:
+                container_dict["enabled"] = False
+            if ctx.container.docker_in_docker:
+                container_dict["docker_in_docker"] = True
+            if ctx.container.dockerfile is not None:
+                container_dict["dockerfile"] = ctx.container.dockerfile
+            if ctx.container.computer_use:
+                container_dict["computer_use"] = True
+            ctx_dict["container"] = container_dict
+
+        contexts[name] = ctx_dict
+
+    result: dict[str, Any] = {
+        "telegram": {"token": config.telegram.token},
+        "allowed_users": config.allowed_users,
+        "contexts": contexts,
+        "default_context": config.default_context,
+    }
+
+    # Include review config if non-default.
+    review_dict: dict[str, Any] = {}
+    if config.review.host != "127.0.0.1":
+        review_dict["host"] = config.review.host
+    if config.review.port != 8080:
+        review_dict["port"] = config.review.port
+    if config.review.public_url is not None:
+        review_dict["public_url"] = config.review.public_url
+    if config.review.tunnel is not None:
+        review_dict["tunnel"] = config.review.tunnel
+    if review_dict:
+        result["review"] = review_dict
+
+    if config.instance_name is not None:
+        result["instance_name"] = config.instance_name
+
+    return result
+
+
 def write_config(config_path: Path, config_dict: dict[str, Any]) -> None:
     """Write a config dictionary to a YAML file.
 
-    Creates parent directories if needed.
+    Creates parent directories if needed.  Does NOT preserve comments —
+    use :func:`load_raw_yaml` / :func:`write_raw_yaml` for round-trip
+    editing that keeps comments intact.
 
     Args:
         config_path: Path to write the config file.
@@ -363,3 +454,40 @@ def write_config(config_path: Path, config_dict: dict[str, Any]) -> None:
     config_path.write_text(
         yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
     )
+
+
+# ── Round-trip YAML helpers (comment-preserving) ──
+
+
+def load_raw_yaml(config_path: Path) -> Any:
+    """Load a YAML file using ruamel.yaml in round-trip mode.
+
+    Returns a ``CommentedMap`` that preserves comments, key ordering,
+    and formatting.  The returned object behaves like a dict but carries
+    YAML metadata so that :func:`write_raw_yaml` can reproduce the
+    original file with comments intact.
+    """
+    from ruamel.yaml import YAML
+
+    ry = YAML()
+    ry.preserve_quotes = True
+    return ry.load(config_path.read_text())
+
+
+def write_raw_yaml(config_path: Path, data: Any) -> None:
+    """Write a ruamel.yaml round-trip structure back to a YAML file.
+
+    Preserves comments and formatting from the original load.
+    """
+    from io import StringIO
+
+    from ruamel.yaml import YAML
+
+    ry = YAML()
+    ry.preserve_quotes = True
+    ry.default_flow_style = False
+
+    buf = StringIO()
+    ry.dump(data, buf)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(buf.getvalue())

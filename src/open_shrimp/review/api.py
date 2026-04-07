@@ -822,6 +822,7 @@ def create_review_app(
     config: Config,
     db: aiosqlite.Connection,
     sandbox_managers: "dict[str, SandboxManager] | None" = None,
+    config_path: str | None = None,
 ) -> Starlette:
     """Create the Starlette application for the review API.
 
@@ -874,9 +875,15 @@ def create_review_app(
 
     routes.extend(create_vnc_routes())
 
+    # Add config Mini App routes.
+    from open_shrimp.config_app.api import create_config_routes
+
+    routes.extend(create_config_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db
     app.state.sandbox_managers = sandbox_managers
+    app.state.config_path = config_path
 
     return app
