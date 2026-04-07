@@ -90,7 +90,11 @@ class TelegramRenderer(mistune.BaseRenderer):
 
     def block_quote(self, text: str) -> str:
         lines = text.strip().split("\n")
-        quoted = "\n".join(">" + line for line in lines)
+        # Filter out empty lines: Telegram ends a blockquote at a bare ">"
+        # line, so empty lines between paragraphs would break a single
+        # blockquote into multiple separate ones with unquoted gaps.
+        non_empty = [line for line in lines if line]
+        quoted = "\n".join(">" + line for line in non_empty)
         return quoted + "\n\n"
 
     def list(self, text: str, **attrs: Any) -> str:
