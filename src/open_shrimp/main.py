@@ -209,7 +209,15 @@ def main() -> None:
 
     if _restart_requested:
         logger.info("Re-executing process for restart...")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        import shutil
+
+        uv = shutil.which("uv")
+        if uv:
+            # Re-exec via uv run so the venv is rebuilt if needed,
+            # matching the systemd ExecStart invocation.
+            os.execv(uv, [uv, "run", "openshrimp"] + sys.argv[1:])
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":
