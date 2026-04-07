@@ -52,6 +52,11 @@ def _parse_args() -> argparse.Namespace:
         help="Remove the OpenShrimp system service",
     )
 
+    subparsers.add_parser(
+        "doctor",
+        help="Check optional component availability",
+    )
+
     return parser.parse_args()
 
 
@@ -181,6 +186,11 @@ def main() -> None:
 
         uninstall_service()
         return
+
+    if args.subcommand == "doctor":
+        from open_shrimp.doctor import run_doctor
+
+        sys.exit(run_doctor())
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         logger.warning(
