@@ -57,6 +57,7 @@ OPTIONS: dict = {
         "tree_sitter_bash",
         "platformdirs",
         "rumps",
+        "ruamel.yaml",
     ],
     "includes": [
         "rumps",
