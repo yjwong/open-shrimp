@@ -55,12 +55,12 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def _run_http_server(
+def _create_http_server(
     config: "Config",  # noqa: F821
     db: "aiosqlite.Connection",  # noqa: F821
     sandbox_managers: dict[str, SandboxManager] | None = None,
-) -> None:
-    """Run the review API HTTP server."""
+) -> "uvicorn.Server":  # noqa: F821
+    """Create the review API HTTP server (call ``server.serve()`` to run)."""
     import uvicorn
 
     from open_shrimp.review.api import create_review_app
@@ -79,7 +79,7 @@ async def _run_http_server(
         config.review.host,
         config.review.port,
     )
-    await server.serve()
+    return server
 
 
 async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = None) -> None:
@@ -120,18 +120,20 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
 
     sandbox_mgrs = create_sandbox_managers(config)
 
+    http_server = _create_http_server(config, db, sandbox_managers=sandbox_mgrs)
+
     bot_task = asyncio.create_task(
         run_bot(config, db, config_path=config_path, sandbox_managers=sandbox_mgrs)
     )
-    http_task = asyncio.create_task(
-        _run_http_server(config, db, sandbox_managers=sandbox_mgrs)
-    )
+    http_task = asyncio.create_task(http_server.serve())
 
     await stop_event.wait()
     logger.info("Shutting down...")
 
+    # Signal uvicorn to exit gracefully (avoids CancelledError in lifespan).
+    http_server.should_exit = True
+
     bot_task.cancel()
-    http_task.cancel()
     for task in (bot_task, http_task):
         try:
             await task
