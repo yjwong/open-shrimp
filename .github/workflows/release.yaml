@@ -238,6 +238,10 @@ jobs:
 
       - name: Build .app bundle
         run: |
+          # ruamel is a PEP 420 namespace package (no __init__.py), which
+          # py2app's imp.find_module cannot resolve.  Add a stub so py2app
+          # can locate the package.
+          touch "$(python -c 'import ruamel; print(ruamel.__path__[0])')/__init__.py"
           mv pyproject.toml pyproject.toml.bak
           python setup_app.py py2app
           mv pyproject.toml.bak pyproject.toml
