@@ -107,7 +107,7 @@ export function useSwipe({
         // Check if the drag started inside a scrollable area (e.g. .hunk-card-body)
         // If so, suppress vertical swipe to allow native scrolling
         const target = event?.target as HTMLElement | null;
-        startedInScrollableRef.current = !!target?.closest(".hunk-card-body");
+        startedInScrollableRef.current = !!target?.closest(".hunk-card-body") || !!target?.closest(".hunk-card-comment");
       }
 
       // Axis locking
@@ -266,13 +266,13 @@ export function useSwipe({
       // browser can perform native scrolling on .hunk-card-body.
       // Also allow taps on interactive elements like the kebab menu.
       const target = e.target as HTMLElement | null;
-      if (target?.closest(".hunk-card-body") || target?.closest(".hunk-card-menu")) return;
+      if (target?.closest(".hunk-card-body") || target?.closest(".hunk-card-menu") || target?.closest(".hunk-card-comment")) return;
       e.preventDefault();
     };
 
     const onTouchMove = (e: TouchEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target?.closest(".hunk-card-body") || target?.closest(".hunk-card-menu")) return;
+      if (target?.closest(".hunk-card-body") || target?.closest(".hunk-card-menu") || target?.closest(".hunk-card-comment")) return;
       e.preventDefault();
     };
 

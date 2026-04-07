@@ -170,3 +170,33 @@ export async function commitChanges(chatId: string, threadId: string | null = nu
     throw new Error(`Failed to commit: ${response.status} ${response.statusText}`);
   }
 }
+
+export interface HunkComment {
+  hunk_id: string;
+  file_path: string;
+  hunk_header: string;
+  comment: string;
+}
+
+export async function submitComments(
+  comments: HunkComment[],
+  chatId: string,
+  threadId: string | null = null,
+): Promise<void> {
+  const response = await fetch(`${BASE_URL}/submit-comments`, {
+    method: "POST",
+    headers: {
+      ...getAuthHeader(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      comments,
+      chat_id: chatId,
+      ...(threadId !== null && { thread_id: threadId }),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to submit comments: ${response.status} ${response.statusText}`);
+  }
+}

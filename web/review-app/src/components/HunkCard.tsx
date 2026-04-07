@@ -5,11 +5,15 @@ import { highlightLines, type HighlightedLine } from "../lib/shiki";
 interface HunkCardProps {
   hunk: Hunk;
   onStageFile?: () => void;
+  comment?: string;
+  onCommentChange?: (comment: string) => void;
 }
 
-export function HunkCard({ hunk, onStageFile }: HunkCardProps) {
+export function HunkCard({ hunk, onStageFile, comment, onCommentChange }: HunkCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [commentOpen, setCommentOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Close menu on outside tap.
   useEffect(() => {
@@ -35,6 +39,23 @@ export function HunkCard({ hunk, onStageFile }: HunkCardProps) {
     },
     [onStageFile],
   );
+  // Auto-open comment area if there's already a comment.
+  useEffect(() => {
+    if (comment) setCommentOpen(true);
+  }, [hunk.id]);
+
+  // Focus textarea when comment area opens.
+  useEffect(() => {
+    if (commentOpen && textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  }, [commentOpen]);
+
+  const handleCommentToggle = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCommentOpen((o) => !o);
+  }, []);
+
   const [lines, setLines] = useState<HighlightedLine[] | null>(null);
 
   useEffect(() => {
@@ -114,6 +135,28 @@ export function HunkCard({ hunk, onStageFile }: HunkCardProps) {
     );
   }
 
+  const commentFooter = onCommentChange && (
+    <div className="hunk-card-comment">
+      {commentOpen ? (
+        <textarea
+          ref={textareaRef}
+          className="hunk-card-comment-input"
+          placeholder="Leave a comment for Claude..."
+          value={comment ?? ""}
+          onChange={(e) => onCommentChange(e.target.value)}
+          rows={2}
+        />
+      ) : (
+        <button
+          className={`hunk-card-comment-btn${comment ? " has-comment" : ""}`}
+          onClick={handleCommentToggle}
+        >
+          {comment ? `Comment: ${comment.slice(0, 40)}${comment.length > 40 ? "..." : ""}` : "Add comment"}
+        </button>
+      )}
+    </div>
+  );
+
   return (
     <div className="hunk-card">
       <div className={`hunk-card-header${hunk.staged ? " staged" : ""}`}>
@@ -144,6 +187,7 @@ export function HunkCard({ hunk, onStageFile }: HunkCardProps) {
           </div>
         )}
       </div>
+      {commentFooter}
     </div>
   );
 }

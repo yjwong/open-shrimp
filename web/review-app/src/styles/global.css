@@ -363,12 +363,14 @@ body {
   touch-action: none;
 }
 
-.swipe-card-current *:not(.hunk-card-body):not(.hunk-card-body *) {
+.swipe-card-current *:not(.hunk-card-body):not(.hunk-card-body *):not(.hunk-card-comment):not(.hunk-card-comment *) {
   touch-action: none;
 }
 
 .hunk-card-body,
-.hunk-card-body * {
+.hunk-card-body *,
+.hunk-card-comment,
+.hunk-card-comment * {
   touch-action: pan-y;
 }
 
@@ -671,6 +673,69 @@ body {
   font-size: 40px;
 }
 
+/* --- Hunk Card Comment --- */
+
+.hunk-card-comment {
+  padding: 8px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.hunk-card-comment-btn {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px dashed var(--text-muted);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hunk-card-comment-btn:active {
+  border-color: var(--text-secondary);
+  color: var(--text-secondary);
+}
+
+.hunk-card-comment-btn.has-comment {
+  border-color: var(--accent);
+  color: var(--accent);
+  border-style: solid;
+}
+
+.hunk-card-comment-input {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 36px;
+  max-height: 120px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.hunk-card-comment-input:focus {
+  border-color: var(--accent);
+}
+
+.hunk-card-comment-input::placeholder {
+  color: var(--text-muted);
+}
+
 /* --- Summary Screen --- */
 
 .summary-screen {
@@ -748,6 +813,11 @@ body {
 
 .summary-btn-commit {
   background: #2ea043;
+  color: #fff;
+}
+
+.summary-btn-comments {
+  background: var(--accent);
   color: #fff;
 }
 

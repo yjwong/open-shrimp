@@ -726,6 +726,98 @@ async def commit_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def submit_comments_endpoint(request: Request) -> JSONResponse:
+    """POST /api/review/submit-comments — send review comments to Claude.
+
+    Expects JSON body::
+
+        {
+            "chat_id": <int>,
+            "thread_id": <int|null>,
+            "comments": [
+                {
+                    "file_path": "...",
+                    "hunk_header": "...",
+                    "comment": "..."
+                },
+                ...
+            ]
+        }
+
+    Builds a structured prompt from the comments and dispatches it to the
+    Claude agent for the given chat.
+    """
+    try:
+        user_id = await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    try:
+        chat_id = int(body["chat_id"])
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse(
+            {"error": "chat_id is required (integer)"}, status_code=400
+        )
+
+    thread_id_raw = body.get("thread_id")
+    thread_id = int(thread_id_raw) if thread_id_raw is not None else None
+
+    comments = body.get("comments")
+    if not comments or not isinstance(comments, list):
+        return JSONResponse(
+            {"error": "comments is required (non-empty list)"}, status_code=400
+        )
+
+    # Build a structured prompt from the review comments.
+    parts: list[str] = [
+        "I've reviewed the current changes and have the following comments. "
+        "Please address each one:\n"
+    ]
+    for i, c in enumerate(comments, 1):
+        file_path = c.get("file_path", "unknown")
+        hunk_header = c.get("hunk_header", "")
+        comment = c.get("comment", "").strip()
+        if not comment:
+            continue
+        parts.append(f"{i}. **{file_path}**")
+        if hunk_header:
+            parts.append(f"   `{hunk_header}`")
+        parts.append(f"   {comment}\n")
+
+    if len(parts) <= 1:
+        return JSONResponse(
+            {"error": "No non-empty comments provided"}, status_code=400
+        )
+
+    prompt = "\n".join(parts)
+
+    from open_shrimp.dispatch_registry import dispatch as dispatch_to_agent
+
+    try:
+        await dispatch_to_agent(
+            prompt, chat_id, thread_id,
+            placeholder="\u23f3 Processing review comments\\.\\.\\.",
+        )
+    except RuntimeError as e:
+        logger.error("submit_comments_endpoint: %s", e)
+        return JSONResponse(
+            {"error": "Dispatch not available — bot may not be running"},
+            status_code=503,
+        )
+    except Exception:
+        logger.exception("Failed to dispatch review comments for chat %d", chat_id)
+        return JSONResponse(
+            {"error": "Failed to dispatch review comments"}, status_code=500
+        )
+
+    return JSONResponse({"ok": True})
+
+
 def create_review_app(
     config: Config,
     db: aiosqlite.Connection,
@@ -752,6 +844,7 @@ def create_review_app(
         Route("/api/review/unstage-file", unstage_file_endpoint, methods=["POST"]),
         Route("/api/review/skip", skip_endpoint, methods=["POST"]),
         Route("/api/review/commit", commit_endpoint, methods=["POST"]),
+        Route("/api/review/submit-comments", submit_comments_endpoint, methods=["POST"]),
     ]
 
     if _dist_dir.is_dir():

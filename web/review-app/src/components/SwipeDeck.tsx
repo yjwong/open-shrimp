@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { FileSummary, Hunk } from "../lib/types";
-import { stageHunk, unstageHunk, skipHunk, stageFile, unstageFile, commitChanges, StaleHunkError } from "../lib/api";
+import { stageHunk, unstageHunk, skipHunk, stageFile, unstageFile, commitChanges, submitComments, StaleHunkError, type HunkComment } from "../lib/api";
 import { HunkCard } from "./HunkCard";
 import { FilePicker } from "./FilePicker";
 import { ProgressBar } from "./ProgressBar";
@@ -47,6 +47,21 @@ export function SwipeDeck({
   const [isProcessing, setIsProcessing] = useState(false);
   const [pendingJumpIndex, setPendingJumpIndex] = useState<number | null>(null);
   const swipeEnabled = !isProcessing;
+
+  // Ephemeral comments map: hunk ID -> comment text
+  const [comments, setComments] = useState<Map<string, string>>(new Map());
+
+  const setComment = useCallback((hunkId: string, text: string) => {
+    setComments((prev) => {
+      const next = new Map(prev);
+      if (text) {
+        next.set(hunkId, text);
+      } else {
+        next.delete(hunkId);
+      }
+      return next;
+    });
+  }, []);
 
   // Track swipe direction for overlay — use refs + direct DOM updates
   // to avoid React re-renders during drag (which would cause @use-gesture
@@ -409,6 +424,7 @@ export function SwipeDeck({
     setHistory([]);
     setStagedCount(0);
     setSkippedCount(0);
+    setComments(new Map());
     setError(null);
     onRefresh();
   }, [onRefresh]);
@@ -431,6 +447,29 @@ export function SwipeDeck({
     }
   }, [chatId]);
 
+  const handleSubmitComments = useCallback(async () => {
+    const hunkComments: HunkComment[] = [];
+    for (const [hunkId, text] of comments) {
+      const hunk = hunks.find((h) => h.id === hunkId);
+      if (hunk && text.trim()) {
+        hunkComments.push({
+          hunk_id: hunkId,
+          file_path: hunk.file_path,
+          hunk_header: hunk.hunk_header,
+          comment: text.trim(),
+        });
+      }
+    }
+    if (hunkComments.length === 0) return;
+
+    try {
+      await submitComments(hunkComments, chatId, threadId);
+      window.Telegram?.WebApp?.close();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to submit comments");
+    }
+  }, [comments, hunks, chatId, threadId]);
+
   // Check if there are any staged hunks in git (not just from this session).
   // This accounts for hunks that were already staged before the review started
   // or that were auto-skipped via "Skip to unstaged".
@@ -442,9 +481,11 @@ export function SwipeDeck({
         stagedCount={stagedCount}
         skippedCount={skippedCount}
         hasStagedHunks={hasStagedHunks}
+        commentCount={comments.size}
         onRefresh={handleRefresh}
         onClose={handleClose}
         onCommit={handleCommit}
+        onSubmitComments={handleSubmitComments}
       />
     );
   }
@@ -521,7 +562,12 @@ export function SwipeDeck({
             >
               Undo
             </div>
-            <HunkCard hunk={currentHunk} onStageFile={handleStageFile} />
+            <HunkCard
+              hunk={currentHunk}
+              onStageFile={handleStageFile}
+              comment={comments.get(currentHunk.id) ?? ""}
+              onCommentChange={(text) => setComment(currentHunk.id, text)}
+            />
           </div>
         )}
 
