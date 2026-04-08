@@ -96,6 +96,13 @@ class _DraftState:
     # Whether the last assistant turn has completed (AssistantMessage seen).
     # Used to insert a newline separator before text from the next turn.
     turn_complete: bool = False
+    # Whether the last content appended to raw_text was a tool notification
+    # blockquote ("> Tool: summary").  Used to insert a paragraph break
+    # before the next assistant text so it doesn't get swallowed into the
+    # notification blockquote.  We track this with a flag instead of
+    # checking raw_text for ">" lines, because Claude's own response text
+    # may also contain blockquotes that should NOT be broken.
+    last_was_notification: bool = False
     # Session ID captured as early as possible (from SystemMessage init or
     # ResultMessage) so it survives task cancellation.
     session_id: str | None = None
@@ -776,12 +783,14 @@ async def stream_response(
                             if state.turn_complete:
                                 state.raw_text += "\n\n"
                                 state.turn_complete = False
-                            # Ensure a blank line after a blockquote so
-                            # assistant text isn't swallowed into it.
-                            stripped = state.raw_text.rstrip()
-                            last_line = stripped.rsplit("\n", 1)[-1] if stripped else ""
-                            if last_line.startswith(">") and stripped:
+                            # Ensure a blank line after a tool notification
+                            # blockquote so assistant text isn't swallowed
+                            # into it.  Only trigger for notifications (tracked
+                            # via flag), NOT for Claude's own blockquote lines.
+                            if state.last_was_notification:
+                                stripped = state.raw_text.rstrip()
                                 state.raw_text = stripped + "\n\n"
+                                state.last_was_notification = False
                             state.raw_text += text
                             state.dirty = True
 
@@ -1132,5 +1141,7 @@ def add_tool_notification(
         state.raw_text = stripped + "\n\n" + line + "\n"
     else:
         state.raw_text = line + "\n"
+
+    state.last_was_notification = True
 
     state.dirty = True
