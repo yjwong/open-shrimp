@@ -347,7 +347,7 @@ def _build_cloud_init_user_data(
             "    wget -q -O /tmp/google-chrome.deb 'https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'\n"
             "    apt-get install -y -qq /tmp/google-chrome.deb > /dev/null 2>&1\n"
             "    rm /tmp/google-chrome.deb\n"
-            "  - apt-get install -y -qq labwc foot seatd > /dev/null 2>&1\n"
+            "  - apt-get install -y -qq labwc foot seatd grim > /dev/null 2>&1\n"
             # Node.js for npx (Playwright MCP is fetched on demand).
             "  - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -\n"
             "  - apt-get install -y -qq nodejs > /dev/null 2>&1\n"
