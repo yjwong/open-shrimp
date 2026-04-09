@@ -173,7 +173,9 @@ export default function ContextEditor({
           >
             <option value="">CLI default</option>
             <option value="opus">opus</option>
+            <option value="opus[1m]">opus[1m]</option>
             <option value="sonnet">sonnet</option>
+            <option value="sonnet[1m]">sonnet[1m]</option>
             <option value="haiku">haiku</option>
           </select>
         </div>
