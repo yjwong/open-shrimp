@@ -323,11 +323,54 @@ async def run_bot(
     finally:
         if watcher_task:
             watcher_task.cancel()
+        # Stop PTB first so the bot goes quiet on Telegram immediately.
+        # Previously this came after session/sandbox cleanup, which meant
+        # getUpdates polls kept firing for tens of seconds after the user
+        # triggered /restart — and if any later step hung, polling would
+        # continue forever.  Stopping PTB first also frees us to run the
+        # rest of the shutdown with less time pressure.
+        logger.info("Stopping Telegram polling...")
+        try:
+            async with asyncio.timeout(10):
+                await app.updater.stop()
+                await app.stop()
+        except (Exception, TimeoutError):
+            logger.warning("Error stopping PTB application", exc_info=True)
+        # Destroy any live `claude /login` PTY session before we tear
+        # down sandboxes — leaving it alive just delays the final SIGTERM
+        # fan-out in the systemd cgroup.
+        from open_shrimp.terminal.api import shutdown_login_session
+        try:
+            async with asyncio.timeout(6):
+                await shutdown_login_session()
+        except (Exception, TimeoutError):
+            logger.warning("Error shutting down login session", exc_info=True)
         await close_all_sessions()
-        # Stop all sandbox managers.
-        for mgr in _sandbox_managers.values():
-            await asyncio.to_thread(mgr.stop_all)
-            mgr.stop_reaper()
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+        # Stop all sandbox managers.  Each stop_reaper() is wrapped in a
+        # timeout because closing a wedged libvirt connection can block
+        # indefinitely, and we'd rather lose that reaper cleanup than
+        # hang the whole process.
+        # The libvirt backend allows up to 180s for ACPI shutdown
+        # internally; give it a little headroom on top so that its own
+        # timeout wins over this one.
+        for name, mgr in _sandbox_managers.items():
+            try:
+                async with asyncio.timeout(200):
+                    await asyncio.to_thread(mgr.stop_all)
+            except (Exception, TimeoutError):
+                logger.warning(
+                    "%s.stop_all() did not finish in time", name, exc_info=True,
+                )
+            try:
+                async with asyncio.timeout(5):
+                    await asyncio.to_thread(mgr.stop_reaper)
+            except (Exception, TimeoutError):
+                logger.warning(
+                    "%s.stop_reaper() did not finish in time",
+                    name, exc_info=True,
+                )
+        try:
+            async with asyncio.timeout(10):
+                await app.shutdown()
+        except (Exception, TimeoutError):
+            logger.warning("Error during PTB app.shutdown()", exc_info=True)

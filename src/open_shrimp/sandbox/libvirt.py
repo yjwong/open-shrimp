@@ -373,6 +373,12 @@ class LibvirtSandbox:
                 domain.create()
                 cold_start = True
                 logger.info("Started domain %s", self._dom_name)
+                # Modern virtiofsd (Rust) daemonizes on startup: the
+                # Popen child we spawned exits once QEMU has attached to
+                # the FUSE socket.  Reap those handles now so they don't
+                # linger as zombies for the lifetime of the service — we
+                # have observed 15+ piling up between restarts.
+                self._reap_dead_virtiofsd()
         except libvirt.libvirtError as e:
             if e.get_error_code() == 42:  # VIR_ERR_NO_DOMAIN
                 raise RuntimeError(
@@ -818,6 +824,9 @@ class LibvirtSandbox:
             logger.info("Undefined domain %s for rebuild", self._dom_name)
         except libvirt.libvirtError:
             pass
+        # Reap any virtiofsd Popen handles whose processes exited along
+        # with the destroyed domain — otherwise they linger as zombies.
+        self._reap_dead_virtiofsd()
 
         # 2. Delete the overlay (forces fresh cloud-init on next boot).
         overlay = self._sdir / "overlay.qcow2"

@@ -8,6 +8,7 @@ and a WebSocket PTY endpoint for interactive ``claude auth login``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import json
 import logging
@@ -313,12 +314,44 @@ class _LoginSession:
             pass
         if self.proc.returncode is None:
             self.proc.terminate()
-            await self.proc.wait()
+            try:
+                async with asyncio.timeout(3):
+                    await self.proc.wait()
+            except TimeoutError:
+                logger.warning(
+                    "claude /login (pid=%d) did not exit on SIGTERM, killing",
+                    self.proc.pid or 0,
+                )
+                try:
+                    self.proc.kill()
+                except ProcessLookupError:
+                    pass
+                with contextlib.suppress(Exception):
+                    async with asyncio.timeout(2):
+                        await self.proc.wait()
         logger.info("Login session destroyed: pid=%d", self.proc.pid or 0)
 
 
 # The single active login session (if any).
 _login_session: _LoginSession | None = None
+
+
+async def shutdown_login_session() -> None:
+    """Destroy any live ``claude /login`` PTY session.
+
+    Called from the bot shutdown path so the long-lived login subprocess
+    doesn't outlive the openshrimp service.  Without this, a stale
+    ``claude /login`` child sits in the systemd cgroup waiting to be
+    reaped by SIGTERM during the next restart, slowing things down.
+    """
+    global _login_session
+    if _login_session is None:
+        return
+    try:
+        await _login_session.destroy()
+    except Exception:
+        logger.warning("Error destroying login session", exc_info=True)
+    _login_session = None
 
 
 async def login_ws_endpoint(websocket: WebSocket) -> None:

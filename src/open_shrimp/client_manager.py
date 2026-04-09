@@ -675,10 +675,19 @@ async def close_session(scope: ChatScope) -> None:
 
 
 async def close_all_sessions() -> None:
-    """Close all active sessions (for shutdown)."""
+    """Close all active sessions (for shutdown).
+
+    Runs all disconnects in parallel so shutdown latency is dominated by
+    the slowest single client (up to the 5s per-client timeout in
+    ``close_session``), not the sum across every active scope.
+    """
     scopes = list(_active_sessions.keys())
-    for scope in scopes:
-        await close_session(scope)
+    if not scopes:
+        return
+    await asyncio.gather(
+        *(close_session(scope) for scope in scopes),
+        return_exceptions=True,
+    )
 
 
 def get_session(scope: ChatScope) -> AgentSession | None:
