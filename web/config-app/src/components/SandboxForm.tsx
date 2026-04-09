@@ -69,6 +69,24 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
         />
       </div>
 
+      <div className="form-toggle-row">
+        <span className="form-toggle-label">Computer Use</span>
+        <button
+          type="button"
+          className={`toggle${sandbox.computer_use ? " on" : ""}`}
+          onClick={() => update({ computer_use: !sandbox.computer_use })}
+        />
+      </div>
+
+      <div className="form-toggle-row">
+        <span className="form-toggle-label">VirGL (3D GPU)</span>
+        <button
+          type="button"
+          className={`toggle${sandbox.virgl ? " on" : ""}`}
+          onClick={() => update({ virgl: !sandbox.virgl })}
+        />
+      </div>
+
       {(sandbox.backend === "docker" || sandbox.backend === "macos") && (
         <>
           <div className="form-toggle-row">
@@ -79,22 +97,6 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
               onClick={() =>
                 update({ docker_in_docker: !sandbox.docker_in_docker })
               }
-            />
-          </div>
-          <div className="form-toggle-row">
-            <span className="form-toggle-label">Computer Use</span>
-            <button
-              type="button"
-              className={`toggle${sandbox.computer_use ? " on" : ""}`}
-              onClick={() => update({ computer_use: !sandbox.computer_use })}
-            />
-          </div>
-          <div className="form-toggle-row">
-            <span className="form-toggle-label">VirGL (3D GPU)</span>
-            <button
-              type="button"
-              className={`toggle${sandbox.virgl ? " on" : ""}`}
-              onClick={() => update({ virgl: !sandbox.virgl })}
             />
           </div>
           <div className="form-group">
