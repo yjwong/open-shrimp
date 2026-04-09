@@ -1674,6 +1674,117 @@ def domain_screenshot_png(
     output_path.write_bytes(b"".join(chunks))
 
 
+def qmp_screendump(
+    conn: "libvirt.virConnect",  # type: ignore[name-defined]
+    domain_name: str,
+    output_path: Path,
+) -> None:
+    """Take a screenshot via QMP ``screendump`` and save as PNG.
+
+    Unlike ``domain.screenshot()`` which targets the first ``<graphics>``
+    device (often ``egl-headless`` when VirGL is enabled), QMP
+    ``screendump`` captures from a specific display device.  By targeting
+    ``video0`` (the virtio-gpu) we get the full composited output
+    including XWayland windows — which ``grim`` misses because
+    ``wlr-screencopy`` can't read back GPU-rendered XWayland buffers.
+
+    The QMP ``screendump`` command writes a PPM file; we convert it to
+    PNG in-process.
+
+    Args:
+        conn: Active libvirt connection.
+        domain_name: Libvirt domain name.
+        output_path: Path to write the PNG file.
+    """
+    import json
+    import tempfile
+
+    try:
+        import libvirt_qemu  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise RuntimeError(
+            "libvirt_qemu not available — install libvirt-python "
+            "with QMP support"
+        ) from exc
+
+    import libvirt
+    domain = conn.lookupByName(domain_name)
+
+    # QMP screendump writes to a path on the *host* filesystem (QEMU
+    # process).  Use a temp file to avoid collisions.
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        suffix=".ppm", dir=output_path.parent, delete=False,
+    ) as tmp:
+        ppm_path = tmp.name
+
+    try:
+        cmd = json.dumps({
+            "execute": "screendump",
+            "arguments": {
+                "filename": ppm_path,
+                "device": "video0",
+                "format": "png",
+            },
+        })
+        resp = libvirt_qemu.qemuMonitorCommand(
+            domain, cmd,
+            libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
+        )
+        parsed = json.loads(resp)
+        if "error" in parsed:
+            err_desc = parsed["error"].get("desc", str(parsed["error"]))
+            # If the 'png' format or 'device' param isn't supported by
+            # this QEMU version, fall back to plain PPM without device
+            # targeting, then convert.
+            if "png" in err_desc or "Unsupported" in err_desc:
+                cmd = json.dumps({
+                    "execute": "screendump",
+                    "arguments": {"filename": ppm_path},
+                })
+                resp = libvirt_qemu.qemuMonitorCommand(
+                    domain, cmd,
+                    libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT,
+                )
+                _check_qmp_response(resp, "screendump fallback")
+                _ppm_to_png(ppm_path, str(output_path))
+                return
+            raise RuntimeError(f"QMP screendump failed: {err_desc}")
+
+        # QEMU wrote PNG directly — just rename.
+        Path(ppm_path).rename(output_path)
+    finally:
+        # Clean up temp file if it still exists (e.g. on error, or after
+        # PPM->PNG conversion).
+        try:
+            Path(ppm_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _ppm_to_png(ppm_path: str, png_path: str) -> None:
+    """Convert a PPM image to PNG.
+
+    Tries Pillow first (fast, pure-Python), falls back to ImageMagick
+    ``convert`` CLI.
+    """
+    try:
+        from PIL import Image
+        with Image.open(ppm_path) as img:
+            img.save(png_path, "PNG")
+        return
+    except ImportError:
+        pass
+
+    import subprocess as _sp
+    result = _sp.run(
+        ["convert", ppm_path, png_path],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"PPM->PNG conversion failed: {result.stderr.strip()}")
+
+
 # ---------------------------------------------------------------------------
 # Logging helper
 # ---------------------------------------------------------------------------

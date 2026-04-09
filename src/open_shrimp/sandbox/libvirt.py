@@ -26,7 +26,6 @@ from open_shrimp.sandbox.libvirt_helpers import (
     build_cli_wrapper as _build_cli_wrapper,
     create_overlay,
     domain_name as _domain_name,
-    domain_screenshot_png,
     ensure_base_image,
     ensure_mounts,
     ensure_ssh_key,
@@ -40,6 +39,7 @@ from open_shrimp.sandbox.libvirt_helpers import (
     load_cloud_init_fingerprint,
     load_ssh_port,
     qmp_send_key_combo,
+    qmp_screendump,
     qmp_send_mouse_event,
     qmp_send_scroll_event,
     qmp_type_text,
@@ -616,37 +616,13 @@ class LibvirtSandbox:
     # -- Computer-use operations (Phase 4) -----------------------------------
 
     def take_screenshot(self, output_path: Path) -> None:
-        """Take a screenshot of the VM display and save as PNG.
+        """Take a screenshot of the VM display via QMP ``screendump``.
 
-        With virgl enabled, ``domain.screenshot()`` fails because the
-        framebuffer lives on the host GPU (``screendump: no surface``).
-        In that case, run ``grim`` inside the guest via SSH — the
-        screenshots directory is shared via virtiofs so the file appears
-        on the host automatically.
+        Uses QMP to capture directly from the QEMU display device,
+        which works uniformly with and without VirGL and correctly
+        captures XWayland windows (unlike ``grim`` / ``wlr-screencopy``).
         """
-        if self._virgl and self._ssh_port is not None:
-            self._take_screenshot_via_grim(output_path)
-        else:
-            domain_screenshot_png(self._conn, self._dom_name, output_path)
-
-    def _take_screenshot_via_grim(self, output_path: Path) -> None:
-        """Take a screenshot by running ``grim`` inside the guest via SSH."""
-        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
-
-        assert self._ssh_port is not None
-        ssh_key = self._sdir / "ssh_key"
-        ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
-
-        # The screenshots dir is mounted at the same path in the guest.
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        guest_path = str(output_path)
-
-        result = subprocess.run(
-            ["ssh", *ssh_opts, "claude@localhost", "grim", guest_path],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"grim failed: {result.stderr.strip()}")
+        qmp_screendump(self._conn, self._dom_name, output_path)
 
     def send_click(self, x: int, y: int, button: str = "left") -> None:
         """Click at screen coordinates via QMP."""
