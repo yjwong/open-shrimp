@@ -14,6 +14,15 @@ interface ContextEditorProps {
 
 type PathStatus = "idle" | "checking" | "valid" | "invalid";
 
+const MODELS = [
+  { value: "", label: "CLI default" },
+  { value: "opus", label: "opus" },
+  { value: "opus[1m]", label: "opus[1m]" },
+  { value: "sonnet", label: "sonnet" },
+  { value: "sonnet[1m]", label: "sonnet[1m]" },
+  { value: "haiku", label: "haiku" },
+] as const;
+
 function usePathValidation() {
   const [status, setStatus] = useState<PathStatus>("idle");
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -171,12 +180,11 @@ export default function ContextEditor({
             value={model}
             onChange={(e) => setModel(e.target.value)}
           >
-            <option value="">CLI default</option>
-            <option value="opus">opus</option>
-            <option value="opus[1m]">opus[1m]</option>
-            <option value="sonnet">sonnet</option>
-            <option value="sonnet[1m]">sonnet[1m]</option>
-            <option value="haiku">haiku</option>
+            {MODELS.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
           </select>
         </div>
 
