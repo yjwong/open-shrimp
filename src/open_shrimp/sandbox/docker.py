@@ -253,6 +253,31 @@ class DockerSandbox:
         if rc != 0:
             raise RuntimeError(f"focus failed: {stderr.strip()}")
 
+    def get_clipboard(self) -> str:
+        rc, stdout, stderr = self._exec_in_container_sync(["wl-paste", "--no-newline"])
+        if rc != 0:
+            return ""
+        return stdout
+
+    def set_clipboard(self, text: str) -> None:
+        uid = os.getuid()
+        docker_cmd = [
+            "docker", "exec", "-i",
+            "-e", f"XDG_RUNTIME_DIR=/tmp/runtime-{uid}",
+            "-e", "WAYLAND_DISPLAY=wayland-0",
+            self.container_name,
+            "wl-copy",
+        ]
+        result = subprocess.run(
+            docker_cmd,
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"wl-copy failed: {result.stderr.strip()}")
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         if not host_paths:
             return []

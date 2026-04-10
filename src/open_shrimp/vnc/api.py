@@ -288,6 +288,116 @@ async def text_input_state_stream_endpoint(
     )
 
 
+def _get_sandbox_for_context(
+    context_name: str,
+    ctx: ContextConfig,
+    sandbox_managers: dict[str, object] | None = None,
+) -> object | None:
+    """Get the cached Sandbox instance for a computer-use context."""
+    backend: str | None = None
+    if ctx.container is not None and ctx.container.computer_use:
+        backend = "docker"
+    elif ctx.sandbox is not None and ctx.sandbox.computer_use:
+        backend = ctx.sandbox.backend
+
+    if backend is None:
+        return None
+
+    manager = (sandbox_managers or {}).get(backend)
+    if manager is None:
+        return None
+
+    create = getattr(manager, "create_sandbox", None)
+    if create is None:
+        return None
+
+    return create(context_name, ctx)
+
+
+async def clipboard_get_endpoint(request: Request) -> JSONResponse:
+    """GET /api/vnc/clipboard — read the sandbox Wayland clipboard."""
+    config: Config = request.app.state.config
+    token = request.query_params.get("token", "")
+    context_name = request.query_params.get("context", "")
+
+    try:
+        await validate_token_param(
+            token, config.telegram.token, config.allowed_users,
+        )
+    except AuthError:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if not context_name or context_name not in config.contexts:
+        return JSONResponse({"error": "Unknown context"}, status_code=400)
+
+    ctx = config.contexts[context_name]
+    if not _is_computer_use_context(ctx):
+        return JSONResponse(
+            {"error": "Not a computer_use context"}, status_code=400,
+        )
+
+    sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
+    sandbox = await asyncio.to_thread(
+        _get_sandbox_for_context, context_name, ctx, sandbox_managers,
+    )
+    if sandbox is None:
+        return JSONResponse(
+            {"error": "Sandbox not available"}, status_code=503,
+        )
+
+    try:
+        text = await asyncio.to_thread(sandbox.get_clipboard)
+    except (NotImplementedError, RuntimeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"text": text})
+
+
+async def clipboard_set_endpoint(request: Request) -> JSONResponse:
+    """POST /api/vnc/clipboard — write to the sandbox Wayland clipboard."""
+    config: Config = request.app.state.config
+    token = request.query_params.get("token", "")
+    context_name = request.query_params.get("context", "")
+
+    try:
+        await validate_token_param(
+            token, config.telegram.token, config.allowed_users,
+        )
+    except AuthError:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if not context_name or context_name not in config.contexts:
+        return JSONResponse({"error": "Unknown context"}, status_code=400)
+
+    ctx = config.contexts[context_name]
+    if not _is_computer_use_context(ctx):
+        return JSONResponse(
+            {"error": "Not a computer_use context"}, status_code=400,
+        )
+
+    try:
+        body = await request.json()
+        text = body.get("text", "")
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
+    sandbox = await asyncio.to_thread(
+        _get_sandbox_for_context, context_name, ctx, sandbox_managers,
+    )
+    if sandbox is None:
+        return JSONResponse(
+            {"error": "Sandbox not available"}, status_code=503,
+        )
+
+    try:
+        await asyncio.to_thread(sandbox.set_clipboard, text)
+    except (NotImplementedError, RuntimeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"ok": True})
+
+
 def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
     """Create the routes for the VNC API and Mini App frontend.
 
@@ -304,6 +414,8 @@ def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
 
     routes: list[Route | Mount | WebSocketRoute] = [
         WebSocketRoute("/api/vnc/ws", vnc_ws_endpoint),
+        Route("/api/vnc/clipboard", clipboard_get_endpoint, methods=["GET"]),
+        Route("/api/vnc/clipboard", clipboard_set_endpoint, methods=["POST"]),
         Route("/api/vnc/text-input-state", text_input_state_endpoint),
         Route(
             "/api/vnc/text-input-state/stream",

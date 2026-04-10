@@ -654,6 +654,50 @@ class LibvirtSandbox:
             "alt+Tab to switch windows."
         )
 
+    def get_clipboard(self) -> str:
+        """Get clipboard contents via wl-paste over SSH."""
+        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
+
+        assert self._ssh_port is not None
+        ssh_key = self._sdir / "ssh_key"
+        ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
+        result = subprocess.run(
+            [
+                "ssh", *ssh_opts, "claude@localhost",
+                "env", "XDG_RUNTIME_DIR=/run/user/1000",
+                "WAYLAND_DISPLAY=wayland-0",
+                "wl-paste", "--no-newline",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout
+
+    def set_clipboard(self, text: str) -> None:
+        """Set clipboard contents via wl-copy over SSH."""
+        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
+
+        assert self._ssh_port is not None
+        ssh_key = self._sdir / "ssh_key"
+        ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
+        result = subprocess.run(
+            [
+                "ssh", *ssh_opts, "claude@localhost",
+                "env", "XDG_RUNTIME_DIR=/run/user/1000",
+                "WAYLAND_DISPLAY=wayland-0",
+                "wl-copy",
+            ],
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"wl-copy failed: {result.stderr.strip()}")
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files into the VM via scp."""
         if not host_paths:

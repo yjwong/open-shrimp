@@ -178,6 +178,21 @@ class Sandbox(Protocol):
         """
         ...
 
+    def get_clipboard(self) -> str:
+        """Get the Wayland clipboard contents via ``wl-paste``.
+
+        Returns the clipboard text, or an empty string if unavailable.
+        Raises :class:`NotImplementedError` for backends without computer-use.
+        """
+        ...
+
+    def set_clipboard(self, text: str) -> None:
+        """Set the Wayland clipboard contents via ``wl-copy``.
+
+        Raises :class:`NotImplementedError` for backends without computer-use.
+        """
+        ...
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files from the host into the sandbox.
 

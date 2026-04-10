@@ -212,40 +212,43 @@ function setupPinchZoom(
 
 // ── Clipboard ──
 
-/** Track the remote VNC clipboard and provide copy/paste helpers. */
-function setupClipboard(rfb: RFBType): {
+/** Clipboard helpers that use the server-side wl-clipboard API. */
+function setupClipboard(context: string, authToken: string): {
   /** Copy the remote clipboard content to the local device clipboard. */
   copyToLocal: () => Promise<void>;
   /** Read the local device clipboard and send it to the remote VNC session. */
   pasteFromLocal: () => Promise<void>;
 } {
-  let remoteClipboard = "";
-
-  // noVNC fires "clipboard" when the VNC server's clipboard changes.
-  rfb.addEventListener("clipboard", (ev: Event) => {
-    const detail = (ev as CustomEvent).detail as { text: string } | undefined;
-    if (detail?.text) {
-      remoteClipboard = detail.text;
-    }
-  });
+  const clipboardUrl =
+    `${window.location.origin}/api/vnc/clipboard` +
+    `?context=${encodeURIComponent(context)}` +
+    `&token=${encodeURIComponent(authToken)}`;
 
   return {
     async copyToLocal() {
-      if (!remoteClipboard) return;
       try {
-        await navigator.clipboard.writeText(remoteClipboard);
+        const resp = await fetch(clipboardUrl);
+        if (!resp.ok) return;
+        const { text } = await resp.json();
+        if (text) {
+          await navigator.clipboard.writeText(text);
+        }
       } catch {
-        // Clipboard API may not be available (insecure context, denied).
+        // Clipboard API or fetch may fail.
       }
     },
     async pasteFromLocal() {
       try {
         const text = await navigator.clipboard.readText();
         if (text) {
-          rfb.clipboardPasteFrom(text);
+          await fetch(clipboardUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
         }
       } catch {
-        // Clipboard API may not be available (insecure context, denied).
+        // Clipboard API or fetch may fail.
       }
     },
   };
@@ -313,7 +316,7 @@ async function main(): Promise<void> {
 
   // ── Events ──
 
-  const clipboard = setupClipboard(rfb);
+  const clipboard = setupClipboard(context, authToken);
 
   rfb.addEventListener("connect", () => {
     loadingEl.remove();

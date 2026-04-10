@@ -264,6 +264,16 @@ class LimaSandbox:
             "Computer-use not yet supported for Lima backend"
         )
 
+    def get_clipboard(self) -> str:
+        raise NotImplementedError(
+            "Computer-use not yet supported for Lima backend"
+        )
+
+    def set_clipboard(self, text: str) -> None:
+        raise NotImplementedError(
+            "Computer-use not yet supported for Lima backend"
+        )
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files into the VM via ``limactl copy``."""
         if not host_paths:

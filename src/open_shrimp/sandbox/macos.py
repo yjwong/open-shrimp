@@ -107,6 +107,12 @@ class MacOSSandbox:
     def focus_window(self, name: str) -> None:
         raise NotImplementedError("Computer-use not supported on macOS sandbox")
 
+    def get_clipboard(self) -> str:
+        raise NotImplementedError("Computer-use not supported on macOS sandbox")
+
+    def set_clipboard(self, text: str) -> None:
+        raise NotImplementedError("Computer-use not supported on macOS sandbox")
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         # macOS sandbox shares the host filesystem — no copy needed.
         return list(host_paths)
