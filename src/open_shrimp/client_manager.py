@@ -67,20 +67,31 @@ def _watch_credentials(stop: threading.Event) -> None:
 
     This keeps long-lived SDK clients (where the wrapper script doesn't
     re-run) in sync with host-side token refreshes.
+
+    We watch the **parent directory** rather than the credentials file
+    itself because Claude Code refreshes credentials via atomic replace
+    (write tmp + rename).  Watching the file directly loses track after
+    the first rename — inotify is bound to the old inode.
     """
     import shutil
 
     from watchfiles import watch
 
-    if not _HOST_CREDENTIALS.exists():
+    cred_dir = _HOST_CREDENTIALS.parent
+    cred_name = _HOST_CREDENTIALS.name
+
+    if not cred_dir.exists():
         return
 
     try:
-        for _changes in watch(
-            _HOST_CREDENTIALS, stop_event=stop, rust_timeout=1000,
+        for changes in watch(
+            cred_dir, stop_event=stop, rust_timeout=1000,
         ):
             if stop.is_set():
                 break
+            # Filter for changes to the credentials file only.
+            if not any(Path(path).name == cred_name for _ct, path in changes):
+                continue
             if not _HOST_CREDENTIALS.exists():
                 continue
             with _cred_sync_lock:
