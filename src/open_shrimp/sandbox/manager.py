@@ -107,6 +107,17 @@ class SandboxManager(Protocol):
         """Stop and remove all managed sandbox runtimes."""
         ...
 
+    # -- Invalidation ----------------------------------------------------------
+
+    def invalidate_sandbox(self, context_name: str) -> None:
+        """Evict the cached sandbox for *context_name*.
+
+        Stops the runtime (container/VM) and removes it from the cache so
+        the next ``create_sandbox`` call builds a fresh instance with
+        updated configuration (e.g. new additional directories).
+        """
+        ...
+
     # -- Factory --------------------------------------------------------------
 
     def create_sandbox(
@@ -357,6 +368,17 @@ class DockerSandboxManager:
                 )
                 logger.info("Removed container %s", name)
 
+    # -- Invalidation ----------------------------------------------------------
+
+    def invalidate_sandbox(self, context_name: str) -> None:
+        cached = self._sandbox_cache.pop(context_name, None)
+        if cached is not None:
+            try:
+                cached.stop()
+            except Exception:
+                logger.debug("Error stopping sandbox %s", context_name, exc_info=True)
+            logger.info("Invalidated Docker sandbox for context '%s'", context_name)
+
     # -- Factory --------------------------------------------------------------
 
     def create_sandbox(
@@ -469,6 +491,12 @@ class MacOSSandboxManager:
 
     def stop_all(self) -> None:
         self._sandbox_cache.clear()
+
+    def invalidate_sandbox(self, context_name: str) -> None:
+        # macOS sandbox-exec has no persistent runtime; just evict cache.
+        cached = self._sandbox_cache.pop(context_name, None)
+        if cached is not None:
+            logger.info("Invalidated macOS sandbox for context '%s'", context_name)
 
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
@@ -587,6 +615,17 @@ class LimaSandboxManager:
                 logger.info("Stopped Lima instance %s", name)
 
         self._sandbox_cache.clear()
+
+    # -- Invalidation ----------------------------------------------------------
+
+    def invalidate_sandbox(self, context_name: str) -> None:
+        cached = self._sandbox_cache.pop(context_name, None)
+        if cached is not None:
+            try:
+                cached.stop()
+            except Exception:
+                logger.debug("Error stopping Lima sandbox %s", context_name, exc_info=True)
+            logger.info("Invalidated Lima sandbox for context '%s'", context_name)
 
     # -- Factory --------------------------------------------------------------
 
@@ -869,6 +908,17 @@ class LibvirtSandboxManager:
                 logger.info("Sent SIGTERM to orphaned virtiofsd (pid=%d)", pid)
             except (ProcessLookupError, PermissionError):
                 pass
+
+    # -- Invalidation ----------------------------------------------------------
+
+    def invalidate_sandbox(self, context_name: str) -> None:
+        cached = self._sandbox_cache.pop(context_name, None)
+        if cached is not None:
+            try:
+                cached.stop()
+            except Exception:
+                logger.debug("Error stopping libvirt sandbox %s", context_name, exc_info=True)
+            logger.info("Invalidated libvirt sandbox for context '%s'", context_name)
 
     # -- Factory --------------------------------------------------------------
 

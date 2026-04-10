@@ -102,6 +102,14 @@ _tool_approved_sessions: dict[tuple[ChatScope, str], list[ApprovalRule]] = {}
 _model_overrides: dict[ChatScope, str] = {}
 
 # ---------------------------------------------------------------------------
+# Per-scope additional directory overrides: (scope, context_name) -> dirs.
+# Set via /add_dir command.  Persisted in DB, cached here for fast lookup.
+# A key present with an empty list means "loaded, no overrides".
+# A key absent means "not loaded yet" (will be populated from DB on access).
+# ---------------------------------------------------------------------------
+_additional_dir_cache: dict[tuple[ChatScope, str], list[str]] = {}
+
+# ---------------------------------------------------------------------------
 # Per-scope active background tasks.  Populated by TaskStartedMessage,
 # updated by TaskProgressMessage, removed by TaskNotificationMessage.
 # Cleared on /clear.

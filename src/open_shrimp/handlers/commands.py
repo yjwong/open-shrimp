@@ -456,6 +456,155 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+# ── /add_dir ──
+
+
+async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /add_dir command: add, remove, or list runtime additional directories.
+
+    Usage:
+        /add_dir                    -- list current additional directories
+        /add_dir <path>             -- add a directory
+        /add_dir remove <path>      -- remove a previously added directory
+    """
+    import os
+
+    from open_shrimp.config import is_sandboxed
+    from open_shrimp.db import (
+        add_additional_directory,
+        get_additional_directories,
+        remove_additional_directory,
+    )
+    from open_shrimp.handlers.state import _additional_dir_cache
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    message = update.effective_message
+    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    scope = chat_scope_from_message(message)
+    ctx_name, ctx = await _get_context(scope, config, db)
+    ctx_dir = config.contexts[ctx_name].directory
+
+    # Parse: strip the /add_dir command, then check for "remove" prefix.
+    # Join remaining tokens to support paths with spaces.
+    raw = (message.text or "").strip()
+    # Remove the /add_dir (or /add_dir@botname) prefix.
+    rest = raw.split(None, 1)[1].strip() if " " in raw else ""
+
+    if not rest:
+        # List directories
+        base_dirs = config.contexts[ctx_name].additional_directories
+        runtime_dirs = await get_additional_directories(db, scope, ctx_name)
+
+        lines: list[str] = []
+        if base_dirs:
+            lines.append("*Config directories:*")
+            for d in base_dirs:
+                lines.append(f"  `{_escape_mdv2(d)}`")
+        if runtime_dirs:
+            if lines:
+                lines.append("")
+            lines.append("*Runtime directories \\(/add\\_dir\\):*")
+            for d in runtime_dirs:
+                lines.append(f"  `{_escape_mdv2(d)}`")
+        if not lines:
+            lines.append("No additional directories configured\\.")
+        else:
+            lines.append("")
+            lines.append("Use `/add_dir <path>` to add, `/add_dir remove <path>` to remove\\.")
+
+        await message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+        return
+
+    # Check for "remove" subcommand
+    rest_parts = rest.split(None, 1)
+    if rest_parts[0] == "remove":
+        remove_path = rest_parts[1].strip() if len(rest_parts) > 1 else ""
+        if not remove_path:
+            await message.reply_text(
+                "Usage: `/add_dir remove <path>`",
+                parse_mode="MarkdownV2",
+            )
+            return
+        target = os.path.expanduser(remove_path)
+        removed = await remove_additional_directory(db, scope, ctx_name, target)
+        if not removed:
+            await message.reply_text(
+                f"Directory not found in runtime list: `{_escape_mdv2(target)}`",
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        # Update cache
+        _additional_dir_cache.pop((scope, ctx_name), None)
+
+        # Reconnect session and invalidate sandbox
+        await _reconnect_after_dir_change(scope, ctx_name, ctx, context)
+
+        await message.reply_text(
+            f"Removed `{_escape_mdv2(target)}`\\. Session will reconnect on next message\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    # Add directory — resolve relative paths against the context directory.
+    target = os.path.expanduser(rest)
+    if not os.path.isabs(target):
+        target = os.path.join(ctx_dir, target)
+    target = os.path.realpath(target)
+
+    if not os.path.isdir(target):
+        await message.reply_text(
+            f"Directory does not exist: `{_escape_mdv2(target)}`",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    # Check for duplicates against context dir, config dirs, and runtime dirs.
+    # Canonicalize everything so symlinks don't bypass the check.
+    canonical_existing = {os.path.realpath(d) for d in ctx.additional_directories}
+    canonical_existing.add(os.path.realpath(ctx_dir))
+    if target in canonical_existing:
+        await message.reply_text(
+            f"`{_escape_mdv2(target)}` is already included\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    await add_additional_directory(db, scope, ctx_name, target)
+
+    # Update cache
+    _additional_dir_cache.pop((scope, ctx_name), None)
+
+    # Reconnect session and invalidate sandbox
+    await _reconnect_after_dir_change(scope, ctx_name, ctx, context)
+
+    await message.reply_text(
+        f"Added `{_escape_mdv2(target)}`\\. Session will reconnect on next message\\.",
+        parse_mode="MarkdownV2",
+    )
+
+
+async def _reconnect_after_dir_change(
+    scope: ChatScope,
+    ctx_name: str,
+    ctx: ContextConfig,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Close session and invalidate sandbox after directory changes."""
+    from open_shrimp.config import is_sandboxed
+    from open_shrimp.handlers.messages import _select_sandbox_manager
+
+    await close_session(scope)
+
+    if is_sandboxed(ctx):
+        manager = _select_sandbox_manager(context.bot_data, ctx)
+        if manager is not None:
+            manager.invalidate_sandbox(ctx_name)
+
+
 def _list_sessions_for_context(
     ctx_name: str,
     ctx: ContextConfig,

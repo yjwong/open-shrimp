@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS pinned_messages (
 )
 """
 
+_CREATE_ADDITIONAL_DIRECTORIES_TABLE = """
+CREATE TABLE IF NOT EXISTS additional_directories (
+    chat_id INTEGER NOT NULL,
+    message_thread_id INTEGER NOT NULL DEFAULT 0,
+    context_name TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    PRIMARY KEY (chat_id, message_thread_id, context_name, directory)
+)
+"""
+
 _CREATE_SCHEDULED_TASKS_TABLE = """
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,6 +166,7 @@ async def init_db(db_path: Path = DEFAULT_DB_PATH) -> aiosqlite.Connection:
     await db.execute(_CREATE_ACTIVE_CONTEXTS_TABLE)
     await db.execute(_CREATE_PINNED_MESSAGES_TABLE)
     await db.execute(_CREATE_SCHEDULED_TASKS_TABLE)
+    await db.execute(_CREATE_ADDITIONAL_DIRECTORIES_TABLE)
     await db.commit()
     await _migrate_schema(db)
     logger.info("Database initialized at %s", db_path)
@@ -411,3 +422,74 @@ async def delete_scheduled_task_by_id(
     """Delete a scheduled task by its primary key ID."""
     await db.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
     await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Per-scope additional directories (runtime overrides via /add_dir)
+# ---------------------------------------------------------------------------
+
+
+async def add_additional_directory(
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    context_name: str,
+    directory: str,
+) -> None:
+    """Add a runtime additional directory for (scope, context_name)."""
+    await db.execute(
+        "INSERT OR IGNORE INTO additional_directories "
+        "(chat_id, message_thread_id, context_name, directory) "
+        "VALUES (?, ?, ?, ?)",
+        (scope.chat_id, _thread_id_to_db(scope.thread_id), context_name, directory),
+    )
+    await db.commit()
+
+
+async def remove_additional_directory(
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    context_name: str,
+    directory: str,
+) -> bool:
+    """Remove a runtime additional directory. Returns True if it existed."""
+    cursor = await db.execute(
+        "DELETE FROM additional_directories "
+        "WHERE chat_id = ? AND message_thread_id = ? "
+        "AND context_name = ? AND directory = ?",
+        (scope.chat_id, _thread_id_to_db(scope.thread_id), context_name, directory),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def get_additional_directories(
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    context_name: str,
+) -> list[str]:
+    """Return all runtime additional directories for (scope, context_name)."""
+    cursor = await db.execute(
+        "SELECT directory FROM additional_directories "
+        "WHERE chat_id = ? AND message_thread_id = ? AND context_name = ? "
+        "ORDER BY directory",
+        (scope.chat_id, _thread_id_to_db(scope.thread_id), context_name),
+    )
+    rows = await cursor.fetchall()
+    return [row[0] for row in rows]
+
+
+async def get_all_additional_directories_for_context(
+    db: aiosqlite.Connection,
+    context_name: str,
+) -> list[str]:
+    """Return the union of runtime additional directories across all scopes.
+
+    Used for sandboxed contexts where the sandbox is shared across scopes.
+    """
+    cursor = await db.execute(
+        "SELECT DISTINCT directory FROM additional_directories "
+        "WHERE context_name = ? ORDER BY directory",
+        (context_name,),
+    )
+    rows = await cursor.fetchall()
+    return [row[0] for row in rows]

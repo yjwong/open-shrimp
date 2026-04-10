@@ -28,6 +28,7 @@ from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
 from open_shrimp.dispatch_registry import register_dispatch
 from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
+    add_dir_handler,
     cancel_handler,
     clear_handler,
     config_handler,
@@ -167,6 +168,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("cancel", cancel_handler))
     app.add_handler(CommandHandler("resume", resume_handler))
     app.add_handler(CommandHandler("model", model_handler))
+    app.add_handler(CommandHandler("add_dir", add_dir_handler))
     app.add_handler(CommandHandler("review", review_handler))
     app.add_handler(CommandHandler("mcp", mcp_handler))
     app.add_handler(CommandHandler("schedule", schedule_handler))
@@ -228,6 +230,7 @@ async def run_bot(
         BotCommand("cancel", "Abort running Claude invocation"),
         BotCommand("resume", "List and resume a previous session"),
         BotCommand("model", "Show or override the model for this chat"),
+        BotCommand("add_dir", "Add a working directory to the context"),
         BotCommand("review", "Review and stage git changes"),
         BotCommand("mcp", "List and manage MCP servers"),
         BotCommand("schedule", "List scheduled tasks"),

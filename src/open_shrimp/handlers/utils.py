@@ -19,6 +19,7 @@ from open_shrimp.db import (
 )
 from open_shrimp.handlers.state import (
     _DEFAULT_CONTEXT_LIMIT,
+    _additional_dir_cache,
     _model_overrides,
 )
 
@@ -75,14 +76,39 @@ async def _get_context(
 
     If a per-scope model override is active (via ``/model``), returns a
     shallow copy of the context config with the overridden model.
+    Runtime additional directories (via ``/add_dir``) are merged in.
     """
+    from dataclasses import replace
+
     name = await _get_context_name(scope, config, db)
     ctx = config.contexts[name]
-    override = _model_overrides.get(scope)
-    if override:
-        from dataclasses import replace
-        ctx = replace(ctx, model=override)
+
+    model_override = _model_overrides.get(scope)
+
+    # Merge runtime additional directories from DB cache.
+    extra_dirs = await _get_runtime_dirs(scope, name, db)
+
+    if model_override or extra_dirs:
+        kwargs: dict[str, Any] = {}
+        if model_override:
+            kwargs["model"] = model_override
+        if extra_dirs:
+            kwargs["additional_directories"] = list(ctx.additional_directories) + extra_dirs
+        ctx = replace(ctx, **kwargs)
+
     return name, ctx
+
+
+async def _get_runtime_dirs(
+    scope: ChatScope, context_name: str, db: aiosqlite.Connection,
+) -> list[str]:
+    """Return runtime additional directories, loading from DB on first access."""
+    from open_shrimp.db import get_additional_directories
+
+    key = (scope, context_name)
+    if key not in _additional_dir_cache:
+        _additional_dir_cache[key] = await get_additional_directories(db, scope, context_name)
+    return _additional_dir_cache[key]
 
 
 def _is_authorized(user_id: int | None, config: Config) -> bool:

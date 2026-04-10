@@ -180,6 +180,7 @@ Key fields:
 | `/status` | `status_handler` | Current context, session, running state |
 | `/cancel` | `cancel_handler` | Abort running Claude invocation |
 | `/model` | `model_handler` | Show or override the model for this chat |
+| `/add_dir` | `add_dir_handler` | Add a working directory to the current context |
 | `/resume` | `resume_handler` | List and resume a previous session |
 | `/review` | `review_handler` | Open the review Mini App for the current context |
 | `/mcp` | `mcp_handler` | List and manage MCP servers (reset/enable/disable) |
