@@ -30,6 +30,7 @@ from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
     add_dir_handler,
     cancel_handler,
+    handle_add_dir_callback,
     clear_handler,
     config_handler,
     context_handler,
@@ -84,6 +85,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     # /resume session selection
     if await handle_resume_callback(query, data, config, context):
+        return
+
+    # /add_dir persistence choice
+    if await handle_add_dir_callback(query, data, config, context):
         return
 
     # Tool approval, show_prompt, show_bash, accept_all_edits
@@ -160,6 +165,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
 
     app.bot_data["config"] = config
     app.bot_data["db"] = db
+    app.bot_data["config_path"] = None  # set by run_bot if available
 
     # Command handlers
     app.add_handler(CommandHandler("context", context_handler))
@@ -203,6 +209,7 @@ async def run_bot(
 ) -> None:
     """Start the bot with long polling."""
     app = build_application(config, db)
+    app.bot_data["config_path"] = config_path
     logger.info("Starting bot with long polling")
     await app.initialize()
 

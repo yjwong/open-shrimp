@@ -573,18 +573,120 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    await add_additional_directory(db, scope, ctx_name, target)
+    # Store pending add and show inline keyboard with short callback keys.
+    import uuid
 
-    # Update cache
-    _additional_dir_cache.pop((scope, ctx_name), None)
+    from open_shrimp.handlers.state import _pending_add_dirs
 
-    # Reconnect session and invalidate sandbox
-    await _reconnect_after_dir_change(scope, ctx_name, ctx, context)
+    key = uuid.uuid4().hex[:12]
+    _pending_add_dirs[key] = (scope, ctx_name, target)
 
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("This session", callback_data=f"adddir_s:{key}"),
+            InlineKeyboardButton("Remember", callback_data=f"adddir_r:{key}"),
+        ],
+    ])
     await message.reply_text(
-        f"Added `{_escape_mdv2(target)}`\\. Session will reconnect on next message\\.",
+        f"Add `{_escape_mdv2(target)}` to *{_escape_mdv2(ctx_name)}*?",
         parse_mode="MarkdownV2",
+        reply_markup=markup,
     )
+
+
+async def handle_add_dir_callback(
+    query: Any, data: str, config: Config, context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Handle /add_dir inline keyboard callbacks. Returns True if handled."""
+    if not data.startswith(("adddir_s:", "adddir_r:")):
+        return False
+
+    from pathlib import Path
+
+    from open_shrimp.config import load_config, load_raw_yaml, write_raw_yaml
+    from open_shrimp.db import add_additional_directory
+    from open_shrimp.handlers.state import _additional_dir_cache, _pending_add_dirs
+
+    db: aiosqlite.Connection = context.bot_data["db"]
+
+    # Parse: "adddir_{s|r}:{key}"
+    prefix, key = data.split(":", 1)
+    action = "session" if prefix == "adddir_s" else "remember"
+
+    pending = _pending_add_dirs.pop(key, None)
+    if pending is None:
+        await query.answer("This action has expired.")
+        return True
+
+    scope, ctx_name, target = pending
+    ctx = config.contexts.get(ctx_name)
+    if ctx is None:
+        await query.answer("Context no longer exists.")
+        return True
+
+    if action == "session":
+        # Store in DB only — persists across messages but not bot restarts.
+        await add_additional_directory(db, scope, ctx_name, target)
+        _additional_dir_cache.pop((scope, ctx_name), None)
+        await _reconnect_after_dir_change(scope, ctx_name, ctx, context)
+
+        try:
+            await query.message.edit_text(
+                f"Added `{_escape_mdv2(target)}` to *{_escape_mdv2(ctx_name)}* "
+                f"\\(this session\\)\\.\n"
+                f"Session will reconnect on next message\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        await query.answer()
+        return True
+
+    if action == "remember":
+        # Write to config.yaml so it persists across restarts.
+        config_path_str: str | None = context.bot_data.get("config_path")
+        if not config_path_str:
+            from open_shrimp.config import DEFAULT_CONFIG_PATH
+            config_path_str = str(DEFAULT_CONFIG_PATH)
+
+        config_path = Path(config_path_str)
+        try:
+            raw = load_raw_yaml(config_path)
+            ctx_raw = raw.get("contexts", {}).get(ctx_name, {})
+            dirs = ctx_raw.get("additional_directories", [])
+            if target not in dirs:
+                dirs.append(target)
+                ctx_raw["additional_directories"] = dirs
+            write_raw_yaml(config_path, raw)
+            # Reload config eagerly (hot-reload watcher will also fire).
+            new_config = load_config(config_path_str)
+            context.bot_data["config"] = new_config
+        except Exception:
+            logger.exception("Failed to write config for /add_dir remember")
+            await query.answer("Failed to update config file.")
+            return True
+
+        # No DB entry needed — it's in the config now.
+        _additional_dir_cache.pop((scope, ctx_name), None)
+
+        updated_ctx = new_config.contexts.get(ctx_name, ctx)
+        await _reconnect_after_dir_change(scope, ctx_name, updated_ctx, context)
+
+        try:
+            await query.message.edit_text(
+                f"Added `{_escape_mdv2(target)}` to *{_escape_mdv2(ctx_name)}* "
+                f"\\(saved to config\\)\\.\n"
+                f"Session will reconnect on next message\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        await query.answer()
+        return True
+
+    return False
 
 
 async def _reconnect_after_dir_change(

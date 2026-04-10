@@ -110,6 +110,13 @@ _model_overrides: dict[ChatScope, str] = {}
 _additional_dir_cache: dict[tuple[ChatScope, str], list[str]] = {}
 
 # ---------------------------------------------------------------------------
+# Pending /add_dir confirmations: short key -> (scope, ctx_name, path).
+# Telegram callback_data is limited to 64 bytes, so we store the full
+# details here and put only a short UUID in the callback data.
+# ---------------------------------------------------------------------------
+_pending_add_dirs: dict[str, tuple[ChatScope, str, str]] = {}
+
+# ---------------------------------------------------------------------------
 # Per-scope active background tasks.  Populated by TaskStartedMessage,
 # updated by TaskProgressMessage, removed by TaskNotificationMessage.
 # Cleared on /clear.
