@@ -8,6 +8,7 @@ OpenShrimp's VMs from the user's personal Lima instances.
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
 import logging
@@ -42,7 +43,7 @@ def _read_credentials_json() -> str | None:
                 "-s",
                 "Claude Code-credentials",
                 "-a",
-                os.getlogin(),
+                getpass.getuser(),
                 "-w",
             ],
             capture_output=True,
@@ -330,7 +331,9 @@ def _build_mounts(
 
     # Host-side .claude home (shared into VM).
     # Lima creates the VM user as <username> with home /home/<username>.guest.
-    vm_home = f"/home/{os.getlogin()}.guest"
+    # getpass.getuser(), not os.getlogin() — the latter returns "root"
+    # under launchd (macOS .app), producing a wrong mount point.
+    vm_home = f"/home/{getpass.getuser()}.guest"
     claude_home = str(sdir / "claude-home")
     Path(claude_home).mkdir(parents=True, exist_ok=True)
     mounts.append({
