@@ -28,7 +28,7 @@ contexts:
 
 On first use, OpenShrimp will:
 
-1. Download `limactl` to `~/.config/openshrimp/bin/`
+1. Download `limactl` to `~/Library/Application Support/openshrimp/bin/`
 2. Download an Ubuntu 24.04 cloud image
 3. Create and boot a VM (takes ~30 seconds on first boot)
 4. Install the Claude CLI inside the VM
