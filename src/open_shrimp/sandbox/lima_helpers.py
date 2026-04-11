@@ -466,23 +466,28 @@ def _build_computer_use_provisions() -> list[dict]:
 
         rm -rf /var/lib/apt/lists/*
 
+        # Install Claude Code and Playwright MCP globally.
+        npm install -g --cache /tmp/npm-cache \\
+            @anthropic-ai/claude-code@latest \\
+            @playwright/mcp
+        rm -rf /tmp/npm-cache
+
+        # Install Playwright's Chromium system dependencies.
+        npx playwright install-deps chromium
+
         # Enable linger so user services start on boot without login.
         LIMA_USER=$(getent passwd 1000 | cut -d: -f1)
         loginctl enable-linger "$LIMA_USER"
     """)
     provisions.append({"mode": "system", "script": install_script})
 
-    # --- User provision: install Playwright + Chromium, write configs ---
+    # --- User provision: download browsers, write configs ---
     user_setup_script = textwrap.dedent("""\
         #!/bin/bash
         set -eux
 
-        # Install Playwright MCP and its bundled Chromium.
-        npm install -g --cache /tmp/npm-cache \\
-            @anthropic-ai/claude-code@latest \\
-            @playwright/mcp
-        npx playwright install --with-deps chromium
-        rm -rf /tmp/npm-cache ~/.npm
+        # Download Playwright's bundled Chromium (system deps already installed).
+        npx playwright install chromium
 
         # Chromium profile: skip first-run UI and disable crash reporter.
         mkdir -p ~/.config/chromium/Default
