@@ -35,20 +35,22 @@ openshrimp = "open_shrimp.main:main"
 openshrimp-app = "open_shrimp.platform.macos.app:main"
 
 [tool.hatch.build.targets.sdist.force-include]
-"web/review-app/dist" = "web/review-app/dist"
-"web/terminal-app/dist" = "web/terminal-app/dist"
-"web/markdown-app/dist" = "web/markdown-app/dist"
-"web/vnc-app/dist" = "web/vnc-app/dist"
 "Dockerfile.claude" = "Dockerfile.claude"
 "seccomp-dind.json" = "seccomp-dind.json"
+"web/config-app/dist" = "web/config-app/dist"
+"web/markdown-app/dist" = "web/markdown-app/dist"
+"web/review-app/dist" = "web/review-app/dist"
+"web/terminal-app/dist" = "web/terminal-app/dist"
+"web/vnc-app/dist" = "web/vnc-app/dist"
 
 [tool.hatch.build.targets.wheel.force-include]
-"web/review-app/dist" = "open_shrimp/review/static"
-"web/terminal-app/dist" = "open_shrimp/terminal/static"
-"web/markdown-app/dist" = "open_shrimp/preview/static"
-"web/vnc-app/dist" = "open_shrimp/vnc/static"
 "Dockerfile.claude" = "open_shrimp/Dockerfile.claude"
 "seccomp-dind.json" = "open_shrimp/seccomp-dind.json"
+"web/config-app/dist" = "open_shrimp/config_app/static"
+"web/markdown-app/dist" = "open_shrimp/preview/static"
+"web/review-app/dist" = "open_shrimp/review/static"
+"web/terminal-app/dist" = "open_shrimp/terminal/static"
+"web/vnc-app/dist" = "open_shrimp/vnc/static"
 
 [tool.hatch.version]
 path = "VERSION"
