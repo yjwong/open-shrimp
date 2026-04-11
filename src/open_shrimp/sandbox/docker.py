@@ -254,7 +254,9 @@ class DockerSandbox:
             raise RuntimeError(f"focus failed: {stderr.strip()}")
 
     def get_clipboard(self) -> str:
-        rc, stdout, stderr = self._exec_in_container_sync(["wl-paste", "--no-newline"])
+        rc, stdout, stderr = self._exec_in_container_sync(
+            ["wl-paste", "--no-newline", "--primary"],
+        )
         if rc != 0:
             return ""
         return stdout

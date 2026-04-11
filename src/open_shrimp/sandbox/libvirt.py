@@ -666,7 +666,7 @@ class LibvirtSandbox:
                 "ssh", *ssh_opts, "claude@localhost",
                 "env", "XDG_RUNTIME_DIR=/run/user/1000",
                 "WAYLAND_DISPLAY=wayland-0",
-                "wl-paste", "--no-newline",
+                "wl-paste", "--no-newline", "--primary",
             ],
             capture_output=True,
             text=True,
