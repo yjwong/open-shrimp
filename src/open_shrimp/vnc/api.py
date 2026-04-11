@@ -22,7 +22,6 @@ from open_shrimp.config import Config, ContextConfig
 from open_shrimp.sandbox.docker_helpers import (
     get_text_input_active,
     get_text_input_state_path,
-    get_vnc_port as docker_get_vnc_port,
 )
 from open_shrimp.review.auth import AuthError, validate_token_param
 
@@ -38,42 +37,41 @@ def _is_computer_use_context(ctx: ContextConfig) -> bool:
     return False
 
 
+def _get_sandbox_for_context(
+    context_name: str,
+    ctx: ContextConfig,
+    sandbox_managers: dict[str, object] | None = None,
+) -> object | None:
+    """Get the cached Sandbox instance for a computer-use context."""
+    backend: str | None = None
+    if ctx.container is not None and ctx.container.computer_use:
+        backend = "docker"
+    elif ctx.sandbox is not None and ctx.sandbox.computer_use:
+        backend = ctx.sandbox.backend
+
+    if backend is None:
+        return None
+
+    manager = (sandbox_managers or {}).get(backend)
+    if manager is None:
+        return None
+
+    create = getattr(manager, "create_sandbox", None)
+    if create is None:
+        return None
+
+    return create(context_name, ctx)
+
+
 def _get_vnc_port_for_context(
     context_name: str,
     ctx: ContextConfig,
     sandbox_managers: dict[str, object] | None = None,
 ) -> int | None:
-    """Discover the VNC port for a context, supporting both backends.
-
-    Docker: reads the VNC port from the container's state directory.
-    Libvirt: parses ``domain.XMLDesc()`` for the auto-assigned VNC port.
-    """
-    if ctx.container is not None and ctx.container.computer_use:
-        return docker_get_vnc_port(context_name)
-
-    if ctx.sandbox is not None and ctx.sandbox.computer_use:
-        # Libvirt backend — need the sandbox manager's connection.
-        sandbox_manager = (sandbox_managers or {}).get(ctx.sandbox.backend)
-        if sandbox_manager is not None:
-            try:
-                from open_shrimp.sandbox.libvirt_helpers import (
-                    domain_name,
-                    extract_vnc_port_from_xml,
-                )
-                dom_name = domain_name(context_name, getattr(
-                    sandbox_manager, "instance_prefix", "openshrimp",
-                ))
-                conn = getattr(sandbox_manager, "_conn", None)
-                if conn is not None:
-                    import libvirt
-                    try:
-                        domain = conn.lookupByName(dom_name)
-                        if domain.isActive():
-                            return extract_vnc_port_from_xml(domain.XMLDesc(0))
-                    except libvirt.libvirtError:
-                        pass
-            except ImportError:
-                pass
+    """Discover the VNC port for a context via the sandbox protocol."""
+    sandbox = _get_sandbox_for_context(context_name, ctx, sandbox_managers)
+    if sandbox is not None:
+        return sandbox.get_vnc_port()
     return None
 
 
@@ -286,32 +284,6 @@ async def text_input_state_stream_endpoint(
             "X-Accel-Buffering": "no",
         },
     )
-
-
-def _get_sandbox_for_context(
-    context_name: str,
-    ctx: ContextConfig,
-    sandbox_managers: dict[str, object] | None = None,
-) -> object | None:
-    """Get the cached Sandbox instance for a computer-use context."""
-    backend: str | None = None
-    if ctx.container is not None and ctx.container.computer_use:
-        backend = "docker"
-    elif ctx.sandbox is not None and ctx.sandbox.computer_use:
-        backend = ctx.sandbox.backend
-
-    if backend is None:
-        return None
-
-    manager = (sandbox_managers or {}).get(backend)
-    if manager is None:
-        return None
-
-    create = getattr(manager, "create_sandbox", None)
-    if create is None:
-        return None
-
-    return create(context_name, ctx)
 
 
 async def clipboard_get_endpoint(request: Request) -> JSONResponse:

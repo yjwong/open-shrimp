@@ -38,6 +38,7 @@ from open_shrimp.sandbox.lima_helpers import (
     load_config_fingerprint,
     save_config_fingerprint,
     state_dir_for,
+    vnc_host_port,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,7 @@ class LimaSandbox:
             self._project_dir,
             self._additional_directories or None,
             self._computer_use,
+            context_name=self._context_name,
         )
         saved_fp = load_config_fingerprint(sdir)
         if saved_fp is not None and saved_fp != desired_fp:
@@ -151,6 +153,7 @@ class LimaSandbox:
             self._project_dir,
             self._additional_directories or None,
             self._computer_use,
+            context_name=self._context_name,
         )
 
         # Create the instance (this downloads the image + boots for cloud-init).
@@ -237,7 +240,7 @@ class LimaSandbox:
 
     def get_vnc_port(self) -> int | None:
         if self._computer_use:
-            return 5900
+            return vnc_host_port(self._context_name)
         return None
 
     def get_text_input_state_path(self) -> Path | None:

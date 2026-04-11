@@ -229,6 +229,18 @@ def state_dir_for(context_name: str) -> Path:
     return _data_dir() / "lima-state" / context_name
 
 
+def vnc_host_port(context_name: str) -> int:
+    """Return a deterministic VNC host port for a context.
+
+    Lima does not support ``hostPort: 0`` for auto-assignment, so we
+    derive a unique port from the context name to avoid collisions when
+    multiple computer-use VMs run concurrently.  Uses the range
+    49152–65535 (dynamic/private ports per IANA).
+    """
+    h = int.from_bytes(hashlib.sha256(context_name.encode()).digest())
+    return 49152 + (h % (65536 - 49152))
+
+
 def instance_name(context_name: str, instance_prefix: str = "openshrimp") -> str:
     """Return sanitised Lima instance name.
 
@@ -265,6 +277,8 @@ def generate_lima_yaml(
     project_dir: str,
     additional_directories: list[str] | None = None,
     computer_use: bool = False,
+    *,
+    context_name: str = "",
 ) -> Path:
     """Generate a Lima YAML template file.
 
@@ -295,6 +309,7 @@ def generate_lima_yaml(
         # VNC server (wayvnc on guest port 5900).
         port_forward.append({
             "guestPort": 5900,
+            "hostPort": vnc_host_port(context_name or sdir.name),
             "hostIP": "127.0.0.1",
         })
         # Chromium CDP debugging port for Playwright MCP.
@@ -606,6 +621,8 @@ def lima_config_fingerprint(
     project_dir: str,
     additional_directories: list[str] | None,
     computer_use: bool,
+    *,
+    context_name: str = "",
 ) -> str:
     """SHA-256 fingerprint of the Lima YAML template content.
 
@@ -621,6 +638,7 @@ def lima_config_fingerprint(
             project_dir,
             additional_directories,
             computer_use,
+            context_name=context_name,
         )
         content = yaml_path.read_text(encoding="utf-8")
     finally:
