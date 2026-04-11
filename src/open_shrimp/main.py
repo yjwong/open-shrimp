@@ -13,6 +13,7 @@ from pathlib import Path
 from open_shrimp.bot import run_bot
 from open_shrimp.config import DEFAULT_CONFIG_PATH, load_config
 from open_shrimp.db import init_db
+from open_shrimp.paths import init_paths
 from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
 
 logger = logging.getLogger("open_shrimp")
@@ -100,6 +101,8 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     config = load_config(config_path)
     logger.info("Config loaded from %s", config_path)
     logger.info("Contexts: %s", ", ".join(config.contexts.keys()))
+
+    init_paths(config.instance_name)
 
     db = await init_db()
 

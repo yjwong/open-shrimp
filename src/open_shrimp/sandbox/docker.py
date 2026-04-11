@@ -12,9 +12,9 @@ import os
 import subprocess
 from pathlib import Path
 
+import open_shrimp.sandbox.docker_helpers as _dh
+
 from open_shrimp.sandbox.docker_helpers import (
-    COMPUTER_USE_IMAGE,
-    CONTAINER_IMAGE,
     build_cli_wrapper as _build_cli_wrapper,
     container_name as _container_name_fn,
     ensure_computer_use_image as _ensure_computer_use_image,
@@ -53,15 +53,13 @@ class DockerSandbox:
         self._computer_use = computer_use
         self._custom_dockerfile = custom_dockerfile
 
-        # Resolve image name (same logic as client_manager.py lines 273-280).
-        if computer_use and custom_dockerfile:
-            self._image_name = f"openshrimp-claude:{context_name}"
+        if custom_dockerfile:
+            repo = _dh.CONTAINER_IMAGE.rsplit(":", 1)[0]
+            self._image_name = f"{repo}:{context_name}"
         elif computer_use:
-            self._image_name = COMPUTER_USE_IMAGE
-        elif custom_dockerfile:
-            self._image_name = f"openshrimp-claude:{context_name}"
+            self._image_name = _dh.COMPUTER_USE_IMAGE
         else:
-            self._image_name = CONTAINER_IMAGE
+            self._image_name = _dh.CONTAINER_IMAGE
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -86,7 +84,7 @@ class DockerSandbox:
             _ensure_image(
                 image_name=self._image_name,
                 dockerfile=self._custom_dockerfile,
-                base_image=COMPUTER_USE_IMAGE,
+                base_image=_dh.COMPUTER_USE_IMAGE,
                 log_file=log_file,
             )
         elif self._computer_use:

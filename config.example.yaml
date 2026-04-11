@@ -73,6 +73,12 @@ contexts:
 
 default_context: default
 
+# Instance name (required when running multiple OpenShrimp instances on the
+# same host).  Isolates the database, sandbox state, Docker images, Lima VMs,
+# and build logs so instances don't collide.  When omitted (single-instance),
+# all paths use the legacy layout.
+# instance_name: mybot
+
 # Review Mini App settings (optional)
 # review:
 #   host: "127.0.0.1"   # HTTP server bind address

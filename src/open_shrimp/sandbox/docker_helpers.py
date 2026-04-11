@@ -35,7 +35,7 @@ import tempfile
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 
-from platformdirs import user_data_path
+from open_shrimp.paths import data_dir as _data_dir
 
 def find_claude_binary() -> str:
     """Find the Claude CLI binary on disk.
@@ -135,7 +135,9 @@ CONTAINER_IMAGE = "openshrimp-claude:latest"
 COMPUTER_USE_IMAGE = "openshrimp-computer-use:latest"
 
 # Base directory for per-context container state (session storage, etc.).
-CONTAINER_STATE_DIR = user_data_path("openshrimp") / "containers"
+def container_state_dir() -> Path:
+    """Return the base directory for per-context Docker sandbox state."""
+    return _data_dir() / "containers"
 
 
 # Custom seccomp profile for DinD: Docker's default + keyctl (inner runc
@@ -443,7 +445,7 @@ def _ensure_state_dir(context_name: str) -> Path:
     This directory is bind-mounted as ``~/.claude`` inside the container,
     giving each context its own isolated session storage.
     """
-    state_dir = CONTAINER_STATE_DIR / context_name
+    state_dir = container_state_dir() / context_name
     state_dir.mkdir(parents=True, exist_ok=True)
     return state_dir
 
@@ -455,12 +457,12 @@ def check_docker_available() -> bool:
 
 def get_screenshots_dir(context_name: str) -> Path:
     """Return the host-side screenshots directory for a computer-use context."""
-    return CONTAINER_STATE_DIR / context_name / "screenshots"
+    return container_state_dir() / context_name / "screenshots"
 
 
 def get_text_input_state_path(context_name: str) -> Path:
     """Return the host-side text-input-state file for a computer-use context."""
-    return CONTAINER_STATE_DIR / context_name / "text-input-state"
+    return container_state_dir() / context_name / "text-input-state"
 
 
 def get_text_input_active(context_name: str) -> bool:

@@ -22,9 +22,8 @@ import textwrap
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from platformdirs import user_data_path
-
 from open_shrimp.config import SandboxConfig
+from open_shrimp.paths import data_dir as _data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +38,14 @@ DEFAULT_BASE_IMAGE_URL = (
 )
 DEFAULT_BASE_IMAGE_NAME = "ubuntu-24.04-cloud.img"
 
-_VM_STATE_DIR = user_data_path("openshrimp") / "vms"
-_IMAGES_DIR = user_data_path("openshrimp") / "images"
+def _vm_state_dir() -> Path:
+    return _data_dir() / "vms"
+
+
+def _images_dir() -> Path:
+    return _data_dir() / "images"
+
+
 _DOMAIN_PREFIX = "openshrimp"
 
 
@@ -51,7 +56,7 @@ _DOMAIN_PREFIX = "openshrimp"
 
 def state_dir_for(context_name: str) -> Path:
     """Return the per-context state directory for VM artifacts."""
-    return _VM_STATE_DIR / context_name
+    return _vm_state_dir() / context_name
 
 
 def domain_name(context_name: str, instance_prefix: str = _DOMAIN_PREFIX) -> str:
@@ -101,7 +106,7 @@ def find_virtiofsd() -> str | None:
         Absolute path to virtiofsd, or ``None`` if not found.
     """
     # 1. Managed binary (auto-downloaded, always preferred).
-    managed = user_data_path("openshrimp") / "bin" / "virtiofsd"
+    managed = _data_dir() / "bin" / "virtiofsd"
     if managed.is_file() and os.access(str(managed), os.X_OK):
         return str(managed)
 
@@ -160,7 +165,7 @@ def _download_virtiofsd() -> str:
             f"Please install virtiofsd >= {'.'.join(str(v) for v in _MIN_VIRTIOFSD_VERSION)} manually."
         )
 
-    bin_dir = user_data_path("openshrimp") / "bin"
+    bin_dir = _data_dir() / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     target = bin_dir / "virtiofsd"
     url = f"{_VIRTIOFSD_DOWNLOAD_BASE}/{binary_name}"
@@ -601,8 +606,9 @@ def ensure_base_image(base_image: str | None, *, log_file: Path | None = None) -
         return path
 
     # Default: download Ubuntu 24.04 cloud image if not cached.
-    _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    image_path = _IMAGES_DIR / DEFAULT_BASE_IMAGE_NAME
+    images = _images_dir()
+    images.mkdir(parents=True, exist_ok=True)
+    image_path = images / DEFAULT_BASE_IMAGE_NAME
 
     if image_path.exists():
         return image_path

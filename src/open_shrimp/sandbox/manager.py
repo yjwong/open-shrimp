@@ -23,9 +23,8 @@ import threading
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from platformdirs import user_data_path
-
 from open_shrimp.config import Config, ContextConfig
+from open_shrimp.paths import build_log_dir as _build_log_dir, data_dir as _data_dir
 from open_shrimp.sandbox.base import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -187,8 +186,8 @@ class DockerSandboxManager:
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
 
-        self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
-        self._state_dir = user_data_path("openshrimp") / "containers"
+        self._build_log_dir = _build_log_dir()
+        self._state_dir = _data_dir() / "containers"
 
     # -- Instance naming ------------------------------------------------------
 
@@ -204,6 +203,12 @@ class DockerSandboxManager:
         import open_shrimp.sandbox.docker_helpers as _c
         _c._INSTANCE_PREFIX = self._instance_prefix  # noqa: SLF001
         _c._CONTAINER_LABEL = self._container_label  # noqa: SLF001
+        if instance_name:
+            _c.CONTAINER_IMAGE = f"openshrimp-{instance_name}-claude:latest"
+            _c.COMPUTER_USE_IMAGE = f"openshrimp-{instance_name}-computer-use:latest"
+        else:
+            _c.CONTAINER_IMAGE = "openshrimp-claude:latest"
+            _c.COMPUTER_USE_IMAGE = "openshrimp-computer-use:latest"
 
     @property
     def instance_prefix(self) -> str:
@@ -464,8 +469,8 @@ class MacOSSandboxManager:
         self._instance_prefix = "openshrimp"
         self._container_label = "openshrimp"
         self._sandbox_cache: dict[str, Sandbox] = {}
-        self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
-        self._state_dir = user_data_path("openshrimp") / "containers"
+        self._build_log_dir = _build_log_dir()
+        self._state_dir = _data_dir() / "containers"
 
     def set_instance_prefix(self, instance_name: str | None) -> None:
         if instance_name:
@@ -561,8 +566,8 @@ class LimaSandboxManager:
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
 
-        self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
-        self._state_dir = user_data_path("openshrimp") / "lima"
+        self._build_log_dir = _build_log_dir()
+        self._state_dir = _data_dir() / "lima"
 
     # -- Instance naming ------------------------------------------------------
 
@@ -728,8 +733,8 @@ class LibvirtSandboxManager:
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
 
-        self._build_log_dir = Path(tempfile.gettempdir()) / "openshrimp-builds"
-        self._state_dir = user_data_path("openshrimp") / "vms"
+        self._build_log_dir = _build_log_dir()
+        self._state_dir = _data_dir() / "vms"
 
     # -- Instance naming ------------------------------------------------------
 

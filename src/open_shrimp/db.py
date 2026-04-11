@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import aiosqlite
-from platformdirs import user_data_path
+from open_shrimp.paths import db_path as _default_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,6 @@ def _thread_id_to_db(thread_id: int | None) -> int:
     """Convert a thread_id to the DB representation (0 for None)."""
     return thread_id if thread_id is not None else 0
 
-
-DEFAULT_DB_PATH = user_data_path("openshrimp") / "sessions.db"
 
 _CREATE_SESSIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -158,8 +156,10 @@ async def _migrate_schema(db: aiosqlite.Connection) -> None:
     logger.info("Database schema migration complete.")
 
 
-async def init_db(db_path: Path = DEFAULT_DB_PATH) -> aiosqlite.Connection:
+async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     """Create the database and tables, return the connection."""
+    if db_path is None:
+        db_path = _default_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db = await aiosqlite.connect(db_path)
     await db.execute(_CREATE_SESSIONS_TABLE)

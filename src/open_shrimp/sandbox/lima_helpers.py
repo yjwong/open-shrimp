@@ -23,9 +23,8 @@ import textwrap
 from pathlib import Path
 
 import yaml
-from platformdirs import user_data_path
-
 from open_shrimp.config import SandboxConfig
+from open_shrimp.paths import data_dir as _data_dir, get_instance_name as _get_instance_name
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +62,22 @@ def _read_credentials_json() -> str | None:
 
 LIMA_VERSION = "2.1.1"
 
-_BIN_DIR = user_data_path("openshrimp") / "bin"
+def _bin_dir() -> Path:
+    return _data_dir() / "bin"
 
-# Lima creates Unix sockets under LIMA_HOME/<instance>/ssh.sock.* which
-# must stay below UNIX_PATH_MAX (104 on macOS).  The platformdirs data
-# path (~/Library/Application Support/…) is too long, so we use a short
-# path under $HOME instead.
-_LIMA_STATE_DIR = Path.home() / ".openshrimp" / "lima"
+
+def _lima_state_dir() -> Path:
+    """Return the ``LIMA_HOME`` directory, scoped by instance name when set.
+
+    Lima creates Unix sockets under LIMA_HOME/<instance>/ssh.sock.* which
+    must stay below UNIX_PATH_MAX (104 on macOS).  The platformdirs data
+    path (~/Library/Application Support/...) is too long, so we use a short
+    path under $HOME instead.
+    """
+    name = _get_instance_name()
+    if name:
+        return Path.home() / ".openshrimp" / f"lima-{name}"
+    return Path.home() / ".openshrimp" / "lima"
 
 _DOWNLOAD_BASE = (
     f"https://github.com/lima-vm/lima/releases/download/v{LIMA_VERSION}"
@@ -107,7 +115,7 @@ _CLAUDE_CLI_GCS_BASE = (
 
 def _find_limactl() -> str | None:
     """Find limactl: check managed bin dir first, then ``$PATH``."""
-    local_bin = _BIN_DIR / "limactl"
+    local_bin = _bin_dir() / "limactl"
     if local_bin.is_file() and os.access(local_bin, os.X_OK):
         return str(local_bin)
 
@@ -122,7 +130,7 @@ def _download_lima_sync() -> str:
     """Download and extract the Lima release tarball (sync).
 
     Lima tarballs contain a ``bin/`` subdirectory with ``limactl``,
-    ``lima``, etc.  All binaries are extracted to ``_BIN_DIR``.
+    ``lima``, etc.  All binaries are extracted to ``_bin_dir()``.
 
     Returns the path to the ``limactl`` binary.
     """
@@ -136,7 +144,8 @@ def _download_lima_sync() -> str:
             f"brew install lima"
         )
 
-    _BIN_DIR.mkdir(parents=True, exist_ok=True)
+    bin_dir = _bin_dir()
+    bin_dir.mkdir(parents=True, exist_ok=True)
     url = f"{_DOWNLOAD_BASE}/{tarball_name}"
     logger.info("Downloading Lima %s from %s ...", LIMA_VERSION, url)
 
@@ -155,16 +164,15 @@ def _download_lima_sync() -> str:
                         f.write(chunk)
 
         # Lima expects share/lima/ (guest agents, templates) relative to
-        # the install prefix.  Since bin/ -> _BIN_DIR, the prefix is its
-        # parent, so share/ -> _BIN_DIR.parent / "share".
-        prefix_dir = _BIN_DIR.parent
+        # the install prefix.
+        prefix_dir = bin_dir.parent
         with tarfile.open(tmp_path, "r:gz") as tar:
             for member in tar.getmembers():
                 name = member.name.lstrip("./")
                 if not member.isfile():
                     continue
                 if name.startswith("bin/"):
-                    dest = _BIN_DIR / os.path.basename(name)
+                    dest = bin_dir / os.path.basename(name)
                 elif name.startswith("share/"):
                     dest = prefix_dir / name
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -184,11 +192,11 @@ def _download_lima_sync() -> str:
     finally:
         os.unlink(tmp_path)
 
-    target = _BIN_DIR / "limactl"
+    target = bin_dir / "limactl"
     if not target.is_file():
         raise RuntimeError("limactl not found in downloaded Lima archive")
 
-    logger.info("Lima %s downloaded to %s", LIMA_VERSION, _BIN_DIR)
+    logger.info("Lima %s downloaded to %s", LIMA_VERSION, bin_dir)
     return str(target)
 
 
@@ -214,10 +222,10 @@ def ensure_limactl_sync() -> str:
 def state_dir_for(context_name: str) -> Path:
     """Return per-context state dir (separate from LIMA_HOME).
 
-    This must NOT live under ``_LIMA_STATE_DIR`` because Lima treats
+    This must NOT live under ``_lima_state_dir()`` because Lima treats
     any subdirectory there with a ``lima.yaml`` as an instance.
     """
-    return user_data_path("openshrimp") / "lima-state" / context_name
+    return _data_dir() / "lima-state" / context_name
 
 
 def instance_name(context_name: str, instance_prefix: str = "openshrimp") -> str:
@@ -241,7 +249,7 @@ def instance_name(context_name: str, instance_prefix: str = "openshrimp") -> str
 def _lima_env() -> dict[str, str]:
     """Return environment dict with ``LIMA_HOME`` set for isolation."""
     env = os.environ.copy()
-    env["LIMA_HOME"] = str(_LIMA_STATE_DIR)
+    env["LIMA_HOME"] = str(_lima_state_dir())
     return env
 
 
@@ -723,7 +731,7 @@ def build_cli_wrapper(
 
         LIMACTL={shlex.quote(limactl_path)}
         INSTANCE_NAME={shlex.quote(inst_name)}
-        LIMA_HOME={shlex.quote(str(_LIMA_STATE_DIR))}
+        LIMA_HOME={shlex.quote(str(_lima_state_dir()))}
         export LIMA_HOME
 
         # Self-heal: check if instance is running, start if needed.

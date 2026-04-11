@@ -23,7 +23,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from platformdirs import user_data_path
+from open_shrimp.paths import data_dir as _data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 from open_shrimp.sandbox.docker_helpers import find_claude_binary as _find_claude_binary
 
 # Base directory for per-context sandbox state (session storage, etc.).
-SANDBOX_STATE_DIR = user_data_path("openshrimp") / "containers"
+def _sandbox_state_dir() -> Path:
+    return _data_dir() / "containers"
 
 
 def _ensure_state_dir(context_name: str) -> Path:
@@ -41,7 +42,7 @@ def _ensure_state_dir(context_name: str) -> Path:
     ``~/.claude``) for the sandboxed process, giving each context its own
     isolated session history.
     """
-    state_dir = SANDBOX_STATE_DIR / context_name
+    state_dir = _sandbox_state_dir() / context_name
     state_dir.mkdir(parents=True, exist_ok=True)
     return state_dir
 
