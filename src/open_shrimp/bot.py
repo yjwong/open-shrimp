@@ -257,7 +257,7 @@ async def run_bot(
         scope=BotCommandScopeAllPrivateChats(),
     )
     await app.start()
-    await app.updater.start_polling()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     logger.info("Bot is running")
 
     # If we were restarted via /restart or auto-update, send a confirmation.
