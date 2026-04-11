@@ -453,7 +453,7 @@ def _build_computer_use_provisions() -> list[dict]:
 
         # Build wlrctl from source (not packaged for arm64).
         apt-get install -y --no-install-recommends \\
-            git pkg-config meson ninja-build \\
+            gcc libc6-dev git pkg-config meson ninja-build \\
             libwayland-dev libxkbcommon-dev wayland-protocols
         git clone https://git.sr.ht/~brocellous/wlrctl /tmp/wlrctl
         meson setup --prefix=/usr/local /tmp/wlrctl/build /tmp/wlrctl
