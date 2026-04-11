@@ -136,11 +136,11 @@ Run the Claude CLI inside an isolated environment. When a sandbox is enabled, al
 | `docker_in_docker` | bool | No | `false` | Enable rootless Docker inside the container (Docker backend only) |
 | `dockerfile` | string | No | `null` | Path to a custom Dockerfile (Docker backend only) |
 | `computer_use` | bool | No | `false` | Enable GUI interaction with a headless desktop |
-| `memory` | int | No | `2048` | Memory ceiling in MB (Libvirt backend only) |
-| `cpus` | int | No | `2` | Number of vCPUs (Libvirt backend only) |
-| `disk_size` | int | No | `20` | Disk size in GB for qcow2 overlay (Libvirt backend only) |
+| `memory` | int | No | `2048` | Memory ceiling in MB (Libvirt and Lima backends) |
+| `cpus` | int | No | `2` | Number of vCPUs (Libvirt and Lima backends) |
+| `disk_size` | int | No | `20` | Disk size in GB for qcow2 overlay (Libvirt and Lima backends) |
 | `base_image` | string | No | `null` | Path to base qcow2/cloud image (Libvirt backend only) |
-| `provision` | string | No | `null` | Shell script to run on first boot (Libvirt backend only) |
+| `provision` | string | No | `null` | Shell script to run on first boot (Libvirt and Lima backends) |
 
 ### Docker backend
 
@@ -176,6 +176,22 @@ sandbox:
 Requires the `libvirt-python` optional dependency (`uv pip install libvirt-python`).
 
 See the [VM Sandbox guide](/guides/vm-sandbox/) for detailed setup instructions.
+
+### Lima backend
+
+```yaml
+sandbox:
+  backend: lima
+  memory: 4096
+  cpus: 4
+  disk_size: 40
+  provision: |
+    apt-get update && apt-get install -y git nodejs npm
+```
+
+macOS only. Uses Apple Virtualization.framework via Lima. OpenShrimp downloads `limactl` automatically on first use — no manual installation needed.
+
+See the [Lima Sandbox guide](/guides/lima-sandbox/) for detailed setup instructions.
 
 ### Computer use
 
