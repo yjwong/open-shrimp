@@ -406,7 +406,7 @@ def _build_provision_scripts(
 
         # AcceptEnv for API key forwarding via SSH.
         printf 'AcceptEnv ANTHROPIC_API_KEY\\n' > /etc/ssh/sshd_config.d/openshrimp.conf
-        systemctl restart sshd
+        systemctl restart ssh
 
         # Enable fstrim for disk space reclamation.
         systemctl enable --now fstrim.timer
@@ -441,7 +441,6 @@ def _build_computer_use_provisions() -> list[dict]:
         apt-get update
         apt-get install -y --no-install-recommends \\
             labwc \\
-            wlrctl \\
             grim \\
             wayvnc \\
             wl-clipboard \\
@@ -451,6 +450,15 @@ def _build_computer_use_provisions() -> list[dict]:
             fonts-noto \\
             dbus-x11 \\
             procps
+
+        # Build wlrctl from source (not packaged for arm64).
+        apt-get install -y --no-install-recommends \\
+            git pkg-config meson ninja-build \\
+            libwayland-dev libxkbcommon-dev wayland-protocols
+        git clone https://git.sr.ht/~brocellous/wlrctl /tmp/wlrctl
+        meson setup --prefix=/usr/local /tmp/wlrctl/build /tmp/wlrctl
+        ninja -C /tmp/wlrctl/build install
+        rm -rf /tmp/wlrctl
 
         # Node.js for Playwright MCP.
         curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
