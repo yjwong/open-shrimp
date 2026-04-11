@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
+import subprocess
 from pathlib import Path
 
 from open_shrimp.config import SandboxConfig
@@ -39,6 +41,13 @@ from open_shrimp.sandbox.lima_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Named key → character mapping for wlrctl keyboard input.
+_NAMED_KEY_CHARS: dict[str, str] = {
+    "return": "\n", "enter": "\n",
+    "tab": "\t", "escape": "\x1b",
+    "backspace": "\x08", "space": " ",
+}
 
 
 class LimaSandbox:
@@ -71,6 +80,7 @@ class LimaSandbox:
         self._inst_name = _instance_name(context_name, instance_prefix)
         self._claude_home_dir = self._sdir / "claude-home"
         self._tmp_dir = self._sdir / "tmp"
+        self._env = _lima_env()  # cached — LIMA_HOME doesn't change
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -221,58 +231,121 @@ class LimaSandbox:
             limactl_stop(self._limactl, self._inst_name)
 
     def get_screenshots_dir(self) -> Path | None:
+        if self._computer_use:
+            return self._sdir / "screenshots"
         return None
 
     def get_vnc_port(self) -> int | None:
+        if self._computer_use:
+            return 5900
         return None
 
     def get_text_input_state_path(self) -> Path | None:
+        if self._computer_use:
+            return self._sdir / "text-input-state-dir" / "text-input-state"
         return None
 
     def get_text_input_active(self) -> bool:
-        return False
+        if not self._computer_use:
+            return False
+        try:
+            path = self._sdir / "text-input-state-dir" / "text-input-state"
+            return path.read_text(encoding="utf-8").strip() == "1"
+        except (FileNotFoundError, OSError):
+            return False
+
+    # -- Computer-use operations ------------------------------------------------
+
+    def _exec_in_vm_sync(
+        self, cmd: str, *, timeout_secs: float = 10.0,
+        stdin_data: str | None = None,
+    ) -> tuple[int, str, str]:
+        """Run a shell command inside the VM via ``limactl shell``.
+
+        *cmd* is a shell command string (passed to ``bash -c``).
+        The Wayland environment is exported automatically.
+        """
+        shell_cmd = f"export WAYLAND_DISPLAY=wayland-0; {cmd}"
+        result = subprocess.run(
+            [
+                self._limactl, "shell", self._inst_name,
+                "--", "bash", "-c", shell_cmd,
+            ],
+            input=stdin_data,
+            capture_output=True,
+            text=True,
+            timeout=timeout_secs,
+            env=self._env,
+        )
+        return result.returncode, result.stdout, result.stderr
 
     def take_screenshot(self, output_path: Path) -> None:
-        raise NotImplementedError(
-            "Computer-use screenshots not yet supported for Lima backend"
-        )
+        ts = int(output_path.stem.split("-")[-1]) if "-" in output_path.stem else 0
+        guest_path = f"/tmp/screenshots/screenshot-{ts}.png"
+        rc, _, stderr = self._exec_in_vm_sync(f"grim {guest_path}")
+        if rc != 0:
+            raise RuntimeError(f"grim failed: {stderr.strip()}")
 
     def send_click(self, x: int, y: int, button: str = "left") -> None:
-        raise NotImplementedError(
-            "Computer-use not yet supported for Lima backend"
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"wlrctl pointer move {x} {y} && wlrctl pointer click {button}"
         )
+        if rc != 0:
+            raise RuntimeError(f"click failed: {stderr.strip()}")
 
     def send_type(self, text: str) -> None:
-        raise NotImplementedError(
-            "Computer-use not yet supported for Lima backend"
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"wlrctl keyboard type {shlex.quote(text)}"
         )
+        if rc != 0:
+            raise RuntimeError(f"type failed: {stderr.strip()}")
 
     def send_key(self, key_str: str) -> None:
-        raise NotImplementedError(
-            "Computer-use not yet supported for Lima backend"
-        )
+        parts = key_str.split("+")
+        if len(parts) > 1:
+            modifiers = ",".join(parts[:-1])
+            key_name = parts[-1]
+            char = _NAMED_KEY_CHARS.get(key_name.lower(), key_name)
+            cmd = f"wlrctl keyboard type {shlex.quote(char)} modifiers {modifiers}"
+        else:
+            char = _NAMED_KEY_CHARS.get(key_str.lower(), key_str)
+            cmd = f"wlrctl keyboard type {shlex.quote(char)}"
+
+        rc, _, stderr = self._exec_in_vm_sync(cmd)
+        if rc != 0:
+            raise RuntimeError(f"key press failed: {stderr.strip()}")
 
     def send_scroll(
         self, x: int, y: int, direction: str, amount: int = 3,
     ) -> None:
-        raise NotImplementedError(
-            "Computer-use not yet supported for Lima backend"
+        scroll_map = {
+            "up": (0, -amount), "down": (0, amount),
+            "left": (-amount, 0), "right": (amount, 0),
+        }
+        dx, dy = scroll_map.get(direction, (0, amount))
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"wlrctl pointer move {x} {y} && wlrctl pointer scroll {dx} {dy}"
         )
+        if rc != 0:
+            raise RuntimeError(f"scroll failed: {stderr.strip()}")
 
     def focus_window(self, name: str) -> None:
-        raise NotImplementedError(
-            "Computer-use not yet supported for Lima backend"
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"wlrctl toplevel focus {shlex.quote(name)}"
         )
+        if rc != 0:
+            raise RuntimeError(f"focus failed: {stderr.strip()}")
 
     def get_clipboard(self) -> str:
-        raise NotImplementedError(
-            "Computer-use not yet supported for Lima backend"
-        )
+        rc, stdout, _ = self._exec_in_vm_sync("wl-paste --no-newline --primary")
+        if rc != 0:
+            return ""
+        return stdout
 
     def set_clipboard(self, text: str) -> None:
-        raise NotImplementedError(
-            "Computer-use not yet supported for Lima backend"
-        )
+        rc, _, stderr = self._exec_in_vm_sync("wl-copy", stdin_data=text)
+        if rc != 0:
+            raise RuntimeError(f"wl-copy failed: {stderr.strip()}")
 
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files into the VM via ``limactl copy``."""
@@ -285,7 +358,7 @@ class LimaSandbox:
         proc = await asyncio.create_subprocess_exec(
             self._limactl, "shell", self._inst_name, "--",
             "mkdir", "-p", upload_dir,
-            env=_lima_env(),
+            env=self._env,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -304,7 +377,7 @@ class LimaSandbox:
                 self._limactl, "copy",
                 str(host_path),
                 f"{self._inst_name}:{vm_path}",
-                env=_lima_env(),
+                env=self._env,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )

@@ -284,13 +284,24 @@ def generate_lima_yaml(
         images.append({"location": img_url, "arch": img_arch})
 
     # Build mounts.
-    mounts = _build_mounts(sdir, project_dir, additional_directories)
+    mounts = _build_mounts(sdir, project_dir, additional_directories, computer_use)
 
     # Build provision scripts.
     provision = _build_provision_scripts(config, computer_use)
 
-    # Port forwarding (Phase 2: add VNC).
+    # Port forwarding.
     port_forward: list[dict] = []
+    if computer_use:
+        # VNC server (wayvnc on guest port 5900).
+        port_forward.append({
+            "guestPort": 5900,
+            "hostIP": "127.0.0.1",
+        })
+        # Chromium CDP debugging port for Playwright MCP.
+        port_forward.append({
+            "guestPort": 9222,
+            "hostIP": "127.0.0.1",
+        })
 
     template: dict = {
         "vmType": "vz",
@@ -308,6 +319,9 @@ def generate_lima_yaml(
         "ssh": {"forwardAgent": True},
     }
 
+    if port_forward:
+        template["portForwards"] = port_forward
+
     yaml_path = sdir / "lima.yaml"
     yaml_path.write_text(yaml.dump(template, default_flow_style=False, sort_keys=False), encoding="utf-8")
     logger.info("Generated Lima YAML template at %s", yaml_path)
@@ -318,6 +332,7 @@ def _build_mounts(
     sdir: Path,
     project_dir: str,
     additional_directories: list[str] | None,
+    computer_use: bool = False,
 ) -> list[dict]:
     """Build Lima mount entries."""
     mounts = []
@@ -351,6 +366,25 @@ def _build_mounts(
         "writable": True,
     })
 
+    if computer_use:
+        # Screenshots directory — grim writes here, host reads for Telegram.
+        screenshots_dir = str(sdir / "screenshots")
+        Path(screenshots_dir).mkdir(parents=True, exist_ok=True)
+        mounts.append({
+            "location": screenshots_dir,
+            "mountPoint": "/tmp/screenshots",
+            "writable": True,
+        })
+
+        # Text-input-state directory — seat-keyboard writes focus state here.
+        text_input_state_dir = str(sdir / "text-input-state-dir")
+        Path(text_input_state_dir).mkdir(parents=True, exist_ok=True)
+        mounts.append({
+            "location": text_input_state_dir,
+            "mountPoint": "/tmp/text-input-state-dir",
+            "writable": True,
+        })
+
     return mounts
 
 
@@ -383,9 +417,170 @@ def _build_provision_scripts(
     if config.provision:
         scripts.append({"mode": "system", "script": config.provision})
 
-    # Phase 2: computer_use provision would go here.
+    if computer_use:
+        scripts.extend(_build_computer_use_provisions())
 
     return scripts
+
+
+def _build_computer_use_provisions() -> list[dict]:
+    """Build Lima provision entries for the computer-use desktop stack.
+
+    Installs a headless Wayland compositor (labwc), input injection
+    (wlrctl), screenshot capture (grim), VNC server (wayvnc), Chromium
+    via Playwright, and systemd user units to auto-start everything.
+    """
+    provisions: list[dict] = []
+
+    # --- System provision: install packages ---
+    install_script = textwrap.dedent("""\
+        #!/bin/bash
+        set -eux
+
+        # Wayland compositor + tools.
+        apt-get update
+        apt-get install -y --no-install-recommends \\
+            labwc \\
+            wlrctl \\
+            grim \\
+            wayvnc \\
+            wl-clipboard \\
+            foot \\
+            fonts-liberation \\
+            fonts-noto-color-emoji \\
+            fonts-noto \\
+            dbus-x11 \\
+            procps
+
+        # Node.js for Playwright MCP.
+        curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+        apt-get install -y --no-install-recommends nodejs
+
+        rm -rf /var/lib/apt/lists/*
+
+        # Enable linger so user services start on boot without login.
+        LIMA_USER=$(getent passwd 1000 | cut -d: -f1)
+        loginctl enable-linger "$LIMA_USER"
+    """)
+    provisions.append({"mode": "system", "script": install_script})
+
+    # --- User provision: install Playwright + Chromium, write configs ---
+    user_setup_script = textwrap.dedent("""\
+        #!/bin/bash
+        set -eux
+
+        # Install Playwright MCP and its bundled Chromium.
+        npm install -g --cache /tmp/npm-cache \\
+            @anthropic-ai/claude-code@latest \\
+            @playwright/mcp
+        npx playwright install --with-deps chromium
+        rm -rf /tmp/npm-cache ~/.npm
+
+        # Chromium profile: skip first-run UI and disable crash reporter.
+        mkdir -p ~/.config/chromium/Default
+        printf '{\\n  "browser": { "check_default_browser": false },\\n  "profile": { "default_content_setting_values": {} }\\n}\\n' \\
+            > ~/.config/chromium/Default/Preferences
+        printf '%s\\n' '{"countrycode_at_install":"","default_browser_infobar_last_declined":"","default_browser_set_once":"","metrics":{"reporting_enabled":false},"session":{"restore_on_startup":4}}' \\
+            > ~/.config/chromium/'Local State'
+
+        # labwc config.
+        mkdir -p ~/.config/labwc
+        cat > ~/.config/labwc/rc.xml << 'RCXML'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <labwc_config>
+          <core><gap>0</gap></core>
+          <theme>
+            <name></name>
+            <titlebar><height>20</height></titlebar>
+            <font name="sans" size="10" />
+          </theme>
+          <keyboard />
+          <mouse />
+        </labwc_config>
+        RCXML
+
+        # Empty autostart — services handle application startup.
+        echo '# Applications started via systemd user units.' > ~/.config/labwc/autostart
+
+        # --- systemd user units ---
+        mkdir -p ~/.config/systemd/user
+
+        cat > ~/.config/systemd/user/openshrimp-labwc.service << 'UNIT'
+        [Unit]
+        Description=labwc Wayland compositor (headless)
+
+        [Service]
+        Type=simple
+        Environment=WLR_BACKENDS=headless
+        Environment=WLR_RENDERER=pixman
+        Environment=WLR_HEADLESS_OUTPUTS=1
+        Environment=WAYLAND_DISPLAY=wayland-0
+        ExecStart=/usr/bin/labwc
+        Restart=on-failure
+        RestartSec=2
+
+        [Install]
+        WantedBy=default.target
+        UNIT
+
+        cat > ~/.config/systemd/user/openshrimp-wayvnc.service << 'UNIT'
+        [Unit]
+        Description=wayvnc VNC server
+        After=openshrimp-labwc.service
+        Requires=openshrimp-labwc.service
+
+        [Service]
+        Type=simple
+        Environment=WAYLAND_DISPLAY=wayland-0
+        ExecStartPre=/bin/bash -c 'for i in $(seq 1 75); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done'
+        ExecStart=/usr/bin/wayvnc --output=HEADLESS-1 0.0.0.0 5900
+        Restart=on-failure
+        RestartSec=2
+
+        [Install]
+        WantedBy=default.target
+        UNIT
+
+        # Resolve Chromium binary path installed by Playwright.
+        CHROMIUM_BIN=$(find ~/.cache/ms-playwright -name 'chromium' -o -name 'chrome' 2>/dev/null | grep -E '/(chromium|chrome)$' | head -1)
+        if [ -n "$CHROMIUM_BIN" ]; then
+            cat > ~/.config/systemd/user/openshrimp-chromium.service << UNIT
+        [Unit]
+        Description=Chromium browser
+        After=openshrimp-labwc.service
+        Requires=openshrimp-labwc.service
+
+        [Service]
+        Type=simple
+        Environment=WAYLAND_DISPLAY=wayland-0
+        ExecStartPre=/bin/bash -c 'for i in \\$(seq 1 75); do [ -S "\\$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done'
+        ExecStart=${CHROMIUM_BIN} --no-first-run --no-default-browser-check --no-sandbox --disable-dev-shm-usage --disable-background-networking --ozone-platform=wayland --user-data-dir=%h/.config/chromium --remote-debugging-port=9222
+        Restart=on-failure
+        RestartSec=5
+
+        [Install]
+        WantedBy=default.target
+        UNIT
+        fi
+
+        # Enable all units.
+        systemctl --user daemon-reload
+        systemctl --user enable openshrimp-labwc.service
+        systemctl --user enable openshrimp-wayvnc.service
+        if [ -f ~/.config/systemd/user/openshrimp-chromium.service ]; then
+            systemctl --user enable openshrimp-chromium.service
+        fi
+
+        # Start services now (VM is booting for the first time).
+        systemctl --user start openshrimp-labwc.service
+        systemctl --user start openshrimp-wayvnc.service
+        if [ -f ~/.config/systemd/user/openshrimp-chromium.service ]; then
+            systemctl --user start openshrimp-chromium.service
+        fi
+    """)
+    provisions.append({"mode": "user", "script": user_setup_script})
+
+    return provisions
 
 
 # ---------------------------------------------------------------------------
