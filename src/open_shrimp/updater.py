@@ -354,6 +354,73 @@ async def _notify_and_wait(
     return result
 
 
+# ── Apply update ──
+
+
+async def apply_update(
+    bot: Bot, config: "Config", update_info: UpdateInfo  # noqa: F821
+) -> None:
+    """Download the new binary, notify users, and restart.
+
+    Called after the user has confirmed the update (either via the periodic
+    check or the manual ``/update`` command).
+    """
+    try:
+        await download_and_replace(update_info)
+    except PermissionError:
+        logger.error(
+            "Permission denied replacing binary. "
+            "The bot may need to run as a user with write access to %s",
+            sys.executable,
+        )
+        for uid in config.allowed_users:
+            try:
+                await bot.send_message(
+                    chat_id=uid,
+                    text=(
+                        f"Update failed: permission denied writing to "
+                        f"`{_escape_md(sys.executable)}`\\. "
+                        f"Check file ownership/permissions\\."
+                    ),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+        return
+    except Exception:
+        logger.exception("Update download/replace failed")
+        for uid in config.allowed_users:
+            try:
+                await bot.send_message(
+                    chat_id=uid,
+                    text="Update failed\\. Check the bot logs for details\\.",
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+        return
+
+    # Notify and restart.
+    for uid in config.allowed_users:
+        try:
+            await bot.send_message(
+                chat_id=uid,
+                text=f"Update to `{_escape_md(update_info.version)}` downloaded\\. Restarting\\.\\.\\.",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            pass
+
+    # Set env var so post-restart message shows the new version.
+    os.environ["OPENSHRIMP_UPDATE_VERSION"] = update_info.version
+
+    # Trigger restart via the existing mechanism.
+    from open_shrimp.main import request_restart
+
+    request_restart()
+    os.kill(os.getpid(), __import__("signal").SIGTERM)
+
+
 # ── Update check job ──
 
 
@@ -387,61 +454,7 @@ async def _update_check_job(context: "ContextTypes.DEFAULT_TYPE") -> None:  # no
             logger.info("Update %s skipped by user", update_info.version)
             return
 
-        # User confirmed — download and replace.
-        try:
-            await download_and_replace(update_info)
-        except PermissionError:
-            logger.error(
-                "Permission denied replacing binary. "
-                "The bot may need to run as a user with write access to %s",
-                sys.executable,
-            )
-            for uid in config.allowed_users:
-                try:
-                    await bot.send_message(
-                        chat_id=uid,
-                        text=(
-                            f"Update failed: permission denied writing to "
-                            f"`{_escape_md(sys.executable)}`\\. "
-                            f"Check file ownership/permissions\\."
-                        ),
-                        parse_mode="MarkdownV2",
-                    )
-                except Exception:
-                    pass
-            return
-        except Exception:
-            logger.exception("Update download/replace failed")
-            for uid in config.allowed_users:
-                try:
-                    await bot.send_message(
-                        chat_id=uid,
-                        text="Update failed\\. Check the bot logs for details\\.",
-                        parse_mode="MarkdownV2",
-                    )
-                except Exception:
-                    pass
-            return
-
-        # Notify and restart.
-        for uid in config.allowed_users:
-            try:
-                await bot.send_message(
-                    chat_id=uid,
-                    text=f"Update to `{_escape_md(update_info.version)}` downloaded\\. Restarting\\.\\.\\.",
-                    parse_mode="MarkdownV2",
-                )
-            except Exception:
-                pass
-
-        # Set env var so post-restart message shows the new version.
-        os.environ["OPENSHRIMP_UPDATE_VERSION"] = update_info.version
-
-        # Trigger restart via the existing mechanism.
-        from open_shrimp.main import request_restart
-
-        request_restart()
-        os.kill(os.getpid(), __import__("signal").SIGTERM)
+        await apply_update(bot, config, update_info)
 
 
 # ── Registration ──
@@ -484,3 +497,53 @@ def register_update_checker(app: "Application") -> None:  # noqa: F821
         _CHECK_INTERVAL // 3600,
         _FIRST_CHECK_DELAY,
     )
+
+
+# ── CLI update command ──
+
+
+async def run_update_cli() -> int:
+    """Check for updates and apply if available. Returns exit code."""
+    current = get_current_version()
+    print(f"Current version: {current}")
+
+    asset_name = get_platform_asset_name()
+    if asset_name is None:
+        print(f"No binary available for this platform ({platform.system()} {platform.machine()}).")
+        return 1
+
+    print("Checking for updates...")
+    update_info = await check_for_update()
+
+    if update_info is None:
+        print("You are up to date.")
+        return 0
+
+    print(f"Update available: {update_info.version}")
+    if update_info.release_notes:
+        notes = update_info.release_notes
+        if len(notes) > 500:
+            notes = notes[:497] + "..."
+        print(f"\n{notes}\n")
+
+    if not is_pyapp_binary():
+        print(
+            "Auto-update is only supported for PyApp binaries.\n"
+            f"Download manually: {update_info.release_url}"
+        )
+        return 1
+
+    # Prompt for confirmation.
+    try:
+        answer = input(f"Update to {update_info.version}? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return 1
+
+    if answer not in ("y", "yes"):
+        print("Skipped.")
+        return 0
+
+    print(f"Downloading {update_info.asset_name}...")
+    await download_and_replace(update_info)
+    print(f"Updated to {update_info.version}. Restart the bot to use the new version.")

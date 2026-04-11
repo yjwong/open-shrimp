@@ -58,6 +58,11 @@ def _parse_args() -> argparse.Namespace:
         help="Check optional component availability",
     )
 
+    subparsers.add_parser(
+        "update",
+        help="Check for and apply updates",
+    )
+
     return parser.parse_args()
 
 
@@ -194,6 +199,11 @@ def main() -> None:
         from open_shrimp.doctor import run_doctor
 
         sys.exit(run_doctor())
+
+    if args.subcommand == "update":
+        from open_shrimp.updater import run_update_cli
+
+        sys.exit(asyncio.run(run_update_cli()))
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         logger.warning(
