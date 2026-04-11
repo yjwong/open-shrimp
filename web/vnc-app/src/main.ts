@@ -264,14 +264,16 @@ function setupClipboard(context: string, authToken: string, rfb: RFBType): {
     const sendBtn = document.createElement("button");
     sendBtn.textContent = "Send";
     sendBtn.classList.add("primary");
-    sendBtn.addEventListener("click", () => {
+    sendBtn.addEventListener("click", async () => {
       const text = textarea.value;
       closePasteModal();
       if (text) {
-        sendToRemote(text);
-        for (const ch of text) {
-          rfb.sendKey(charToKeysym(ch), null);
-        }
+        await sendToRemote(text);
+        // Ctrl+V to paste from the VM clipboard.
+        rfb.sendKey(0xffe3, null, true);  // Control_L down
+        rfb.sendKey(0x0076, null, true);  // v down
+        rfb.sendKey(0x0076, null, false); // v up
+        rfb.sendKey(0xffe3, null, false); // Control_L up
       }
     });
     btnRow.appendChild(sendBtn);
