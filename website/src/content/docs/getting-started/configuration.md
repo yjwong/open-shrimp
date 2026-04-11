@@ -5,7 +5,29 @@ sidebar:
   order: 3
 ---
 
-OpenShrimp is configured via a YAML file at `~/.config/openshrimp/config.yaml`. If you ran the setup wizard, this file already exists. Here's what each section does.
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+OpenShrimp is configured via a YAML file. The default location depends on your platform:
+
+<Tabs>
+  <TabItem label="Linux">
+    ```
+    ~/.config/openshrimp/config.yaml
+    ```
+  </TabItem>
+  <TabItem label="macOS">
+    ```
+    ~/Library/Application Support/openshrimp/config.yaml
+    ```
+  </TabItem>
+  <TabItem label="Windows">
+    ```
+    C:\Users\<you>\AppData\Local\openshrimp\config.yaml
+    ```
+  </TabItem>
+</Tabs>
+
+If you ran the setup wizard, this file already exists. Here's what each section does.
 
 ## Minimal config
 

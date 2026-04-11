@@ -3,7 +3,29 @@ title: Configuration Reference
 description: Complete reference for all config.yaml fields.
 ---
 
-Full reference for `~/.config/openshrimp/config.yaml`. For a guided walkthrough, see [Configuration](/getting-started/configuration/).
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Full reference for `config.yaml`. The default location depends on your platform:
+
+<Tabs>
+  <TabItem label="Linux">
+    ```
+    ~/.config/openshrimp/config.yaml
+    ```
+  </TabItem>
+  <TabItem label="macOS">
+    ```
+    ~/Library/Application Support/openshrimp/config.yaml
+    ```
+  </TabItem>
+  <TabItem label="Windows">
+    ```
+    C:\Users\<you>\AppData\Local\openshrimp\config.yaml
+    ```
+  </TabItem>
+</Tabs>
+
+For a guided walkthrough, see [Configuration](/getting-started/configuration/).
 
 ## Top-level fields
 
