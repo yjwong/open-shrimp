@@ -351,7 +351,7 @@ def _build_cloud_init_user_data(
             "    wget -q -O /tmp/google-chrome.deb 'https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'\n"
             "    apt-get install -y -qq /tmp/google-chrome.deb > /dev/null 2>&1\n"
             "    rm /tmp/google-chrome.deb\n"
-            "  - apt-get install -y -qq labwc foot seatd grim wl-clipboard > /dev/null 2>&1\n"
+            "  - apt-get install -y -qq labwc foot seatd grim wl-clipboard fonts-noto fonts-noto-color-emoji fonts-liberation > /dev/null 2>&1\n"
             # Node.js for npx (Playwright MCP is fetched on demand).
             "  - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -\n"
             "  - apt-get install -y -qq nodejs > /dev/null 2>&1\n"
@@ -943,7 +943,7 @@ def wait_for_cloud_init(
     ssh_port: int,
     ssh_key: Path,
     *,
-    timeout: int = 300,
+    timeout: int = 600,
     user: str = "claude",
 ) -> bool:
     """Wait for cloud-init to finish inside the VM.
