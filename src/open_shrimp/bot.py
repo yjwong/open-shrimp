@@ -236,19 +236,21 @@ async def run_bot(
         BotCommand("status", "Show current context, session, and state"),
         BotCommand("cancel", "Abort running Claude invocation"),
         BotCommand("resume", "List and resume a previous session"),
-        BotCommand("model", "Show or override the model for this chat"),
-        BotCommand("add_dir", "Add a working directory to the context"),
         BotCommand("review", "Review and stage git changes"),
         BotCommand("mcp", "List and manage MCP servers"),
         BotCommand("schedule", "List scheduled tasks"),
         BotCommand("tasks", "List or stop background tasks"),
         BotCommand("usage", "Show Claude quota and usage stats"),
         BotCommand("vnc", "View computer-use desktop"),
-        BotCommand("login", "Re-authenticate Claude Code OAuth"),
     ]
     await app.bot.set_my_commands(common_commands)
+    # Private-chat-only commands: these expose sensitive info or mutate
+    # global state and should not be visible/usable in group chats.
     await app.bot.set_my_commands(
         common_commands + [
+            BotCommand("model", "Show or override the model for this chat"),
+            BotCommand("add_dir", "Add a working directory to the context"),
+            BotCommand("login", "Re-authenticate Claude Code OAuth"),
             BotCommand("config", "Edit bot configuration"),
             BotCommand("restart", "Restart the bot process"),
         ],

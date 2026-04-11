@@ -53,6 +53,12 @@ from open_shrimp.handlers.utils import (
 logger = logging.getLogger(__name__)
 
 
+def _is_private_chat(update: Update) -> bool:
+    """Return True if this update is from a private (1:1) chat."""
+    chat = update.effective_chat
+    return chat is not None and chat.type == chat.PRIVATE
+
+
 # ── /context ──
 
 _CONTEXT_PAGE_SIZE = 6
@@ -406,6 +412,10 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
+    if not _is_private_chat(update):
+        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        return
+
     scope = chat_scope_from_message(message)
     ctx_name = await _get_context_name(scope, config, db)
     ctx_default_model = config.contexts[ctx_name].model
@@ -481,6 +491,10 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     db: aiosqlite.Connection = context.bot_data["db"]
     message = update.effective_message
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    if not _is_private_chat(update):
+        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
         return
 
     scope = chat_scope_from_message(message)
@@ -1242,6 +1256,10 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not _is_authorized(update.effective_user.id, config):
         return
 
+    if not _is_private_chat(update):
+        await update.message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        return
+
     # Build the Mini App URL.
     if config.review.public_url:
         base_url = config.review.public_url.rstrip("/")
@@ -1748,8 +1766,7 @@ async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    chat = update.effective_chat
-    if chat and chat.type != chat.PRIVATE:
+    if not _is_private_chat(update):
         await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
         return
 
@@ -1785,6 +1802,10 @@ async def config_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     message = update.message
 
     if not _is_authorized(update.effective_user.id, config):
+        return
+
+    if not _is_private_chat(update):
+        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
         return
 
     # Build the Mini App URL.
