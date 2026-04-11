@@ -1521,8 +1521,9 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         prompt_escaped = _escape_mdv2(prompt_preview)
         ctx_escaped = _escape_mdv2(t.context_name)
 
+        disabled_label = " \\[disabled\\]" if t.disabled else ""
         lines.append(
-            f"• *{name_escaped}*\n"
+            f"• *{name_escaped}*{disabled_label}\n"
             f"  📅 {desc_escaped}\n"
             f"  📁 `{ctx_escaped}`\n"
             f"  💬 _{prompt_escaped}_"

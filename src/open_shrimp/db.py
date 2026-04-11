@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
     schedule_expr TEXT NOT NULL,
     timeout_seconds INTEGER NOT NULL DEFAULT 600,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    disabled INTEGER NOT NULL DEFAULT 0,
     UNIQUE(chat_id, message_thread_id, name)
 )
 """
@@ -156,6 +157,19 @@ async def _migrate_schema(db: aiosqlite.Connection) -> None:
     logger.info("Database schema migration complete.")
 
 
+async def _migrate_scheduled_tasks_disabled(db: aiosqlite.Connection) -> None:
+    """Add the ``disabled`` column to scheduled_tasks if it doesn't exist."""
+    cursor = await db.execute("PRAGMA table_info(scheduled_tasks)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "disabled" in columns:
+        return
+    logger.info("Adding 'disabled' column to scheduled_tasks...")
+    await db.execute(
+        "ALTER TABLE scheduled_tasks ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"
+    )
+    await db.commit()
+
+
 async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     """Create the database and tables, return the connection."""
     if db_path is None:
@@ -169,6 +183,7 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_ADDITIONAL_DIRECTORIES_TABLE)
     await db.commit()
     await _migrate_schema(db)
+    await _migrate_scheduled_tasks_disabled(db)
     logger.info("Database initialized at %s", db_path)
     return db
 
@@ -288,6 +303,7 @@ class ScheduledTask:
     schedule_expr: str
     timeout_seconds: int
     created_at: str
+    disabled: bool = False
 
     @property
     def scope(self) -> ChatScope:
@@ -308,12 +324,13 @@ def _row_to_task(row: tuple) -> ScheduledTask:
         schedule_expr=row[7],
         timeout_seconds=row[8],
         created_at=row[9],
+        disabled=bool(row[10]),
     )
 
 
 _SELECT_TASK_COLS = (
     "id, chat_id, message_thread_id, context_name, name, prompt, "
-    "schedule_type, schedule_expr, timeout_seconds, created_at"
+    "schedule_type, schedule_expr, timeout_seconds, created_at, disabled"
 )
 
 
@@ -406,10 +423,13 @@ async def list_scheduled_tasks(
 
 async def get_all_scheduled_tasks(
     db: aiosqlite.Connection,
+    *,
+    include_disabled: bool = False,
 ) -> list[ScheduledTask]:
     """Return all scheduled tasks across all scopes (for reload on startup)."""
+    where = "" if include_disabled else " WHERE disabled = 0"
     cursor = await db.execute(
-        f"SELECT {_SELECT_TASK_COLS} FROM scheduled_tasks ORDER BY id"
+        f"SELECT {_SELECT_TASK_COLS} FROM scheduled_tasks{where} ORDER BY id"
     )
     rows = await cursor.fetchall()
     return [_row_to_task(row) for row in rows]
@@ -421,6 +441,17 @@ async def delete_scheduled_task_by_id(
 ) -> None:
     """Delete a scheduled task by its primary key ID."""
     await db.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
+    await db.commit()
+
+
+async def disable_scheduled_task(
+    db: aiosqlite.Connection,
+    task_id: int,
+) -> None:
+    """Mark a scheduled task as disabled."""
+    await db.execute(
+        "UPDATE scheduled_tasks SET disabled = 1 WHERE id = ?", (task_id,)
+    )
     await db.commit()
 
 

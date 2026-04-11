@@ -34,6 +34,7 @@ from open_shrimp.db import (
     ChatScope,
     ScheduledTask,
     delete_scheduled_task_by_id,
+    disable_scheduled_task,
     get_all_scheduled_tasks,
 )
 
@@ -174,7 +175,7 @@ def _register_task_with_jobqueue(
         job.schedule_removal()
 
     async def _job_callback(context: Any) -> None:
-        await _execute_task(bot, db, config, task)
+        await _execute_task(bot, db, config, task, job_queue)
 
     try:
         if task.schedule_type == "interval":
@@ -260,6 +261,7 @@ async def _execute_task(
     db: aiosqlite.Connection,
     config: Config,
     task: ScheduledTask,
+    job_queue: JobQueue,
 ) -> None:
     """Execute a single scheduled task.
 
@@ -293,7 +295,7 @@ async def _execute_task(
     async with _semaphore:
         _running_task_ids.add(task.id)
         try:
-            await _execute_task_inner(bot, db, config, task, scope)
+            await _execute_task_inner(bot, db, config, task, scope, job_queue)
         finally:
             _running_task_ids.discard(task.id)
 
@@ -304,6 +306,7 @@ async def _execute_task_inner(
     config: Config,
     task: ScheduledTask,
     scope: ChatScope,
+    job_queue: JobQueue,
 ) -> None:
     """Inner execution logic, runs under the semaphore."""
     from open_shrimp.handlers.utils import _thread_kwargs
@@ -366,6 +369,10 @@ async def _execute_task_inner(
             logger.debug("Failed to send timeout notification")
 
     except Exception as exc:
+        if _is_thread_not_found(exc):
+            await _handle_thread_not_found(bot, db, task, scope, job_queue)
+            return
+
         logger.exception(
             "Scheduled task %d (%s) failed", task.id, task.name
         )
@@ -392,6 +399,62 @@ async def _execute_task_inner(
             )
         except Exception:
             logger.debug("Failed to auto-delete one-shot task %d", task.id)
+
+
+def _is_thread_not_found(exc: BaseException) -> bool:
+    """Check whether an exception is a Telegram 'message thread not found' error."""
+    from telegram.error import BadRequest
+
+    if isinstance(exc, BadRequest):
+        return "message thread not found" in str(exc).lower()
+    # Check explicit chaining (raise ... from ...) and implicit chaining.
+    if exc.__cause__ is not None:
+        return _is_thread_not_found(exc.__cause__)
+    if exc.__context__ is not None:
+        return _is_thread_not_found(exc.__context__)
+    return False
+
+
+async def _handle_thread_not_found(
+    bot: Bot,
+    db: aiosqlite.Connection,
+    task: ScheduledTask,
+    scope: ChatScope,
+    job_queue: JobQueue,
+) -> None:
+    """Disable a task whose forum topic has been deleted and notify the user."""
+    logger.warning(
+        "Scheduled task %d (%s): thread %s not found, disabling",
+        task.id,
+        task.name,
+        scope.thread_id,
+    )
+
+    try:
+        await disable_scheduled_task(db, task.id)
+    except Exception:
+        logger.debug("Failed to disable task %d in DB", task.id)
+
+    # Remove from JobQueue so it stops firing.
+    job_name = f"scheduled_task_{task.id}"
+    for job in job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+
+    # Notify in the parent chat (without message_thread_id).
+    try:
+        await bot.send_message(
+            chat_id=scope.chat_id,
+            text=(
+                f"⚠️ Scheduled task *{_escape_md(task.name)}* has been disabled: "
+                f"the thread it was created in no longer exists\\."
+            ),
+            parse_mode="MarkdownV2",
+        )
+    except Exception:
+        logger.debug(
+            "Failed to send thread-not-found notification for task %d",
+            task.id,
+        )
 
 
 async def _run_scheduled_prompt(

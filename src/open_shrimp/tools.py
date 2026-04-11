@@ -527,8 +527,9 @@ def create_openshrimp_mcp_server(
                 }.get(t.schedule_type, t.schedule_expr)
 
                 prompt_preview = t.prompt[:60] + ("..." if len(t.prompt) > 60 else "")
+                disabled_label = " [disabled]" if t.disabled else ""
                 lines.append(
-                    f"\n• {t.name}\n"
+                    f"\n• {t.name}{disabled_label}\n"
                     f"  Schedule: {type_desc}\n"
                     f"  Context: {t.context_name}\n"
                     f"  Timeout: {t.timeout_seconds}s\n"
