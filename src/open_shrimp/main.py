@@ -239,13 +239,19 @@ def main() -> None:
         logger.info("Re-executing process for restart...")
         import shutil
 
-        uv = shutil.which("uv")
-        if uv:
-            # Re-exec via uv run so the venv is rebuilt if needed,
-            # matching the systemd ExecStart invocation.
-            os.execv(uv, [uv, "run", "openshrimp"] + sys.argv[1:])
+        from open_shrimp.updater import pyapp_binary_path
+
+        pyapp = pyapp_binary_path()
+        if pyapp:
+            os.execv(str(pyapp), [str(pyapp)] + sys.argv[1:])
         else:
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            uv = shutil.which("uv")
+            if uv:
+                # Re-exec via uv run so the venv is rebuilt if needed,
+                # matching the systemd ExecStart invocation.
+                os.execv(uv, [uv, "run", "openshrimp"] + sys.argv[1:])
+            else:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":

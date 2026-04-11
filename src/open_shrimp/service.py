@@ -49,18 +49,25 @@ def _detect_executable() -> list[str]:
     single-element list with the absolute path, but falls back to
     ``[sys.executable, "-m", "open_shrimp"]`` if the script is not found.
     """
-    # 1. Check if openshrimp is on PATH
+    # 1. PyApp binary: PYAPP_PASS_LOCATION=1 sets PYAPP to the binary path.
+    from open_shrimp.updater import pyapp_binary_path
+
+    pyapp = pyapp_binary_path()
+    if pyapp:
+        return [str(pyapp)]
+
+    # 2. Check if openshrimp is on PATH
     which = shutil.which("openshrimp")
     if which:
         return [str(Path(which).resolve())]
 
-    # 2. Check for the script next to the running Python interpreter
+    # 3. Check for the script next to the running Python interpreter
     bin_dir = Path(sys.executable).parent
     candidate = bin_dir / "openshrimp"
     if candidate.is_file():
         return [str(candidate.resolve())]
 
-    # 3. Fallback: run as a module
+    # 4. Fallback: run as a module
     return [sys.executable, "-m", "open_shrimp"]
 
 

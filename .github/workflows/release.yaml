@@ -134,6 +134,7 @@ jobs:
           PYAPP_PYTHON_VERSION: "3.11"
           PYAPP_EXEC_CODE: ${{ matrix.exec_code }}
           PYAPP_DISTRIBUTION_EMBED: "1"
+          PYAPP_PASS_LOCATION: "1"
         run: cargo install pyapp --force --root dist/pyapp
 
       - name: Rename binary

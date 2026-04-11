@@ -102,22 +102,17 @@ def get_platform_asset_name() -> str | None:
     return _ASSET_MAP.get((platform.system(), platform.machine()))
 
 
-def is_pyapp_binary() -> bool:
-    """Check if we're running as a PyApp binary (not from source via uv/python)."""
-    exe = os.path.realpath(sys.executable)
-    basename = os.path.basename(exe).lower()
-    # Running from source: sys.executable points at a python interpreter.
-    if basename.startswith("python"):
-        return False
-    # PyApp sets PYAPP=1 in the environment.
-    if os.environ.get("PYAPP"):
-        return True
-    # Heuristic: if the executable name matches our asset pattern, it's PyApp.
-    asset = get_platform_asset_name()
-    if asset and asset in exe:
-        return True
-    # If executable is not python and is a single binary, assume PyApp.
-    return not basename.startswith("python")
+def pyapp_binary_path() -> Path | None:
+    """Return the path of the running PyApp binary, or None.
+
+    With PYAPP_PASS_LOCATION=1 at build time, PyApp sets the PYAPP env var
+    to the binary's absolute path.  Returns None when not running under PyApp
+    or when the build didn't enable PYAPP_PASS_LOCATION.
+    """
+    pyapp = os.environ.get("PYAPP", "")
+    if pyapp and pyapp != "1" and os.path.isfile(pyapp):
+        return Path(pyapp)
+    return None
 
 
 # ── GitHub API ──
@@ -185,7 +180,12 @@ async def download_and_replace(update_info: UpdateInfo) -> None:
     """
     import httpx
 
-    target = Path(os.path.realpath(sys.executable))
+    target = pyapp_binary_path()
+    if target is None:
+        raise RuntimeError(
+            "Cannot determine PyApp binary path. "
+            "Ensure the binary was built with PYAPP_PASS_LOCATION=1."
+        )
     tmp = target.with_name(f".{target.name}.update.tmp")
 
     logger.info(
@@ -368,10 +368,11 @@ async def apply_update(
     try:
         await download_and_replace(update_info)
     except PermissionError:
+        binary_path = pyapp_binary_path()
         logger.error(
             "Permission denied replacing binary. "
             "The bot may need to run as a user with write access to %s",
-            sys.executable,
+            binary_path,
         )
         for uid in config.allowed_users:
             try:
@@ -379,7 +380,7 @@ async def apply_update(
                     chat_id=uid,
                     text=(
                         f"Update failed: permission denied writing to "
-                        f"`{_escape_md(sys.executable)}`\\. "
+                        f"`{_escape_md(str(binary_path))}`\\. "
                         f"Check file ownership/permissions\\."
                     ),
                     parse_mode="MarkdownV2",
@@ -473,7 +474,7 @@ def register_update_checker(app: "Application") -> None:  # noqa: F821
         logger.info("Auto-update disabled via config")
         return
 
-    if not is_pyapp_binary():
+    if pyapp_binary_path() is None:
         logger.debug("Not a PyApp binary — auto-update disabled")
         return
 
@@ -526,7 +527,7 @@ async def run_update_cli() -> int:
             notes = notes[:497] + "..."
         print(f"\n{notes}\n")
 
-    if not is_pyapp_binary():
+    if pyapp_binary_path() is None:
         print(
             "Auto-update is only supported for PyApp binaries.\n"
             f"Download manually: {update_info.release_url}"
