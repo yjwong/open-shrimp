@@ -210,7 +210,7 @@ class LibvirtSandbox:
 
         # 2. SSH key.
         private_key, public_key_path = ensure_ssh_key(sdir)
-        public_key = public_key_path.read_text().strip()
+        public_key = public_key_path.read_text(encoding="utf-8").strip()
 
         # 3. qcow2 overlay.
         overlay = create_overlay(sdir, base_image, self._config.disk_size)

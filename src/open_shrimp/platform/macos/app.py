@@ -296,7 +296,7 @@ def _install_launch_agent() -> None:
     """)
     _LAUNCHD_PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _LAUNCHD_PLIST_PATH.write_text(plist)
+    _LAUNCHD_PLIST_PATH.write_text(plist, encoding="utf-8")
     logger.info("Installed LaunchAgent at %s", _LAUNCHD_PLIST_PATH)
 
 

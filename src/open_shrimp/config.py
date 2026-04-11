@@ -344,7 +344,7 @@ def load_config(path: str | None = None) -> Config:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    raw = yaml.safe_load(config_path.read_text())
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     _validate_raw(raw)
     return _parse(raw)
 
@@ -457,7 +457,8 @@ def write_config(config_path: Path, config_dict: dict[str, Any]) -> None:
     """
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
-        yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
+        yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
     )
 
 
@@ -476,7 +477,7 @@ def load_raw_yaml(config_path: Path) -> Any:
 
     ry = YAML()
     ry.preserve_quotes = True
-    return ry.load(config_path.read_text())
+    return ry.load(config_path.read_text(encoding="utf-8"))
 
 
 def write_raw_yaml(config_path: Path, data: Any) -> None:
@@ -495,4 +496,4 @@ def write_raw_yaml(config_path: Path, data: Any) -> None:
     buf = StringIO()
     ry.dump(data, buf)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(buf.getvalue())
+    config_path.write_text(buf.getvalue(), encoding="utf-8")

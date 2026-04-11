@@ -1649,7 +1649,7 @@ async def _fetch_usage() -> dict[str, Any] | None:
         return None
 
     try:
-        creds = _json.loads(credentials_path.read_text())
+        creds = _json.loads(credentials_path.read_text(encoding="utf-8"))
         oauth = creds["claudeAiOauth"]
         token = oauth["accessToken"]
         # Skip API call if token is expired (with 5-minute buffer)

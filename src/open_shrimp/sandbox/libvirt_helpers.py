@@ -426,8 +426,8 @@ def generate_cloud_init_iso(
     # Write temp files and generate ISO.
     user_data_path_f = sdir / "user-data"
     meta_data_path_f = sdir / "meta-data"
-    user_data_path_f.write_text(user_data)
-    meta_data_path_f.write_text(meta_data)
+    user_data_path_f.write_text(user_data, encoding="utf-8")
+    meta_data_path_f.write_text(meta_data, encoding="utf-8")
 
     subprocess.run(
         [
@@ -1169,7 +1169,7 @@ def build_cli_wrapper(
         prefix=f"openshrimp-libvirt-{context_name}-",
         suffix=".sh",
     ))
-    wrapper_path.write_text(script)
+    wrapper_path.write_text(script, encoding="utf-8")
     wrapper_path.chmod(stat.S_IRWXU)
     logger.info("Generated CLI wrapper at %s", wrapper_path)
     return str(wrapper_path)
@@ -1203,20 +1203,20 @@ def cloud_init_fingerprint(config: SandboxConfig, computer_use: bool) -> str:
 
 def save_cloud_init_fingerprint(sdir: Path, fingerprint: str) -> None:
     """Persist the cloud-init fingerprint for drift detection."""
-    (sdir / "cloud-init.sha256").write_text(fingerprint)
+    (sdir / "cloud-init.sha256").write_text(fingerprint, encoding="utf-8")
 
 
 def load_cloud_init_fingerprint(sdir: Path) -> str | None:
     """Load the saved cloud-init fingerprint, or ``None`` if absent."""
     fp_file = sdir / "cloud-init.sha256"
     if fp_file.exists():
-        return fp_file.read_text().strip()
+        return fp_file.read_text(encoding="utf-8").strip()
     return None
 
 
 def save_ssh_port(sdir: Path, port: int) -> None:
     """Persist the SSH port for a context."""
-    (sdir / "ssh_port").write_text(str(port))
+    (sdir / "ssh_port").write_text(str(port), encoding="utf-8")
 
 
 def load_ssh_port(sdir: Path) -> int | None:
@@ -1224,7 +1224,7 @@ def load_ssh_port(sdir: Path) -> int | None:
     port_file = sdir / "ssh_port"
     if port_file.exists():
         try:
-            return int(port_file.read_text().strip())
+            return int(port_file.read_text(encoding="utf-8").strip())
         except ValueError:
             return None
     return None
@@ -1803,5 +1803,5 @@ def _ppm_to_png(ppm_path: str, png_path: str) -> None:
 def _log(log_file: Path | None, message: str) -> None:
     """Append a message to the build log file (if provided)."""
     if log_file:
-        with open(log_file, "a") as f:
+        with open(log_file, "a", encoding="utf-8") as f:
             f.write(message + "\n")

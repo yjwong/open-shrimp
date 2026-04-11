@@ -238,7 +238,7 @@ async def text_input_state_stream_endpoint(
 
     def _read_state() -> bool:
         try:
-            return state_path.read_text().strip() == "1"
+            return state_path.read_text(encoding="utf-8").strip() == "1"
         except (FileNotFoundError, OSError):
             return False
 

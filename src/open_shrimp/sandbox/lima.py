@@ -200,7 +200,7 @@ class LimaSandbox:
         creds = _read_credentials_json()
         if creds:
             dest = self._claude_home_dir / ".credentials.json"
-            dest.write_text(creds)
+            dest.write_text(creds, encoding="utf-8")
             logger.info("Wrote credentials to %s", dest)
 
     def build_cli_wrapper(self) -> tuple[str, list[str]]:

@@ -203,7 +203,7 @@ def install_service(config_path: str) -> None:
         _LAUNCHD_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     svc_path.parent.mkdir(parents=True, exist_ok=True)
-    svc_path.write_text(content)
+    svc_path.write_text(content, encoding="utf-8")
     print(f"Service file written to {svc_path}")
 
     # Enable and start

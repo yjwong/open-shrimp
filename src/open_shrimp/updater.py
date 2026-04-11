@@ -77,7 +77,7 @@ def get_current_version() -> str:
         # Fallback: read VERSION file (development mode).
         version_file = Path(__file__).resolve().parent.parent.parent / "VERSION"
         if version_file.is_file():
-            return version_file.read_text().strip()
+            return version_file.read_text(encoding="utf-8").strip()
         return "0.0.0"
 
 

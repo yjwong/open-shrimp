@@ -308,7 +308,7 @@ def generate_lima_yaml(
     }
 
     yaml_path = sdir / "lima.yaml"
-    yaml_path.write_text(yaml.dump(template, default_flow_style=False, sort_keys=False))
+    yaml_path.write_text(yaml.dump(template, default_flow_style=False, sort_keys=False), encoding="utf-8")
     logger.info("Generated Lima YAML template at %s", yaml_path)
     return yaml_path
 
@@ -411,7 +411,7 @@ def lima_config_fingerprint(
             additional_directories,
             computer_use,
         )
-        content = yaml_path.read_text()
+        content = yaml_path.read_text(encoding="utf-8")
     finally:
         shutil.rmtree(sdir_placeholder, ignore_errors=True)
 
@@ -420,14 +420,14 @@ def lima_config_fingerprint(
 
 def save_config_fingerprint(sdir: Path, fingerprint: str) -> None:
     """Persist the config fingerprint for drift detection."""
-    (sdir / "config.sha256").write_text(fingerprint)
+    (sdir / "config.sha256").write_text(fingerprint, encoding="utf-8")
 
 
 def load_config_fingerprint(sdir: Path) -> str | None:
     """Load the saved config fingerprint, or ``None`` if absent."""
     fp_file = sdir / "config.sha256"
     if fp_file.exists():
-        return fp_file.read_text().strip()
+        return fp_file.read_text(encoding="utf-8").strip()
     return None
 
 
@@ -439,7 +439,7 @@ def load_config_fingerprint(sdir: Path) -> str | None:
 def _log(log_file: Path | None, msg: str) -> None:
     """Append a line to the build log file (for terminal mini app)."""
     if log_file is not None:
-        with open(log_file, "a") as f:
+        with open(log_file, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
             f.flush()
 
@@ -459,7 +459,7 @@ def _run_limactl(
 
     if log_file is not None and not capture_output:
         # Stream output to log file.
-        with open(log_file, "a") as f:
+        with open(log_file, "a", encoding="utf-8") as f:
             result = subprocess.run(
                 cmd,
                 env=env,
@@ -777,7 +777,7 @@ def build_cli_wrapper(
         prefix=f"openshrimp-lima-{context_name}-",
         suffix=".sh",
     ))
-    wrapper_path.write_text(script)
+    wrapper_path.write_text(script, encoding="utf-8")
     wrapper_path.chmod(stat.S_IRWXU)
     logger.info("Generated Lima CLI wrapper at %s", wrapper_path)
     return str(wrapper_path)

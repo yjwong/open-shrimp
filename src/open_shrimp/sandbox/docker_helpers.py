@@ -276,12 +276,12 @@ def ensure_image(
         repo_root = Path(__file__).resolve().parent.parent.parent.parent
         repo_dockerfile = repo_root / "Dockerfile.claude"
         if repo_dockerfile.is_file():
-            dockerfile_text = repo_dockerfile.read_text()
+            dockerfile_text = repo_dockerfile.read_text(encoding="utf-8")
         else:
             dockerfile_text = (
                 _pkg_files("open_shrimp")
                 .joinpath("Dockerfile.claude")
-                .read_text()
+                .read_text(encoding="utf-8")
             )
 
         with tempfile.TemporaryDirectory(
@@ -289,7 +289,7 @@ def ensure_image(
         ) as build_dir:
             build_path = Path(build_dir)
             shutil.copy2(cli_binary, build_path / "claude")
-            (build_path / "Dockerfile").write_text(dockerfile_text)
+            (build_path / "Dockerfile").write_text(dockerfile_text, encoding="utf-8")
             _docker_build(
                 image_name=image_name,
                 build_dir=build_dir,
@@ -361,9 +361,9 @@ def ensure_computer_use_image(
             # Copy Dockerfile.
             dockerfile_text = pkg.joinpath(
                 "Dockerfile.computer-use"
-            ).read_text()
+            ).read_text(encoding="utf-8")
             (build_path / "Dockerfile.computer-use").write_text(
-                dockerfile_text
+                dockerfile_text, encoding="utf-8",
             )
 
             # Copy computer-use assets.
@@ -371,7 +371,7 @@ def ensure_computer_use_image(
             cu_dir.mkdir()
             for asset_name in ("entrypoint.sh", "rc.xml", "autostart"):
                 asset = pkg.joinpath("computer-use", asset_name)
-                (cu_dir / asset_name).write_text(asset.read_text())
+                (cu_dir / asset_name).write_text(asset.read_text(encoding="utf-8"), encoding="utf-8")
 
             _docker_build(
                 image_name=image_name,
@@ -473,7 +473,7 @@ def get_text_input_active(context_name: str) -> bool:
     """
     path = get_text_input_state_path(context_name)
     try:
-        return path.read_text().strip() == "1"
+        return path.read_text(encoding="utf-8").strip() == "1"
     except (FileNotFoundError, OSError):
         return False
 
@@ -750,7 +750,7 @@ def _build_docker_run_argv(
         if not computer_use:
             # Standalone DinD: use the dedicated entrypoint script.
             entrypoint_path = state_dir / "dind-entrypoint.sh"
-            entrypoint_path.write_text(_DIND_ENTRYPOINT)
+            entrypoint_path.write_text(_DIND_ENTRYPOINT, encoding="utf-8")
             entrypoint_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
                                   | stat.S_IROTH | stat.S_IXOTH)
             docker_argv.extend([
@@ -1050,7 +1050,7 @@ def build_cli_wrapper(
         prefix=f"openshrimp-docker-{context_name}-",
         suffix=".sh",
     )
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(script)
     os.chmod(wrapper_path, stat.S_IRWXU)
 
