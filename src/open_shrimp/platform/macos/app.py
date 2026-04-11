@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import subprocess
 import sys
 import threading
@@ -314,13 +315,21 @@ def _remove_launch_agent() -> None:
 
 def main() -> None:
     """Entry point for the macOS menu bar app."""
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    log_fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    file_handler = logging.handlers.RotatingFileHandler(
+        _LOG_DIR / "openshrimp.log",
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3,
+    )
+    file_handler.setFormatter(logging.Formatter(log_fmt))
+
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
+        format=log_fmt,
+        handlers=[logging.StreamHandler(sys.stderr), file_handler],
     )
-
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     app = OpenShrimpApp()
     # rumps doesn't expose applicationDidFinishLaunching directly;
