@@ -77,7 +77,7 @@ You're away from your desk but need Claude to fix a bug, review a diff, or scaff
 - **Multiple projects, one bot.** Switch between project contexts on the fly with `/context`. Each context has its own working directory, CLAUDE.md, model, and tool permissions.
 - **Persistent sessions.** Pick up where you left off. Sessions survive restarts, and you can `/resume` any previous conversation.
 - **Forum topic support.** Use Telegram forum channels to organize conversations — each topic thread gets its own independent Claude session. Run parallel tasks in the same chat without them stepping on each other. Claude auto-titles each topic for easy navigation.
-- **Container isolation.** Run each context inside a Docker container with only the project directory mounted. On macOS, native `sandbox-exec` isolation — no Docker required.
+- **Container isolation.** Run each context inside a Docker container with only the project directory mounted. On macOS, use Lima for full VM isolation via Apple's Virtualization.framework.
 - **Computer use.** Enable a headless desktop inside the container — Claude can launch Chromium, click around, take screenshots, and interact with GUIs. Watch live via VNC.
 - **Group chat ready.** Add the bot to a team chat. It responds to @mentions and replies, so it stays out of the way until you need it.
 - **Schedule recurring tasks.** Tell Claude to check your repo every morning, monitor a CI pipeline, or run a one-shot task later — all via natural language. Tasks run in isolated sessions automatically.
@@ -108,7 +108,7 @@ You can run each context inside a Docker container by adding a `container:` bloc
 
 Session state is stored separately per context under `~/.config/openshrimp/containers/`, so containerized contexts don't interfere with each other or your host `~/.claude`.
 
-On Linux, this uses Docker. On macOS, it uses Apple's `sandbox-exec` for native binary-level isolation — no Docker required.
+On Linux, this uses Docker or libvirt VMs. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework.
 
 ## macOS App
 

@@ -28,7 +28,7 @@ class ContainerConfig:
 class SandboxConfig:
     """Unified sandbox configuration for all backends."""
 
-    backend: str  # "docker", "libvirt", "macos"
+    backend: str  # "docker", "libvirt", "lima"
     enabled: bool = True
 
     # Docker-specific
@@ -46,7 +46,7 @@ class SandboxConfig:
 
 
 # Valid values for sandbox config fields.
-_SANDBOX_BACKENDS = {"docker", "libvirt", "lima", "macos"}
+_SANDBOX_BACKENDS = {"docker", "libvirt", "lima"}
 
 
 def is_sandboxed(context: "ContextConfig") -> bool:

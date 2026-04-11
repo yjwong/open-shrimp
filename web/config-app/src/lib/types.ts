@@ -1,5 +1,5 @@
 export interface SandboxConfig {
-  backend: "docker" | "libvirt" | "lima" | "macos";
+  backend: "docker" | "libvirt" | "lima";
   enabled?: boolean;
   docker_in_docker?: boolean;
   dockerfile?: string | null;

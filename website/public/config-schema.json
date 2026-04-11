@@ -59,7 +59,7 @@
       "properties": {
         "backend": {
           "type": "string",
-          "description": "Sandbox backend: \"docker\", \"libvirt\", or \"macos\"."
+          "description": "Sandbox backend: \"docker\", \"libvirt\", or \"lima\"."
         },
         "enabled": {
           "type": "boolean",

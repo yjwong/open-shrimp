@@ -126,7 +126,7 @@ contexts:
   myproject:
     # ...
     sandbox:
-      backend: docker          # "docker", "libvirt", or "macos"
+      backend: docker          # "docker", "libvirt", or "lima"
       docker_in_docker: true   # enable Docker inside the container
       dockerfile: /path/to/Dockerfile.claude  # custom Dockerfile
       computer_use: true       # enable GUI interaction
@@ -134,7 +134,7 @@ contexts:
 
 When a sandbox is enabled, all Bash commands and path-scoped tools are auto-approved since the sandbox provides the safety boundary.
 
-See the dedicated guides for [Docker sandbox](/guides/docker-sandbox/), [VM sandbox](/guides/vm-sandbox/), and [macOS sandbox](/guides/macos-sandbox/).
+See the dedicated guides for [Docker sandbox](/guides/docker-sandbox/) and [VM sandbox](/guides/vm-sandbox/).
 
 ## Default context
 

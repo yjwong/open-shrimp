@@ -458,94 +458,6 @@ class DockerSandboxManager:
 
 
 # ---------------------------------------------------------------------------
-# macOS (no-op) implementation
-# ---------------------------------------------------------------------------
-
-
-class MacOSSandboxManager:
-    """No-op :class:`SandboxManager` for macOS (sandbox-exec, no Docker)."""
-
-    def __init__(self) -> None:
-        self._instance_prefix = "openshrimp"
-        self._container_label = "openshrimp"
-        self._sandbox_cache: dict[str, Sandbox] = {}
-        self._build_log_dir = _build_log_dir()
-        self._state_dir = _data_dir() / "containers"
-
-    def set_instance_prefix(self, instance_name: str | None) -> None:
-        if instance_name:
-            self._instance_prefix = f"openshrimp-{instance_name}"
-            self._container_label = f"openshrimp-{instance_name}"
-        else:
-            self._instance_prefix = "openshrimp"
-            self._container_label = "openshrimp"
-
-    @property
-    def instance_prefix(self) -> str:
-        return self._instance_prefix
-
-    @property
-    def container_label(self) -> str:
-        return self._container_label
-
-    def start_reaper(self) -> None:
-        pass
-
-    def stop_reaper(self) -> None:
-        pass
-
-    def stop_all(self) -> None:
-        self._sandbox_cache.clear()
-
-    def invalidate_sandbox(self, context_name: str) -> None:
-        # macOS sandbox-exec has no persistent runtime; just evict cache.
-        cached = self._sandbox_cache.pop(context_name, None)
-        if cached is not None:
-            logger.info("Invalidated macOS sandbox for context '%s'", context_name)
-
-    def create_sandbox(
-        self, context_name: str, context: ContextConfig,
-    ) -> Sandbox:
-        cached = self._sandbox_cache.get(context_name)
-        if cached is not None:
-            return cached
-
-        from open_shrimp.sandbox.macos import MacOSSandbox
-
-        sandbox = MacOSSandbox(
-            context_name=context_name,
-            project_dir=context.directory,
-            additional_directories=context.additional_directories or None,
-        )
-        self._sandbox_cache[context_name] = sandbox
-        return sandbox
-
-    def register_build(self, context_name: str) -> Path:
-        self._build_log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self._build_log_dir / f"{context_name}.log"
-        log_path.write_bytes(b"")
-        register_active_build(context_name, log_path, self)
-        return log_path
-
-    def unregister_build(self, context_name: str) -> None:
-        unregister_active_build(context_name)
-
-    def is_build_active(self, context_name: str) -> bool:
-        return lookup_active_build(context_name) is not None
-
-    @property
-    def build_log_dir(self) -> Path:
-        return self._build_log_dir
-
-    @property
-    def state_dir(self) -> Path:
-        return self._state_dir
-
-    def claude_home_dir(self, context_name: str) -> Path:
-        return self._state_dir / context_name
-
-
-# ---------------------------------------------------------------------------
 # Lima implementation
 # ---------------------------------------------------------------------------
 
@@ -1014,26 +926,12 @@ class LibvirtSandboxManager:
 def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
     """Instantiate one :class:`SandboxManager` per backend used in the config.
 
-    On macOS, always returns a single ``"macos"`` manager.
-    On Linux, returns one manager per backend (``"docker"``, ``"libvirt"``)
+    Returns one manager per backend (``"docker"``, ``"libvirt"``, ``"lima"``)
     that is actually referenced by at least one context.
 
     Returns:
         A dict mapping backend name to its :class:`SandboxManager` instance.
     """
-    if sys.platform == "darwin":
-        managers: dict[str, SandboxManager] = {}
-        uses_lima = any(
-            ctx.sandbox is not None
-            and ctx.sandbox.enabled
-            and ctx.sandbox.backend == "lima"
-            for ctx in config.contexts.values()
-        )
-        if uses_lima:
-            managers["lima"] = LimaSandboxManager()
-        managers["macos"] = MacOSSandboxManager()
-        return managers
-
     # Collect all backends used by sandboxed contexts.
     backends: set[str] = set()
     for ctx in config.contexts.values():
@@ -1043,8 +941,10 @@ def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
             backends.add("docker")
 
     managers: dict[str, SandboxManager] = {}
-    if "docker" in backends or not backends:
+    if "docker" in backends or (not backends and sys.platform != "darwin"):
         managers["docker"] = DockerSandboxManager()
     if "libvirt" in backends:
         managers["libvirt"] = LibvirtSandboxManager()
+    if "lima" in backends:
+        managers["lima"] = LimaSandboxManager()
     return managers

@@ -5,7 +5,7 @@ interface SandboxFormProps {
   onChange: (sandbox: SandboxConfig | null) => void;
 }
 
-const BACKENDS = ["docker", "libvirt", "lima", "macos"] as const;
+const BACKENDS = ["docker", "libvirt", "lima"] as const;
 
 export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
   if (!sandbox) {
@@ -87,7 +87,7 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
         />
       </div>
 
-      {(sandbox.backend === "docker" || sandbox.backend === "macos") && (
+      {sandbox.backend === "docker" && (
         <>
           <div className="form-toggle-row">
             <span className="form-toggle-label">Docker-in-Docker</span>

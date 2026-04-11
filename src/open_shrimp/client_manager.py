@@ -365,11 +365,10 @@ async def get_or_create_session(
             "mcp__playwright__browser_verify_value",
         ])
 
-    # When containerized, generate a wrapper script that runs the Claude
-    # CLI in an isolated environment.  The sandbox backend is chosen by
-    # platform (macOS -> sandbox-exec, Linux -> Docker).  The wrapper is
-    # pointed at via cli_path; all other SDK machinery (stdin/stdout
-    # streaming, canUseTool, MCP) is unchanged.
+    # When sandboxed, generate a wrapper script that runs the Claude CLI
+    # in an isolated environment.  The wrapper is pointed at via cli_path;
+    # all other SDK machinery (stdin/stdout streaming, canUseTool, MCP) is
+    # unchanged.
     sandbox: Sandbox | None = None
     cli_path: str | None = None
     wrapper_cleanup_paths: list[str] = []

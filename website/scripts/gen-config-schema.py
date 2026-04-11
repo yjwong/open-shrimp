@@ -37,7 +37,7 @@ _DESCRIPTIONS: dict[str, dict[str, str]] = {
         "token": "Bot token from @BotFather.",
     },
     "SandboxConfig": {
-        "backend": 'Sandbox backend: "docker", "libvirt", or "macos".',
+        "backend": 'Sandbox backend: "docker", "libvirt", or "lima".',
         "enabled": "Enable or disable the sandbox.",
         "docker_in_docker": "Enable rootless Docker inside the container (Docker backend).",
         "dockerfile": "Path to a custom Dockerfile (Docker backend).",

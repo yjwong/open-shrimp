@@ -1,7 +1,7 @@
 """Sandbox abstraction for isolated Claude CLI execution.
 
 Defines the :class:`Sandbox` protocol that encapsulates different isolation
-backends (Docker containers, macOS sandbox-exec, SSH/VM, etc.) behind a
+backends (Docker containers, Lima/libvirt VMs, etc.) behind a
 common lifecycle interface.  The SDK's ``cli_path`` option is pointed at a
 wrapper script produced by :meth:`Sandbox.build_cli_wrapper`; all other SDK
 machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.

@@ -29,7 +29,6 @@ Telegram <-> OpenShrimp (Python, async) <-> Claude Agent SDK
   - **Docker** (`backend: docker`): Linux containers with the project directory bind-mounted. Session storage isolated under `~/.config/openshrimp/containers/<context>/`. Runs as host uid/gid. Custom Dockerfiles supported; images tagged `openshrimp-claude:<context-name>`, built lazily. `docker_in_docker: true` enables rootless Docker inside the container.
   - **Libvirt/QEMU** (`backend: libvirt`): Full VM isolation via libvirt. Requires `libvirt-python` optional dep. Supports `base_image` and `provision` (shell script for first boot) config fields.
   - **Lima** (`backend: lima`): Full VM isolation via Lima (Apple Virtualization.framework). Designed for macOS hosts. VirtioFS mounts for host directories. Config changes (mounts, CPU, memory) are detected via YAML fingerprinting (SHA-256) and trigger a full VM rebuild (`limactl delete` + `create`). Uses `LIMA_HOME=~/.openshrimp/lima` for isolation from user's personal Lima instances. State stored under `~/.local/share/openshrimp/lima/<context>/`.
-  - **macOS** (`backend: macos`): Local execution with macOS-native sandboxing.
   The SDK's `cli_path` is pointed at a generated wrapper script; all other SDK machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged. Sandboxed contexts auto-approve all Bash commands since the sandbox provides the safety boundary. The `Sandbox` protocol (`sandbox/base.py`) defines the lifecycle: `ensure_environment()` -> `ensure_running()` -> `provision_workspace()` -> `build_cli_wrapper()` -> `cleanup()` -> `stop()`. A `SandboxManager` (`sandbox/manager.py`) provides the factory and global lifecycle.
 - **Computer use**: Optional per-context GUI interaction via `sandbox.computer_use: true`. Runs a headless Wayland desktop (labwc compositor, 1280x720) inside the sandbox with Chromium and a foot terminal. Claude interacts via MCP tools: `computer_screenshot` (grim), `computer_click`/`computer_type`/`computer_key`/`computer_scroll` (wlrctl), and `computer_toplevel` for window management. Screenshots are saved to a bind-mounted directory and sent to Telegram for user observability. A VNC server (wayvnc) is exposed on a dynamic port for live viewing; the `/vnc` command opens a noVNC Mini App. The computer-use image (`openshrimp-computer-use:latest`) extends the base image with `Dockerfile.computer-use`.
 - **Client manager**: Persistent `ClaudeSDKClient` instances keyed by ChatScope (`client_manager.py`). Keeps the CLI subprocess alive across multiple messages in the same conversation, avoiding the "Continue from where you left off" injection on session resume. Only the first message uses `--resume`; subsequent messages call `client.query()` on the already-connected client.
@@ -106,8 +105,6 @@ src/open_shrimp/
         libvirt_helpers.py     # Libvirt utility functions
         lima.py                # Lima VM backend (macOS host)
         lima_helpers.py        # Lima utility functions
-        macos.py               # macOS sandbox backend
-        macos_helpers.py       # macOS utility functions
     terminal/
         __init__.py
         api.py                 # SSE tail + read endpoints for background task output

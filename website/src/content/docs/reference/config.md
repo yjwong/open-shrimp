@@ -131,7 +131,7 @@ Run the Claude CLI inside an isolated environment. When a sandbox is enabled, al
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `backend` | string | Yes | — | `"docker"`, `"libvirt"`, or `"macos"` |
+| `backend` | string | Yes | — | `"docker"`, `"libvirt"`, or `"lima"` |
 | `enabled` | bool | No | `true` | Enable or disable the sandbox |
 | `docker_in_docker` | bool | No | `false` | Enable rootless Docker inside the container (Docker backend only) |
 | `dockerfile` | string | No | `null` | Path to a custom Dockerfile (Docker backend only) |
@@ -176,17 +176,6 @@ sandbox:
 Requires the `libvirt-python` optional dependency (`uv pip install libvirt-python`).
 
 See the [VM Sandbox guide](/guides/vm-sandbox/) for detailed setup instructions.
-
-### macOS backend
-
-```yaml
-sandbox:
-  backend: macos
-```
-
-Uses macOS-native sandboxing (`sandbox-exec`). No additional configuration fields.
-
-See the [macOS Sandbox guide](/guides/macos-sandbox/) for detailed setup instructions.
 
 ### Computer use
 

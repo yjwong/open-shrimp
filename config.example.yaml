@@ -45,7 +45,7 @@ contexts:
     # locked_for_chats:
     #   - -1001234567890  # Locks this group chat to this context (cannot switch)
     # sandbox:                     # Run the Claude CLI in an isolated sandbox.
-    #   backend: docker            # "docker" (Linux), "macos", or "lima" (macOS VM)
+    #   backend: docker            # "docker" (Linux), "libvirt" (Linux VM), or "lima" (macOS VM)
     #                              # Provides strong filesystem isolation — the agent
     #                              # can only access the project directory and its
     #                              # own session storage.

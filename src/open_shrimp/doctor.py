@@ -92,13 +92,6 @@ def _check_lima() -> tuple[bool, str]:
     return False, "not found (required for Lima sandbox on macOS)"
 
 
-def _check_sandbox_exec() -> tuple[bool, str]:
-    path = shutil.which("sandbox-exec")
-    if path:
-        return True, f"found at {path}"
-    return False, "not found (required for macOS sandbox backend)"
-
-
 # Each check: (label, function, platform filter or None for all).
 _CHECKS: list[tuple[str, callable, str | None]] = [
     ("moonshine-stt", _check_moonshine_stt, None),
@@ -107,7 +100,6 @@ _CHECKS: list[tuple[str, callable, str | None]] = [
     ("libvirt", _check_libvirt, "Linux"),
     ("virtiofsd", _check_virtiofsd, "Linux"),
     ("Lima", _check_lima, "Darwin"),
-    ("sandbox-exec", _check_sandbox_exec, "Darwin"),
 ]
 
 
