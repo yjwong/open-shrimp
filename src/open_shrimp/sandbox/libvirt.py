@@ -677,19 +677,29 @@ class LibvirtSandbox:
         return result.stdout
 
     def set_clipboard(self, text: str) -> None:
-        """Set clipboard contents via wl-copy over SSH."""
+        """Set clipboard contents via wl-copy over SSH.
+
+        wl-copy forks a background process to serve paste requests, which
+        keeps the SSH connection alive indefinitely. Work around this by
+        saving stdin to a tmpfile, then backgrounding wl-copy with nohup
+        so the SSH session can exit cleanly.
+        """
         from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
 
         assert self._ssh_port is not None
         ssh_key = self._sdir / "ssh_key"
         ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
+        # Shell script: save stdin to tmpfile, background wl-copy, exit.
+        remote_cmd = (
+            'tmpf=$(mktemp);'
+            ' cat > "$tmpf";'
+            ' env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0'
+            ' nohup wl-copy < "$tmpf" >/dev/null 2>&1 &'
+            ' sleep 0.1;'
+            ' rm "$tmpf"'
+        )
         result = subprocess.run(
-            [
-                "ssh", *ssh_opts, "claude@localhost",
-                "env", "XDG_RUNTIME_DIR=/run/user/1000",
-                "WAYLAND_DISPLAY=wayland-0",
-                "wl-copy",
-            ],
+            ["ssh", *ssh_opts, "claude@localhost", remote_cmd],
             input=text,
             capture_output=True,
             text=True,
