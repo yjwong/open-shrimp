@@ -582,7 +582,7 @@ def _build_computer_use_provisions() -> list[dict]:
         Type=simple
         Environment=WAYLAND_DISPLAY=wayland-0
         ExecStartPre=/bin/bash -c 'for i in \\$(seq 1 75); do [ -S "\\$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done'
-        ExecStart=${CHROMIUM_BIN} --no-first-run --no-default-browser-check --no-sandbox --disable-dev-shm-usage --disable-background-networking --ozone-platform=wayland --user-data-dir=%h/.config/chromium --remote-debugging-port=9222
+        ExecStart=${CHROMIUM_BIN} --no-first-run --no-default-browser-check --disable-background-networking --ozone-platform=wayland --user-data-dir=%h/.config/chromium --remote-debugging-port=9222
         Restart=on-failure
         RestartSec=5
 
