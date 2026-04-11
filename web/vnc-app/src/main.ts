@@ -213,16 +213,87 @@ function setupPinchZoom(
 // ── Clipboard ──
 
 /** Clipboard helpers that use the server-side wl-clipboard API. */
-function setupClipboard(context: string, authToken: string): {
-  /** Copy the remote clipboard content to the local device clipboard. */
+function setupClipboard(context: string, authToken: string, rfb: RFBType): {
   copyToLocal: () => Promise<void>;
-  /** Read the local device clipboard and send it to the remote VNC session. */
-  pasteFromLocal: () => Promise<void>;
+  pasteFromLocal: () => void;
 } {
   const clipboardUrl =
     `${window.location.origin}/api/vnc/clipboard` +
     `?context=${encodeURIComponent(context)}` +
     `&token=${encodeURIComponent(authToken)}`;
+
+  async function sendToRemote(text: string): Promise<void> {
+    await fetch(clipboardUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  }
+
+  // Reusable paste modal — shown when the paste button is clicked.
+  let modal: HTMLElement | null = null;
+
+  function showPasteModal(): void {
+    if (modal) return;
+
+    modal = document.createElement("div");
+    modal.className = "paste-modal-overlay";
+
+    const box = document.createElement("div");
+    box.className = "paste-modal";
+
+    const label = document.createElement("div");
+    label.className = "paste-modal-label";
+    label.textContent = "Paste text to send to VM";
+    box.appendChild(label);
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "paste-modal-input";
+    textarea.placeholder = "Long-press and paste here...";
+    textarea.rows = 4;
+    box.appendChild(textarea);
+
+    const btnRow = document.createElement("div");
+    btnRow.className = "paste-modal-buttons";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", closePasteModal);
+    btnRow.appendChild(cancelBtn);
+
+    const sendBtn = document.createElement("button");
+    sendBtn.textContent = "Send";
+    sendBtn.classList.add("primary");
+    sendBtn.addEventListener("click", () => {
+      const text = textarea.value;
+      closePasteModal();
+      if (text) {
+        sendToRemote(text);
+        for (const ch of text) {
+          rfb.sendKey(charToKeysym(ch), null);
+        }
+      }
+    });
+    btnRow.appendChild(sendBtn);
+
+    box.appendChild(btnRow);
+    modal.appendChild(box);
+
+    // Close on overlay click (outside the box).
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) closePasteModal();
+    });
+
+    document.body.appendChild(modal);
+    textarea.focus();
+  }
+
+  function closePasteModal(): void {
+    if (modal) {
+      modal.remove();
+      modal = null;
+    }
+  }
 
   return {
     async copyToLocal() {
@@ -234,22 +305,11 @@ function setupClipboard(context: string, authToken: string): {
           await navigator.clipboard.writeText(text);
         }
       } catch {
-        // Clipboard API or fetch may fail.
+        // Clipboard API or fetch may fail silently.
       }
     },
-    async pasteFromLocal() {
-      try {
-        const text = await navigator.clipboard.readText();
-        if (text) {
-          await fetch(clipboardUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text }),
-          });
-        }
-      } catch {
-        // Clipboard API or fetch may fail.
-      }
+    pasteFromLocal() {
+      showPasteModal();
     },
   };
 }
@@ -316,7 +376,7 @@ async function main(): Promise<void> {
 
   // ── Events ──
 
-  const clipboard = setupClipboard(context, authToken);
+  const clipboard = setupClipboard(context, authToken, rfb);
 
   rfb.addEventListener("connect", () => {
     loadingEl.remove();
@@ -485,7 +545,7 @@ function buildToolbar(
   context: string,
   initData: string,
   pinchZoom: { reset: () => void; getScale: () => number } | null,
-  clipboard: { copyToLocal: () => Promise<void>; pasteFromLocal: () => Promise<void> },
+  clipboard: { copyToLocal: () => Promise<void>; pasteFromLocal: () => void },
 ): void {
   // Inject styles.
   const style = document.createElement("style");
@@ -555,6 +615,70 @@ function buildToolbar(
       font-size: 13px;
       z-index: 9999;
     }
+    .paste-modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      padding: 16px;
+    }
+    .paste-modal {
+      background: #24283b;
+      border-radius: 8px;
+      padding: 16px;
+      width: 100%;
+      max-width: 360px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .paste-modal-label {
+      color: #a9b1d6;
+      font-family: monospace;
+      font-size: 13px;
+    }
+    .paste-modal-input {
+      background: #1a1b26;
+      color: #a9b1d6;
+      border: 1px solid #414868;
+      border-radius: 4px;
+      padding: 8px;
+      font-family: monospace;
+      font-size: 13px;
+      resize: vertical;
+      outline: none;
+    }
+    .paste-modal-input:focus {
+      border-color: #7aa2f7;
+    }
+    .paste-modal-buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .paste-modal-buttons button {
+      background: #414868;
+      color: #a9b1d6;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-family: monospace;
+      cursor: pointer;
+    }
+    .paste-modal-buttons button:hover {
+      background: #565f89;
+    }
+    .paste-modal-buttons button.primary {
+      background: #7aa2f7;
+      color: #1a1b26;
+    }
+    .paste-modal-buttons button.primary:hover {
+      background: #89b4fa;
+    }
   `;
   document.head.appendChild(style);
 
@@ -562,10 +686,18 @@ function buildToolbar(
   const viewOnlyBtn = document.createElement("button");
   viewOnlyBtn.textContent = rfb.viewOnly ? "View only" : "Interactive";
   if (!rfb.viewOnly) viewOnlyBtn.classList.add("active");
+  // Buttons to hide/show based on interactive mode.
+  const interactiveOnly: HTMLElement[] = [];
+  function updateInteractiveButtons(): void {
+    for (const btn of interactiveOnly) {
+      btn.style.display = rfb.viewOnly ? "none" : "";
+    }
+  }
   viewOnlyBtn.addEventListener("click", () => {
     rfb.viewOnly = !rfb.viewOnly;
     viewOnlyBtn.textContent = rfb.viewOnly ? "View only" : "Interactive";
     viewOnlyBtn.classList.toggle("active", !rfb.viewOnly);
+    updateInteractiveButtons();
   });
   toolbar.appendChild(viewOnlyBtn);
 
@@ -603,7 +735,10 @@ function buildToolbar(
   pasteBtn.addEventListener("click", () => {
     clipboard.pasteFromLocal();
   });
+  interactiveOnly.push(pasteBtn);
   toolbar.appendChild(pasteBtn);
+
+  updateInteractiveButtons();
 
   // Keyboard toggle (mobile only).
   if (isMobile) {
