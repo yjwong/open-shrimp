@@ -674,6 +674,7 @@ def _run_limactl(
         env=env,
         capture_output=capture_output,
         text=True,
+        encoding="utf-8",
         check=check,
         timeout=timeout,
     )
