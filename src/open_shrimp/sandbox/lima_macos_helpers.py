@@ -168,10 +168,27 @@ _HOMEBREW_INSTALL_SCRIPT = textwrap.dedent("""\
     #!/bin/bash
     set -eux -o pipefail
 
+    # Skip post-login Setup Assistant buddy screens (iCloud, Siri, etc.).
+    # Lima writes .skipbuddy to /Library/User Template/ but on Tahoe the
+    # user home is populated from /System/Library/User Template/English.lproj/
+    # which doesn't include it — so we create it explicitly.
+    touch ~/.skipbuddy
+
     # Create sudo askpass helper (reads password from ~/password).
     PW=$(cat "$HOME/password")
     echo "$PW" | sudo -S mkdir -p /usr/local/bin
     echo "$PW" | sudo -S bash -c 'printf "#!/bin/sh\\nset -eu\\ncat \\"\\$HOME/password\\"\\n" > /usr/local/bin/lima-sudo-askpass.sh && chmod 755 /usr/local/bin/lima-sudo-askpass.sh'
+
+    # Auto-login: boot straight to desktop without loginwindow.
+    echo "$PW" | sudo -S sysadminctl -autologin set -userName "$(whoami)" -password "$PW"
+
+    # Disable screen lock and screensaver.
+    echo "$PW" | sudo -S sysadminctl -screenLock off -password "$PW"
+    echo "$PW" | sudo -S defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
+    defaults -currentHost write com.apple.screensaver idleTime 0
+
+    # Disable sleep.
+    echo "$PW" | sudo -S pmset -a sleep 0 displaysleep 0 disksleep 0
 
     # Install Homebrew.
     [ -e /opt/homebrew ] && exit 0
