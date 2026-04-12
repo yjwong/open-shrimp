@@ -200,6 +200,12 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                         )
                         return
 
+                # For symlinks (e.g. agent task .output -> .jsonl),
+                # resolve to the real file so we watch the correct
+                # directory where writes actually happen.
+                watch_path = source.path.resolve()
+                watch_parent = watch_path.parent
+
                 # Catch-up: read any data already present.
                 chunk, file_size = await asyncio.to_thread(_read_new_data)
                 if file_size == -1:
@@ -212,14 +218,14 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
 
                 # Main watch loop — react to file changes via OS events.
                 async for changes in awatch(
-                    parent, stop_event=stop_event
+                    watch_parent, stop_event=stop_event
                 ):
                     if stop_event.is_set():
                         break
 
                     # Only care about changes to our target file.
                     if not any(
-                        Path(p) == source.path for _, p in changes
+                        Path(p) == watch_path for _, p in changes
                     ):
                         continue
 
