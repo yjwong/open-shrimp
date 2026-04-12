@@ -11,6 +11,7 @@ export interface SandboxConfig {
   disk_size?: number;
   base_image?: string | null;
   provision?: string | null;
+  persistent_paths?: string[];
 }
 
 export interface ContextConfig {

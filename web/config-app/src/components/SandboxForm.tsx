@@ -193,6 +193,55 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
           </div>
         </>
       )}
+
+      {sandbox.backend === "libvirt" && (
+        <div className="form-group">
+          <label className="form-label">Persistent Paths</label>
+          <span className="form-hint">
+            Guest paths with dedicated qcow2 volumes that survive VM rebuilds
+          </span>
+          <div className="list-input-items">
+            {(sandbox.persistent_paths ?? []).map((p, i) => (
+              <div key={i} className="list-input-row">
+                <input
+                  className="form-input"
+                  value={p}
+                  onChange={(e) => {
+                    const next = [...(sandbox.persistent_paths ?? [])];
+                    next[i] = e.target.value;
+                    update({ persistent_paths: next });
+                  }}
+                  placeholder="/var/lib/docker"
+                />
+                <button
+                  type="button"
+                  className="list-input-remove"
+                  onClick={() =>
+                    update({
+                      persistent_paths: (sandbox.persistent_paths ?? []).filter(
+                        (_, j) => j !== i,
+                      ),
+                    })
+                  }
+                >
+                  x
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="add-btn"
+            onClick={() =>
+              update({
+                persistent_paths: [...(sandbox.persistent_paths ?? []), ""],
+              })
+            }
+          >
+            + Add Path
+          </button>
+        </div>
+      )}
     </div>
   );
 }
