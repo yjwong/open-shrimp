@@ -2,7 +2,7 @@
 
 Uses Lima (Apple Virtualization.framework via the VZ driver) for full VM
 isolation.  VirtioFS provides fast filesystem sharing between the host
-and the Linux guest.
+and the guest (Linux or macOS).
 
 VMs are **persistent**: one long-lived VM per context, kept warm between
 Claude sessions.  Cold boot is ~30 s, so VMs should stay running.  The
@@ -43,11 +43,37 @@ from open_shrimp.sandbox.lima_helpers import (
 
 logger = logging.getLogger(__name__)
 
-# Named key → character mapping for wlrctl keyboard input.
+# Named key → character mapping for wlrctl keyboard input (Linux guests).
 _NAMED_KEY_CHARS: dict[str, str] = {
     "return": "\n", "enter": "\n",
     "tab": "\t", "escape": "\x1b",
     "backspace": "\x08", "space": " ",
+}
+
+# macOS key code mapping for osascript (macOS guests).
+_MACOS_KEY_CODES: dict[str, int] = {
+    "return": 36, "enter": 76,
+    "tab": 48, "escape": 53,
+    "backspace": 51, "delete": 117,
+    "space": 49,
+    "up": 126, "down": 125, "left": 123, "right": 124,
+    "home": 115, "end": 119,
+    "pageup": 116, "pagedown": 121,
+    "f1": 122, "f2": 120, "f3": 99, "f4": 118,
+    "f5": 96, "f6": 97, "f7": 98, "f8": 100,
+    "f9": 101, "f10": 109, "f11": 103, "f12": 111,
+}
+
+_MACOS_MODIFIER_MAP: dict[str, str] = {
+    "ctrl": "control down",
+    "control": "control down",
+    "alt": "option down",
+    "option": "option down",
+    "shift": "shift down",
+    "super": "command down",
+    "cmd": "command down",
+    "command": "command down",
+    "meta": "command down",
 }
 
 
@@ -68,6 +94,7 @@ class LimaSandbox:
         additional_directories: list[str] | None = None,
         instance_prefix: str = "openshrimp",
         computer_use: bool = False,
+        guest_os: str = "linux",
     ) -> None:
         self._context_name = context_name
         self._config = config
@@ -76,12 +103,16 @@ class LimaSandbox:
         self._additional_directories = additional_directories or []
         self._instance_prefix = instance_prefix
         self._computer_use = computer_use
+        self._guest_os = guest_os
 
         self._sdir = state_dir_for(context_name)
         self._inst_name = _instance_name(context_name, instance_prefix)
         self._claude_home_dir = self._sdir / "claude-home"
         self._tmp_dir = self._sdir / "tmp"
         self._env = _lima_env()  # cached — LIMA_HOME doesn't change
+
+        # SSH tunnel processes for macOS guest port forwarding.
+        self._ssh_tunnels: list[subprocess.Popen] = []
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -114,6 +145,7 @@ class LimaSandbox:
             self._additional_directories or None,
             self._computer_use,
             context_name=self._context_name,
+            guest_os=self._guest_os,
         )
         saved_fp = load_config_fingerprint(sdir)
         if saved_fp is not None and saved_fp != desired_fp:
@@ -155,6 +187,7 @@ class LimaSandbox:
             self._additional_directories or None,
             self._computer_use,
             context_name=self._context_name,
+            guest_os=self._guest_os,
         )
 
         # Create the instance (this downloads the image + boots for cloud-init).
@@ -182,9 +215,33 @@ class LimaSandbox:
             )
 
         if status != "Running":
-            limactl_start(
-                self._limactl, self._inst_name, log_file=log_file,
-            )
+            if self._guest_os == "macos":
+                # macOS guests often start in DEGRADED state because
+                # SSH agent forwarding requires sudo which isn't
+                # available until our askpass provision runs.
+                # limactl start exits non-zero for DEGRADED, but the
+                # VM is still usable — don't treat it as fatal.
+                try:
+                    limactl_start(
+                        self._limactl, self._inst_name, log_file=log_file,
+                    )
+                except subprocess.CalledProcessError:
+                    # Check if the VM came up despite the error.
+                    recheck = limactl_instance_status(
+                        self._limactl, self._inst_name,
+                    )
+                    if recheck != "Running":
+                        raise
+                    logger.warning(
+                        "limactl start returned non-zero for %s but VM is "
+                        "running (likely DEGRADED state — expected for "
+                        "macOS guests before askpass is provisioned)",
+                        self._inst_name,
+                    )
+            else:
+                limactl_start(
+                    self._limactl, self._inst_name, log_file=log_file,
+                )
 
         # Wait for shell to be responsive.
         if not limactl_shell_check(self._limactl, self._inst_name):
@@ -205,10 +262,24 @@ class LimaSandbox:
         _log(log_file, "Lima VM ready.")
         logger.info("Lima instance %s is ready", self._inst_name)
 
+        if self._guest_os == "macos":
+            # Fix up VirtioFS mount symlinks — the guest agent may have
+            # failed on first boot because parent directories didn't exist.
+            from open_shrimp.sandbox.lima_macos_helpers import ensure_mounts_macos
+            mount_points = [self._project_dir] + self._additional_directories
+            ensure_mounts_macos(
+                self._limactl, self._inst_name, mount_points,
+            )
+
+            # Set up SSH tunnels for port forwarding.
+            if self._computer_use:
+                self._ensure_ssh_tunnels()
+
     def provision_workspace(self) -> None:
         """Ensure Claude CLI is installed in the VM and credentials are copied."""
-        # Install Claude CLI (Linux binary).
-        ensure_claude_cli_in_vm(self._limactl, self._inst_name)
+        ensure_claude_cli_in_vm(
+            self._limactl, self._inst_name, guest_os=self._guest_os,
+        )
 
         # Copy credentials to host-side shared directory.
         creds = _read_credentials_json()
@@ -225,11 +296,24 @@ class LimaSandbox:
             project_dir=self._project_dir,
             inst_name=self._inst_name,
             claude_home_dir=self._claude_home_dir,
+            guest_os=self._guest_os,
         )
         return path, [path]
 
     def stop(self) -> None:
-        """Stop the Lima instance."""
+        """Stop the Lima instance and any SSH tunnels."""
+        # Terminate SSH tunnels first.
+        for proc in self._ssh_tunnels:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self._ssh_tunnels.clear()
+
         status = limactl_instance_status(self._limactl, self._inst_name)
         if status == "Running":
             limactl_stop(self._limactl, self._inst_name)
@@ -267,9 +351,12 @@ class LimaSandbox:
         """Run a shell command inside the VM via ``limactl shell``.
 
         *cmd* is a shell command string (passed to ``bash -c``).
-        The Wayland environment is exported automatically.
+        For Linux guests, the Wayland environment is exported automatically.
         """
-        shell_cmd = f"export WAYLAND_DISPLAY=wayland-0; {cmd}"
+        if self._guest_os == "macos":
+            shell_cmd = cmd
+        else:
+            shell_cmd = f"export WAYLAND_DISPLAY=wayland-0; {cmd}"
         result = subprocess.run(
             [
                 self._limactl, "shell", self._inst_name,
@@ -286,25 +373,41 @@ class LimaSandbox:
     def take_screenshot(self, output_path: Path) -> None:
         ts = int(output_path.stem.split("-")[-1]) if "-" in output_path.stem else 0
         guest_path = f"/tmp/screenshots/screenshot-{ts}.png"
-        rc, _, stderr = self._exec_in_vm_sync(f"grim {guest_path}")
-        if rc != 0:
-            raise RuntimeError(f"grim failed: {stderr.strip()}")
+        if self._guest_os == "macos":
+            rc, _, stderr = self._exec_in_vm_sync(
+                f"screencapture -x {guest_path}"
+            )
+            if rc != 0:
+                raise RuntimeError(f"screencapture failed: {stderr.strip()}")
+        else:
+            rc, _, stderr = self._exec_in_vm_sync(f"grim {guest_path}")
+            if rc != 0:
+                raise RuntimeError(f"grim failed: {stderr.strip()}")
 
     def send_click(self, x: int, y: int, button: str = "left") -> None:
-        rc, _, stderr = self._exec_in_vm_sync(
-            f"wlrctl pointer move {x} {y} && wlrctl pointer click {button}"
-        )
-        if rc != 0:
-            raise RuntimeError(f"click failed: {stderr.strip()}")
+        if self._guest_os == "macos":
+            self._send_click_macos(x, y, button)
+        else:
+            rc, _, stderr = self._exec_in_vm_sync(
+                f"wlrctl pointer move {x} {y} && wlrctl pointer click {button}"
+            )
+            if rc != 0:
+                raise RuntimeError(f"click failed: {stderr.strip()}")
 
     def send_type(self, text: str) -> None:
-        rc, _, stderr = self._exec_in_vm_sync(
-            f"wlrctl keyboard type {shlex.quote(text)}"
-        )
-        if rc != 0:
-            raise RuntimeError(f"type failed: {stderr.strip()}")
+        if self._guest_os == "macos":
+            self._send_type_macos(text)
+        else:
+            rc, _, stderr = self._exec_in_vm_sync(
+                f"wlrctl keyboard type {shlex.quote(text)}"
+            )
+            if rc != 0:
+                raise RuntimeError(f"type failed: {stderr.strip()}")
 
     def send_key(self, key_str: str) -> None:
+        if self._guest_os == "macos":
+            self._send_key_macos(key_str)
+            return
         parts = key_str.split("+")
         if len(parts) > 1:
             modifiers = ",".join(parts[:-1])
@@ -322,6 +425,9 @@ class LimaSandbox:
     def send_scroll(
         self, x: int, y: int, direction: str, amount: int = 3,
     ) -> None:
+        if self._guest_os == "macos":
+            self._send_scroll_macos(x, y, direction, amount)
+            return
         scroll_map = {
             "up": (0, -amount), "down": (0, amount),
             "left": (-amount, 0), "right": (amount, 0),
@@ -334,6 +440,9 @@ class LimaSandbox:
             raise RuntimeError(f"scroll failed: {stderr.strip()}")
 
     def focus_window(self, name: str) -> None:
+        if self._guest_os == "macos":
+            self._focus_window_macos(name)
+            return
         rc, _, stderr = self._exec_in_vm_sync(
             f"wlrctl toplevel focus {shlex.quote(name)}"
         )
@@ -341,12 +450,20 @@ class LimaSandbox:
             raise RuntimeError(f"focus failed: {stderr.strip()}")
 
     def get_clipboard(self) -> str:
+        if self._guest_os == "macos":
+            rc, stdout, _ = self._exec_in_vm_sync("pbpaste")
+            return stdout if rc == 0 else ""
         rc, stdout, _ = self._exec_in_vm_sync("wl-paste --no-newline --primary")
         if rc != 0:
             return ""
         return stdout
 
     def set_clipboard(self, text: str) -> None:
+        if self._guest_os == "macos":
+            rc, _, stderr = self._exec_in_vm_sync("pbcopy", stdin_data=text)
+            if rc != 0:
+                raise RuntimeError(f"pbcopy failed: {stderr.strip()}")
+            return
         rc, _, stderr = self._exec_in_vm_sync("wl-copy", stdin_data=text)
         if rc != 0:
             raise RuntimeError(f"wl-copy failed: {stderr.strip()}")
@@ -401,6 +518,190 @@ class LimaSandbox:
             )
 
         return result
+
+    # -- macOS computer-use helpers -------------------------------------------
+
+    def _send_click_macos(self, x: int, y: int, button: str = "left") -> None:
+        """Click at coordinates using Python+Quartz CGEvent."""
+        btn_map = {
+            "left": ("kCGEventLeftMouseDown", "kCGEventLeftMouseUp", "kCGMouseButtonLeft"),
+            "right": ("kCGEventRightMouseDown", "kCGEventRightMouseUp", "kCGMouseButtonRight"),
+            "middle": ("kCGEventOtherMouseDown", "kCGEventOtherMouseUp", "kCGMouseButtonCenter"),
+        }
+        down_evt, up_evt, btn_const = btn_map.get(button, btn_map["left"])
+        py_script = (
+            f"from Quartz.CoreGraphics import *; import time; "
+            f"p=CGPointMake({x},{y}); "
+            f"CGEventPost(kCGHIDEventTap, CGEventCreateMouseEvent(None, kCGEventMouseMoved, p, {btn_const})); "
+            f"time.sleep(0.05); "
+            f"CGEventPost(kCGHIDEventTap, CGEventCreateMouseEvent(None, {down_evt}, p, {btn_const})); "
+            f"time.sleep(0.05); "
+            f"CGEventPost(kCGHIDEventTap, CGEventCreateMouseEvent(None, {up_evt}, p, {btn_const}))"
+        )
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"python3 -c {shlex.quote(py_script)}", timeout_secs=15.0,
+        )
+        if rc != 0:
+            raise RuntimeError(f"click failed: {stderr.strip()}")
+
+    def _send_type_macos(self, text: str) -> None:
+        """Type text using osascript keystroke."""
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        script = f'tell application "System Events" to keystroke "{escaped}"'
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"osascript -e {shlex.quote(script)}"
+        )
+        if rc != 0:
+            raise RuntimeError(f"type failed: {stderr.strip()}")
+
+    def _send_key_macos(self, key_str: str) -> None:
+        """Press a key or key combo using osascript key code."""
+        parts = key_str.split("+")
+        key_name = parts[-1].lower()
+        modifiers = parts[:-1] if len(parts) > 1 else []
+
+        # Build modifier clause.
+        modifier_clause = ""
+        if modifiers:
+            mod_strs = []
+            for m in modifiers:
+                mapped = _MACOS_MODIFIER_MAP.get(m.lower())
+                if mapped:
+                    mod_strs.append(mapped)
+            if mod_strs:
+                modifier_clause = " using {" + ", ".join(mod_strs) + "}"
+
+        # Use key code for named keys, keystroke for characters.
+        key_code = _MACOS_KEY_CODES.get(key_name)
+        if key_code is not None:
+            script = (
+                f'tell application "System Events" to '
+                f'key code {key_code}{modifier_clause}'
+            )
+        else:
+            char = key_name.replace("\\", "\\\\").replace('"', '\\"')
+            script = (
+                f'tell application "System Events" to '
+                f'keystroke "{char}"{modifier_clause}'
+            )
+
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"osascript -e {shlex.quote(script)}"
+        )
+        if rc != 0:
+            raise RuntimeError(f"key press failed: {stderr.strip()}")
+
+    def _send_scroll_macos(
+        self, x: int, y: int, direction: str, amount: int = 3,
+    ) -> None:
+        """Scroll using Python+Quartz CGEvent."""
+        scroll_map = {
+            "up": (amount, 0),
+            "down": (-amount, 0),
+            "left": (0, -amount),
+            "right": (0, amount),
+        }
+        dy, dx = scroll_map.get(direction, (-amount, 0))
+
+        # Move mouse to position first, then scroll.
+        py_script = (
+            f"from Quartz.CoreGraphics import *; "
+            f"p=CGPointMake({x},{y}); "
+            f"CGEventPost(kCGHIDEventTap, CGEventCreateMouseEvent(None, kCGEventMouseMoved, p, kCGMouseButtonLeft)); "
+            f"e=CGEventCreateScrollWheelEvent(None, kCGScrollEventUnitLine, 2, {dy}, {dx}); "
+            f"CGEventPost(kCGHIDEventTap, e)"
+        )
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"python3 -c {shlex.quote(py_script)}", timeout_secs=15.0,
+        )
+        if rc != 0:
+            raise RuntimeError(f"scroll failed: {stderr.strip()}")
+
+    def _focus_window_macos(self, name: str) -> None:
+        """Focus a window by application name using osascript."""
+        escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+        script = f'tell application "{escaped}" to activate'
+        rc, _, stderr = self._exec_in_vm_sync(
+            f"osascript -e {shlex.quote(script)}"
+        )
+        if rc != 0:
+            # Fallback: search by window title via System Events.
+            script2 = (
+                f'tell application "System Events" to set frontmost of '
+                f'(first process whose name contains "{escaped}") to true'
+            )
+            rc2, _, stderr2 = self._exec_in_vm_sync(
+                f"osascript -e {shlex.quote(script2)}"
+            )
+            if rc2 != 0:
+                raise RuntimeError(f"focus failed: {stderr2.strip()}")
+
+    # -- SSH tunnel management (macOS guests) ---------------------------------
+
+    def _ensure_ssh_tunnels(self) -> None:
+        """Set up SSH port-forwarding tunnels for macOS guest ports.
+
+        macOS Lima guests don't support automatic port forwarding, so
+        we use ``ssh -L`` tunnels for VNC and CDP ports.
+        """
+        # Check if existing tunnels are still alive.
+        alive = [p for p in self._ssh_tunnels if p.poll() is None]
+        if alive and len(alive) == len(self._ssh_tunnels):
+            return
+        self._ssh_tunnels = alive
+
+        # Get SSH connection args from limactl.
+        result = subprocess.run(
+            [self._limactl, "show-ssh", "--format=args", self._inst_name],
+            capture_output=True, text=True, env=self._env, timeout=10,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Cannot set up SSH tunnels for %s: show-ssh failed: %s",
+                self._inst_name, result.stderr.strip(),
+            )
+            return
+
+        ssh_args = shlex.split(result.stdout.strip())
+
+        host_vnc_port = vnc_host_port(self._context_name)
+        tunnels_needed = [(host_vnc_port, 5900), (9222, 9222)]
+
+        for host_port, guest_port in tunnels_needed:
+            # Check if this tunnel is already running.
+            already_tunneled = any(
+                p.poll() is None
+                for p in alive
+                # Can't easily check which port a Popen maps to, so just
+                # check total count — if we lost any, restart all missing.
+            )
+            if already_tunneled and len(alive) >= len(tunnels_needed):
+                continue
+
+            tunnel_cmd = ssh_args + [
+                "-N",
+                "-o", "ExitOnForwardFailure=yes",
+                "-o", "ServerAliveInterval=30",
+                "-L", f"127.0.0.1:{host_port}:127.0.0.1:{guest_port}",
+            ]
+            try:
+                proc = subprocess.Popen(
+                    tunnel_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    env=self._env,
+                )
+                self._ssh_tunnels.append(proc)
+                logger.info(
+                    "SSH tunnel: localhost:%d -> guest:%d (pid %d)",
+                    host_port, guest_port, proc.pid,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to start SSH tunnel for port %d", guest_port,
+                    exc_info=True,
+                )
 
     # -- Internal helpers -----------------------------------------------------
 

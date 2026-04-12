@@ -571,6 +571,7 @@ class LimaSandboxManager:
             additional_directories=context.additional_directories or None,
             instance_prefix=self._instance_prefix,
             computer_use=context.sandbox.computer_use,
+            guest_os=context.sandbox.guest_os,
         )
         self._sandbox_cache[context_name] = sandbox
         return sandbox

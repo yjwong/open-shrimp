@@ -87,6 +87,24 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
         />
       </div>
 
+      {sandbox.backend === "lima" && (
+        <div className="form-group">
+          <label className="form-label">Guest OS</label>
+          <select
+            className="form-input"
+            value={sandbox.guest_os ?? "linux"}
+            onChange={(e) =>
+              update({
+                guest_os: e.target.value as "linux" | "macos",
+              })
+            }
+          >
+            <option value="linux">Linux</option>
+            <option value="macos">macOS</option>
+          </select>
+        </div>
+      )}
+
       {sandbox.backend === "docker" && (
         <>
           <div className="form-toggle-row">

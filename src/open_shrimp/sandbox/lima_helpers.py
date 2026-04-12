@@ -279,11 +279,19 @@ def generate_lima_yaml(
     computer_use: bool = False,
     *,
     context_name: str = "",
+    guest_os: str = "linux",
 ) -> Path:
     """Generate a Lima YAML template file.
 
     Writes to ``sdir/lima.yaml`` and returns the path.
     """
+    if guest_os == "macos":
+        from open_shrimp.sandbox.lima_macos_helpers import generate_lima_yaml_macos
+        return generate_lima_yaml_macos(
+            sdir, config, project_dir, additional_directories,
+            computer_use, context_name=context_name,
+        )
+
     sdir.mkdir(parents=True, exist_ok=True)
 
     # Detect host architecture for cloud image selection.
@@ -621,6 +629,7 @@ def lima_config_fingerprint(
     computer_use: bool,
     *,
     context_name: str = "",
+    guest_os: str = "linux",
 ) -> str:
     """SHA-256 fingerprint of the Lima YAML template content.
 
@@ -628,6 +637,13 @@ def lima_config_fingerprint(
     invocations (matching the libvirt approach).  The YAML is rendered
     in memory — no temporary files are created.
     """
+    if guest_os == "macos":
+        from open_shrimp.sandbox.lima_macos_helpers import lima_config_fingerprint_macos
+        return lima_config_fingerprint_macos(
+            sdir, config, project_dir, additional_directories,
+            computer_use, context_name=context_name,
+        )
+
     # Build the same template that generate_lima_yaml() would produce,
     # but dump to a string instead of writing a file.  Using the real
     # sdir keeps host-side mount paths deterministic.
@@ -860,13 +876,22 @@ def _get_host_claude_version() -> str | None:
     return None
 
 
-def ensure_claude_cli_in_vm(limactl: str, inst_name: str) -> None:
+def ensure_claude_cli_in_vm(
+    limactl: str,
+    inst_name: str,
+    *,
+    guest_os: str = "linux",
+) -> None:
     """Ensure the Claude CLI binary is installed inside the Lima VM.
 
-    Downloads the Linux binary directly inside the VM using the GCS
-    distribution URL, since the host macOS binary cannot run in the
-    Linux guest.
+    For Linux guests, downloads the Linux binary directly inside the VM
+    using the GCS distribution URL.  For macOS guests, copies the host
+    binary directly (same OS and architecture).
     """
+    if guest_os == "macos":
+        from open_shrimp.sandbox.lima_macos_helpers import ensure_claude_cli_in_vm_macos
+        return ensure_claude_cli_in_vm_macos(limactl, inst_name)
+
     # Check if claude is already available.
     result = _run_limactl(
         limactl,
@@ -934,11 +959,20 @@ def build_cli_wrapper(
     project_dir: str,
     inst_name: str,
     claude_home_dir: Path | None = None,
+    *,
+    guest_os: str = "linux",
 ) -> str:
     """Generate a bash wrapper that uses ``limactl shell`` to run Claude CLI.
 
     Returns the absolute path to the generated wrapper script.
     """
+    if guest_os == "macos":
+        from open_shrimp.sandbox.lima_macos_helpers import build_cli_wrapper_macos
+        return build_cli_wrapper_macos(
+            context_name, sdir, limactl_path, project_dir,
+            inst_name, claude_home_dir,
+        )
+
     # Credential copy block — extract from macOS Keychain into host-side
     # VirtioFS-shared directory so the Linux VM can pick it up.
     cred_block = ""

@@ -1,5 +1,6 @@
 """Config loading and validation for OpenShrimp."""
 
+import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ class SandboxConfig:
 
     backend: str  # "docker", "libvirt", "lima"
     enabled: bool = True
+    guest_os: str = "linux"  # "linux" or "macos" (macos requires backend: lima, ARM host)
 
     # Docker-specific
     docker_in_docker: bool = False
@@ -47,6 +49,7 @@ class SandboxConfig:
 
 # Valid values for sandbox config fields.
 _SANDBOX_BACKENDS = {"docker", "libvirt", "lima"}
+_SANDBOX_GUEST_OS = {"linux", "macos"}
 
 
 def is_sandboxed(context: "ContextConfig") -> bool:
@@ -212,6 +215,24 @@ def _validate_raw(raw: dict) -> None:
                 f"Context '{name}': sandbox.provision must be a string"
             )
 
+        guest_os = sandbox.get("guest_os", "linux")
+        if guest_os not in _SANDBOX_GUEST_OS:
+            raise ValueError(
+                f"Context '{name}': sandbox.guest_os must be one of "
+                f"{sorted(_SANDBOX_GUEST_OS)}, got: {guest_os!r}"
+            )
+        if guest_os == "macos":
+            if backend != "lima":
+                raise ValueError(
+                    f"Context '{name}': sandbox.guest_os 'macos' requires "
+                    f"backend 'lima', got: {backend!r}"
+                )
+            if platform.machine() != "arm64":
+                raise ValueError(
+                    f"Context '{name}': sandbox.guest_os 'macos' requires "
+                    f"an ARM host (Lima macOS guests are ARM-only)"
+                )
+
     # default_context references a defined context
     default = raw["default_context"]
     if default not in contexts:
@@ -226,6 +247,7 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
     return SandboxConfig(
         backend=raw["backend"],
         enabled=bool(raw.get("enabled", True)),
+        guest_os=str(raw.get("guest_os", "linux")),
         docker_in_docker=bool(raw.get("docker_in_docker", False)),
         dockerfile=raw.get("dockerfile"),
         computer_use=bool(raw.get("computer_use", False)),
@@ -375,6 +397,8 @@ def config_to_dict(config: Config) -> dict[str, Any]:
         # Prefer sandbox over legacy container.
         if ctx.sandbox is not None:
             sandbox_dict: dict[str, Any] = {"backend": ctx.sandbox.backend}
+            if ctx.sandbox.guest_os != "linux":
+                sandbox_dict["guest_os"] = ctx.sandbox.guest_os
             if not ctx.sandbox.enabled:
                 sandbox_dict["enabled"] = False
             if ctx.sandbox.docker_in_docker:
