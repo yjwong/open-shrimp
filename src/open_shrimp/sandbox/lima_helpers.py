@@ -614,6 +614,7 @@ def _build_computer_use_provisions() -> list[dict]:
 
 
 def lima_config_fingerprint(
+    sdir: Path,
     config: SandboxConfig,
     project_dir: str,
     additional_directories: list[str] | None,
@@ -623,24 +624,51 @@ def lima_config_fingerprint(
 ) -> str:
     """SHA-256 fingerprint of the Lima YAML template content.
 
-    Used to detect config drift and trigger VM rebuild.
+    Uses the real state directory so mount paths are stable across
+    invocations (matching the libvirt approach).  The YAML is rendered
+    in memory — no temporary files are created.
     """
-    # Generate the template to a temporary state dir for hashing.
-    # We hash the YAML content so any change triggers rebuild.
-    sdir_placeholder = Path(tempfile.mkdtemp(prefix="lima-fp-"))
-    try:
-        yaml_path = generate_lima_yaml(
-            sdir_placeholder,
-            config,
-            project_dir,
-            additional_directories,
-            computer_use,
-            context_name=context_name,
-        )
-        content = yaml_path.read_text(encoding="utf-8")
-    finally:
-        shutil.rmtree(sdir_placeholder, ignore_errors=True)
+    # Build the same template that generate_lima_yaml() would produce,
+    # but dump to a string instead of writing a file.  Using the real
+    # sdir keeps host-side mount paths deterministic.
+    mounts = _build_mounts(sdir, project_dir, additional_directories, computer_use)
+    provision = _build_provision_scripts(config, computer_use)
 
+    port_forward: list[dict] = []
+    if computer_use:
+        port_forward.append({
+            "guestPort": 5900,
+            "hostPort": vnc_host_port(context_name or sdir.name),
+            "hostIP": "127.0.0.1",
+        })
+        port_forward.append({
+            "guestPort": 9222,
+            "hostIP": "127.0.0.1",
+        })
+
+    template: dict = {
+        "vmType": "vz",
+        "vmOpts": {
+            "vz": {"rosetta": {"enabled": True, "binfmt": True}},
+        },
+        "cpus": config.cpus,
+        "memory": f"{config.memory}MiB",
+        "disk": f"{config.disk_size}GiB",
+        "images": [
+            {"location": url, "arch": arch}
+            for arch, url in _CLOUD_IMAGES.items()
+        ],
+        "mountType": "virtiofs",
+        "mounts": mounts,
+        "provision": provision,
+        "containerd": {"system": False, "user": False},
+        "ssh": {"forwardAgent": True},
+    }
+
+    if port_forward:
+        template["portForwards"] = port_forward
+
+    content = yaml.dump(template, default_flow_style=False, sort_keys=False)
     return hashlib.sha256(content.encode()).hexdigest()
 
 

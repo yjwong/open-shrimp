@@ -108,6 +108,7 @@ class LimaSandbox:
 
         # Detect config drift.
         desired_fp = lima_config_fingerprint(
+            sdir,
             self._config,
             self._project_dir,
             self._additional_directories or None,
