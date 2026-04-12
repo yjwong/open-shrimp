@@ -45,6 +45,7 @@ class SandboxConfig:
     disk_size: int = 20  # GB, for qcow2 overlay
     base_image: str | None = None  # path to base qcow2/cloud image
     provision: str | None = None  # shell script to run on first boot
+    persistent_paths: list[str] = field(default_factory=list)  # guest paths with dedicated qcow2 volumes
 
 
 # Valid values for sandbox config fields.
@@ -215,6 +216,23 @@ def _validate_raw(raw: dict) -> None:
                 f"Context '{name}': sandbox.provision must be a string"
             )
 
+        persistent_paths = sandbox.get("persistent_paths", [])
+        if not isinstance(persistent_paths, list):
+            raise ValueError(
+                f"Context '{name}': sandbox.persistent_paths must be a list"
+            )
+        for pp in persistent_paths:
+            if not isinstance(pp, str):
+                raise ValueError(
+                    f"Context '{name}': sandbox.persistent_paths entries "
+                    f"must be strings, got: {pp!r}"
+                )
+            if not pp.startswith("/"):
+                raise ValueError(
+                    f"Context '{name}': sandbox.persistent_paths entries "
+                    f"must be absolute paths, got: {pp!r}"
+                )
+
         guest_os = sandbox.get("guest_os", "linux")
         if guest_os not in _SANDBOX_GUEST_OS:
             raise ValueError(
@@ -257,6 +275,7 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
         disk_size=int(raw.get("disk_size", 20)),
         base_image=raw.get("base_image"),
         provision=raw.get("provision"),
+        persistent_paths=raw.get("persistent_paths", []),
     )
 
 
@@ -421,6 +440,8 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                     sandbox_dict["base_image"] = ctx.sandbox.base_image
                 if ctx.sandbox.provision is not None:
                     sandbox_dict["provision"] = ctx.sandbox.provision
+                if ctx.sandbox.persistent_paths:
+                    sandbox_dict["persistent_paths"] = ctx.sandbox.persistent_paths
             ctx_dict["sandbox"] = sandbox_dict
         elif ctx.container is not None:
             container_dict: dict[str, Any] = {}

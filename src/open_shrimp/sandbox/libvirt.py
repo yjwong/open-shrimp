@@ -25,11 +25,15 @@ from open_shrimp.sandbox.libvirt_helpers import (
     _fs_tag_for_dir,
     build_cli_wrapper as _build_cli_wrapper,
     create_overlay,
+    _persistent_dev_name,
+    create_persistent_volume,
     domain_name as _domain_name,
     ensure_base_image,
     ensure_mounts,
+    ensure_persistent_mounts,
     ensure_ssh_key,
     extract_fs_tags_from_xml,
+    extract_persistent_disks_from_xml,
     extract_vnc_port_from_xml,
     find_free_port,
     find_virtiofsd,
@@ -215,6 +219,12 @@ class LibvirtSandbox:
         # 3. qcow2 overlay.
         overlay = create_overlay(sdir, base_image, self._config.disk_size)
 
+        # 3a. Persistent volume qcow2 files (survive rebuilds).
+        persistent_volumes: list[tuple[str, Path]] = []
+        for ppath in self._config.persistent_paths:
+            pv_qcow2 = create_persistent_volume(sdir, ppath)
+            persistent_volumes.append((ppath, pv_qcow2))
+
         # 4. Cloud-init ISO (user + SSH only; mounts handled via SSH).
         cloud_init_iso = generate_cloud_init_iso(
             sdir, public_key,
@@ -258,14 +268,18 @@ class LibvirtSandbox:
             use_virtiofs=self._use_virtiofs,
             computer_use=self._computer_use,
             virgl=self._virgl,
+            persistent_volumes=persistent_volumes,
         )
 
         # Define domain (idempotent — overwrites if exists).
-        # If the domain is active but the desired filesystem devices have
-        # changed (e.g. additional_directories added/removed), we must
-        # gracefully stop the VM, re-define, and let ensure_running()
-        # restart it.
+        # If the domain is active but the desired filesystem devices or
+        # persistent disks have changed, we must gracefully stop the VM,
+        # re-define, and let ensure_running() restart it.
         desired_tags = {_fs_tag_for_dir(d) for d in all_dirs}
+        desired_pvs = {
+            _persistent_dev_name(i)
+            for i in range(len(persistent_volumes))
+        }
         try:
             domain = self._conn.lookupByName(self._dom_name)
             if not domain.isActive():
@@ -273,18 +287,27 @@ class LibvirtSandbox:
                 self._conn.defineXML(xml)
                 logger.info("Re-defined domain %s", self._dom_name)
             else:
-                # Check if the filesystem devices have drifted.
-                current_tags = extract_fs_tags_from_xml(domain.XMLDesc(0))
-                if current_tags != desired_tags:
+                # Check if filesystem devices or persistent disks drifted.
+                live_xml = domain.XMLDesc(0)
+                current_tags = extract_fs_tags_from_xml(live_xml)
+                current_pvs = extract_persistent_disks_from_xml(live_xml)
+                config_drifted = (
+                    current_tags != desired_tags
+                    or current_pvs != desired_pvs
+                )
+                if config_drifted:
                     _log(
                         log_file,
-                        "Shared directories changed — restarting VM "
+                        "VM config changed — restarting VM "
                         "to apply new config...",
                     )
                     logger.info(
-                        "Filesystem tags drifted for %s: "
-                        "current=%s desired=%s — stopping for re-define",
-                        self._dom_name, current_tags, desired_tags,
+                        "Config drifted for %s: "
+                        "fs_tags current=%s desired=%s, "
+                        "pvs current=%s desired=%s — stopping for re-define",
+                        self._dom_name,
+                        current_tags, desired_tags,
+                        current_pvs, desired_pvs,
                     )
                     self.stop()
                     # After stop, domain is inactive — undefine and re-define.
@@ -295,7 +318,7 @@ class LibvirtSandbox:
                         pass
                     self._conn.defineXML(xml)
                     logger.info(
-                        "Re-defined domain %s with updated filesystems",
+                        "Re-defined domain %s with updated config",
                         self._dom_name,
                     )
                 else:
@@ -469,6 +492,15 @@ class LibvirtSandbox:
             fs_type=fs_type,
             mount_overrides=mount_overrides,
         )
+
+        # Mount persistent volumes (format ext4 if needed, create systemd
+        # mount units).  These are block devices, not virtiofs.
+        if self._config.persistent_paths:
+            ensure_persistent_mounts(
+                ssh_port=self._ssh_port,
+                ssh_key=self._sdir / "ssh_key",
+                persistent_paths=self._config.persistent_paths,
+            )
 
     def provision_workspace(self) -> None:
         """Provision the workspace: ensure Claude CLI is installed in the VM."""
@@ -859,6 +891,8 @@ class LibvirtSandbox:
         self._reap_dead_virtiofsd()
 
         # 2. Delete the overlay (forces fresh cloud-init on next boot).
+        #    Persistent volume files (pv-*.qcow2) are intentionally preserved
+        #    so that data survives rebuilds.
         overlay = self._sdir / "overlay.qcow2"
         overlay.unlink(missing_ok=True)
         # Also delete cloud-init ISO so it gets regenerated.

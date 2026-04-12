@@ -10,6 +10,7 @@ after initial system package installation.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shlex
@@ -564,6 +565,96 @@ def ensure_mounts(
         _ssh_run("sudo systemctl daemon-reload")
 
 
+def ensure_persistent_mounts(
+    ssh_port: int,
+    ssh_key: Path,
+    persistent_paths: list[str],
+) -> None:
+    """Format (if needed) and mount persistent volume disks inside the VM.
+
+    Each path in *persistent_paths* corresponds to a virtio block device
+    in order: ``/dev/vdb``, ``/dev/vdc``, etc.  Uses filesystem labels
+    in mount units so device ordering changes don't cause data mismatches.
+
+    Detection: uses ``blkid`` to check if the device has a filesystem.
+    If not, formats it with ``mkfs.ext4`` and sets a deterministic label.
+    """
+    ssh_opts = _ssh_common_opts(ssh_key, ssh_port)
+
+    def _ssh_run(cmd: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["ssh", *ssh_opts, "claude@localhost", "--", cmd],
+            capture_output=True,
+        )
+
+    for idx, guest_path in enumerate(persistent_paths):
+        dev = f"/dev/{_persistent_dev_name(idx)}"
+        label = _persistent_vol_label(guest_path)
+
+        # 1. Check if device needs formatting.
+        check = _ssh_run(f"sudo blkid -o value -s TYPE {shlex.quote(dev)}")
+        fs_type = check.stdout.decode().strip()
+
+        if fs_type != "ext4":
+            logger.info(
+                "Formatting %s as ext4 (label=%s) for persistent volume %s",
+                dev, label, guest_path,
+            )
+            result = _ssh_run(
+                f"sudo mkfs.ext4 -L {shlex.quote(label)} {shlex.quote(dev)}"
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to format {dev} for {guest_path}: "
+                    f"{result.stderr.decode().strip()}"
+                )
+
+        # 2. Create systemd mount unit using LABEL= for robustness.
+        esc = subprocess.run(
+            ["systemd-escape", "--path", guest_path],
+            capture_output=True, text=True, check=True,
+        )
+        unit_name = esc.stdout.strip() + ".mount"
+        unit_file = f"/etc/systemd/system/{unit_name}"
+
+        unit_content = textwrap.dedent(f"""\
+            [Unit]
+            Description=Persistent volume {guest_path}
+            DefaultDependencies=no
+            After=local-fs.target
+            [Mount]
+            What=LABEL={label}
+            Where={guest_path}
+            Type=ext4
+            Options=discard
+            [Install]
+            WantedBy=multi-user.target
+        """).strip() + "\n"
+
+        # Check if unit already exists with correct content.
+        check = _ssh_run(f"cat {shlex.quote(unit_file)} 2>/dev/null")
+        if check.returncode == 0 and check.stdout.decode() == unit_content:
+            # Unit exists and is correct — just ensure it's mounted.
+            _ssh_run(
+                f"mountpoint -q {shlex.quote(guest_path)} || "
+                f"sudo systemctl start {shlex.quote(unit_name)}"
+            )
+            continue
+
+        # Write new/updated unit.
+        escaped_content = shlex.quote(unit_content)
+        _ssh_run(
+            f"sudo mkdir -p {shlex.quote(guest_path)} && "
+            f"sudo chown claude:claude {shlex.quote(guest_path)} && "
+            f"printf '%s' {escaped_content} | sudo tee {shlex.quote(unit_file)} > /dev/null && "
+            f"sudo systemctl daemon-reload && "
+            f"sudo systemctl enable --now {shlex.quote(unit_name)}"
+        )
+        logger.info(
+            "Mounted persistent volume LABEL=%s -> %s in VM", label, guest_path,
+        )
+
+
 def extract_fs_tags_from_xml(domain_xml: str) -> set[str]:
     """Extract the set of filesystem ``<target dir=...>`` tags from domain XML.
 
@@ -579,6 +670,25 @@ def extract_fs_tags_from_xml(domain_xml: str) -> set[str]:
             if dir_attr:
                 tags.add(dir_attr)
     return tags
+
+
+def extract_persistent_disks_from_xml(domain_xml: str) -> set[str]:
+    """Extract virtio block device names (vdb, vdc, …) from domain XML.
+
+    Only returns devices other than vda (the overlay).  Used to detect
+    when persistent volume configuration has changed and the domain
+    needs to be re-defined.
+    """
+    root = ET.fromstring(domain_xml)
+    devs: set[str] = set()
+    for disk in root.iter("disk"):
+        target = disk.find("target")
+        if target is not None:
+            dev = target.get("dev", "")
+            bus = target.get("bus", "")
+            if bus == "virtio" and dev != "vda":
+                devs.add(dev)
+    return devs
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +748,62 @@ def ensure_base_image(base_image: str | None, *, log_file: Path | None = None) -
 # ---------------------------------------------------------------------------
 
 
+def _persistent_dev_name(idx: int) -> str:
+    """Return the virtio block device name for a persistent volume index.
+
+    Index 0 -> ``vdb``, 1 -> ``vdc``, etc.  (``vda`` is the overlay.)
+    """
+    return f"vd{chr(ord('b') + idx)}"
+
+
+def _persistent_vol_filename(guest_path: str) -> str:
+    """Return a qcow2 filename for a persistent volume guest path.
+
+    Sanitizes the path: strips leading slash, replaces '/' with '_',
+    prefixes with 'pv-'.  Example: '/var/lib/docker' -> 'pv-var_lib_docker.qcow2'
+    """
+    sanitized = guest_path.strip("/").replace("/", "_")
+    return f"pv-{sanitized}.qcow2"
+
+
+def _persistent_vol_label(guest_path: str) -> str:
+    """Return an ext4 filesystem label for a persistent volume.
+
+    Labels are max 16 chars for ext4.  Use a short hash to stay within
+    the limit while remaining deterministic.
+    """
+    h = hashlib.sha256(guest_path.encode()).hexdigest()[:8]
+    return f"pv-{h}"
+
+
+def create_persistent_volume(sdir: Path, guest_path: str, size_gb: int = 100) -> Path:
+    """Create a sparse qcow2 disk for a persistent volume.
+
+    Idempotent — returns the existing file if already present.
+    The qcow2 is thin-provisioned: the virtual size is *size_gb* but
+    actual host disk usage starts near zero and grows on write.
+    """
+    filename = _persistent_vol_filename(guest_path)
+    qcow2_path = sdir / filename
+    if qcow2_path.exists():
+        return qcow2_path
+
+    sdir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "qemu-img", "create", "-f", "qcow2",
+            str(qcow2_path), f"{size_gb}G",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    logger.info(
+        "Created persistent volume %s (%dG sparse) for %s",
+        qcow2_path, size_gb, guest_path,
+    )
+    return qcow2_path
+
+
 def create_overlay(sdir: Path, base_image: Path, disk_size_gb: int) -> Path:
     """Create a qcow2 CoW overlay backed by the base image.
 
@@ -677,7 +843,6 @@ def _fs_tag_for_dir(directory: str) -> str:
     We use a deterministic short hash to avoid path-length issues with
     virtiofs tags (max ~36 chars in older QEMU).
     """
-    import hashlib
     h = hashlib.sha256(directory.encode()).hexdigest()[:12]
     return f"fs-{h}"
 
@@ -695,6 +860,7 @@ def generate_domain_xml(
     use_virtiofs: bool = False,
     computer_use: bool = False,
     virgl: bool = False,
+    persistent_volumes: list[tuple[str, Path]] | None = None,
 ) -> str:
     """Generate libvirt domain XML for a VM sandbox.
 
@@ -719,6 +885,9 @@ def generate_domain_xml(
         virgl: Enable VirGL 3D GPU acceleration.  Adds an ``egl-headless``
             graphics device for the GL context and ``accel3d="yes"`` on the
             virtio-gpu model.  Requires a host GPU with a DRM render node.
+        persistent_volumes: List of ``(guest_path, qcow2_path)`` tuples.
+            Each gets a virtio block device (vdb, vdc, …) with
+            ``discard="unmap"`` for automatic space reclamation.
 
     Returns:
         Domain XML string.
@@ -775,6 +944,15 @@ def generate_domain_xml(
     ET.SubElement(cdrom, "source", file=str(cloud_init_iso.resolve()))
     ET.SubElement(cdrom, "target", dev="sda", bus="sata")
     ET.SubElement(cdrom, "readonly")
+
+    # Persistent volume disks (vdb, vdc, …).
+    if persistent_volumes:
+        for idx, (_guest_path, pv_qcow2) in enumerate(persistent_volumes):
+            dev_name = _persistent_dev_name(idx)
+            pdisk = ET.SubElement(devices, "disk", type="file", device="disk")
+            ET.SubElement(pdisk, "driver", name="qemu", type="qcow2", discard="unmap")
+            ET.SubElement(pdisk, "source", file=str(pv_qcow2.resolve()))
+            ET.SubElement(pdisk, "target", dev=dev_name, bus="virtio")
 
     # Primary serial console on PTY (enables `virsh console`).
     # The <log> element tees ttyS0 output to a file so we can stream
@@ -1189,8 +1367,6 @@ def cloud_init_fingerprint(config: SandboxConfig, computer_use: bool) -> str:
     change — including edits to systemd units, package lists, etc. —
     triggers a rebuild automatically.
     """
-    import hashlib
-
     # Use a placeholder key so the fingerprint is stable across SSH key
     # regeneration (the key doesn't affect cloud-init behavior).
     user_data = _build_cloud_init_user_data(
