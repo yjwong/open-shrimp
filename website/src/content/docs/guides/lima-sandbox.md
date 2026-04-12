@@ -95,7 +95,49 @@ When you send files to the bot (photos, documents), they're copied into the VM v
 VMs stay running between conversations. There's no boot delay for follow-up messages — only the first message after starting OpenShrimp incurs the startup cost.
 :::
 
+## macOS guest VMs
+
+Lima can also run macOS as the guest OS — useful for testing macOS-specific workflows or running computer use with native macOS apps. This requires an Apple Silicon (ARM) host.
+
+```yaml
+contexts:
+  macos-dev:
+    directory: /Users/you/Documents/myproject
+    description: "macOS sandbox"
+    sandbox:
+      backend: lima
+      guest_os: macos
+```
+
+On first boot, the VM downloads a macOS IPSW restore image and installs Homebrew automatically. This initial setup takes significantly longer than a Linux guest.
+
+### Computer use on macOS guests
+
+macOS guests support `computer_use: true` with native macOS input methods:
+
+```yaml
+contexts:
+  macos-dev:
+    directory: /Users/you/Documents/myproject
+    sandbox:
+      backend: lima
+      guest_os: macos
+      computer_use: true
+```
+
+This provisions the VM with:
+- **Screen Sharing** (macOS built-in VNC) for screenshots and the VNC viewer
+- **Google Chrome** and **Playwright MCP** via Homebrew
+- **Accessibility permissions** for input injection via `osascript` and `CGEvent`
+
+Screenshots use `screencapture`, clicks and keyboard input use `CGEvent` (via Python), and clipboard uses `pbcopy`/`pbpaste` — all native macOS APIs.
+
+### macOS guest limitations
+
+- **ARM hosts only** — Lima macOS guests require Apple Silicon (M1/M2/M3/M4)
+- **Slow first boot** — downloading the IPSW image and installing Homebrew + Xcode CLT can take several minutes
+- **VirtioFS mount fixup** — mount symlinks may need a retry on first boot (handled automatically)
+
 ## Limitations
 
 - **macOS only** — the Lima backend uses Apple Virtualization.framework, which is not available on Linux. Use the [Docker](/guides/docker-sandbox/) or [Libvirt](/guides/vm-sandbox/) sandbox on Linux.
-- **No computer use** — GUI interaction (`computer_use: true`) is not yet supported with the Lima backend.
