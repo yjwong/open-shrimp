@@ -174,6 +174,7 @@ class AgentSession:
     context_name: str = ""
     callback_context: CallbackContext = field(default_factory=CallbackContext)
     sandbox: Sandbox | None = None
+    mcp_proxy: Any | None = None
     wrapper_cleanup_paths: list[str] = field(default_factory=list)
 
 
@@ -217,6 +218,7 @@ async def get_or_create_session(
     user_id: int = 0,
     is_private_chat: bool = True,
     sandbox_manager: SandboxManager | None = None,
+    mcp_proxy: Any | None = None,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
@@ -534,6 +536,37 @@ async def get_or_create_session(
                 ],
             }
 
+        # Keep MCP server credentials on the host; sandbox sees only
+        # HTTP endpoints via the proxy.
+        if is_containerized and mcp_proxy is not None and sandbox is not None:
+            from open_shrimp.mcp_proxy.config_reader import (
+                get_mcp_servers_for_directory,
+            )
+
+            stdio_servers = get_mcp_servers_for_directory(context.directory)
+            if stdio_servers:
+                token = mcp_proxy.register_context(
+                    context_name, stdio_servers
+                )
+                host_ip = sandbox.host_address
+                for name in stdio_servers:
+                    mcp_servers[name] = {
+                        "type": "http",
+                        "url": mcp_proxy.get_proxy_url(
+                            context_name, name, host_ip
+                        ),
+                        "headers": {
+                            "Authorization": f"Bearer {token}",
+                        },
+                    }
+                logger.info(
+                    "Injected %d proxied MCP server(s) for sandboxed "
+                    "context '%s': %s",
+                    len(stdio_servers),
+                    context_name,
+                    ", ".join(stdio_servers),
+                )
+
         options.mcp_servers = mcp_servers
 
     if session_id:
@@ -576,6 +609,7 @@ async def get_or_create_session(
         context_name=context_name,
         callback_context=callback_context,
         sandbox=sandbox,
+        mcp_proxy=mcp_proxy if is_containerized else None,
         wrapper_cleanup_paths=wrapper_cleanup_paths,
     )
 
@@ -602,6 +636,7 @@ async def reconnect_session(
     user_id: int = 0,
     is_private_chat: bool = True,
     sandbox_manager: SandboxManager | None = None,
+    mcp_proxy: Any | None = None,
 ) -> AgentSession | None:
     """Reconnect after a mid-session container crash.
 
@@ -646,6 +681,7 @@ async def reconnect_session(
             user_id=user_id,
             is_private_chat=is_private_chat,
             sandbox_manager=sandbox_manager,
+            mcp_proxy=mcp_proxy,
         )
     except Exception:
         logger.exception(
@@ -670,6 +706,15 @@ async def close_session(scope: ChatScope) -> None:
         )
         if not still_used:
             _unregister_cred_sync(ctx)
+    # Unregister proxied MCP servers when no other session needs them.
+    if session.mcp_proxy is not None:
+        ctx = session.context_name
+        still_used = any(
+            s.context_name == ctx and s.mcp_proxy is not None
+            for s in _active_sessions.values()
+        )
+        if not still_used:
+            await session.mcp_proxy.unregister_context(ctx)
     try:
         async with asyncio.timeout(5):
             await session.client.disconnect()

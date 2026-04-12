@@ -43,6 +43,16 @@ class Sandbox(Protocol):
         """Docker container name, or ``None`` for non-container backends."""
         ...
 
+    @property
+    def host_address(self) -> str:
+        """IP or hostname the sandbox should use to reach the host.
+
+        Each backend has its own network topology — Docker containers
+        use ``host.docker.internal``, libvirt VMs use the SLIRP gateway
+        ``10.0.2.2``, and Lima VMs use ``192.168.5.2``.
+        """
+        ...
+
     def environment_ready(self) -> bool:
         """Return ``True`` if the environment is already built.
 

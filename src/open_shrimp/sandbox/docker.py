@@ -68,6 +68,10 @@ class DockerSandbox:
         return self._context_name
 
     @property
+    def host_address(self) -> str:
+        return "host.docker.internal"
+
+    @property
     def container_name(self) -> str | None:
         return _container_name_fn(self._context_name)
 

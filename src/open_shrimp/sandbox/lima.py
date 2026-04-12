@@ -121,6 +121,10 @@ class LimaSandbox:
         return self._context_name
 
     @property
+    def host_address(self) -> str:
+        return "192.168.5.2"
+
+    @property
     def container_name(self) -> str | None:
         return None
 

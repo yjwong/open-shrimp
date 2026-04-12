@@ -210,10 +210,12 @@ async def run_bot(
     db: aiosqlite.Connection,
     config_path: str | None = None,
     sandbox_managers: "dict[str, SandboxManager] | None" = None,
+    mcp_proxy: "Any | None" = None,
 ) -> None:
     """Start the bot with long polling."""
     app = build_application(config, db)
     app.bot_data["config_path"] = config_path
+    app.bot_data["mcp_proxy"] = mcp_proxy
     logger.info("Starting bot with long polling")
     await app.initialize()
 

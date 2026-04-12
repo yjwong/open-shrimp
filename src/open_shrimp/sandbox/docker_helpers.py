@@ -713,6 +713,12 @@ def _build_docker_run_argv(
     for env_arg in git_env_args:
         docker_argv.extend(["-e", env_arg])
 
+    # Ensure host.docker.internal resolves inside the container.
+    # This is automatic on Docker Desktop but needs --add-host on
+    # native/rootless Docker (Linux).  The MCP proxy listens on the
+    # host and sandboxed contexts reach it via this hostname.
+    docker_argv.extend(["--add-host", "host.docker.internal:host-gateway"])
+
     # Mount Claude CLI tmp dir inside the container so background task
     # outputs are written to the host-visible state directory.
     claude_tmp_dir = state_dir / "tmp"

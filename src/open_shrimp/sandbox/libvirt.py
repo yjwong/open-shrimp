@@ -161,8 +161,11 @@ class LibvirtSandbox:
         return self._context_name
 
     @property
+    def host_address(self) -> str:
+        return "10.0.2.2"
+
+    @property
     def container_name(self) -> str | None:
-        # Not a Docker container — return None.
         return None
 
     def environment_ready(self) -> bool:
