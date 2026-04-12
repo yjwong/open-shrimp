@@ -442,8 +442,8 @@ def _build_computer_use_provisions() -> list[dict]:
     """Build Lima provision entries for the computer-use desktop stack.
 
     Installs a headless Wayland compositor (labwc), input injection
-    (wlrctl), screenshot capture (grim), VNC server (wayvnc), Chromium
-    via Playwright, and systemd user units to auto-start everything.
+    (wlrctl), screenshot capture (grim), VNC server (wayvnc), Google
+    Chrome, and systemd user units to auto-start everything.
     """
     provisions: list[dict] = []
 
@@ -479,6 +479,16 @@ def _build_computer_use_provisions() -> list[dict]:
         curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
         apt-get install -y --no-install-recommends nodejs
 
+        # Install browser: Google Chrome on amd64, Chromium from apt on arm64.
+        if [ "$(dpkg --print-architecture)" = "amd64" ]; then
+            wget -q -O /tmp/google-chrome.deb \
+                'https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'
+            apt-get install -y /tmp/google-chrome.deb
+            rm /tmp/google-chrome.deb
+        else
+            apt-get install -y chromium-browser
+        fi
+
         rm -rf /var/lib/apt/lists/*
 
         # Install Claude Code and Playwright MCP globally.
@@ -486,9 +496,6 @@ def _build_computer_use_provisions() -> list[dict]:
             @anthropic-ai/claude-code@latest \\
             @playwright/mcp
         rm -rf /tmp/npm-cache
-
-        # Install Playwright's Chromium system dependencies.
-        npx playwright install-deps chromium
 
         # Enable linger so user services start on boot without login.
         LIMA_USER=$(getent passwd 1000 | cut -d: -f1)
@@ -500,16 +507,6 @@ def _build_computer_use_provisions() -> list[dict]:
     user_setup_script = textwrap.dedent("""\
         #!/bin/bash
         set -eux
-
-        # Download Playwright's bundled Chromium (system deps already installed).
-        npx playwright install chromium
-
-        # Chromium profile: skip first-run UI and disable crash reporter.
-        mkdir -p ~/.config/chromium/Default
-        printf '{\\n  "browser": { "check_default_browser": false },\\n  "profile": { "default_content_setting_values": {} }\\n}\\n' \\
-            > ~/.config/chromium/Default/Preferences
-        printf '%s\\n' '{"countrycode_at_install":"","default_browser_infobar_last_declined":"","default_browser_set_once":"","metrics":{"reporting_enabled":false},"session":{"restore_on_startup":4}}' \\
-            > ~/.config/chromium/'Local State'
 
         # labwc config.
         mkdir -p ~/.config/labwc
@@ -569,42 +566,42 @@ def _build_computer_use_provisions() -> list[dict]:
         WantedBy=default.target
         UNIT
 
-        # Resolve Chromium binary path installed by Playwright.
-        CHROMIUM_BIN=$(find ~/.cache/ms-playwright -name 'chromium' -o -name 'chrome' 2>/dev/null | grep -E '/(chromium|chrome)$' | head -1)
-        if [ -n "$CHROMIUM_BIN" ]; then
-            cat > ~/.config/systemd/user/openshrimp-chromium.service << UNIT
+        # Browser systemd unit: Google Chrome on amd64, Chromium on arm64.
+        if command -v google-chrome >/dev/null 2>&1; then
+            BROWSER_BIN=/usr/bin/google-chrome
+            BROWSER_NAME="Google Chrome"
+        else
+            BROWSER_BIN=/usr/bin/chromium-browser
+            BROWSER_NAME="Chromium"
+        fi
+        cat > ~/.config/systemd/user/openshrimp-chromium.service << UNIT
         [Unit]
-        Description=Chromium browser
+        Description=${BROWSER_NAME} browser
         After=openshrimp-labwc.service
         Requires=openshrimp-labwc.service
 
         [Service]
         Type=simple
         Environment=WAYLAND_DISPLAY=wayland-0
-        ExecStartPre=/bin/bash -c 'for i in \\$(seq 1 75); do [ -S "\\$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done'
-        ExecStart=${CHROMIUM_BIN} --no-first-run --no-default-browser-check --disable-background-networking --ozone-platform=wayland --user-data-dir=%h/.config/chromium --remote-debugging-port=9222
+        ExecStartPre=/bin/bash -c 'for i in \$(seq 1 75); do [ -S "\$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done'
+        ExecStart=${BROWSER_BIN} --no-first-run --no-default-browser-check --disable-background-networking --disable-default-apps --ozone-platform=wayland --user-data-dir=%h/.config/google-chrome-debug --remote-debugging-port=9222 --window-size=1280,720
         Restart=on-failure
         RestartSec=5
 
         [Install]
         WantedBy=default.target
         UNIT
-        fi
 
         # Enable all units.
         systemctl --user daemon-reload
         systemctl --user enable openshrimp-labwc.service
         systemctl --user enable openshrimp-wayvnc.service
-        if [ -f ~/.config/systemd/user/openshrimp-chromium.service ]; then
-            systemctl --user enable openshrimp-chromium.service
-        fi
+        systemctl --user enable openshrimp-chromium.service
 
         # Start services now (VM is booting for the first time).
         systemctl --user start openshrimp-labwc.service
         systemctl --user start openshrimp-wayvnc.service
-        if [ -f ~/.config/systemd/user/openshrimp-chromium.service ]; then
-            systemctl --user start openshrimp-chromium.service
-        fi
+        systemctl --user start openshrimp-chromium.service
     """)
     provisions.append({"mode": "user", "script": user_setup_script})
 
