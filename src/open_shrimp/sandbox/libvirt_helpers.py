@@ -270,6 +270,7 @@ def _build_cloud_init_user_data(
     *,
     provision_script: str | None = None,
     computer_use: bool = False,
+    persistent_paths: list[str] | None = None,
 ) -> str:
     """Build the cloud-init user-data YAML string.
 
@@ -343,6 +344,62 @@ def _build_cloud_init_user_data(
             "      foot &\n"
         )
 
+    # Persistent volume mount units (write_files + bootcmd).
+    # These must be set up before runcmd so the provision script (e.g.
+    # Docker install) writes into the persistent volume, not the overlay.
+    bootcmd = ""
+    if persistent_paths:
+        for idx, guest_path in enumerate(persistent_paths):
+            dev = f"/dev/{_persistent_dev_name(idx)}"
+            label = _persistent_vol_label(guest_path)
+            esc = subprocess.run(
+                ["systemd-escape", "--path", guest_path],
+                capture_output=True, text=True, check=True,
+            )
+            unit_name = esc.stdout.strip() + ".mount"
+            unit_content = (
+                f"[Unit]\n"
+                f"Description=Persistent volume {guest_path}\n"
+                f"DefaultDependencies=no\n"
+                f"After=local-fs.target\n"
+                f"[Mount]\n"
+                f"What=LABEL={label}\n"
+                f"Where={guest_path}\n"
+                f"Type=ext4\n"
+                f"Options=discard\n"
+                f"[Install]\n"
+                f"WantedBy=multi-user.target\n"
+            )
+            # Write the systemd mount unit file via write_files.
+            write_files += f"  - path: /etc/systemd/system/{unit_name}\n"
+            write_files += f"    content: |\n"
+            for line in unit_content.splitlines():
+                write_files += f"      {line}\n"
+
+        # bootcmd runs before runcmd, on every boot.  Format unformatted
+        # disks and start mount units so the provision script (runcmd)
+        # writes into the persistent volume.
+        bootcmd = "bootcmd:\n"
+        for idx, guest_path in enumerate(persistent_paths):
+            dev = f"/dev/{_persistent_dev_name(idx)}"
+            label = _persistent_vol_label(guest_path)
+            esc = subprocess.run(
+                ["systemd-escape", "--path", guest_path],
+                capture_output=True, text=True, check=True,
+            )
+            unit_name = esc.stdout.strip() + ".mount"
+            # Format only if no filesystem exists yet (first boot).
+            bootcmd += (
+                f"  - |\n"
+                f"    fs=$(blkid -o value -s TYPE {dev} 2>/dev/null || true)\n"
+                f"    if [ \"$fs\" != \"ext4\" ]; then\n"
+                f"      mkfs.ext4 -L {label} {dev}\n"
+                f"    fi\n"
+                f"    mkdir -p {guest_path}\n"
+                f"    systemctl daemon-reload\n"
+                f"    systemctl enable --now {unit_name}\n"
+            )
+
     # Build runcmd entries.
     runcmd = textwrap.dedent("""\
         runcmd:
@@ -374,7 +431,7 @@ def _build_cloud_init_user_data(
             sudo: ALL=(ALL) NOPASSWD:ALL
             ssh_authorized_keys:
               - {public_key}
-    """) + write_files + runcmd
+    """) + write_files + bootcmd + runcmd
 
     if provision_script:
         user_data += f"  - |\n"
@@ -390,6 +447,7 @@ def generate_cloud_init_iso(
     *,
     provision_script: str | None = None,
     computer_use: bool = False,
+    persistent_paths: list[str] | None = None,
 ) -> Path:
     """Generate a cloud-init ``cloud-init.iso`` with SSH key + user setup.
 
@@ -417,6 +475,7 @@ def generate_cloud_init_iso(
         public_key,
         provision_script=provision_script,
         computer_use=computer_use,
+        persistent_paths=persistent_paths,
     )
 
     meta_data = textwrap.dedent(f"""\
@@ -1373,6 +1432,7 @@ def cloud_init_fingerprint(config: SandboxConfig, computer_use: bool) -> str:
         "FINGERPRINT_PLACEHOLDER_KEY",
         provision_script=config.provision,
         computer_use=computer_use,
+        persistent_paths=config.persistent_paths or None,
     )
     return hashlib.sha256(user_data.encode()).hexdigest()
 

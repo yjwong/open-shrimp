@@ -230,6 +230,7 @@ class LibvirtSandbox:
             sdir, public_key,
             provision_script=self._config.provision,
             computer_use=self._computer_use,
+            persistent_paths=self._config.persistent_paths or None,
         )
 
         # 5. Allocate SSH port (persistent across restarts).
