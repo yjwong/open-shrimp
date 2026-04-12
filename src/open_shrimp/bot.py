@@ -25,6 +25,7 @@ import aiosqlite
 from open_shrimp.client_manager import close_all_sessions
 from open_shrimp.config import Config, load_config
 from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
+from open_shrimp.sandbox.manager import destroy_contexts_background
 from open_shrimp.dispatch_registry import register_dispatch
 from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
@@ -146,6 +147,9 @@ async def _watch_config(config_path: str, bot_data: dict) -> None:
                 logger.info("Config reload: added contexts: %s", added)
             if removed:
                 logger.info("Config reload: removed contexts: %s", removed)
+                mgrs = bot_data.get("sandbox_managers")
+                if mgrs:
+                    destroy_contexts_background(removed, mgrs)
             if not added and not removed:
                 logger.info("Config reloaded")
         except Exception:
@@ -303,6 +307,19 @@ async def run_bot(
     # Start reapers for all sandbox managers.
     for mgr in _sandbox_managers.values():
         await asyncio.to_thread(mgr.start_reaper)
+
+    active_contexts = set(config.contexts.keys())
+    for name, mgr in _sandbox_managers.items():
+        async def _run_orphan_cleanup(
+            m: SandboxManager = mgr, n: str = name,
+        ) -> None:
+            try:
+                await asyncio.to_thread(m.cleanup_orphans, active_contexts)
+            except Exception:
+                logger.warning(
+                    "%s.cleanup_orphans() failed", n, exc_info=True,
+                )
+        asyncio.create_task(_run_orphan_cleanup())
 
     # Reload scheduled tasks from the database.
     from open_shrimp.scheduler import reload_tasks

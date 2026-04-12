@@ -71,6 +71,27 @@ def lookup_active_build(
         return _build_registry.get(context_name)
 
 
+def destroy_contexts_background(
+    context_names: set[str],
+    managers: dict[str, SandboxManager],
+) -> None:
+    """Run ``destroy_context`` for each context on all managers in a daemon thread."""
+
+    def _run() -> None:
+        for ctx_name in context_names:
+            logger.info("Cleaning up sandbox resources for removed context '%s'", ctx_name)
+            for mgr in managers.values():
+                try:
+                    mgr.destroy_context(ctx_name)
+                except Exception:
+                    logger.warning(
+                        "Error cleaning up context '%s'", ctx_name,
+                        exc_info=True,
+                    )
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 @runtime_checkable
 class SandboxManager(Protocol):
     """Manages global sandbox lifecycle and acts as a factory for sandboxes."""
@@ -114,6 +135,29 @@ class SandboxManager(Protocol):
         Stops the runtime (container/VM) and removes it from the cache so
         the next ``create_sandbox`` call builds a fresh instance with
         updated configuration (e.g. new additional directories).
+        """
+        ...
+
+    def destroy_context(self, context_name: str) -> None:
+        """Permanently destroy all resources for a context.
+
+        Stops the runtime (if running), removes persistent state
+        (disk images, cloud-init ISOs, state directories), and
+        cleans up any backend-specific resources (Docker images,
+        libvirt domain definitions, Lima instances).
+
+        Unlike ``invalidate_sandbox`` which only evicts from cache
+        and stops the runtime, this method deletes everything.
+        Idempotent — safe to call multiple times.
+        """
+        ...
+
+    def cleanup_orphans(self, active_contexts: set[str]) -> None:
+        """Remove resources for contexts not in *active_contexts*.
+
+        Scans the state directory for context subdirectories and
+        destroys any that are not in the active set.  Logs each
+        orphan found and cleaned.
         """
         ...
 
@@ -384,6 +428,39 @@ class DockerSandboxManager:
                 logger.debug("Error stopping sandbox %s", context_name, exc_info=True)
             logger.info("Invalidated Docker sandbox for context '%s'", context_name)
 
+    def destroy_context(self, context_name: str) -> None:
+        self.invalidate_sandbox(context_name)
+
+        import open_shrimp.sandbox.docker_helpers as _dh
+
+        # Force-remove the container (may already be gone from invalidate).
+        cname = _dh.container_name(context_name)
+        subprocess.run(["docker", "rm", "-f", cname], capture_output=True)
+
+        # Remove per-context Docker image (custom Dockerfile tag only,
+        # not the shared base images).
+        repo = _dh.CONTAINER_IMAGE.rsplit(":", 1)[0]
+        image_tag = f"{repo}:{context_name}"
+        result = subprocess.run(
+            ["docker", "rmi", image_tag], capture_output=True,
+        )
+        if result.returncode == 0:
+            logger.info("Removed Docker image %s", image_tag)
+
+        state_path = self._state_dir / context_name
+        shutil.rmtree(state_path, ignore_errors=True)
+
+        self.unregister_build(context_name)
+        logger.info("Destroyed Docker resources for context '%s'", context_name)
+
+    def cleanup_orphans(self, active_contexts: set[str]) -> None:
+        if not self._state_dir.exists():
+            return
+        for child in self._state_dir.iterdir():
+            if child.is_dir() and child.name not in active_contexts:
+                logger.info("Orphan Docker context found: %s", child.name)
+                self.destroy_context(child.name)
+
     # -- Factory --------------------------------------------------------------
 
     def create_sandbox(
@@ -543,6 +620,52 @@ class LimaSandboxManager:
             except Exception:
                 logger.debug("Error stopping Lima sandbox %s", context_name, exc_info=True)
             logger.info("Invalidated Lima sandbox for context '%s'", context_name)
+
+    def destroy_context(self, context_name: str) -> None:
+        self.invalidate_sandbox(context_name)
+
+        # Delete the Lima instance via limactl (handles stop + delete).
+        if self._limactl_path is not None:
+            from open_shrimp.sandbox.lima_helpers import (
+                instance_name as _instance_name,
+                limactl_delete,
+            )
+            inst_name = _instance_name(context_name, self._instance_prefix)
+            try:
+                limactl_delete(self._limactl_path, inst_name)
+                logger.info("Deleted Lima instance %s", inst_name)
+            except Exception:
+                logger.debug(
+                    "Failed to delete Lima instance %s", inst_name,
+                    exc_info=True,
+                )
+
+        from open_shrimp.sandbox.lima_helpers import state_dir_for
+        shutil.rmtree(state_dir_for(context_name), ignore_errors=True)
+        shutil.rmtree(self._state_dir / context_name, ignore_errors=True)
+
+        self.unregister_build(context_name)
+        logger.info("Destroyed Lima resources for context '%s'", context_name)
+
+    def cleanup_orphans(self, active_contexts: set[str]) -> None:
+        seen: set[str] = set()
+
+        # Manager-level state dir (lima/).
+        if self._state_dir.exists():
+            for child in self._state_dir.iterdir():
+                if child.is_dir() and child.name not in active_contexts:
+                    seen.add(child.name)
+
+        # Per-context state dir (lima-state/).
+        lima_state_base = _data_dir() / "lima-state"
+        if lima_state_base.exists():
+            for child in lima_state_base.iterdir():
+                if child.is_dir() and child.name not in active_contexts:
+                    seen.add(child.name)
+
+        for orphan in seen:
+            logger.info("Orphan Lima context found: %s", orphan)
+            self.destroy_context(orphan)
 
     # -- Factory --------------------------------------------------------------
 
@@ -798,14 +921,17 @@ class LibvirtSandboxManager:
         self._stop_all_virtiofsd()
 
     def _stop_all_virtiofsd(self) -> None:
-        """Kill virtiofsd processes with socket paths under our state dir.
+        """Kill virtiofsd processes with socket paths under our state dir."""
+        self._stop_virtiofsd_for(str(self._state_dir))
+
+    def _stop_virtiofsd_for(self, path_prefix: str) -> None:
+        """Kill virtiofsd processes with socket paths under *path_prefix*.
 
         Walks ``/proc`` directly instead of shelling out to ``pgrep``.
         """
         import os
         import signal
 
-        state_prefix = str(self._state_dir)
         proc = Path("/proc")
         for entry in proc.iterdir():
             if not entry.name.isdigit():
@@ -818,7 +944,7 @@ class LibvirtSandboxManager:
             parts = cmdline.decode(errors="replace").split("\0")
             if not parts or not parts[0].endswith("virtiofsd"):
                 continue
-            if not any(state_prefix in arg for arg in parts):
+            if not any(path_prefix in arg for arg in parts):
                 continue
             try:
                 pid = int(entry.name)
@@ -837,6 +963,42 @@ class LibvirtSandboxManager:
             except Exception:
                 logger.debug("Error stopping libvirt sandbox %s", context_name, exc_info=True)
             logger.info("Invalidated libvirt sandbox for context '%s'", context_name)
+
+    def destroy_context(self, context_name: str) -> None:
+        self.invalidate_sandbox(context_name)
+
+        # Destroy + undefine the libvirt domain.
+        if self._conn is not None:
+            try:
+                import libvirt
+            except ImportError:
+                pass
+            else:
+                from open_shrimp.sandbox.libvirt_helpers import domain_name
+                dom_name = domain_name(context_name, self._instance_prefix)
+                try:
+                    dom = self._conn.lookupByName(dom_name)
+                    if dom.isActive():
+                        dom.destroy()
+                    dom.undefine()
+                    logger.info("Undefined libvirt domain %s", dom_name)
+                except libvirt.libvirtError:
+                    logger.debug("Domain %s not found or already gone", dom_name)
+
+        state_path = self._state_dir / context_name
+        self._stop_virtiofsd_for(str(state_path))
+        shutil.rmtree(state_path, ignore_errors=True)
+
+        self.unregister_build(context_name)
+        logger.info("Destroyed libvirt resources for context '%s'", context_name)
+
+    def cleanup_orphans(self, active_contexts: set[str]) -> None:
+        if not self._state_dir.exists():
+            return
+        for child in self._state_dir.iterdir():
+            if child.is_dir() and child.name not in active_contexts:
+                logger.info("Orphan libvirt context found: %s", child.name)
+                self.destroy_context(child.name)
 
     # -- Factory --------------------------------------------------------------
 

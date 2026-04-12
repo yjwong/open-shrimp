@@ -113,6 +113,9 @@ async def config_put_endpoint(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
+    old_config: Config = request.app.state.config
+    old_context_names = set(old_config.contexts.keys())
+
     path = Path(config_path)
 
     # Load the existing file with ruamel.yaml to preserve comments.
@@ -150,6 +153,15 @@ async def config_put_endpoint(request: Request) -> JSONResponse:
         request.app.state.config = new_config
     except Exception:
         logger.exception("Failed to reload config after write")
+        return JSONResponse({"ok": True})
+
+    new_context_names = set(new_config.contexts.keys())
+    removed = old_context_names - new_context_names
+    if removed:
+        sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
+        if sandbox_managers:
+            from open_shrimp.sandbox.manager import destroy_contexts_background
+            destroy_contexts_background(removed, sandbox_managers)
 
     return JSONResponse({"ok": True})
 
