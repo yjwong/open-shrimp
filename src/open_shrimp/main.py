@@ -141,6 +141,10 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     and the macOS menu-bar app.  When *stop_event* is ``None`` (the CLI
     path), SIGTERM/SIGINT handlers are installed automatically.
     """
+    # Patch SDK before any clients are created (workaround for #810).
+    from open_shrimp.sdk_patches import apply as apply_sdk_patches
+    apply_sdk_patches()
+
     config = load_config(config_path)
     logger.info("Config loaded from %s", config_path)
     logger.info("Contexts: %s", ", ".join(config.contexts.keys()))
