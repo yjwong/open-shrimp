@@ -174,7 +174,7 @@ def _download_lima_sync() -> str:
                     continue
                 if name.startswith("bin/"):
                     dest = bin_dir / os.path.basename(name)
-                elif name.startswith("share/"):
+                elif name.startswith(("share/", "libexec/")):
                     dest = prefix_dir / name
                     dest.parent.mkdir(parents=True, exist_ok=True)
                 else:
