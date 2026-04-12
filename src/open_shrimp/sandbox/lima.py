@@ -263,10 +263,21 @@ class LimaSandbox:
         logger.info("Lima instance %s is ready", self._inst_name)
 
         if self._guest_os == "macos":
+            from open_shrimp.sandbox.lima_macos_helpers import (
+                ensure_mounts_macos,
+                reboot_if_first_provision,
+            )
+            mount_points = [self._project_dir] + self._additional_directories
+
+            # Auto-login only takes effect on boot —
+            # reboot once after first provisioning.  Do this before
+            # mount fixups so we don't have to redo them after reboot.
+            reboot_if_first_provision(
+                self._limactl, self._inst_name, log_file=log_file,
+            )
+
             # Fix up VirtioFS mount symlinks — the guest agent may have
             # failed on first boot because parent directories didn't exist.
-            from open_shrimp.sandbox.lima_macos_helpers import ensure_mounts_macos
-            mount_points = [self._project_dir] + self._additional_directories
             ensure_mounts_macos(
                 self._limactl, self._inst_name, mount_points,
             )

@@ -180,6 +180,7 @@ _HOMEBREW_INSTALL_SCRIPT = textwrap.dedent("""\
     echo "$PW" | sudo -S bash -c 'printf "#!/bin/sh\\nset -eu\\ncat \\"\\$HOME/password\\"\\n" > /usr/local/bin/lima-sudo-askpass.sh && chmod 755 /usr/local/bin/lima-sudo-askpass.sh'
 
     # Auto-login: boot straight to desktop without loginwindow.
+    # Takes effect on next boot — reboot_if_first_provision() handles that.
     echo "$PW" | sudo -S sysadminctl -autologin set -userName "$(whoami)" -password "$PW"
 
     # Disable screen lock and screensaver.
@@ -335,6 +336,69 @@ def ensure_mounts_macos(
         )
     else:
         logger.info("macOS VirtioFS mounts and provisioning fixed up")
+
+
+def reboot_if_first_provision(
+    limactl: str,
+    inst_name: str,
+    *,
+    log_file: Path | None = None,
+) -> None:
+    """Reboot the macOS VM once after first provisioning.
+
+    Auto-login only takes effect on boot, so the VM must
+    be rebooted after the first provision that sets it up.  A marker
+    file inside the VM tracks whether this has already happened.
+    """
+    marker = "/var/tmp/.openshrimp-provisioned"
+
+    # Check if already rebooted after provisioning.
+    result = _run_limactl(
+        limactl,
+        ["shell", inst_name, "--", "test", "-f", marker],
+        check=False,
+        timeout=10,
+    )
+    if result.returncode == 0:
+        return  # Already done.
+
+    logger.info("First provision detected — rebooting macOS VM for auto-login")
+    if log_file:
+        from open_shrimp.sandbox.lima_helpers import _log
+        _log(log_file, "Rebooting VM for auto-login...")
+
+    # Create marker before rebooting.
+    _run_limactl(
+        limactl,
+        ["shell", inst_name, "--", "touch", marker],
+        check=False,
+        timeout=10,
+    )
+
+    # Reboot via limactl stop + start, then wait for SSH.
+    from open_shrimp.sandbox.lima_helpers import (
+        limactl_stop, limactl_start, limactl_shell_check,
+        limactl_instance_status,
+    )
+    limactl_stop(limactl, inst_name)
+    try:
+        limactl_start(limactl, inst_name, log_file=log_file)
+    except subprocess.CalledProcessError:
+        # macOS guests often start in DEGRADED state — tolerate it
+        # as long as the VM is running.
+        if limactl_instance_status(limactl, inst_name) != "Running":
+            raise
+
+    # Wait for shell to be responsive after reboot.
+    import time
+    for _ in range(120):
+        if limactl_shell_check(limactl, inst_name):
+            break
+        time.sleep(1)
+    else:
+        logger.warning("Shell not responsive after auto-login reboot")
+
+    logger.info("macOS VM rebooted for auto-login")
 
 
 # ---------------------------------------------------------------------------
