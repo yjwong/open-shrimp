@@ -21,6 +21,44 @@ logger = logging.getLogger("open_shrimp")
 _restart_requested = False
 
 
+def _dump_debug_info() -> None:
+    """Dump asyncio tasks and thread stacks to stderr on SIGUSR1."""
+    import faulthandler
+
+    logger.warning("=== SIGUSR1 received — dumping debug info ===")
+
+    # Dump all thread stacks via faulthandler (writes to stderr)
+    logger.warning("--- Thread stacks ---")
+    faulthandler.dump_traceback(file=sys.stderr)
+
+    # Dump all asyncio tasks
+    try:
+        loop = asyncio.get_running_loop()
+        tasks = asyncio.all_tasks(loop)
+        logger.warning("--- Asyncio tasks (%d) ---", len(tasks))
+        for task in sorted(tasks, key=lambda t: t.get_name()):
+            coro = task.get_coro()
+            logger.warning(
+                "  Task %s: state=%s coro=%s",
+                task.get_name(),
+                task._state,
+                coro,
+            )
+            # Print the task's stack frames if available
+            frames = task.get_stack()
+            for frame in frames:
+                logger.warning(
+                    "    File %s:%d in %s",
+                    frame.f_code.co_filename,
+                    frame.f_lineno,
+                    frame.f_code.co_name,
+                )
+    except RuntimeError:
+        logger.warning("No running event loop — skipping asyncio task dump")
+
+    logger.warning("=== End debug dump ===")
+
+
 def request_restart() -> None:
     """Signal that the process should re-exec after shutdown."""
     global _restart_requested
@@ -133,6 +171,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop_event.set)
+        loop.add_signal_handler(signal.SIGUSR1, _dump_debug_info)
 
     sandbox_mgrs = create_sandbox_managers(config)
 
