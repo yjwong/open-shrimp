@@ -326,8 +326,8 @@ async def _send_approval_keyboard(
     if tool_name in ("Edit", "Write"):
         accept_all_data = f"accept_all_edits:{tool_use_id}"
         session_row.append(InlineKeyboardButton("Accept all edits", callback_data=accept_all_data))
-    # For Bash, offer a prefix-specific button (e.g. "Accept all git")
-    # before the blanket "Accept all Bash" button.
+    # Bash: prefix-specific persistent rule only (no blanket "Accept all
+    # Bash") — over-broad Bash approval is a security risk.
     if tool_name == "Bash":
         command = tool_input.get("command", "")
         prefix = _extract_bash_prefix(command)
@@ -335,11 +335,12 @@ async def _send_approval_keyboard(
             accept_prefix_data = f"accept_bash_pfx:{tool_use_id}:{prefix}"
             if len(accept_prefix_data.encode()) <= 64:
                 session_row.append(InlineKeyboardButton(
-                    f"Accept all {prefix}", callback_data=accept_prefix_data,
+                    f"Allow & remember: {prefix} *",
+                    callback_data=accept_prefix_data,
                 ))
-    # All tools (except Edit/Write and ExitPlanMode) get a generic
+    # All tools (except Edit/Write, ExitPlanMode, and Bash) get a generic
     # "Accept all <tool>" option for session-scoped auto-approval.
-    _no_accept_all = ("Edit", "Write", "ExitPlanMode")
+    _no_accept_all = ("Edit", "Write", "ExitPlanMode", "Bash")
     if tool_name not in _no_accept_all:
         accept_all_tool_data = f"accept_all_tool:{tool_use_id}:{tool_name}"
         # Truncate callback_data to 64 bytes (Telegram limit)
@@ -651,23 +652,34 @@ async def handle_approval_callback(
 
         if query.message and prefix:
             from open_shrimp.handlers.state import _tool_approved_sessions
+            from open_shrimp.settings_local import save_persistent_rule
 
             scope = chat_scope_from_message(query.message)
             db: aiosqlite.Connection = context.bot_data["db"]
-            ctx_name, _ = await _get_context(scope, config, db)
+            ctx_name, ctx_config = await _get_context(scope, config, db)
             rule = ApprovalRule(tool_name="Bash", pattern=f"{prefix} *")
             _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
+
+            # Persist to .claude/settings.local.json so the rule survives
+            # restarts and is also respected by the Claude CLI directly.
+            try:
+                persisted = await save_persistent_rule(ctx_config.directory, rule)
+            except OSError:
+                logger.exception("Failed to persist rule to settings.local.json")
+                persisted = False
+
             logger.info(
-                "Accept-all-Bash(%s *) enabled for scope %s context %s",
+                "Saved persistent Bash(%s:*) rule for scope %s context %s (persisted=%s)",
                 prefix,
                 scope,
                 ctx_name,
+                persisted,
             )
 
         future.set_result(True)
         escaped_prefix = _escape_mdv2(prefix)
         await query.answer(
-            f"Approved. Future {prefix} commands auto-approved."
+            f"Approved. Rule saved: {prefix} * auto-approved."
         )
 
         if query.message:
@@ -675,7 +687,7 @@ async def handle_approval_callback(
                 icon = '\u2705'
                 compact = (
                     f"{icon} *Bash* \u2014 Approved\\. "
-                    f"_Future {escaped_prefix} commands auto\\-approved\\._"
+                    f"_Rule saved: {escaped_prefix} \\* auto\\-approved\\._"
                 )
                 await query.message.edit_text(
                     text=compact,

@@ -628,6 +628,20 @@ async def _start_agent_task(
                     todos=todos if todos else None,
                 )
 
+            # Load persistent approval rules from .claude/settings.local.json
+            # into the in-memory cache so they are checked alongside
+            # session-scoped rules.
+            from open_shrimp.settings_local import load_persistent_rules
+
+            persistent_rules = await load_persistent_rules(ctx_config.directory)
+            if persistent_rules:
+                existing = _tool_approved_sessions.setdefault((scope, ctx_name), [])
+                # Avoid duplicates if rules were already loaded.
+                existing_set = {(r.tool_name, r.pattern) for r in existing}
+                for rule in persistent_rules:
+                    if (rule.tool_name, rule.pattern) not in existing_set:
+                        existing.append(rule)
+
             cb_ctx = CallbackContext(
                 request_approval=request_approval,
                 handle_user_questions=handle_questions,
