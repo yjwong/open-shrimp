@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -21,6 +21,55 @@ function wrapBlock(Tag: string) {
         <Tag {...props} />
       </CommentableBlock>
     );
+  };
+}
+
+/**
+ * Resolve a potentially relative image `src` to an absolute filesystem path
+ * using the parent directory of the markdown file, then return a proxy URL.
+ * External URLs (http/https/data) are returned as-is.
+ */
+function resolveImageSrc(
+  src: string,
+  fileDir: string | null,
+  authToken: string | undefined,
+): string {
+  if (!src) return src;
+  if (/^https?:\/\/|^data:/i.test(src)) return src;
+  if (!fileDir) return src;
+
+  let absolute: string;
+  if (src.startsWith("/")) {
+    absolute = src;
+  } else {
+    const parts = (fileDir + "/" + src).split("/");
+    const resolved: string[] = [];
+    for (const p of parts) {
+      if (p === "" || p === ".") continue;
+      if (p === ".." && resolved.length > 0) {
+        resolved.pop();
+      } else if (p !== "..") {
+        resolved.push(p);
+      }
+    }
+    absolute = "/" + resolved.join("/");
+  }
+
+  const params = new URLSearchParams({ path: absolute });
+  if (authToken) params.set("token", authToken);
+  return `/api/preview/image?${params.toString()}`;
+}
+
+function makeImageComponent(fileDir: string | null) {
+  // Resolve auth token once per component creation, not per image.
+  const authToken =
+    new URLSearchParams(window.location.search).get("token") ??
+    window.Telegram?.WebApp?.initData ??
+    undefined;
+
+  return function ProxiedImage(props: React.ImgHTMLAttributes<HTMLImageElement>) {
+    const src = resolveImageSrc(props.src ?? "", fileDir, authToken);
+    return <img {...props} src={src} />;
   };
 }
 
@@ -86,6 +135,9 @@ function AppInner() {
   if (error) return <div className="loading error">{error}</div>;
   if (!data) return <div className="loading">Loading preview...</div>;
 
+  const fileDir = data.path ? data.path.replace(/\/[^/]*$/, "") || "/" : null;
+  const ProxiedImage = useMemo(() => makeImageComponent(fileDir), [fileDir]);
+
   return (
     <>
       <div id="content">
@@ -94,6 +146,7 @@ function AppInner() {
           rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
           components={{
             code: CodeBlock,
+            img: ProxiedImage,
             p: wrapBlock("p"),
             h1: wrapBlock("h1"),
             h2: wrapBlock("h2"),

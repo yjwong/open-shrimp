@@ -9,18 +9,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from open_shrimp.config import Config
-from open_shrimp.review.auth import AuthError, authenticate
+from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,63 @@ async def content_endpoint(request: Request) -> JSONResponse:
         "filename": entry["title"],
         "content": entry["content"],
     })
+
+
+_IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".avif",
+}
+
+
+async def image_endpoint(request: Request) -> JSONResponse | FileResponse:
+    """GET /api/preview/image — serve an image file from disk.
+
+    Query params:
+        path: Absolute path to the image file.
+        token: Optional auth token (for ``<img>`` tags that can't send headers).
+    """
+    config: Config = request.app.state.config
+    token = request.query_params.get("token", "")
+    try:
+        if token:
+            await validate_token_param(
+                token, config.telegram.token, config.allowed_users
+            )
+        else:
+            await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    file_path_str = request.query_params.get("path", "")
+    if not file_path_str:
+        return JSONResponse(
+            {"error": "path query parameter is required"}, status_code=400
+        )
+
+    file_path = Path(file_path_str)
+
+    if not file_path.is_absolute():
+        return JSONResponse(
+            {"error": "path must be absolute"}, status_code=400
+        )
+
+    if not _is_within_context_directories(file_path, config):
+        return JSONResponse(
+            {"error": "path is outside configured context directories"},
+            status_code=403,
+        )
+
+    resolved = file_path.resolve()
+
+    if resolved.suffix.lower() not in _IMAGE_EXTENSIONS:
+        return JSONResponse(
+            {"error": "not a supported image file"}, status_code=400
+        )
+
+    if not resolved.is_file():
+        return JSONResponse({"error": "file not found"}, status_code=404)
+
+    media_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+    return FileResponse(str(resolved), media_type=media_type)
 
 
 async def submit_review_endpoint(request: Request) -> JSONResponse:
@@ -406,6 +464,7 @@ def create_preview_routes() -> list[Route | Mount]:
     routes: list[Route | Mount] = [
         Route("/api/preview/read", read_endpoint, methods=["GET"]),
         Route("/api/preview/content/{content_id}", content_endpoint, methods=["GET"]),
+        Route("/api/preview/image", image_endpoint, methods=["GET"]),
         Route("/api/preview/submit-review", submit_review_endpoint, methods=["POST"]),
     ]
 
