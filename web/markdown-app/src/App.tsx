@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { Component, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -67,17 +67,44 @@ function makeImageComponent(fileDir: string | null) {
     window.Telegram?.WebApp?.initData ??
     undefined;
 
-  return function ProxiedImage(props: React.ImgHTMLAttributes<HTMLImageElement>) {
+  return function ProxiedImage({ node, ...props }: any) {
     const src = resolveImageSrc(props.src ?? "", fileDir, authToken);
     return <img {...props} src={src} />;
   };
 }
 
+class ErrorBoundary extends Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="loading error">
+          <strong>Render error:</strong> {this.state.error.message}
+          <pre style={{ fontSize: "0.75em", whiteSpace: "pre-wrap", marginTop: 8 }}>
+            {this.state.error.stack}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   return (
-    <ReviewProvider>
-      <AppInner />
-    </ReviewProvider>
+    <ErrorBoundary>
+      <ReviewProvider>
+        <AppInner />
+      </ReviewProvider>
+    </ErrorBoundary>
   );
 }
 
@@ -132,11 +159,11 @@ function AppInner() {
     window.Telegram?.WebApp?.close();
   };
 
+  const fileDir = data?.path ? data.path.replace(/\/[^/]*$/, "") || "/" : null;
+  const ProxiedImage = useMemo(() => makeImageComponent(fileDir), [fileDir]);
+
   if (error) return <div className="loading error">{error}</div>;
   if (!data) return <div className="loading">Loading preview...</div>;
-
-  const fileDir = data.path ? data.path.replace(/\/[^/]*$/, "") || "/" : null;
-  const ProxiedImage = useMemo(() => makeImageComponent(fileDir), [fileDir]);
 
   return (
     <>
