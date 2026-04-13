@@ -18,6 +18,11 @@ from open_shrimp.mcp_proxy.config_reader import StdioServerConfig
 
 logger = logging.getLogger(__name__)
 
+# 16 MiB — generous limit for MCP responses (e.g. large database query
+# results).  Python's asyncio StreamReader defaults to 64 KiB which is
+# far too small.  Bun (used by Claude Code) has no such limit.
+_STDOUT_BUFFER_LIMIT = 16 * 1024 * 1024
+
 
 @dataclass
 class StdioProcess:
@@ -103,10 +108,24 @@ class StdioManager:
             request_id = message.get("id")
             max_lines = 500
             for _ in range(max_lines):
-                line = await asyncio.wait_for(
-                    proc.process.stdout.readline(),
-                    timeout=120,  # generous timeout for slow tools
-                )
+                try:
+                    line = await asyncio.wait_for(
+                        proc.process.stdout.readline(),
+                        timeout=120,  # generous timeout for slow tools
+                    )
+                except ValueError:
+                    # readline() re-raises LimitOverrunError as ValueError
+                    # when a single line exceeds the StreamReader buffer
+                    # limit.  The stream is irrecoverably corrupted —
+                    # kill the process so it gets respawned on the next
+                    # request.
+                    logger.error(
+                        "MCP server produced a line exceeding buffer "
+                        "limit (%d bytes), killing process for respawn",
+                        _STDOUT_BUFFER_LIMIT,
+                    )
+                    proc.process.kill()
+                    raise
                 if not line:
                     raise RuntimeError(
                         "MCP server process closed stdout unexpectedly"
@@ -114,7 +133,9 @@ class StdioManager:
                 try:
                     response = json.loads(line)
                 except json.JSONDecodeError:
-                    logger.debug("Non-JSON line from MCP server: %s", line[:200])
+                    logger.debug(
+                        "Non-JSON line from MCP server: %s", line[:200]
+                    )
                     continue
                 if "id" in response and response["id"] == request_id:
                     return response  # type: ignore[no-any-return]
@@ -170,6 +191,7 @@ class StdioManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            limit=_STDOUT_BUFFER_LIMIT,
         )
 
         proc = StdioProcess(process=process, config=config)
