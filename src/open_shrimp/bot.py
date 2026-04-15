@@ -22,7 +22,11 @@ from telegram.ext import (
 
 import aiosqlite
 
-from open_shrimp.client_manager import close_all_sessions
+from open_shrimp.client_manager import (
+    close_all_sessions,
+    start_idle_sweep,
+    stop_idle_sweep,
+)
 from open_shrimp.config import Config, load_config
 from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
 from open_shrimp.sandbox.manager import destroy_contexts_background
@@ -335,6 +339,9 @@ async def run_bot(
             "Install python-telegram-bot[job-queue] to enable."
         )
 
+    # Start idle-session sweep so dangling Claude processes get reaped.
+    start_idle_sweep()
+
     # Register auto-update checker.
     from open_shrimp.updater import register_update_checker
 
@@ -376,6 +383,7 @@ async def run_bot(
                 await shutdown_login_session()
         except (Exception, TimeoutError):
             logger.warning("Error shutting down login session", exc_info=True)
+        stop_idle_sweep()
         await close_all_sessions()
         # Stop all sandbox managers.  Each stop_reaper() is wrapped in a
         # timeout because closing a wedged libvirt connection can block

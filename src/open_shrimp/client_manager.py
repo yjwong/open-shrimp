@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -176,9 +177,14 @@ class AgentSession:
     sandbox: Sandbox | None = None
     mcp_proxy: Any | None = None
     wrapper_cleanup_paths: list[str] = field(default_factory=list)
+    last_activity: float = field(default_factory=time.monotonic)
 
 
 _active_sessions: dict[ChatScope, AgentSession] = {}
+
+# Idle session timeout: sessions with no activity for this long are closed.
+_IDLE_TIMEOUT: float = 30 * 60  # 30 minutes
+_idle_sweep_task: asyncio.Task[None] | None = None
 
 # Per-context lock: serialises sandbox creation so two scopes sharing
 # the same libvirt context don't race on VM boot / virtiofsd / ports.
@@ -246,6 +252,7 @@ async def get_or_create_session(
                 existing.callback_context.is_edit_auto_approved = callback_context.is_edit_auto_approved
                 existing.callback_context.notify_auto_approved_edit = callback_context.notify_auto_approved_edit
                 existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
+                existing.last_activity = time.monotonic()
                 logger.info(
                     "Reusing live client for scope %s context %s",
                     scope,
@@ -745,6 +752,40 @@ async def close_all_sessions() -> None:
     )
 
 
+async def _sweep_idle_sessions() -> None:
+    """Periodically close sessions that have been idle too long."""
+    while True:
+        await asyncio.sleep(60)
+        now = time.monotonic()
+        stale = [
+            scope for scope, session in _active_sessions.items()
+            if now - session.last_activity > _IDLE_TIMEOUT
+        ]
+        for scope in stale:
+            logger.info(
+                "Closing idle session for scope %s (idle %.0fs)",
+                scope,
+                now - _active_sessions[scope].last_activity,
+            )
+            await close_session(scope)
+
+
+def start_idle_sweep() -> None:
+    """Start the background idle-session sweep task."""
+    global _idle_sweep_task
+    if _idle_sweep_task is None or _idle_sweep_task.done():
+        _idle_sweep_task = asyncio.create_task(_sweep_idle_sessions())
+        logger.info("Started idle session sweep (timeout=%ds)", _IDLE_TIMEOUT)
+
+
+def stop_idle_sweep() -> None:
+    """Cancel the idle-session sweep task."""
+    global _idle_sweep_task
+    if _idle_sweep_task is not None:
+        _idle_sweep_task.cancel()
+        _idle_sweep_task = None
+
+
 def get_session(scope: ChatScope) -> AgentSession | None:
     """Return the active session for *scope*, or None."""
     return _active_sessions.get(scope)
@@ -776,6 +817,7 @@ async def query_and_stream(
     prompt: str,
 ) -> AsyncIterator[AgentEvent]:
     """Send a query on an existing session and yield events."""
+    session.last_activity = time.monotonic()
     logger.info("Sending query on live client: %s", prompt[:200])
     await session.client.query(prompt)
     async for message in receive_events(session):
