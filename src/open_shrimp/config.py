@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-EffortLevel = Literal["low", "medium", "high", "max"]
-_VALID_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "max")
+EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
+_VALID_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 import yaml
 from platformdirs import user_config_path

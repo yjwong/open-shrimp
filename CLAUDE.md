@@ -178,7 +178,7 @@ Key fields:
 | `/status` | `status_handler` | Current context, session, running state |
 | `/cancel` | `cancel_handler` | Abort running Claude invocation |
 | `/model` | `model_handler` | Show or override the model for this chat |
-| `/effort` | `effort_handler` | Show or override the thinking effort level (low/medium/high/max) |
+| `/effort` | `effort_handler` | Show or override the thinking effort level (low/medium/high/xhigh/max) |
 | `/add_dir` | `add_dir_handler` | Add a working directory to the current context |
 | `/resume` | `resume_handler` | List and resume a previous session |
 | `/review` | `review_handler` | Open the review Mini App for the current context |

@@ -474,7 +474,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ── /effort ──
 
 
-_VALID_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "max")
+_VALID_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 
 async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -482,7 +482,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     Usage:
         /effort              -- show current effort level (and override if active)
-        /effort <level>      -- override for this chat (low, medium, high, max)
+        /effort <level>      -- override for this chat (low, medium, high, xhigh, max)
         /effort reset        -- clear the override, revert to context default
     """
     config: Config = context.bot_data["config"]
@@ -511,7 +511,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         else:
             text = f"*Effort:* `{ctx_default_effort or 'default'}` \\(context default\\)"
-        text += "\n\nLevels: `low`, `medium`, `high`, `max`"
+        text += "\n\nLevels: `low`, `medium`, `high`, `xhigh`, `max`"
         for ch in ".-/":
             text = text.replace(ch, f"\\{ch}")
         await message.reply_text(text, parse_mode="MarkdownV2")
