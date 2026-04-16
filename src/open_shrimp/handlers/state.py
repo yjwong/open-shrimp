@@ -102,6 +102,13 @@ _tool_approved_sessions: dict[tuple[ChatScope, str], list[ApprovalRule]] = {}
 _model_overrides: dict[ChatScope, str] = {}
 
 # ---------------------------------------------------------------------------
+# Per-scope effort override: scope -> effort level ("low", "medium", "high",
+# "max").  Set via /effort command.  Cleared on /clear or context switch.
+# Takes precedence over context config.
+# ---------------------------------------------------------------------------
+_effort_overrides: dict[ChatScope, str] = {}
+
+# ---------------------------------------------------------------------------
 # Per-scope additional directory overrides: (scope, context_name) -> dirs.
 # Set via /add_dir command.  Persisted in DB, cached here for fast lookup.
 # A key present with an empty list means "loaded, no overrides".

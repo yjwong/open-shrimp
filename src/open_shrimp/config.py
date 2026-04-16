@@ -3,7 +3,10 @@
 import platform
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+EffortLevel = Literal["low", "medium", "high", "max"]
+_VALID_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "max")
 
 import yaml
 from platformdirs import user_config_path
@@ -68,6 +71,7 @@ class ContextConfig:
     description: str
     allowed_tools: list[str]
     model: str | None = None
+    effort: EffortLevel | None = None
     additional_directories: list[str] = field(default_factory=list)
     default_for_chats: list[int] = field(default_factory=list)
     locked_for_chats: list[int] = field(default_factory=list)
@@ -142,6 +146,12 @@ def _validate_raw(raw: dict) -> None:
                     f"Context '{name}': additional_directories entries must "
                     f"be strings, got: {d!r}"
                 )
+        effort = ctx.get("effort")
+        if effort is not None and effort not in _VALID_EFFORT_LEVELS:
+            raise ValueError(
+                f"Context '{name}': effort must be one of "
+                f"{list(_VALID_EFFORT_LEVELS)}, got: {effort!r}"
+            )
 
     # Validate container config
     for name, ctx in contexts.items():
@@ -333,6 +343,7 @@ def _parse(raw: dict) -> Config:
             description=ctx["description"],
             allowed_tools=ctx["allowed_tools"],
             model=ctx.get("model"),
+            effort=ctx.get("effort"),
             additional_directories=ctx.get("additional_directories", []),
             default_for_chats=ctx.get("default_for_chats", []),
             locked_for_chats=ctx.get("locked_for_chats", []),
@@ -406,6 +417,8 @@ def config_to_dict(config: Config) -> dict[str, Any]:
         }
         if ctx.model is not None:
             ctx_dict["model"] = ctx.model
+        if ctx.effort is not None:
+            ctx_dict["effort"] = ctx.effort
         if ctx.additional_directories:
             ctx_dict["additional_directories"] = ctx.additional_directories
         if ctx.default_for_chats:

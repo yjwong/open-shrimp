@@ -206,6 +206,7 @@ async def run_agent(
     options = ClaudeAgentOptions(
         cwd=context.directory,
         model=context.model,
+        effort=context.effort,
         allowed_tools=context.allowed_tools,
         add_dirs=context.additional_directories,
         setting_sources=["project", "user", "local"],

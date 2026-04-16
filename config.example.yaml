@@ -12,6 +12,7 @@ contexts:
     directory: /home/you/Documents/your-project
     description: "Default context"
     # model: sonnet  # Optional. Short names: sonnet, opus, haiku. Omit to use CLI default.
+    # effort: medium  # Optional thinking effort level: low, medium, high, max. Omit for CLI default.
     allowed_tools:
       - LSP
       - AskUserQuestion

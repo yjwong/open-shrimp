@@ -1,5 +1,5 @@
 """Telegram command handlers (/context, /clear, /status, /cancel, /model,
-/resume, /review, /mcp, /tasks, /usage, /login).
+/effort, /resume, /review, /mcp, /tasks, /usage, /login).
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from open_shrimp.handlers.state import (
     _RESUME_LIST_LIMIT,
     _active_bg_tasks,
     _edit_approved_sessions,
+    _effort_overrides,
     _injectable_sessions,
     _model_overrides,
     _resume_page_cache,
@@ -183,6 +184,7 @@ async def handle_context_callback(
         _edit_approved_sessions.discard((scope, current))
         _tool_approved_sessions.pop((scope, current), None)
         _model_overrides.pop(scope, None)
+        _effort_overrides.pop(scope, None)
         await close_session(scope)
 
         from open_shrimp.db import set_active_context
@@ -268,6 +270,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     _edit_approved_sessions.discard((scope, old_ctx_name))
     _tool_approved_sessions.pop((scope, old_ctx_name), None)
     _model_overrides.pop(scope, None)
+    _effort_overrides.pop(scope, None)
     await close_session(scope)
 
     from open_shrimp.db import set_active_context
@@ -313,6 +316,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _edit_approved_sessions.discard((scope, ctx_name))
     _tool_approved_sessions.pop((scope, ctx_name), None)
     _model_overrides.pop(scope, None)
+    _effort_overrides.pop(scope, None)
     _active_bg_tasks.pop(scope, None)
     await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
     await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
@@ -340,6 +344,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"*Context:* `{ctx_name}`",
         f"*Directory:* `{ctx.directory}`",
         f"*Model:* `{ctx.model or 'CLI default'}`" + (" (override)" if scope in _model_overrides else ""),
+        f"*Effort:* `{ctx.effort or 'default'}`" + (" (override)" if scope in _effort_overrides else ""),
         f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
         f"*Running:* {'Yes' if running else 'No'}",
         f"*Injectable:* {'Yes' if injectable else 'No'}",
@@ -462,6 +467,89 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await message.reply_text(
         f"Model overridden to `{model_escaped}`\\. "
         f"Use `/model reset` to revert\\.",
+        parse_mode="MarkdownV2",
+    )
+
+
+# ── /effort ──
+
+
+_VALID_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "max")
+
+
+async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /effort command: show or override the thinking effort level.
+
+    Usage:
+        /effort              -- show current effort level (and override if active)
+        /effort <level>      -- override for this chat (low, medium, high, max)
+        /effort reset        -- clear the override, revert to context default
+    """
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    message = update.effective_message
+    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    if not _is_private_chat(update):
+        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        return
+
+    scope = chat_scope_from_message(message)
+    ctx_name = await _get_context_name(scope, config, db)
+    ctx_default_effort = config.contexts[ctx_name].effort
+    current_override = _effort_overrides.get(scope)
+    args = message.text.split() if message.text else []
+
+    if len(args) < 2:
+        # Show current effort
+        if current_override:
+            text = (
+                f"*Effort:* `{current_override}` \\(override\\)\n"
+                f"*Context default:* `{ctx_default_effort or 'default'}`\n\n"
+                f"Use `/effort reset` to revert\\."
+            )
+        else:
+            text = f"*Effort:* `{ctx_default_effort or 'default'}` \\(context default\\)"
+        text += "\n\nLevels: `low`, `medium`, `high`, `max`"
+        for ch in ".-/":
+            text = text.replace(ch, f"\\{ch}")
+        await message.reply_text(text, parse_mode="MarkdownV2")
+        return
+
+    target = args[1].lower()
+
+    if target == "reset":
+        if current_override:
+            del _effort_overrides[scope]
+            await close_session(scope)
+            effort_escaped = _escape_mdv2(ctx_default_effort or "default")
+            await message.reply_text(
+                f"Effort override cleared\\. Using context default: `{effort_escaped}`",
+                parse_mode="MarkdownV2",
+            )
+        else:
+            await message.reply_text(
+                "No effort override active\\.",
+                parse_mode="MarkdownV2",
+            )
+        return
+
+    if target not in _VALID_EFFORT_LEVELS:
+        levels = ", ".join(f"`{lvl}`" for lvl in _VALID_EFFORT_LEVELS)
+        await message.reply_text(
+            f"Invalid effort level: `{_escape_mdv2(target)}`\\. Valid: {levels}",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    # Set override
+    _effort_overrides[scope] = target
+    await close_session(scope)
+    effort_escaped = _escape_mdv2(target)
+    await message.reply_text(
+        f"Effort overridden to `{effort_escaped}`\\. "
+        f"Use `/effort reset` to revert\\.",
         parse_mode="MarkdownV2",
     )
 

@@ -39,6 +39,7 @@ from open_shrimp.handlers.commands import (
     clear_handler,
     config_handler,
     context_handler,
+    effort_handler,
     handle_context_callback,
     handle_resume_callback,
     login_handler,
@@ -182,6 +183,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("cancel", cancel_handler))
     app.add_handler(CommandHandler("resume", resume_handler))
     app.add_handler(CommandHandler("model", model_handler))
+    app.add_handler(CommandHandler("effort", effort_handler))
     app.add_handler(CommandHandler("add_dir", add_dir_handler))
     app.add_handler(CommandHandler("review", review_handler))
     app.add_handler(CommandHandler("mcp", mcp_handler))
@@ -259,6 +261,7 @@ async def run_bot(
     await app.bot.set_my_commands(
         common_commands + [
             BotCommand("model", "Show or override the model for this chat"),
+            BotCommand("effort", "Show or override the thinking effort level"),
             BotCommand("add_dir", "Add a working directory to the context"),
             BotCommand("login", "Re-authenticate Claude Code OAuth"),
             BotCommand("config", "Edit bot configuration"),

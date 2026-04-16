@@ -150,7 +150,7 @@ Config lives at `~/.config/openshrimp/config.yaml`. See `config.example.yaml` fo
 Key fields:
 - `telegram.token` - Bot token from @BotFather
 - `allowed_users` - List of Telegram user IDs (integers)
-- `contexts` - Map of context name -> {directory, description, model, allowed_tools, default_for_chats, locked_for_chats, additional_directories, sandbox}
+- `contexts` - Map of context name -> {directory, description, model, effort, allowed_tools, default_for_chats, locked_for_chats, additional_directories, sandbox}
 - `default_context` - Context name to use when none is specified
 - `review` - Optional: `host`, `port`, `public_url`, `tunnel` (cloudflared) for Mini App HTTP server
 
@@ -178,6 +178,7 @@ Key fields:
 | `/status` | `status_handler` | Current context, session, running state |
 | `/cancel` | `cancel_handler` | Abort running Claude invocation |
 | `/model` | `model_handler` | Show or override the model for this chat |
+| `/effort` | `effort_handler` | Show or override the thinking effort level (low/medium/high/max) |
 | `/add_dir` | `add_dir_handler` | Add a working directory to the current context |
 | `/resume` | `resume_handler` | List and resume a previous session |
 | `/review` | `review_handler` | Open the review Mini App for the current context |

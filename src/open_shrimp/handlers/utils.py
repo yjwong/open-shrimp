@@ -20,6 +20,7 @@ from open_shrimp.db import (
 from open_shrimp.handlers.state import (
     _DEFAULT_CONTEXT_LIMIT,
     _additional_dir_cache,
+    _effort_overrides,
     _model_overrides,
 )
 
@@ -74,9 +75,10 @@ async def _get_context(
 ) -> tuple[str, ContextConfig]:
     """Get context name and config for a scope.
 
-    If a per-scope model override is active (via ``/model``), returns a
-    shallow copy of the context config with the overridden model.
-    Runtime additional directories (via ``/add_dir``) are merged in.
+    If a per-scope model or effort override is active (via ``/model`` or
+    ``/effort``), returns a shallow copy of the context config with the
+    overridden value.  Runtime additional directories (via ``/add_dir``)
+    are merged in.
     """
     from dataclasses import replace
 
@@ -84,14 +86,17 @@ async def _get_context(
     ctx = config.contexts[name]
 
     model_override = _model_overrides.get(scope)
+    effort_override = _effort_overrides.get(scope)
 
     # Merge runtime additional directories from DB cache.
     extra_dirs = await _get_runtime_dirs(scope, name, db)
 
-    if model_override or extra_dirs:
+    if model_override or effort_override or extra_dirs:
         kwargs: dict[str, Any] = {}
         if model_override:
             kwargs["model"] = model_override
+        if effort_override:
+            kwargs["effort"] = effort_override
         if extra_dirs:
             kwargs["additional_directories"] = list(ctx.additional_directories) + extra_dirs
         ctx = replace(ctx, **kwargs)
@@ -229,6 +234,8 @@ def _build_status_text(
         f"\U0001f4c1 `{escaped_dir}`",
         f"\U0001f916 `{escaped_model}`",
     ]
+    if ctx.effort:
+        lines.append(f"\U0001f9e0 *Effort:* `{_escape_mdv2(ctx.effort)}`")
 
     # Context window usage from per-turn API usage (the last assistant
     # message).  input_tokens + cache tokens = current context size.
