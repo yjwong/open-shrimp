@@ -296,23 +296,23 @@ def _build_cloud_init_user_data(
             "    content: |\n"
             "      [Unit]\n"
             "      Description=labwc Wayland compositor on DRM\n"
-            "      Requires=seatd.service\n"
-            "      After=seatd.service\n"
+            # user-runtime-dir@1000 owns /run/user/1000 as a tmpfs and
+            # unmounts it when its refcount drops to zero, taking the
+            # Wayland socket with it. Binding to it (plus lingering the
+            # claude user, below) keeps the runtime dir pinned for the
+            # compositor's entire lifetime.
+            "      Requires=seatd.service user-runtime-dir@1000.service\n"
+            "      After=seatd.service user-runtime-dir@1000.service\n"
             "      [Service]\n"
             "      User=claude\n"
             "      SupplementaryGroups=video render input\n"
             "      Environment=WLR_BACKENDS=drm,libinput\n"
             "      Environment=XDG_RUNTIME_DIR=/run/user/1000\n"
             "      Environment=WAYLAND_DISPLAY=wayland-0\n"
-            "      ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/1000 && chown claude:claude /run/user/1000'\n"
             "      ExecStart=/usr/bin/labwc\n"
             "      Restart=on-failure\n"
             "      [Install]\n"
             "      WantedBy=multi-user.target\n"
-            "  # Prevent systemd-tmpfiles from cleaning the Wayland socket.\n"
-            "  - path: /etc/tmpfiles.d/wayland-compositor.conf\n"
-            "    content: |\n"
-            "      x /run/user/1000/wayland-*\n"
             "  # Minimal labwc config for computer-use.\n"
             "  # Deferred so the claude user exists when the file is written.\n"
             "  - path: /home/claude/.config/labwc/rc.xml\n"
@@ -419,6 +419,10 @@ def _build_cloud_init_user_data(
             "  - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -\n"
             "  - apt-get install -y -qq nodejs > /dev/null 2>&1\n"
             "  - usermod -aG video,render,input claude\n"
+            # Linger so user-runtime-dir@1000.service starts at boot
+            # without an SSH login and survives session churn, keeping
+            # /run/user/1000 (and the Wayland socket) pinned.
+            "  - loginctl enable-linger claude\n"
             "  - systemctl enable --now seatd.service\n"
             "  - systemctl enable --now wayland-compositor.service\n"
         )
