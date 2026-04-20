@@ -336,6 +336,13 @@ async def read_endpoint(request: Request) -> JSONResponse:
 class _LoginSession:
     """Background PTY session for ``claude`` TUI login."""
 
+    # Marker printed by ConsoleOAuthFlow when OAuth completes successfully
+    # ("Login successful. Press Enter to continue…"). ``/login`` is a slash
+    # command that only dismisses its Dialog on Enter — the REPL then sits
+    # at the prompt indefinitely. When we see this, we drive the REPL to
+    # exit so the subprocess actually terminates.
+    _SUCCESS_MARKER = "Login successful"
+
     def __init__(
         self,
         proc: asyncio.subprocess.Process,
@@ -349,7 +356,11 @@ class _LoginSession:
         self._MAX_BUFFER = 64 * 1024  # 64 KiB
         self._websocket: WebSocket | None = None
         self._reader_task: asyncio.Task | None = None
+        self._exit_task: asyncio.Task | None = None
         self._done = asyncio.Event()
+        # Small sliding window so the marker is detected even when it
+        # straddles two os.read() boundaries.
+        self._scan_tail = ""
 
     def start_background(self) -> None:
         self._reader_task = asyncio.create_task(self._pty_reader())
@@ -397,16 +408,53 @@ class _LoginSession:
                         await ws.send_text(text)
                     except Exception:
                         self._websocket = None
+                # Watch for the success marker and schedule a graceful
+                # REPL exit the first time we see it. Scan a small sliding
+                # window so a marker split across two reads still matches.
+                if self._exit_task is None:
+                    combined = self._scan_tail + text
+                    if self._SUCCESS_MARKER in combined:
+                        self._exit_task = asyncio.create_task(
+                            self._graceful_exit()
+                        )
+                    tail_len = len(self._SUCCESS_MARKER) - 1
+                    self._scan_tail = combined[-tail_len:]
         except OSError:
             pass
         finally:
             self._done.set()
+
+    async def _graceful_exit(self) -> None:
+        """Drive the REPL to exit after ``/login`` completes.
+
+        The ``/login`` slash command's ``onDone`` only dismisses the Login
+        Dialog — it does not terminate the process. We send:
+
+        1. ``\\r`` to fire the "Press Enter to continue…" confirmation,
+           which dismisses the dialog and lets the post-login
+           fire-and-forget refreshes (``enrollTrustedDevice``,
+           ``refreshPolicyLimits``, etc.) start.
+        2. A short delay so those in-flight network calls settle.
+        3. ``/exit\\r`` which routes through ``gracefulShutdown`` in the
+           Claude Code REPL and terminates the subprocess cleanly.
+        """
+        try:
+            os.write(self.master_fd, b"\r")
+            # Give the post-login refreshes in commands/login/login.tsx
+            # (enrollTrustedDevice, refreshRemoteManagedSettings, etc.)
+            # a moment to complete before we tear the REPL down.
+            await asyncio.sleep(2.0)
+            os.write(self.master_fd, b"/exit\r")
+        except OSError:
+            pass
 
     # ── Cleanup ──
 
     async def destroy(self) -> None:
         if self._reader_task:
             self._reader_task.cancel()
+        if self._exit_task:
+            self._exit_task.cancel()
         try:
             os.close(self.master_fd)
         except OSError:
