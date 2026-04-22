@@ -841,6 +841,7 @@ async def receive_events(
         elif isinstance(message, ResultMessage):
             if message.session_id:
                 session.session_id = message.session_id
+        session.last_activity = time.monotonic()
         yield message
 
 
