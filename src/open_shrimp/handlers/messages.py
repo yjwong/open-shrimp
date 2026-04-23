@@ -50,6 +50,7 @@ from open_shrimp.handlers.state import (
     _setup_queues,
 )
 from open_shrimp.handlers.utils import (
+    _cancel_running,
     _get_context,
     _is_authorized,
     _is_bot_addressed,
@@ -463,7 +464,32 @@ async def _dispatch_to_agent(
         # Task is running -- try to inject into the live session.
         session = _injectable_sessions.get(scope)
         if session is not None:
-            await _inject_message(session, prompt, attachments, scope, context.bot, config)
+            try:
+                await _inject_message(
+                    session, prompt, attachments, scope, context.bot, config,
+                )
+            except _DeadTransport:
+                # Transport is dead — the existing task is stuck in
+                # receive_response() against a closed subprocess. Tear it
+                # down and start a fresh task; the SDK will resume the
+                # same session_id from disk so conversation continuity is
+                # preserved.
+                await _tear_down_dead_task(scope)
+                try:
+                    await context.bot.send_message(
+                        chat_id=scope.chat_id,
+                        text="↻ Session dropped, resuming\\.\\.\\.",
+                        parse_mode="MarkdownV2",
+                        **_thread_kwargs(scope),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to send session-restart notice for %s", scope,
+                    )
+                await _start_agent_task(
+                    prompt, attachments, scope, config, db, context,
+                    user_id=user_id, is_private_chat=is_private_chat,
+                )
         else:
             # Session is still being set up -- queue for injection once ready.
             if scope not in _setup_queues:
@@ -484,6 +510,28 @@ async def _dispatch_to_agent(
                 logger.debug("Failed to send setup-queue notification for scope %s", scope)
 
 
+class _DeadTransport(Exception):
+    """Raised by _inject_message when the SDK transport is no longer writable.
+
+    Signals to the dispatcher that the existing agent task is dead and the
+    message should be redelivered via a fresh session.
+    """
+
+
+async def _tear_down_dead_task(scope: ChatScope) -> None:
+    """Cancel a stuck agent task whose subprocess transport is dead.
+
+    After this returns, _start_agent_task can be called safely —
+    get_or_create_session detects the dead client via _is_client_alive
+    and creates a fresh one, resuming the same session_id.
+    """
+    # Evict from injectable map first so no other concurrent dispatcher
+    # tries to inject into the dead session.
+    _injectable_sessions.pop(scope, None)
+    _setup_queues.pop(scope, None)
+    await _cancel_running(scope)
+
+
 async def _inject_message(
     session: Any,
     prompt: str,
@@ -497,6 +545,10 @@ async def _inject_message(
     The message is sent via ``session.client.query()`` which writes to
     the CLI subprocess stdin.  The already-running ``receive_response()``
     iterator will pick up the resulting events naturally.
+
+    Raises _DeadTransport if the CLI subprocess is no longer writable
+    (sandbox exited, subprocess crashed). The caller is responsible for
+    tearing down the stale task and restarting with a fresh session.
     """
     attachment_paths: list[Path] = []
     if attachments:
@@ -524,6 +576,22 @@ async def _inject_message(
             "Injected message into live session for scope %s: %s",
             scope, actual_prompt[:100],
         )
+    except (CLIConnectionError, BrokenPipeError) as exc:
+        logger.warning(
+            "Dead transport on inject for scope %s (%s); will restart session",
+            scope, exc,
+        )
+        # Roll back the attachment-path tracking — the restarted task will
+        # re-copy its own attachments from prompt/attachments.
+        if attachment_paths:
+            tracked = _injected_attachment_paths.get(scope)
+            if tracked:
+                for p in attachment_paths:
+                    try:
+                        tracked.remove(p)
+                    except ValueError:
+                        pass
+        raise _DeadTransport() from exc
     except Exception:
         logger.exception("Failed to inject message for scope %s", scope)
         cleanup_attachments(attachment_paths)
