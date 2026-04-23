@@ -33,6 +33,7 @@ from claude_agent_sdk.types import (
     TaskStartedMessage,
 )
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 
 from open_shrimp.agent import AgentEvent
 from open_shrimp.db import ChatScope
@@ -40,6 +41,18 @@ from open_shrimp.markdown import gfm_to_telegram
 from open_shrimp.web_app_button import make_web_app_button
 
 logger = logging.getLogger(__name__)
+
+
+def _is_thread_not_found(exc: BaseException) -> bool:
+    """Whether ``exc`` is Telegram's 'message thread not found' error.
+
+    The scheduler relies on this propagating out so it can disable the
+    task and stop re-firing into a deleted forum topic.
+    """
+    return (
+        isinstance(exc, BadRequest)
+        and "message thread not found" in str(exc).lower()
+    )
 
 TELEGRAM_MAX_LENGTH = 4096
 DRAFT_INTERVAL_SECONDS = 0.5
@@ -169,6 +182,8 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
         )
         state.dirty = False
     except Exception as e:
+        if _is_thread_not_found(e):
+            raise
         error_msg = str(e).lower()
         if "draft_peer_invalid" in error_msg:
             # sendMessageDraft not supported for this chat type — disable drafts
@@ -217,7 +232,9 @@ async def _send_live_edit(bot: Bot, state: _DraftState) -> None:
             state.live_edit_message_id = msg.message_id
             state.live_edit_last_text = full_text
             state.dirty = False
-        except Exception:
+        except Exception as e:
+            if _is_thread_not_found(e):
+                raise
             logger.exception("Failed to send live-edit message")
     else:
         # Update the existing message.
@@ -302,7 +319,9 @@ async def _finalize_message(
                 **notif_kwargs,
             )
             message_ids.append(msg.message_id)
-        except Exception:
+        except Exception as e:
+            if _is_thread_not_found(e):
+                raise
             logger.exception("Failed to send finalized message chunk")
             # Retry without MarkdownV2 as fallback
             try:
@@ -313,7 +332,9 @@ async def _finalize_message(
                     **notif_kwargs,
                 )
                 message_ids.append(msg.message_id)
-            except Exception:
+            except Exception as e2:
+                if _is_thread_not_found(e2):
+                    raise
                 logger.exception("Failed to send plaintext fallback")
 
     return message_ids
@@ -496,7 +517,9 @@ async def _send_bash_button(
                 **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
-        except Exception:
+        except Exception as e:
+            if _is_thread_not_found(e):
+                raise
             logger.exception("Failed to send bash header (no output)")
         return
 
@@ -525,7 +548,9 @@ async def _send_bash_button(
             **state._thread_kwargs,
         )
         state.sent_message_ids.append(msg.message_id)
-    except Exception:
+    except Exception as e:
+        if _is_thread_not_found(e):
+            raise
         logger.exception("Failed to send bash button message")
 
 
@@ -613,7 +638,9 @@ async def _handle_assistant_error(
             parse_mode="MarkdownV2",
             **state._thread_kwargs,
         )
-    except Exception:
+    except Exception as e:
+        if _is_thread_not_found(e):
+            raise
         logger.exception("Failed to send error message for %s", error)
         try:
             await bot.send_message(
@@ -621,7 +648,9 @@ async def _handle_assistant_error(
                 text=msg_text,
                 **state._thread_kwargs,
             )
-        except Exception:
+        except Exception as e2:
+            if _is_thread_not_found(e2):
+                raise
             logger.exception("Failed to send plaintext error fallback")
 
 
@@ -895,7 +924,9 @@ async def stream_response(
                             disable_notification=True,
                             **state._thread_kwargs,
                         )
-                    except Exception:
+                    except Exception as e:
+                        if _is_thread_not_found(e):
+                            raise
                         logger.exception(
                             "Failed to send task started message"
                         )
@@ -946,7 +977,9 @@ async def stream_response(
                             disable_notification=True,
                             **state._thread_kwargs,
                         )
-                    except Exception:
+                    except Exception as e:
+                        if _is_thread_not_found(e):
+                            raise
                         logger.exception(
                             "Failed to send task notification message"
                         )
@@ -969,7 +1002,9 @@ async def stream_response(
                             disable_notification=True,
                             **state._thread_kwargs,
                         )
-                    except Exception:
+                    except Exception as e:
+                        if _is_thread_not_found(e):
+                            raise
                         logger.exception("Failed to send rate limit message")
                 elif info.status == "allowed_warning":
                     pct = (
@@ -1097,7 +1132,9 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
             **state._thread_kwargs,
         )
         state.sent_message_ids.append(msg.message_id)
-    except Exception:
+    except Exception as e:
+        if _is_thread_not_found(e):
+            raise
         logger.exception("Failed to finalize message")
         try:
             msg = await bot.send_message(
@@ -1107,7 +1144,9 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
                 **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
-        except Exception:
+        except Exception as e2:
+            if _is_thread_not_found(e2):
+                raise
             logger.exception("Failed to send plaintext fallback")
 
     # Keep the remainder as raw GFM for the next message.
