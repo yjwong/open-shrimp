@@ -168,6 +168,7 @@ jobs:
           API_KEY_ID: ${{ secrets.MACOS_NOTARY_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.MACOS_NOTARY_API_ISSUER_ID }}
         run: |
+          set -e
           BIN="dist/${{ matrix.artifact }}"
           codesign --force --timestamp --options runtime \
             --entitlements entitlements.plist \
@@ -177,11 +178,21 @@ jobs:
           echo -n "$API_KEY_B64" | base64 --decode -o "$KEY"
           ZIP="$RUNNER_TEMP/${{ matrix.artifact }}.zip"
           ditto -c -k --keepParent "$BIN" "$ZIP"
-          xcrun notarytool submit "$ZIP" \
-            --key "$KEY" \
-            --key-id "$API_KEY_ID" \
-            --issuer "$API_ISSUER_ID" \
-            --wait --timeout 30m
+          set +e
+          SUBMIT_OUT=$(xcrun notarytool submit "$ZIP" \
+            --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
+            --wait --timeout 30m --output-format json)
+          SUBMIT_RC=$?
+          echo "$SUBMIT_OUT"
+          SUBMIT_ID=$(echo "$SUBMIT_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+          if [ "$SUBMIT_RC" -ne 0 ] || ! echo "$SUBMIT_OUT" | grep -q '"status":"Accepted"'; then
+            echo "::group::Notary log for $SUBMIT_ID"
+            xcrun notarytool log "$SUBMIT_ID" \
+              --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
+            echo "::endgroup::"
+            rm -f "$ZIP" "$KEY"
+            exit 1
+          fi
           # Single-file binaries can't be stapled; Gatekeeper checks online.
           rm "$ZIP" "$KEY"
 
@@ -313,17 +324,26 @@ jobs:
         env:
           IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
+          set -e
           APP="dist/OpenShrimp.app"
-          # Sign nested Mach-O files bottom-up so inner signatures are sealed
-          # before the enclosing bundle is signed.
-          find "$APP" -type f \( -name "*.dylib" -o -name "*.so" \) \
-            -exec codesign --force --timestamp --options runtime \
-              --sign "$IDENTITY" {} \;
-          # Sign the embedded Python framework (if present)
-          find "$APP/Contents/Frameworks" -maxdepth 2 -type d -name "*.framework" \
-            -exec codesign --force --timestamp --options runtime \
-              --sign "$IDENTITY" {} \;
-          # Sign the main bundle with entitlements
+          # Sign every Mach-O file inside the bundle. Extension-based matching
+          # isn't enough for py2app (the embedded Python interpreter has no
+          # suffix), so probe each file with `file`.
+          find "$APP" -type f | while read -r f; do
+            if file -b "$f" | grep -qE 'Mach-O|dynamically linked shared library'; then
+              codesign --force --timestamp --options runtime \
+                --sign "$IDENTITY" "$f"
+            fi
+          done
+          # Sign embedded bundles (frameworks, nested .app) deepest-first so
+          # each enclosing CodeResources seal covers already-signed contents.
+          find "$APP/Contents" -type d \( -name "*.framework" -o -name "*.app" \) | \
+            awk -F/ '{ print NF, $0 }' | sort -k1 -rn | cut -d' ' -f2- | \
+            while read -r b; do
+              codesign --force --timestamp --options runtime \
+                --sign "$IDENTITY" "$b"
+            done
+          # Finally sign the outer bundle with entitlements.
           codesign --force --timestamp --options runtime \
             --entitlements entitlements.plist \
             --sign "$IDENTITY" "$APP"
@@ -348,15 +368,26 @@ jobs:
           API_KEY_ID: ${{ secrets.MACOS_NOTARY_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.MACOS_NOTARY_API_ISSUER_ID }}
         run: |
+          set -e
           DMG="dist/OpenShrimp-$(cat VERSION).dmg"
           codesign --force --timestamp --sign "$IDENTITY" "$DMG"
           KEY="$RUNNER_TEMP/notary_key.p8"
           echo -n "$API_KEY_B64" | base64 --decode -o "$KEY"
-          xcrun notarytool submit "$DMG" \
-            --key "$KEY" \
-            --key-id "$API_KEY_ID" \
-            --issuer "$API_ISSUER_ID" \
-            --wait --timeout 30m
+          set +e
+          SUBMIT_OUT=$(xcrun notarytool submit "$DMG" \
+            --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
+            --wait --timeout 30m --output-format json)
+          SUBMIT_RC=$?
+          echo "$SUBMIT_OUT"
+          SUBMIT_ID=$(echo "$SUBMIT_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+          if [ "$SUBMIT_RC" -ne 0 ] || ! echo "$SUBMIT_OUT" | grep -q '"status":"Accepted"'; then
+            echo "::group::Notary log for $SUBMIT_ID"
+            xcrun notarytool log "$SUBMIT_ID" \
+              --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
+            echo "::endgroup::"
+            rm -f "$KEY"
+            exit 1
+          fi
           rm "$KEY"
           xcrun stapler staple "$DMG"
           xcrun stapler validate "$DMG"
