@@ -242,16 +242,56 @@ function setupClipboard(context: string, authToken: string, rfb: RFBType): {
     const box = document.createElement("div");
     box.className = "paste-modal";
 
+    const labelRow = document.createElement("div");
+    labelRow.className = "paste-modal-label-row";
+
     const label = document.createElement("div");
     label.className = "paste-modal-label";
     label.textContent = "Paste text to send to VM";
-    box.appendChild(label);
+    labelRow.appendChild(label);
+
+    const pwToggleLabel = document.createElement("label");
+    pwToggleLabel.className = "paste-modal-toggle";
+    const pwToggle = document.createElement("input");
+    pwToggle.type = "checkbox";
+    pwToggleLabel.appendChild(pwToggle);
+    pwToggleLabel.appendChild(document.createTextNode(" Password"));
+    labelRow.appendChild(pwToggleLabel);
+
+    box.appendChild(labelRow);
 
     const textarea = document.createElement("textarea");
     textarea.className = "paste-modal-input";
     textarea.placeholder = "Long-press and paste here...";
     textarea.rows = 4;
     box.appendChild(textarea);
+
+    const pwInput = document.createElement("input");
+    pwInput.type = "password";
+    pwInput.className = "paste-modal-input";
+    pwInput.placeholder = "Password";
+    pwInput.autocomplete = "off";
+    pwInput.setAttribute("autocorrect", "off");
+    pwInput.setAttribute("autocapitalize", "off");
+    pwInput.spellcheck = false;
+    pwInput.style.display = "none";
+    box.appendChild(pwInput);
+
+    pwToggle.addEventListener("change", () => {
+      if (pwToggle.checked) {
+        pwInput.value = textarea.value;
+        textarea.value = "";
+        textarea.style.display = "none";
+        pwInput.style.display = "";
+        pwInput.focus();
+      } else {
+        textarea.value = pwInput.value;
+        pwInput.value = "";
+        pwInput.style.display = "none";
+        textarea.style.display = "";
+        textarea.focus();
+      }
+    });
 
     const btnRow = document.createElement("div");
     btnRow.className = "paste-modal-buttons";
@@ -265,7 +305,7 @@ function setupClipboard(context: string, authToken: string, rfb: RFBType): {
     sendBtn.textContent = "Send";
     sendBtn.classList.add("primary");
     sendBtn.addEventListener("click", async () => {
-      const text = textarea.value;
+      const text = pwToggle.checked ? pwInput.value : textarea.value;
       closePasteModal();
       if (text) {
         await sendToRemote(text);
@@ -637,10 +677,26 @@ function buildToolbar(
       flex-direction: column;
       gap: 12px;
     }
+    .paste-modal-label-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
     .paste-modal-label {
       color: #a9b1d6;
       font-family: monospace;
       font-size: 13px;
+    }
+    .paste-modal-toggle {
+      color: #a9b1d6;
+      font-family: monospace;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      user-select: none;
     }
     .paste-modal-input {
       background: #1a1b26;
