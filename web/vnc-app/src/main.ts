@@ -447,17 +447,24 @@ async function main(): Promise<void> {
 }
 
 // ── Mobile keyboard input via hidden textarea ──
+//
+// Port of noVNC's app/ui.js keyInput / keyboardinputReset — input-event
+// fallback for Android IMEs that don't fire proper keydown for text.
 
 function setupKeyboardInput(rfb: RFBType): {
   show: () => void;
   hide: () => void;
   isVisible: () => boolean;
 } {
+  const PADDING = "_".repeat(99);
+  let lastValue: string | null = null;
+
   const textarea = document.createElement("textarea");
   textarea.autocapitalize = "off";
   textarea.setAttribute("autocorrect", "off");
   textarea.setAttribute("autocomplete", "off");
   textarea.spellcheck = false;
+  textarea.tabIndex = -1;
   // Position offscreen but keep it focusable.
   Object.assign(textarea.style, {
     position: "fixed",
@@ -472,17 +479,71 @@ function setupKeyboardInput(rfb: RFBType): {
 
   let visible = false;
 
-  // Handle text input from the mobile keyboard.
-  textarea.addEventListener("input", () => {
-    const text = textarea.value;
-    textarea.value = "";
+  function reset(): void {
+    textarea.value = PADDING;
+    lastValue = PADDING;
+  }
+
+  textarea.addEventListener("input", (event) => {
     if (rfb.viewOnly) return;
-    for (const ch of text) {
-      rfb.sendKey(charToKeysym(ch), null);
+
+    const target = event.target as HTMLTextAreaElement;
+    const newValue = target.value;
+
+    if (!lastValue) {
+      reset();
+    }
+    const oldValue = lastValue!;
+
+    let newLen: number;
+    try {
+      // Use caret position because trailing whitespace may not be
+      // reflected in value.length in some browsers.
+      newLen = Math.max(target.selectionStart ?? 0, newValue.length);
+    } catch {
+      newLen = newValue.length;
+    }
+    const oldLen = oldValue.length;
+
+    let inputs = newLen - oldLen;
+    let backspaces = inputs < 0 ? -inputs : 0;
+
+    // Compare old vs new to account for text corrections or other input
+    // that modifies existing text (e.g. IME autocorrect).
+    for (let i = 0; i < Math.min(oldLen, newLen); i++) {
+      if (newValue.charAt(i) !== oldValue.charAt(i)) {
+        inputs = newLen - i;
+        backspaces = oldLen - i;
+        break;
+      }
+    }
+
+    for (let i = 0; i < backspaces; i++) {
+      rfb.sendKey(0xff08, "Backspace"); // XK_BackSpace
+    }
+    for (let i = newLen - inputs; i < newLen; i++) {
+      rfb.sendKey(charToKeysym(newValue.charAt(i)), null);
+    }
+
+    if (newLen > 2 * PADDING.length) {
+      reset();
+    } else if (newLen < 1) {
+      // There always has to be some text in the textarea for backspace
+      // to interact with.
+      reset();
+      // Blur+refocus is required for the Android keyboard to recognize
+      // that text has been added to the field. Must run outside the
+      // input handler to actually work.
+      target.blur();
+      setTimeout(() => target.focus(), 0);
+    } else {
+      lastValue = newValue;
     }
   });
 
-  // Handle special keys (Backspace, Enter, etc.).
+  // Special keys (Backspace, Enter, arrow keys) fire proper keydown
+  // events even on Android IMEs. preventDefault keeps them from also
+  // modifying the textarea and double-triggering the input diff.
   textarea.addEventListener("keydown", (e: KeyboardEvent) => {
     const keysym = SPECIAL_KEYSYMS[e.key];
     if (keysym && !rfb.viewOnly) {
@@ -494,6 +555,9 @@ function setupKeyboardInput(rfb: RFBType): {
   return {
     show() {
       visible = true;
+      // Ensure lastValue matches the textarea before any input event
+      // (upstream resets lazily on first input, leaving them out of sync).
+      reset();
       textarea.focus();
     },
     hide() {
