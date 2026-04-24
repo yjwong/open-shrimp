@@ -181,15 +181,17 @@ jobs:
           set +e
           SUBMIT_OUT=$(xcrun notarytool submit "$ZIP" \
             --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
-            --wait --timeout 30m --output-format json)
+            --wait --timeout 30m 2>&1)
           SUBMIT_RC=$?
           echo "$SUBMIT_OUT"
-          SUBMIT_ID=$(echo "$SUBMIT_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
-          if [ "$SUBMIT_RC" -ne 0 ] || ! echo "$SUBMIT_OUT" | grep -q '"status":"Accepted"'; then
-            echo "::group::Notary log for $SUBMIT_ID"
-            xcrun notarytool log "$SUBMIT_ID" \
-              --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
-            echo "::endgroup::"
+          SUBMIT_ID=$(printf '%s\n' "$SUBMIT_OUT" | awk '/^[[:space:]]*id:/ {print $2; exit}')
+          if [ "$SUBMIT_RC" -ne 0 ] || ! printf '%s\n' "$SUBMIT_OUT" | grep -q 'status: Accepted'; then
+            if [ -n "$SUBMIT_ID" ]; then
+              echo "::group::Notary log for $SUBMIT_ID"
+              xcrun notarytool log "$SUBMIT_ID" \
+                --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
+              echo "::endgroup::"
+            fi
             rm -f "$ZIP" "$KEY"
             exit 1
           fi
@@ -376,15 +378,17 @@ jobs:
           set +e
           SUBMIT_OUT=$(xcrun notarytool submit "$DMG" \
             --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
-            --wait --timeout 30m --output-format json)
+            --wait --timeout 30m 2>&1)
           SUBMIT_RC=$?
           echo "$SUBMIT_OUT"
-          SUBMIT_ID=$(echo "$SUBMIT_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
-          if [ "$SUBMIT_RC" -ne 0 ] || ! echo "$SUBMIT_OUT" | grep -q '"status":"Accepted"'; then
-            echo "::group::Notary log for $SUBMIT_ID"
-            xcrun notarytool log "$SUBMIT_ID" \
-              --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
-            echo "::endgroup::"
+          SUBMIT_ID=$(printf '%s\n' "$SUBMIT_OUT" | awk '/^[[:space:]]*id:/ {print $2; exit}')
+          if [ "$SUBMIT_RC" -ne 0 ] || ! printf '%s\n' "$SUBMIT_OUT" | grep -q 'status: Accepted'; then
+            if [ -n "$SUBMIT_ID" ]; then
+              echo "::group::Notary log for $SUBMIT_ID"
+              xcrun notarytool log "$SUBMIT_ID" \
+                --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
+              echo "::endgroup::"
+            fi
             rm -f "$KEY"
             exit 1
           fi

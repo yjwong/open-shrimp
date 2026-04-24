@@ -1,0 +1,30 @@
+name: Notary log
+
+on:
+  workflow_dispatch:
+    inputs:
+      submission_id:
+        description: "Apple notary submission ID (UUID)"
+        required: true
+        type: string
+
+jobs:
+  fetch:
+    runs-on: macos-latest
+    steps:
+      - name: Fetch notarization log
+        env:
+          API_KEY_B64: ${{ secrets.MACOS_NOTARY_API_KEY_P8_BASE64 }}
+          API_KEY_ID: ${{ secrets.MACOS_NOTARY_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.MACOS_NOTARY_API_ISSUER_ID }}
+          SUBMISSION_ID: ${{ inputs.submission_id }}
+        run: |
+          set -e
+          KEY="$RUNNER_TEMP/notary_key.p8"
+          echo -n "$API_KEY_B64" | base64 --decode -o "$KEY"
+          xcrun notarytool info "$SUBMISSION_ID" \
+            --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID"
+          echo "---"
+          xcrun notarytool log "$SUBMISSION_ID" \
+            --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID"
+          rm "$KEY"
