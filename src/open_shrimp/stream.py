@@ -579,7 +579,8 @@ async def finalize_and_reset(
 _ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
     "authentication_failed": (
         "⚠️ **Authentication failed.** Claude was unable to authenticate. "
-        "Check that your API key or OAuth session is valid."
+        "Check that your API key or OAuth session is valid. "
+        "Run /login to re-authenticate Claude Code."
     ),
     "billing_error": (
         "⚠️ **Billing error.** There is a problem with your Anthropic account billing. "
