@@ -1,4 +1,4 @@
-"""Telegram command handlers (/context, /clear, /status, /cancel, /model,
+"""Telegram command handlers (/start, /context, /clear, /status, /cancel, /model,
 /effort, /resume, /review, /mcp, /tasks, /usage, /login).
 """
 
@@ -58,6 +58,38 @@ def _is_private_chat(update: Update) -> bool:
     """Return True if this update is from a private (1:1) chat."""
     chat = update.effective_chat
     return chat is not None and chat.type == chat.PRIVATE
+
+
+# ── /start ──
+
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command: welcome message for first-time users."""
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    message = update.effective_message
+    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    scope = chat_scope_from_message(message)
+    ctx_name, ctx = await _get_context(scope, config, db)
+
+    lines = [
+        "👋 *Welcome to OpenShrimp*",
+        "",
+        "You're connected to Claude. Just send a message (or voice note) — no command needed.",
+        "",
+        f"*Working in:* `{ctx_name}` → `{ctx.directory}`",
+        "",
+        "*Commands worth knowing:*",
+        "• /context — switch working directory",
+        "• /clear — start a fresh session",
+        "• /status — show current state",
+    ]
+    text = "\n".join(lines)
+    for ch in ".-()!>#+={|}~[]":
+        text = text.replace(ch, f"\\{ch}")
+    await message.reply_text(text, parse_mode="MarkdownV2")
 
 
 # ── /context ──

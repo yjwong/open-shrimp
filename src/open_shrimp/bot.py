@@ -49,6 +49,7 @@ from open_shrimp.handlers.commands import (
     resume_handler,
     review_handler,
     schedule_handler,
+    start_handler,
     status_handler,
     tasks_handler,
     usage_handler,
@@ -177,6 +178,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.bot_data["config_path"] = None  # set by run_bot if available
 
     # Command handlers
+    app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("context", context_handler))
     app.add_handler(CommandHandler("clear", clear_handler))
     app.add_handler(CommandHandler("status", status_handler))
