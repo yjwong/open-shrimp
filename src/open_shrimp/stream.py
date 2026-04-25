@@ -58,7 +58,13 @@ def _is_auto_promoted_fg_bash(
     a "View output" button that 404s. Reported upstream as
     anthropics/claude-code#31518 (closed without fix).
     """
-    if event.task_type != "local_bash" or not event.tool_use_id:
+    # Only TaskStartedMessage carries task_type; TaskProgressMessage and
+    # TaskNotificationMessage don't, so for those we rely on the task_id
+    # we recorded when the started event was suppressed.
+    task_type = getattr(event, "task_type", None)
+    if task_type is None:
+        return event.task_id in state.suppressed_task_ids
+    if task_type != "local_bash" or not event.tool_use_id:
         return False
     info = state.tool_use_map.get(event.tool_use_id)
     if info is None or info[0] != "Bash":
@@ -151,6 +157,11 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
+    # task_ids of auto-promoted foreground Bash tasks (see
+    # _is_auto_promoted_fg_bash).  Only TaskStartedMessage carries
+    # task_type, so we record the id here at started-time and skip the
+    # matching TaskProgressMessage / TaskNotificationMessage events.
+    suppressed_task_ids: set[str] = field(default_factory=set)
     # Fields for web_app button fallback in group chats.
     user_id: int = 0
     is_private_chat: bool = True
@@ -877,6 +888,7 @@ async def stream_response(
 
                 if isinstance(event, TaskStartedMessage):
                     if _is_auto_promoted_fg_bash(state, event):
+                        state.suppressed_task_ids.add(event.task_id)
                         logger.debug(
                             "Skipping auto-promoted FG bash task %s for "
                             "chat %d (tool_use_id=%s)",
@@ -985,6 +997,7 @@ async def stream_response(
 
                 elif isinstance(event, TaskNotificationMessage):
                     if _is_auto_promoted_fg_bash(state, event):
+                        state.suppressed_task_ids.discard(event.task_id)
                         continue
                     logger.info(
                         "Background task %s %s for chat %d: %s",
