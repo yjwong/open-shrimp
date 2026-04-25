@@ -179,9 +179,29 @@ _HOMEBREW_INSTALL_SCRIPT = textwrap.dedent("""\
     echo "$PW" | sudo -S mkdir -p /usr/local/bin
     echo "$PW" | sudo -S bash -c 'printf "#!/bin/sh\\nset -eu\\ncat \\"\\$HOME/password\\"\\n" > /usr/local/bin/lima-sudo-askpass.sh && chmod 755 /usr/local/bin/lima-sudo-askpass.sh'
 
-    # Auto-login: boot straight to desktop without loginwindow.
+    # Auto-login: write autoLoginUser plist key + /etc/kcpassword manually.
+    # `sysadminctl -autologin set` half-fails on macOS Tahoe (26):
+    # SACSetAutoLoginPassword returns error:22, autoLoginUser is set, but
+    # /etc/kcpassword is never written — loginwindow then has no password
+    # and shows the prompt instead of auto-logging in.  Doing it manually
+    # is portable across versions.  Use perl since /usr/bin/python3 triggers
+    # the Xcode CLT install dialog on fresh images.
     # Takes effect on next boot — reboot_if_first_provision() handles that.
-    echo "$PW" | sudo -S sysadminctl -autologin set -userName "$(whoami)" -password "$PW"
+    echo "$PW" | sudo -S defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser -string "$(whoami)"
+    perl -e '
+        my @key = (0x7d, 0x89, 0x52, 0x23, 0xd2, 0xbc, 0xdd, 0xea, 0xa3, 0xb9, 0x1f);
+        my $pw = $ARGV[0];
+        my @out;
+        for (my $i = 0; $i < length($pw); $i++) {
+            push @out, ord(substr($pw, $i, 1)) ^ $key[$i % scalar(@key)];
+        }
+        while (scalar(@out) % 12 != 0) {
+            push @out, $key[scalar(@out) % scalar(@key)];
+        }
+        print pack("C*", @out);
+    ' "$PW" > /tmp/kcpassword.new
+    echo "$PW" | sudo -S install -m 600 -o root -g wheel /tmp/kcpassword.new /etc/kcpassword
+    rm -f /tmp/kcpassword.new
 
     # Disable screen lock and screensaver.
     echo "$PW" | sudo -S sysadminctl -screenLock off -password "$PW"
