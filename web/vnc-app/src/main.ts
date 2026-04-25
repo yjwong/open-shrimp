@@ -484,6 +484,92 @@ function setupKeyboardInput(rfb: RFBType): {
     lastValue = PADDING;
   }
 
+  // ── Extra keys row: modifiers, arrows, special keys ──
+  //
+  // Modifiers (Ctrl/Alt/Shift) are held server-side until tapped again,
+  // so anything typed via IME or tapped from this row gets the modifier
+  // applied — this is how we work around the Android IME stripping the
+  // shift state when typing capitals or shifted symbols.
+
+  type ExtraKey = {
+    label: string;
+    keysym: number;
+    code: string;
+    toggle?: boolean;
+  };
+  const EXTRA_KEYS: ExtraKey[] = [
+    { label: "Esc", keysym: 0xff1b, code: "Escape" },
+    { label: "Tab", keysym: 0xff09, code: "Tab" },
+    { label: "Ctrl", keysym: 0xffe3, code: "ControlLeft", toggle: true },
+    { label: "Alt", keysym: 0xffe9, code: "AltLeft", toggle: true },
+    { label: "Shift", keysym: 0xffe1, code: "ShiftLeft", toggle: true },
+    { label: "←", keysym: 0xff51, code: "ArrowLeft" },
+    { label: "↑", keysym: 0xff52, code: "ArrowUp" },
+    { label: "↓", keysym: 0xff54, code: "ArrowDown" },
+    { label: "→", keysym: 0xff53, code: "ArrowRight" },
+  ];
+
+  const heldMods = new Map<number, { code: string; btn: HTMLButtonElement }>();
+
+  const extraKeys = document.createElement("div");
+  extraKeys.id = "extra-keys";
+
+  for (const k of EXTRA_KEYS) {
+    const btn = document.createElement("button");
+    btn.textContent = k.label;
+    btn.tabIndex = -1;
+
+    if (k.toggle) {
+      btn.addEventListener("pointerdown", (e) => {
+        // Don't steal focus from the textarea — would close the soft keyboard.
+        e.preventDefault();
+        if (rfb.viewOnly) return;
+        if (heldMods.has(k.keysym)) {
+          heldMods.delete(k.keysym);
+          rfb.sendKey(k.keysym, k.code, false);
+          btn.classList.remove("held");
+        } else {
+          heldMods.set(k.keysym, { code: k.code, btn });
+          rfb.sendKey(k.keysym, k.code, true);
+          btn.classList.add("held");
+        }
+      });
+    } else {
+      // Hold-style: press on pointerdown, release on pointerup. A quick tap
+      // sends press+release; a long press leaves the key held so the guest
+      // OS's native key-repeat takes over (works for arrows, tab cycling).
+      let pressed = false;
+      btn.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (rfb.viewOnly || pressed) return;
+        pressed = true;
+        rfb.sendKey(k.keysym, k.code, true);
+        // Pointer capture: ensures pointerup fires on this button even if
+        // the finger drifts off before lifting.
+        btn.setPointerCapture(e.pointerId);
+      });
+      const release = () => {
+        if (!pressed) return;
+        pressed = false;
+        rfb.sendKey(k.keysym, k.code, false);
+      };
+      btn.addEventListener("pointerup", release);
+      btn.addEventListener("pointercancel", release);
+    }
+
+    extraKeys.appendChild(btn);
+  }
+
+  document.body.appendChild(extraKeys);
+
+  function releaseAllMods(): void {
+    for (const [keysym, { code, btn }] of heldMods) {
+      rfb.sendKey(keysym, code, false);
+      btn.classList.remove("held");
+    }
+    heldMods.clear();
+  }
+
   textarea.addEventListener("input", (event) => {
     if (rfb.viewOnly) return;
 
@@ -559,10 +645,17 @@ function setupKeyboardInput(rfb: RFBType): {
       // (upstream resets lazily on first input, leaving them out of sync).
       reset();
       textarea.focus();
+      extraKeys.classList.add("visible");
+      const container = document.getElementById("vnc-container");
+      if (container) container.style.bottom = "68px";
     },
     hide() {
       visible = false;
       textarea.blur();
+      extraKeys.classList.remove("visible");
+      releaseAllMods();
+      const container = document.getElementById("vnc-container");
+      if (container) container.style.bottom = "36px";
     },
     isVisible: () => visible,
   };
@@ -708,6 +801,45 @@ function buildToolbar(
       color: #565f89;
       font-size: 11px;
       font-family: monospace;
+    }
+    #extra-keys {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 36px;
+      height: 32px;
+      background: #24283b;
+      display: none;
+      align-items: center;
+      overflow-x: auto;
+      padding: 0 4px;
+      gap: 4px;
+      z-index: 99;
+      border-top: 1px solid #414868;
+    }
+    #extra-keys.visible {
+      display: flex;
+    }
+    #extra-keys button {
+      background: #414868;
+      color: #a9b1d6;
+      border: none;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-family: monospace;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      min-width: 36px;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: manipulation;
+    }
+    #extra-keys button.held {
+      background: #7aa2f7;
+      color: #1a1b26;
     }
     #loading {
       position: fixed;
