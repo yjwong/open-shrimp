@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import pty
-import shutil
 import struct
 import termios
 from collections.abc import AsyncGenerator
@@ -26,6 +25,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from open_shrimp.claude_binary import find_claude_binary
 from open_shrimp.config import Config
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
@@ -552,11 +552,10 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
 
     # ── Start a new session ──
 
-    claude_bin = shutil.which("claude")
-    if claude_bin is None:
-        await websocket.send_text(
-            "\x1b[31mError: claude CLI not found in PATH.\x1b[0m\r\n"
-        )
+    try:
+        claude_bin = find_claude_binary()
+    except RuntimeError as e:
+        await websocket.send_text(f"\x1b[31mError: {e}\x1b[0m\r\n")
         await websocket.close()
         return
 

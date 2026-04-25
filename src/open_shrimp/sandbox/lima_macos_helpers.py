@@ -463,7 +463,7 @@ def ensure_claude_cli_in_vm_macos(
         return
 
     # Find host binary.
-    from open_shrimp.sandbox.docker_helpers import find_claude_binary
+    from open_shrimp.claude_binary import find_claude_binary
     host_binary = find_claude_binary()
     logger.info("Copying host Claude CLI (%s) into macOS VM %s...", host_binary, inst_name)
 

@@ -511,7 +511,7 @@ class LibvirtSandbox:
         assert self._ssh_port is not None
         ssh_key = self._sdir / "ssh_key"
 
-        from open_shrimp.sandbox.docker_helpers import find_claude_binary
+        from open_shrimp.claude_binary import find_claude_binary
         from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
 
         cli_binary = find_claude_binary()
