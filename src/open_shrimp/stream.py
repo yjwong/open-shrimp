@@ -43,6 +43,29 @@ from open_shrimp.web_app_button import make_web_app_button
 logger = logging.getLogger(__name__)
 
 
+def _is_auto_promoted_fg_bash(
+    state: "_DraftState",
+    event: "TaskStartedMessage | TaskProgressMessage | TaskNotificationMessage",
+) -> bool:
+    """Detect SDK auto-promotion of slow foreground Bash to a task.
+
+    Why: Claude Code CLI 2.1.117 (bundled with claude-agent-sdk 0.1.65)
+    silently wraps long-running foreground Bash in ``task_started`` /
+    ``task_notification`` events even when ``run_in_background`` was not
+    set. Those auto-promoted tasks have an empty ``output_file`` and no
+    ``.output`` file on disk — the regular Bash tool-result flow already
+    rendered the output. Without this filter we'd post ⏳ + 📋 noise and
+    a "View output" button that 404s. Reported upstream as
+    anthropics/claude-code#31518 (closed without fix).
+    """
+    if event.task_type != "local_bash" or not event.tool_use_id:
+        return False
+    info = state.tool_use_map.get(event.tool_use_id)
+    if info is None or info[0] != "Bash":
+        return False
+    return not info[1].get("run_in_background")
+
+
 def _is_thread_not_found(exc: BaseException) -> bool:
     """Whether ``exc`` is Telegram's 'message thread not found' error.
 
@@ -853,6 +876,15 @@ async def stream_response(
                     result.session_id = sid
 
                 if isinstance(event, TaskStartedMessage):
+                    if _is_auto_promoted_fg_bash(state, event):
+                        logger.debug(
+                            "Skipping auto-promoted FG bash task %s for "
+                            "chat %d (tool_use_id=%s)",
+                            event.task_id,
+                            state.chat_id,
+                            event.tool_use_id,
+                        )
+                        continue
                     logger.info(
                         "Background task started %s (%s) for chat %d: %s",
                         event.task_id,
@@ -933,6 +965,8 @@ async def stream_response(
                         )
 
                 elif isinstance(event, TaskProgressMessage):
+                    if _is_auto_promoted_fg_bash(state, event):
+                        continue
                     logger.debug(
                         "Background task progress %s for chat %d: "
                         "last_tool=%s",
@@ -950,6 +984,8 @@ async def stream_response(
                             )
 
                 elif isinstance(event, TaskNotificationMessage):
+                    if _is_auto_promoted_fg_bash(state, event):
+                        continue
                     logger.info(
                         "Background task %s %s for chat %d: %s",
                         event.task_id,
