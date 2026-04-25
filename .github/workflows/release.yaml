@@ -86,6 +86,11 @@ jobs:
             artifact: openshrimp-macos-aarch64
             sdist_artifact: sdist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
+          - os: macos-latest
+            artifact: openshrimp-macos-x86_64
+            sdist_artifact: sdist-openshrimp
+            exec_code: "from open_shrimp.main import main; main()"
+            rust_target: x86_64-apple-darwin
           # moonshine-stt
           - os: ubuntu-latest
             artifact: moonshine-stt-linux-x86_64
@@ -99,6 +104,11 @@ jobs:
             artifact: moonshine-stt-macos-aarch64
             sdist_artifact: sdist-moonshine-stt
             exec_code: "from moonshine_stt.main import main; main()"
+          - os: macos-latest
+            artifact: moonshine-stt-macos-x86_64
+            sdist_artifact: sdist-moonshine-stt
+            exec_code: "from moonshine_stt.main import main; main()"
+            rust_target: x86_64-apple-darwin
 
     steps:
       - uses: actions/checkout@v6
@@ -115,6 +125,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target || '' }}
 
       - name: Cache Cargo registry
         uses: actions/cache@v5
@@ -137,7 +149,12 @@ jobs:
           PYAPP_EXEC_CODE: ${{ matrix.exec_code }}
           PYAPP_DISTRIBUTION_EMBED: "1"
           PYAPP_PASS_LOCATION: "1"
-        run: cargo install pyapp --force --root dist/pyapp
+        run: |
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            cargo install pyapp --force --root dist/pyapp --target ${{ matrix.rust_target }}
+          else
+            cargo install pyapp --force --root dist/pyapp
+          fi
 
       - name: Rename binary
         run: mv dist/pyapp/bin/pyapp dist/${{ matrix.artifact }}
