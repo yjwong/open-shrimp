@@ -88,6 +88,7 @@ def _generate_systemd_unit(
         ExecStart={exec_start} --config {shlex.quote(config_path)}
         Restart=on-failure
         RestartSec=5
+        KillMode=mixed
 
         [Install]
         WantedBy=default.target
