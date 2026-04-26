@@ -19,27 +19,20 @@ Keep your bot token secret. Anyone with it can control your bot.
 
 ### Recommended bot settings
 
-While you're in BotFather, configure these optional settings:
+While you're in BotFather, configure these:
 
-- `/setprivacy` — set to **Disable** if you want the bot to see all messages in group chats (required for group chat support without @mentions)
-- `/setcommands` — paste the following to register command autocompletion:
+- **Threaded Mode** — Settings → Bot Settings → Threads Settings → **Threaded Mode**, then turn it on. This is what unlocks parallel conversations (see below). Strongly recommended.
+- **Privacy** — `/setprivacy` and set to **Disable**. Lets the bot see every message in groups, which is required for forum topic support and for group chats to work without @mentions.
 
-```
-context - List or switch contexts
-clear - Start a fresh session
-status - Show current status
-cancel - Abort running task
-model - Show or change model
-resume - List or resume sessions
-review - Open the review Mini App
-schedule - Manage scheduled tasks
-tasks - List background tasks
-usage - Show API usage stats
-vnc - Open VNC viewer
-login - Authenticate for Mini Apps
-mcp - Manage MCP servers
-restart - Restart the bot
-```
+## Run conversations in parallel with Threaded Mode (strongly recommended)
+
+OpenShrimp comes alive when you can run more than one conversation at a time, and **Threaded Mode** is what makes that possible — even in a 1-on-1 private chat with the bot.
+
+With Threaded Mode enabled in BotFather, your private chat with the bot can hold many separate threads. Each thread is an independent conversation with its own context, working directory, Claude session, and tool-approval state. Think one thread per project, per task, or per investigation.
+
+Why this matters: without threads, every message lands in the same Claude session, so a long-running task blocks anything else you'd want to do. With threads, you can have Claude refactoring one repo while you ask it questions about another — neither conversation interferes with the other.
+
+The same model extends to **forum groups** (a group with Topics enabled): each topic is a separate thread, and the bot responds to every message inside a topic without needing an @mention. Use a forum group if you want to share a workspace with other allowed users; otherwise a private chat with Threaded Mode is the simplest setup.
 
 ## Find your Telegram user ID
 
