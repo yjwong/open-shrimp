@@ -96,6 +96,34 @@ from open_shrimp.hooks import ApprovalRule
 _tool_approved_sessions: dict[tuple[ChatScope, str], list[ApprovalRule]] = {}
 
 # ---------------------------------------------------------------------------
+# Session-approved directories: paths the user explicitly opted into via the
+# "Allow <reading from|all edits in> <dir>/ this session" button on an
+# out-of-scope file approval prompt.  Membership grants both read AND write
+# access for the rest of the session (mirrors Claude Code's directory-scoped
+# session approval).  Cleared on /clear or context switch.
+# ---------------------------------------------------------------------------
+_session_approved_dirs: dict[tuple[ChatScope, str], set[str]] = {}
+
+# ---------------------------------------------------------------------------
+# Pending session-dir approvals: short key -> (scope, ctx_name, directory).
+# Telegram callback_data is limited to 64 bytes, so the directory path is
+# stashed here and only a short UUID rides in the callback.
+# ---------------------------------------------------------------------------
+_pending_session_dirs: dict[str, tuple[ChatScope, str, str]] = {}
+
+
+def clear_session_approvals(scope: ChatScope, context_name: str) -> None:
+    """Drop every session-scoped approval for *(scope, context_name)*.
+
+    Called on /clear and on context switch so that auto-approval rules,
+    accept-all-edits, and session-approved directories don't leak across
+    contexts or persist after the user explicitly resets.
+    """
+    _edit_approved_sessions.discard((scope, context_name))
+    _tool_approved_sessions.pop((scope, context_name), None)
+    _session_approved_dirs.pop((scope, context_name), None)
+
+# ---------------------------------------------------------------------------
 # Per-scope model override: scope -> model name.  Set via /model command.
 # Cleared on /clear or context switch.  Takes precedence over context config.
 # ---------------------------------------------------------------------------

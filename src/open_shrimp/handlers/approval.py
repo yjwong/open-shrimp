@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+import os
 from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
+from open_shrimp.db import ChatScope
 from open_shrimp.web_app_button import make_web_app_button
 
 from open_shrimp.handlers.state import (
@@ -16,9 +18,10 @@ from open_shrimp.handlers.state import (
     _approval_metadata,
     _approval_tool_names,
     _pending_agent_inputs,
+    _pending_session_dirs,
 )
 from open_shrimp.handlers.utils import _escape_mdv2
-from open_shrimp.hooks import ApprovalRule
+from open_shrimp.hooks import _PATH_SCOPED_TOOLS, ApprovalRule
 from open_shrimp.stream import _relative_path
 
 logger = logging.getLogger(__name__)
@@ -285,8 +288,20 @@ async def _send_approval_keyboard(
     user_id: int = 0,
     is_private_chat: bool = True,
     bot_token: str = "",
+    suggested_session_dir: str | None = None,
+    scope: ChatScope | None = None,
+    context_name: str | None = None,
 ) -> bool:
-    """Send an inline keyboard for tool approval and wait for response."""
+    """Send an inline keyboard for tool approval and wait for response.
+
+    When ``suggested_session_dir`` is set (the file tool's target is
+    outside the approved directories), an extra "Allow <dir>/ this
+    session" button is added that, when clicked, adds the directory to
+    the session-approved set so subsequent tool calls in that directory
+    auto-approve.  ``scope`` and ``context_name`` are required to scope
+    that approval state.
+    """
+    import uuid
     if tool_name == "Edit":
         text = _format_edit_approval(tool_input, cwd=cwd)
     elif tool_name == "Bash":
@@ -338,9 +353,12 @@ async def _send_approval_keyboard(
                     f"Allow & remember: {prefix} *",
                     callback_data=accept_prefix_data,
                 ))
-    # All tools (except Edit/Write, ExitPlanMode, and Bash) get a generic
-    # "Accept all <tool>" option for session-scoped auto-approval.
-    _no_accept_all = ("Edit", "Write", "ExitPlanMode", "Bash")
+    # Path-scoped tools are excluded from the generic "Accept all <tool>"
+    # button: an in-scope path auto-approves already, and an out-of-scope
+    # path must go through the directory-scoped button below — blanket
+    # per-tool rules must not bypass the directory boundary.  Bash and
+    # ExitPlanMode have their own dedicated approval flows.
+    _no_accept_all = _PATH_SCOPED_TOOLS.keys() | {"ExitPlanMode", "Bash"}
     if tool_name not in _no_accept_all:
         accept_all_tool_data = f"accept_all_tool:{tool_use_id}:{tool_name}"
         # Truncate callback_data to 64 bytes (Telegram limit)
@@ -348,6 +366,38 @@ async def _send_approval_keyboard(
             session_row.append(InlineKeyboardButton(
                 f"Accept all {tool_name}", callback_data=accept_all_tool_data,
             ))
+
+    # Out-of-scope file access: offer to approve the entire directory
+    # for the rest of the session (mirrors Claude Code).  Both readers
+    # and editors get the same underlying grant — the wording differs
+    # so the button reads naturally per tool family.
+    accept_dir_data = ""
+    accept_dir_key = ""
+    if suggested_session_dir and scope is not None and context_name is not None:
+        accept_dir_key = uuid.uuid4().hex[:12]
+        _pending_session_dirs[accept_dir_key] = (
+            scope, context_name, suggested_session_dir,
+        )
+        accept_dir_data = f"accept_dir:{tool_use_id}:{accept_dir_key}"
+        if len(accept_dir_data.encode()) <= 64:
+            dir_label = os.path.basename(
+                suggested_session_dir.rstrip(os.sep)
+            ) or suggested_session_dir
+            # Truncate the directory label so the button stays readable.
+            if len(dir_label) > 24:
+                dir_label = "\u2026" + dir_label[-23:]
+            if tool_name in ("Edit", "Write"):
+                btn_label = f"Allow all edits in {dir_label}/"
+            else:
+                btn_label = f"Allow reading from {dir_label}/"
+            session_row.append(InlineKeyboardButton(
+                btn_label, callback_data=accept_dir_data,
+            ))
+        else:
+            # Couldn't fit — drop the pending entry.
+            _pending_session_dirs.pop(accept_dir_key, None)
+            accept_dir_data = ""
+            accept_dir_key = ""
 
     rows = [primary_row]
     # ExitPlanMode: add "View plan" as its own row (web_app buttons need space).
@@ -404,7 +454,7 @@ async def _send_approval_keyboard(
     if tool_name in ("Edit", "Write"):
         _approval_futures[f"accept_all_edits:{tool_use_id}"] = future
     accept_all_tool_key = f"accept_all_tool:{tool_use_id}:{tool_name}"
-    if tool_name not in ("Edit", "Write") and len(accept_all_tool_key.encode()) <= 64:
+    if tool_name not in _no_accept_all and len(accept_all_tool_key.encode()) <= 64:
         _approval_futures[accept_all_tool_key] = future
     # Register prefix-specific key for Bash.
     accept_prefix_key = ""
@@ -415,6 +465,8 @@ async def _send_approval_keyboard(
             accept_prefix_key = f"accept_bash_pfx:{tool_use_id}:{prefix}"
             if len(accept_prefix_key.encode()) <= 64:
                 _approval_futures[accept_prefix_key] = future
+    if accept_dir_data:
+        _approval_futures[accept_dir_data] = future
 
     try:
         return await future
@@ -425,6 +477,11 @@ async def _send_approval_keyboard(
         _approval_futures.pop(accept_all_tool_key, None)
         if accept_prefix_key:
             _approval_futures.pop(accept_prefix_key, None)
+        if accept_dir_data:
+            _approval_futures.pop(accept_dir_data, None)
+            # If the user resolved via approve/deny instead of the
+            # session-dir button, the pending entry is now dead weight.
+            _pending_session_dirs.pop(accept_dir_key, None)
         _pending_agent_inputs.pop(tool_use_id, None)
         _approval_tool_names.pop(tool_use_id, None)
         _approval_metadata.pop(tool_use_id, None)
@@ -440,6 +497,7 @@ async def _auto_resolve_pending_approvals(
     rule: ApprovalRule | None,
     is_edit_rule: bool,
     chat_id: int,
+    approved_dir: str | None = None,
 ) -> None:
     """Resolve all pending approval futures that match a newly created rule.
 
@@ -452,8 +510,11 @@ async def _auto_resolve_pending_approvals(
             None when is_edit_rule is True.
         is_edit_rule: True for "accept all edits" (matches Edit/Write).
         chat_id: Only resolve approvals in this chat.
+        approved_dir: When set, auto-resolve any pending path-scoped tool
+            whose target file/directory resolves to within this directory.
+            Used by the session-dir approval button.
     """
-    from open_shrimp.hooks import matches_approval_rule
+    from open_shrimp.hooks import matches_approval_rule, tool_path_within_dir
 
     # Snapshot the metadata keys to avoid mutating dict during iteration.
     for tool_use_id, meta in list(_approval_metadata.items()):
@@ -469,6 +530,10 @@ async def _auto_resolve_pending_approvals(
         if is_edit_rule and t_name in ("Edit", "Write"):
             matched = True
         elif rule is not None and matches_approval_rule(rule, t_name, t_input):
+            matched = True
+        elif approved_dir is not None and tool_path_within_dir(
+            t_name, t_input, approved_dir,
+        ):
             matched = True
 
         if not matched:
@@ -705,6 +770,81 @@ async def handle_approval_callback(
         if chat_id is not None and prefix:
             await _auto_resolve_pending_approvals(
                 query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
+            )
+        return True
+
+    # Handle "Allow <reading from|all edits in> <dir>/ this session" --
+    # approve this tool and grant full read+write access to the directory
+    # for the remainder of the session.
+    if data.startswith("accept_dir:"):
+        future = _approval_futures.get(data)
+        if not future or future.done():
+            await query.answer("This approval has expired.")
+            return True
+
+        # Parse: "accept_dir:<tool_use_id>:<short_key>"
+        parts = data.split(":", 2)
+        short_key = parts[2] if len(parts) >= 3 else ""
+
+        from open_shrimp.handlers.state import (
+            _pending_session_dirs,
+            _session_approved_dirs,
+        )
+
+        pending = _pending_session_dirs.pop(short_key, None)
+        if pending is None:
+            await query.answer("This action has expired.")
+            return True
+
+        scope, ctx_name, directory = pending
+        _session_approved_dirs.setdefault((scope, ctx_name), set()).add(
+            directory,
+        )
+        logger.info(
+            "Session-approved dir %s for scope %s context %s",
+            directory,
+            scope,
+            ctx_name,
+        )
+
+        future.set_result(True)
+        escaped_dir = _escape_mdv2(directory)
+        await query.answer(
+            f"Approved. {directory}/ allowed for this session."
+        )
+
+        if query.message:
+            try:
+                original_md = (
+                    query.message.text_markdown_v2
+                    or query.message.text
+                    or ""
+                )
+                status = (
+                    f"\n\n\u2705 *Approved\\.* "
+                    f"_All future tool calls in `{escaped_dir}` "
+                    f"auto\\-approved this session\\._"
+                )
+                await query.message.edit_text(
+                    text=original_md + status,
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    logger.exception("Failed to edit approval message")
+
+        # Auto-resolve other pending approvals whose target is in this dir.
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is not None:
+            await _auto_resolve_pending_approvals(
+                query.get_bot(),
+                rule=None,
+                is_edit_rule=False,
+                chat_id=chat_id,
+                approved_dir=directory,
             )
         return True
 

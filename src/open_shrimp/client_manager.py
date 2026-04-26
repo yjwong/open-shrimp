@@ -245,6 +245,7 @@ class CallbackContext:
     is_edit_auto_approved: Callable[[], bool] | None = None
     notify_auto_approved_edit: EditNotifyCallback | None = None
     is_tool_auto_approved: Callable[[str, dict[str, Any]], bool] | None = None
+    get_session_approved_dirs: Callable[[], list[str]] | None = None
 
 
 @dataclass
@@ -333,6 +334,7 @@ async def get_or_create_session(
                 existing.callback_context.is_edit_auto_approved = callback_context.is_edit_auto_approved
                 existing.callback_context.notify_auto_approved_edit = callback_context.notify_auto_approved_edit
                 existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
+                existing.callback_context.get_session_approved_dirs = callback_context.get_session_approved_dirs
                 existing.last_activity = time.monotonic()
                 logger.info(
                     "Reusing live client for scope %s context %s",
@@ -368,6 +370,7 @@ async def get_or_create_session(
         chat_id=scope.chat_id,
         is_tool_auto_approved=_make_tool_approved_proxy(callback_context),
         is_containerized=is_sandboxed(context),
+        get_session_approved_dirs=_make_session_dirs_proxy(callback_context),
     )
 
     _last_stderr: list[str] = [""]
@@ -949,12 +952,17 @@ def _make_approval_proxy(
     ctx: CallbackContext,
 ) -> ApprovalCallback:
     async def _proxy(
-        tool_name: str, tool_input: dict[str, Any], tool_use_id: str
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+        suggested_session_dir: str | None = None,
     ) -> bool:
         if ctx.request_approval is None:
             logger.warning("No approval callback set, denying tool %s", tool_name)
             return False
-        return await ctx.request_approval(tool_name, tool_input, tool_use_id)
+        return await ctx.request_approval(
+            tool_name, tool_input, tool_use_id, suggested_session_dir,
+        )
 
     return _proxy
 
@@ -1004,5 +1012,16 @@ def _make_tool_approved_proxy(
         if ctx.is_tool_auto_approved is None:
             return False
         return ctx.is_tool_auto_approved(tool_name, tool_input)
+
+    return _proxy
+
+
+def _make_session_dirs_proxy(
+    ctx: CallbackContext,
+) -> Callable[[], list[str]]:
+    def _proxy() -> list[str]:
+        if ctx.get_session_approved_dirs is None:
+            return []
+        return ctx.get_session_approved_dirs()
 
     return _proxy

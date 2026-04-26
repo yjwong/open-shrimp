@@ -29,7 +29,6 @@ from open_shrimp.handlers.state import (
     _MCP_STATUS_EMOJI,
     _RESUME_LIST_LIMIT,
     _active_bg_tasks,
-    _edit_approved_sessions,
     _effort_overrides,
     _injectable_sessions,
     _model_overrides,
@@ -37,8 +36,8 @@ from open_shrimp.handlers.state import (
     _resume_selections,
     _resume_session_cache,
     _running_tasks,
-    _tool_approved_sessions,
     _setup_queues,
+    clear_session_approvals,
 )
 from open_shrimp.handlers.utils import (
     _cancel_running,
@@ -170,8 +169,7 @@ async def handle_context_callback(
             _setup_queues.pop(scope, None)
             await close_session(scope)
             await delete_session(db, scope, ctx_name)
-            _edit_approved_sessions.discard((scope, ctx_name))
-            _tool_approved_sessions.pop((scope, ctx_name), None)
+            clear_session_approvals(scope, ctx_name)
             _active_bg_tasks.pop(scope, None)
 
         ctx = config.contexts.get(target)
@@ -213,8 +211,7 @@ async def handle_context_callback(
             await query.answer(f"Already on {target}.")
             return True
 
-        _edit_approved_sessions.discard((scope, current))
-        _tool_approved_sessions.pop((scope, current), None)
+        clear_session_approvals(scope, current)
         _model_overrides.pop(scope, None)
         _effort_overrides.pop(scope, None)
         await close_session(scope)
@@ -299,8 +296,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     old_ctx_name = await _get_context_name(scope, config, db)
-    _edit_approved_sessions.discard((scope, old_ctx_name))
-    _tool_approved_sessions.pop((scope, old_ctx_name), None)
+    clear_session_approvals(scope, old_ctx_name)
     _model_overrides.pop(scope, None)
     _effort_overrides.pop(scope, None)
     await close_session(scope)
@@ -345,8 +341,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _setup_queues.pop(scope, None)
     await close_session(scope)
     await delete_session(db, scope, ctx_name)
-    _edit_approved_sessions.discard((scope, ctx_name))
-    _tool_approved_sessions.pop((scope, ctx_name), None)
+    clear_session_approvals(scope, ctx_name)
     _model_overrides.pop(scope, None)
     _effort_overrides.pop(scope, None)
     _active_bg_tasks.pop(scope, None)

@@ -43,6 +43,7 @@ from open_shrimp.handlers.state import (
     _media_group_tasks,
     _MEDIA_GROUP_WAIT,
     _scope_dispatch_locks,
+    _session_approved_dirs,
     _tool_approved_sessions,
     _pending_other_input,
     _question_states,
@@ -653,7 +654,10 @@ async def _start_agent_task(
                 _base_url = f"https://{config.review.host}:{config.review.port}"
 
             async def request_approval(
-                tool_name: str, tool_input: dict[str, Any], tool_use_id: str
+                tool_name: str,
+                tool_input: dict[str, Any],
+                tool_use_id: str,
+                suggested_session_dir: str | None = None,
             ) -> bool:
                 await finalize_and_reset(context.bot, draft_state)
                 return await _send_approval_keyboard(
@@ -664,6 +668,9 @@ async def _start_agent_task(
                     user_id=user_id,
                     is_private_chat=is_private_chat,
                     bot_token=config.telegram.token,
+                    suggested_session_dir=suggested_session_dir,
+                    scope=scope,
+                    context_name=ctx_name,
                 )
 
             async def handle_questions(
@@ -718,6 +725,9 @@ async def _start_agent_task(
                 is_tool_auto_approved=lambda tn, ti: any(
                     _matches_rule(rule, tn, ti)
                     for rule in _tool_approved_sessions.get((scope, ctx_name), [])
+                ),
+                get_session_approved_dirs=lambda: list(
+                    _session_approved_dirs.get((scope, ctx_name), set())
                 ),
             )
 

@@ -46,8 +46,13 @@ logger = logging.getLogger(__name__)
 ATTACHMENT_TEMP_DIR = Path(tempfile.gettempdir()) / "openshrimp_uploads"
 
 # Type for the approval callback: receives tool_name, tool_input dict,
-# and tool_use_id; returns True (allow) or False (deny).
-ApprovalCallback = Callable[[str, dict[str, Any], str], Awaitable[bool]]
+# tool_use_id, and an optional ``suggested_session_dir`` (set when the
+# tool's target path is outside the approved directories — the caller
+# may offer a "Allow <dir>/ this session" button); returns True (allow)
+# or False (deny).
+ApprovalCallback = Callable[
+    [str, dict[str, Any], str, str | None], Awaitable[bool]
+]
 
 # Type for the question callback: receives list of question dicts,
 # returns answers dict mapping question text -> answer string.
@@ -263,6 +268,11 @@ _PATH_SCOPED_TOOLS: dict[str, list[str]] = {
 # (Read, Glob, Grep) are still auto-approved within cwd.
 _MUTATING_PATH_TOOLS: set[str] = {"Edit", "Write"}
 
+# Path-scoped tools whose path argument identifies a single file (vs a
+# directory).  For these, the parent directory is the right granularity
+# when suggesting a session-wide approval.
+_FILE_TARGETED_PATH_TOOLS: set[str] = {"Read", "Edit", "Write"}
+
 
 def _is_path_within_directory(path: str, directory: str) -> bool:
     """Check if a resolved path is within the given directory.
@@ -306,6 +316,42 @@ def _is_path_within_any_directory(
     return any(_is_path_within_directory(path, d) for d in directories)
 
 
+def tool_path_within_dir(
+    tool_name: str, tool_input: dict[str, Any], directory: str,
+) -> bool:
+    """Public: True if *tool_name*'s target path resolves inside *directory*.
+
+    Used by the approval handlers to auto-resolve pending tool calls
+    after a session-wide directory approval.  Returns False for tools
+    that aren't path-scoped or that have no resolvable path.
+    """
+    path = _extract_path_for_tool(tool_name, tool_input, directory)
+    return path is not None and _is_path_within_directory(path, directory)
+
+
+def _suggested_session_dir(
+    tool_name: str, tool_input: dict[str, Any]
+) -> str | None:
+    """Return the directory to suggest for "Allow <dir>/ this session".
+
+    For file-targeted tools (Read, Edit, Write) this is the parent of the
+    target file.  For directory-targeted tools (Glob, Grep) this is the
+    path itself.  Returns None for tools without a meaningful path.
+    """
+    keys = _PATH_SCOPED_TOOLS.get(tool_name)
+    if keys is None:
+        return None
+    for key in keys:
+        value = tool_input.get(key)
+        if value is None:
+            continue
+        real = os.path.realpath(str(value))
+        if tool_name in _FILE_TARGETED_PATH_TOOLS:
+            return os.path.dirname(real) or None
+        return real
+    return None
+
+
 def make_can_use_tool(
     request_approval: ApprovalCallback,
     cwd: str,
@@ -316,6 +362,7 @@ def make_can_use_tool(
     chat_id: int | None = None,
     is_tool_auto_approved: ToolAutoApprovedCallback | None = None,
     is_containerized: bool = False,
+    get_session_approved_dirs: Callable[[], list[str]] | None = None,
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext], Awaitable[PermissionResult]
 ]:
@@ -365,11 +412,18 @@ def make_can_use_tool(
             tools (e.g. WebFetch, WebSearch, Bash).
         is_containerized: When True, all Bash commands are auto-approved
             because Docker isolation provides the safety boundary.
+        get_session_approved_dirs: Optional callback returning the list of
+            directories the user opted into via the "Allow <dir>/ this
+            session" button on a previous out-of-scope approval prompt.
+            Membership grants both read and write access — file tools
+            (including Edit/Write) are auto-approved silently for paths
+            within these directories, mirroring Claude Code's session-
+            scoped directory approval.
     """
-    approved_dirs = [cwd] + (additional_directories or [])
+    static_approved_dirs = [cwd] + (additional_directories or [])
     if chat_id is not None:
         upload_dir = str(ATTACHMENT_TEMP_DIR / str(chat_id))
-        approved_dirs.append(upload_dir)
+        static_approved_dirs.append(upload_dir)
 
     async def can_use_tool(
         tool_name: str,
@@ -400,6 +454,16 @@ def make_can_use_tool(
                 ),
             )
 
+        # Recompute approved directories on every call so newly-added
+        # session-approved dirs (from "Allow <dir>/ this session" clicks)
+        # take effect immediately for subsequent tool invocations.
+        session_dirs: list[str] = (
+            list(get_session_approved_dirs())
+            if get_session_approved_dirs is not None
+            else []
+        )
+        approved_dirs = static_approved_dirs + session_dirs
+
         # Containerized contexts: auto-approve all path-scoped tools
         # regardless of path, since Docker isolation provides the safety
         # boundary — consistent with Bash being fully auto-approved in
@@ -419,13 +483,38 @@ def make_can_use_tool(
             return PermissionResultAllow()
 
         # Path-scoped approval for file-access tools.
-        # Read-only tools (Read, Glob, Grep) are auto-approved when within
-        # an approved directory (cwd + additional_directories).  Mutating
-        # tools (Edit, Write) require explicit approval even within approved
-        # dirs, unless the user has opted into "accept all edits".
+        # - Paths inside session-approved dirs (user explicitly opted in via
+        #   the "Allow <dir>/ this session" button) auto-approve for any
+        #   tool, including Edit/Write — mirrors Claude Code's session-
+        #   scoped directory approval.
+        # - Read-only tools (Read, Glob, Grep) within static approved dirs
+        #   (cwd + additional_directories + chat upload dir) auto-approve.
+        # - Mutating tools (Edit, Write) within static approved dirs still
+        #   require explicit approval unless the user has opted into
+        #   "accept all edits".
+        # - Paths outside all approved dirs always prompt — the
+        #   ``is_tool_auto_approved`` rule check below is skipped so that
+        #   blanket "Approve all <Tool>" rules cannot bypass the directory
+        #   boundary.  The approval prompt offers the user a directory-
+        #   scoped session approval as the standard way to broaden access.
         tool_path = _extract_path_for_tool(tool_name, tool_input, cwd)
+        path_scoped_out_of_scope = False
         if tool_path is not None:
-            if _is_path_within_any_directory(tool_path, approved_dirs):
+            if _is_path_within_any_directory(tool_path, session_dirs):
+                if tool_name in _MUTATING_PATH_TOOLS and notify_auto_approved_edit:
+                    try:
+                        await notify_auto_approved_edit(tool_name, tool_input)
+                    except Exception:
+                        logger.exception(
+                            "Failed to send auto-approved edit notification"
+                        )
+                logger.info(
+                    "Auto-approved %s: path %s is within a session-approved dir",
+                    tool_name,
+                    tool_path,
+                )
+                return PermissionResultAllow()
+            if _is_path_within_any_directory(tool_path, static_approved_dirs):
                 if tool_name in _MUTATING_PATH_TOOLS:
                     # Check session-level "accept all edits" flag
                     if is_edit_auto_approved and is_edit_auto_approved():
@@ -461,6 +550,7 @@ def make_can_use_tool(
                     )
                     return PermissionResultAllow()
             else:
+                path_scoped_out_of_scope = True
                 logger.warning(
                     "Path-scoped tool %s targets %s outside approved dirs, "
                     "requiring manual approval",
@@ -495,10 +585,18 @@ def make_can_use_tool(
             return PermissionResultAllow()
 
         # Per-tool session-scoped auto-approval (e.g. "Accept all git").
-        # Checked for all tools that reach the interactive approval stage,
+        # Checked for tools that reach the interactive approval stage,
         # including mutating path tools that weren't caught by the
-        # accept-all-edits check above.
-        if is_tool_auto_approved and is_tool_auto_approved(tool_name, tool_input):
+        # accept-all-edits check above.  Skipped for path-scoped tools
+        # whose target was out-of-scope: we don't let blanket per-tool
+        # rules bypass the directory boundary — the user must explicitly
+        # opt into the directory via the dedicated session-dir button on
+        # the prompt instead.
+        if (
+            not path_scoped_out_of_scope
+            and is_tool_auto_approved
+            and is_tool_auto_approved(tool_name, tool_input)
+        ):
             logger.info(
                 "Auto-approved %s (per-tool session approval)", tool_name
             )
@@ -509,7 +607,14 @@ def make_can_use_tool(
         # approval requests (each gets its own Future in
         # _approval_futures).
         tool_use_id = context.tool_use_id
-        approved = await request_approval(tool_name, tool_input, tool_use_id)
+        suggested_dir = (
+            _suggested_session_dir(tool_name, tool_input)
+            if path_scoped_out_of_scope
+            else None
+        )
+        approved = await request_approval(
+            tool_name, tool_input, tool_use_id, suggested_dir
+        )
         decision = "allow" if approved else "deny"
         logger.info("Tool %s %s", tool_name, decision)
 
