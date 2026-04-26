@@ -25,7 +25,6 @@ from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.lima_helpers import (
     _lima_state_dir,
     _run_limactl,
-    vnc_host_port,
 )
 
 logger = logging.getLogger(__name__)

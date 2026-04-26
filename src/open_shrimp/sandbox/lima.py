@@ -665,19 +665,15 @@ class LimaSandbox:
             return
         self._ssh_tunnels = alive
 
-        # Get SSH connection args from limactl.
-        result = subprocess.run(
-            [self._limactl, "show-ssh", "--format=args", self._inst_name],
-            capture_output=True, text=True, env=self._env, timeout=10,
-        )
-        if result.returncode != 0:
+        # Lima writes a ready-to-use ssh client config alongside the VM.
+        ssh_config = self._sdir / "ssh.config"
+        if not ssh_config.is_file():
             logger.warning(
-                "Cannot set up SSH tunnels for %s: show-ssh failed: %s",
-                self._inst_name, result.stderr.strip(),
+                "Cannot set up SSH tunnels for %s: %s not found",
+                self._inst_name, ssh_config,
             )
             return
-
-        ssh_args = shlex.split(result.stdout.strip())
+        ssh_target = f"lima-{self._inst_name}"
 
         host_vnc_port = vnc_host_port(self._context_name)
         tunnels_needed = [(host_vnc_port, 5900), (9222, 9222)]
@@ -693,7 +689,8 @@ class LimaSandbox:
             if already_tunneled and len(alive) >= len(tunnels_needed):
                 continue
 
-            tunnel_cmd = ssh_args + [
+            tunnel_cmd = [
+                "ssh", "-F", str(ssh_config), ssh_target,
                 "-N",
                 "-o", "ExitOnForwardFailure=yes",
                 "-o", "ServerAliveInterval=30",
