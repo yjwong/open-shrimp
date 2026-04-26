@@ -155,6 +155,10 @@ class DockerSandbox:
             return _get_vnc_port(self._context_name)
         return None
 
+    def get_vnc_credentials(self) -> tuple[str, str] | None:
+        # Docker computer-use runs wayvnc with no authentication.
+        return None
+
     def get_text_input_state_path(self) -> Path | None:
         if self._computer_use:
             return _get_text_input_state_path(self._context_name)

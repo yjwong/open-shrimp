@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import struct
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from open_shrimp.sandbox.docker_helpers import (
     get_text_input_state_path,
 )
 from open_shrimp.review.auth import AuthError, validate_token_param
+from open_shrimp.vnc.apple_dh import AppleDhAuthError, authenticate as apple_dh_authenticate
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,91 @@ def _get_vnc_port_for_context(
     return None
 
 
+class _WSBufferedReader:
+    """Read fixed-size chunks from a WebSocket of unaligned binary frames."""
+
+    def __init__(self, ws: WebSocket) -> None:
+        self._ws = ws
+        self._buf = bytearray()
+
+    async def readexactly(self, n: int) -> bytes:
+        while len(self._buf) < n:
+            self._buf.extend(await self._ws.receive_bytes())
+        out = bytes(self._buf[:n])
+        del self._buf[:n]
+        return out
+
+    def leftover(self) -> bytes:
+        out = bytes(self._buf)
+        self._buf.clear()
+        return out
+
+
+async def _authenticate_to_server(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    credentials: tuple[str, str],
+) -> None:
+    """Complete the RFB handshake with the upstream VNC server.
+
+    Reads the server greeting, negotiates RFB 3.8, and runs the
+    Apple DH (security type 30) auth flow using *credentials*.
+    Leaves the stream positioned just before ``ServerInit`` (the
+    server is now waiting for ``ClientInit``).
+    """
+    greeting = await reader.readexactly(12)
+    if not greeting.startswith(b"RFB "):
+        raise AppleDhAuthError(f"unexpected server greeting {greeting!r}")
+    writer.write(b"RFB 003.008\n")
+    await writer.drain()
+
+    # Read the security-types list (count byte + types).  RFB 3.8: if
+    # count == 0, server sends a 4-byte reason length and a reason string.
+    count = (await reader.readexactly(1))[0]
+    if count == 0:
+        (reason_len,) = struct.unpack("!I", await reader.readexactly(4))
+        reason = (await reader.readexactly(reason_len)).decode(
+            "utf-8", errors="replace",
+        )
+        raise AppleDhAuthError(f"server refused connection: {reason}")
+    types = await reader.readexactly(count)
+    if 30 not in types:
+        raise AppleDhAuthError(
+            f"server does not offer Apple DH (sec types: {list(types)})"
+        )
+
+    writer.write(bytes([30]))
+    await writer.drain()
+    username, password = credentials
+    await apple_dh_authenticate(reader, writer, username, password)
+
+
+async def _fake_no_auth_handshake_to_client(
+    websocket: WebSocket,
+    ws_reader: _WSBufferedReader,
+) -> None:
+    """Pretend to be a credential-less RFB server to the noVNC client.
+
+    Sends an RFB 3.8 greeting, advertises only security type 1
+    ("None"), and signals authentication success.  After this returns,
+    the next bytes from the client are ``ClientInit`` and should be
+    forwarded as-is to the upstream server.
+    """
+    await websocket.send_bytes(b"RFB 003.008\n")
+    await ws_reader.readexactly(12)  # client RFB version (ignored).
+
+    # One sec-type: 1 = None.
+    await websocket.send_bytes(bytes([1, 1]))
+    selected = await ws_reader.readexactly(1)
+    if selected[0] != 1:
+        raise AppleDhAuthError(
+            f"client refused offered security type 1 (sent {selected[0]})"
+        )
+
+    # RFB 3.8 SecurityResult: 0 = OK.
+    await websocket.send_bytes(b"\x00\x00\x00\x00")
+
+
 async def vnc_ws_endpoint(websocket: WebSocket) -> None:
     """WebSocket proxy: bridge noVNC client to container's VNC TCP port.
 
@@ -109,16 +196,21 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         )
         return
 
-    # Discover the VNC port.
+    # Resolve the sandbox handle and discover VNC port + credentials.
     sandbox_managers = getattr(websocket.app.state, "sandbox_managers", None)
-    port = await asyncio.to_thread(
-        _get_vnc_port_for_context, context_name, ctx, sandbox_managers,
+    sandbox = await asyncio.to_thread(
+        _get_sandbox_for_context, context_name, ctx, sandbox_managers,
     )
+    port = sandbox.get_vnc_port() if sandbox is not None else None
     if port is None:
         await websocket.close(
             code=4004, reason="VNC port not available (container not running?)"
         )
         return
+    credentials = (
+        await asyncio.to_thread(sandbox.get_vnc_credentials)
+        if sandbox is not None else None
+    )
 
     # Accept the WebSocket handshake.
     await websocket.accept()
@@ -132,11 +224,31 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         return
 
     logger.info(
-        "VNC proxy connected: context=%s, port=%d", context_name, port
+        "VNC proxy connected: context=%s, port=%d, auth=%s",
+        context_name, port, "apple-dh" if credentials else "passthrough",
     )
+
+    ws_reader = _WSBufferedReader(websocket)
+    if credentials is not None:
+        try:
+            await _authenticate_to_server(reader, writer, credentials)
+            await _fake_no_auth_handshake_to_client(websocket, ws_reader)
+        except (AppleDhAuthError, asyncio.IncompleteReadError) as exc:
+            logger.warning(
+                "VNC handshake interception failed for %s: %s",
+                context_name, exc,
+            )
+            writer.close()
+            await websocket.close(code=4006, reason="VNC authentication failed")
+            return
 
     async def ws_to_tcp() -> None:
         """Forward WebSocket binary frames to TCP."""
+        # Drain any bytes the client already sent past the fake handshake.
+        leftover = ws_reader.leftover()
+        if leftover:
+            writer.write(leftover)
+            await writer.drain()
         try:
             while True:
                 data = await websocket.receive_bytes()

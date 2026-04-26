@@ -14,6 +14,7 @@ Implements the :class:`~open_shrimp.sandbox.base.Sandbox` protocol.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import logging
 import shlex
 import subprocess
@@ -113,6 +114,9 @@ class LimaSandbox:
 
         # SSH tunnel processes for macOS guest port forwarding.
         self._ssh_tunnels: list[subprocess.Popen] = []
+
+        # Cached VNC credentials (read once from the guest).
+        self._vnc_credentials_cached: tuple[str, str] | None = None
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -342,6 +346,24 @@ class LimaSandbox:
         if self._computer_use:
             return vnc_host_port(self._context_name)
         return None
+
+    def get_vnc_credentials(self) -> tuple[str, str] | None:
+        # Linux guests run wayvnc with no auth.  macOS guests run
+        # Apple Screen Sharing which always requires credentials.
+        if not self._computer_use or self._guest_os != "macos":
+            return None
+        if self._vnc_credentials_cached is not None:
+            return self._vnc_credentials_cached
+        rc, stdout, stderr = self._exec_in_vm_sync("cat ~/password")
+        if rc != 0 or not stdout.strip():
+            logger.warning(
+                "Failed to read VNC password from %s: %s",
+                self._inst_name, stderr.strip() or "empty",
+            )
+            return None
+        creds = (getpass.getuser(), stdout.strip())
+        self._vnc_credentials_cached = creds
+        return creds
 
     def get_text_input_state_path(self) -> Path | None:
         if self._computer_use:

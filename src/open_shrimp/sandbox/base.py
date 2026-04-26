@@ -136,6 +136,16 @@ class Sandbox(Protocol):
         """Return VNC port for computer-use, or ``None`` if N/A."""
         ...
 
+    def get_vnc_credentials(self) -> tuple[str, str] | None:
+        """Return ``(username, password)`` for the VNC server, or ``None``.
+
+        Used by the WebSocket proxy to authenticate against the guest's
+        VNC server on behalf of clients that shouldn't see credentials
+        (e.g. browser-side noVNC).  Backends with unauthenticated VNC
+        servers — Linux ``wayvnc``, Docker computer-use — return ``None``.
+        """
+        ...
+
     def get_text_input_state_path(self) -> Path | None:
         """Return host-side path to the text-input-state file, or ``None``."""
         ...

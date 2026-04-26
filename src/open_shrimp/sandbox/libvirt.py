@@ -643,6 +643,10 @@ class LibvirtSandbox:
         except libvirt.libvirtError:
             return None
 
+    def get_vnc_credentials(self) -> tuple[str, str] | None:
+        # Libvirt computer-use runs wayvnc with no authentication.
+        return None
+
     def get_text_input_state_path(self) -> Path | None:
         return None
 
