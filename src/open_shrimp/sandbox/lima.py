@@ -665,8 +665,9 @@ class LimaSandbox:
             return
         self._ssh_tunnels = alive
 
-        # Lima writes a ready-to-use ssh client config alongside the VM.
-        ssh_config = self._sdir / "ssh.config"
+        # Lima writes a ready-to-use ssh client config in the instance
+        # directory under ``LIMA_HOME``, not in our OpenShrimp state dir.
+        ssh_config = Path(self._env["LIMA_HOME"]) / self._inst_name / "ssh.config"
         if not ssh_config.is_file():
             logger.warning(
                 "Cannot set up SSH tunnels for %s: %s not found",
