@@ -14,11 +14,21 @@ Implements the :class:`~open_shrimp.sandbox.base.Sandbox` protocol.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import getpass
 import logging
 import shlex
 import subprocess
 from pathlib import Path
+
+# Bootstrap CoreGraphics/AppKit once for non-app processes (idempotent).
+# Required so SCScreenshotManager doesn't trip CGS_REQUIRE_INIT inside CLI
+# Python invocations. Skipped on non-macOS hosts where AppKit is absent.
+try:
+    import AppKit as _AppKit  # type: ignore[import-not-found]
+    _AppKit.NSApplicationLoad()
+except ImportError:
+    pass
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.lima_helpers import (
@@ -78,6 +88,69 @@ _MACOS_MODIFIER_MAP: dict[str, str] = {
 }
 
 
+def _ax_find_content_rect(
+    pid: int, sc_frame: tuple[float, float, float, float],
+) -> tuple[float, float, float, float] | None:
+    """Return the VZ scroll-area's frame in window-local points.
+
+    Walks the limactl process's accessibility tree, finds the AXWindow
+    matching *sc_frame* (its screen-coord frame from ScreenCaptureKit),
+    and returns ``(x, y, w, h)`` of its AXScrollArea child relative to
+    the window's origin. Returns ``None`` if AX is unavailable or the
+    expected structure isn't present.
+
+    Requires Accessibility TCC permission for the calling process.
+    """
+    try:
+        from ApplicationServices import (  # type: ignore[import-not-found]
+            AXUIElementCopyAttributeValue,
+            AXUIElementCreateApplication,
+            AXValueGetValue,
+            kAXValueCGPointType,
+            kAXValueCGSizeType,
+        )
+    except ImportError:
+        return None
+
+    def _ax_get(elem, attr):
+        err, val = AXUIElementCopyAttributeValue(elem, attr, None)
+        return val if err == 0 else None
+
+    def _ax_frame(elem) -> tuple[float, float, float, float] | None:
+        pos = _ax_get(elem, "AXPosition")
+        siz = _ax_get(elem, "AXSize")
+        if pos is None or siz is None:
+            return None
+        _, p = AXValueGetValue(pos, kAXValueCGPointType, None)
+        _, s = AXValueGetValue(siz, kAXValueCGSizeType, None)
+        return (p.x, p.y, s.width, s.height)
+
+    app = AXUIElementCreateApplication(pid)
+    windows = _ax_get(app, "AXWindows")
+    if not windows:
+        return None
+    sx, sy, sw, sh = sc_frame
+    for w in windows:
+        wf = _ax_frame(w)
+        if wf is None:
+            continue
+        wx, wy, ww, wh = wf
+        if abs(wx - sx) > 2 or abs(wy - sy) > 2 \
+                or abs(ww - sw) > 2 or abs(wh - sh) > 2:
+            continue
+        children = _ax_get(w, "AXChildren") or []
+        for c in children:
+            if _ax_get(c, "AXRole") != "AXScrollArea":
+                continue
+            cf = _ax_frame(c)
+            if cf is None:
+                return None
+            cx, cy, cw, ch = cf
+            return (cx - wx, cy - wy, cw, ch)
+        return None
+    return None
+
+
 class LimaSandbox:
     """Lima VM sandbox implementing the Sandbox protocol.
 
@@ -117,6 +190,14 @@ class LimaSandbox:
 
         # Cached VNC credentials (read once from the guest).
         self._vnc_credentials_cached: tuple[str, str] | None = None
+
+        # Cached chrome-crop rect, keyed by the Lima window's screen frame.
+        # Walking the limactl AX tree costs a few IPC roundtrips per call;
+        # the rect is stable until the user resizes the window.
+        self._crop_cache: dict[
+            tuple[float, float, float, float],
+            tuple[float, float, float, float] | None,
+        ] = {}
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -408,18 +489,135 @@ class LimaSandbox:
         return result.returncode, result.stdout, result.stderr
 
     def take_screenshot(self, output_path: Path) -> None:
+        if self._guest_os == "macos":
+            self._capture_lima_window_macos(output_path)
+            return
         ts = int(output_path.stem.split("-")[-1]) if "-" in output_path.stem else 0
         guest_path = f"/tmp/screenshots/screenshot-{ts}.png"
-        if self._guest_os == "macos":
-            rc, _, stderr = self._exec_in_vm_sync(
-                f"screencapture -x {guest_path}"
+        rc, _, stderr = self._exec_in_vm_sync(f"grim {guest_path}")
+        if rc != 0:
+            raise RuntimeError(f"grim failed: {stderr.strip()}")
+
+    def _capture_lima_window_macos(self, output_path: Path) -> None:
+        """Capture the Lima VM window from the host via ScreenCaptureKit.
+
+        Avoids in-guest ``screencapture`` which fails when the guest is
+        locked or the user session is unavailable. Lima's hostagent owns
+        ~6 windows for a graphical VM: the VM display (e.g. 1165x780)
+        plus several off-screen menubar/toolbar surfaces (e.g. 1440x30);
+        we pick the largest on-screen one. The capture is cropped to
+        exclude the host window's titlebar/toolbar chrome (~52pt) using
+        the AX tree, so coordinates in the resulting PNG map directly
+        to the guest framebuffer. Falls back to a full-window capture
+        with chrome if Accessibility permission isn't granted.
+
+        Requires Screen Recording permission for OpenShrimp.
+        """
+        from Foundation import NSURL  # type: ignore[import-not-found]
+        from Quartz import (  # type: ignore[import-not-found]
+            CGImageDestinationAddImage,
+            CGImageDestinationCreateWithURL,
+            CGImageDestinationFinalize,
+            kCVPixelFormatType_32BGRA,
+        )
+        from ScreenCaptureKit import (  # type: ignore[import-not-found]
+            SCContentFilter,
+            SCScreenshotManager,
+            SCShareableContent,
+            SCStreamConfiguration,
+        )
+
+        pid = self._read_ha_pid()
+        future: concurrent.futures.Future = concurrent.futures.Future()
+
+        def on_image(image, error):
+            if error is not None or image is None:
+                future.set_exception(RuntimeError(f"capture failed: {error}"))
+            else:
+                future.set_result(image)
+
+        def on_content(content, error):
+            if error is not None:
+                future.set_exception(
+                    RuntimeError(f"shareable content failed: {error}"))
+                return
+            best = None
+            best_area = 0
+            for w in content.windows():
+                app = w.owningApplication()
+                if app is None or app.processID() != pid:
+                    continue
+                frame = w.frame()
+                area = int(frame.size.width * frame.size.height)
+                if area < 100_000:  # skip menubar/toolbar surfaces
+                    continue
+                if area > best_area:
+                    best_area, best = area, w
+            if best is None:
+                future.set_exception(RuntimeError(
+                    f"no on-screen Lima window for hostagent pid={pid}; "
+                    "is the VM running with video.display=vz?"))
+                return
+
+            sc_frame = (
+                best.frame().origin.x, best.frame().origin.y,
+                best.frame().size.width, best.frame().size.height,
             )
-            if rc != 0:
-                raise RuntimeError(f"screencapture failed: {stderr.strip()}")
-        else:
-            rc, _, stderr = self._exec_in_vm_sync(f"grim {guest_path}")
-            if rc != 0:
-                raise RuntimeError(f"grim failed: {stderr.strip()}")
+            crop = self._crop_for_window(pid, sc_frame)
+            if crop is not None:
+                cx, cy, cw, ch = crop
+            else:
+                cx, cy, cw, ch = 0.0, 0.0, sc_frame[2], sc_frame[3]
+
+            filt = SCContentFilter.alloc().initWithDesktopIndependentWindow_(best)
+            cfg = SCStreamConfiguration.alloc().init()
+            cfg.setSourceRect_(((cx, cy), (cw, ch)))
+            cfg.setWidth_(int(cw * 2))
+            cfg.setHeight_(int(ch * 2))
+            cfg.setShowsCursor_(False)
+            cfg.setPixelFormat_(kCVPixelFormatType_32BGRA)
+            SCScreenshotManager.captureImageWithFilter_configuration_completionHandler_(
+                filt, cfg, on_image)
+
+        SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
+            False, True, on_content)
+
+        try:
+            image = future.result(timeout=10.0)
+        except concurrent.futures.TimeoutError as e:
+            raise RuntimeError("ScreenCaptureKit timed out after 10s") from e
+
+        url = NSURL.fileURLWithPath_(str(output_path))
+        dest = CGImageDestinationCreateWithURL(url, "public.png", 1, None)
+        if dest is None:
+            raise RuntimeError(
+                f"CGImageDestinationCreateWithURL failed for {output_path}")
+        CGImageDestinationAddImage(dest, image, None)
+        if not CGImageDestinationFinalize(dest):
+            raise RuntimeError(
+                f"CGImageDestinationFinalize failed for {output_path}")
+
+    def _crop_for_window(
+        self, pid: int, sc_frame: tuple[float, float, float, float],
+    ) -> tuple[float, float, float, float] | None:
+        if sc_frame in self._crop_cache:
+            return self._crop_cache[sc_frame]
+        crop = _ax_find_content_rect(pid, sc_frame)
+        if crop is None:
+            logger.warning(
+                "AX content rect unavailable for pid=%d; capturing full "
+                "window with chrome — grant Accessibility permission to "
+                "remove the ~52pt offset.", pid,
+            )
+        self._crop_cache[sc_frame] = crop
+        return crop
+
+    def _read_ha_pid(self) -> int:
+        pid_file = Path(self._env["LIMA_HOME"]) / self._inst_name / "ha.pid"
+        try:
+            return int(pid_file.read_text().strip())
+        except (OSError, ValueError) as e:
+            raise RuntimeError(f"cannot read {pid_file}: {e}") from e
 
     def send_click(self, x: int, y: int, button: str = "left") -> None:
         if self._guest_os == "macos":

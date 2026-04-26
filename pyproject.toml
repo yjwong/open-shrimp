@@ -25,7 +25,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-macos = ["rumps>=0.4"]
+macos = [
+    "rumps>=0.4",
+    "pyobjc-framework-ApplicationServices>=10.0",
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-ScreenCaptureKit>=10.0",
+]
 libvirt = ["libvirt-python>=10.0"]
 
 [project.scripts]
