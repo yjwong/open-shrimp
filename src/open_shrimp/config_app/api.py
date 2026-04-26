@@ -9,6 +9,7 @@ the user's config file are preserved across edits.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from open_shrimp.client_manager import close_sessions_for_context
 from open_shrimp.config import (
     Config,
     _validate_raw,
@@ -27,6 +29,7 @@ from open_shrimp.config import (
     write_raw_yaml,
 )
 from open_shrimp.review.auth import AuthError, authenticate
+from open_shrimp.sandbox import SandboxManager
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +169,116 @@ async def config_put_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+def _resolve_sandbox_manager(
+    request: Request, context_name: str,
+) -> tuple[SandboxManager | None, JSONResponse | None]:
+    """Look up the SandboxManager for *context_name*.
+
+    Returns ``(manager, None)`` on success, or ``(None, error_response)``
+    if the context is missing, has no sandbox configured, or the manager
+    for its backend isn't registered.
+    """
+    config: Config = request.app.state.config
+    ctx = config.contexts.get(context_name)
+    if ctx is None:
+        return None, JSONResponse(
+            {"error": f"Unknown context '{context_name}'"}, status_code=404,
+        )
+    if ctx.sandbox is None:
+        return None, JSONResponse(
+            {"error": f"Context '{context_name}' has no sandbox configured"},
+            status_code=400,
+        )
+
+    sandbox_managers: dict[str, SandboxManager] | None = getattr(
+        request.app.state, "sandbox_managers", None,
+    )
+    if not sandbox_managers:
+        return None, JSONResponse(
+            {"error": "Sandbox managers not available"}, status_code=500,
+        )
+
+    manager = sandbox_managers.get(ctx.sandbox.backend)
+    if manager is None:
+        return None, JSONResponse(
+            {
+                "error": (
+                    f"No manager registered for backend "
+                    f"'{ctx.sandbox.backend}'"
+                ),
+            },
+            status_code=500,
+        )
+
+    return manager, None
+
+
+async def sandbox_reboot_endpoint(request: Request) -> JSONResponse:
+    """POST /api/sandbox/{context_name}/reboot -- stop + start, keep state."""
+    try:
+        await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    context_name = request.path_params["context_name"]
+    manager, err = _resolve_sandbox_manager(request, context_name)
+    if err is not None:
+        return err
+    assert manager is not None
+
+    closed = await close_sessions_for_context(context_name)
+    logger.info(
+        "Rebooting sandbox for context '%s' (closed %d session(s))",
+        context_name, closed,
+    )
+    try:
+        await asyncio.to_thread(manager.invalidate_sandbox, context_name)
+    except Exception as e:
+        logger.exception(
+            "Failed to reboot sandbox for context '%s'", context_name,
+        )
+        return JSONResponse(
+            {"error": f"Failed to reboot sandbox: {e}"}, status_code=500,
+        )
+
+    return JSONResponse({"ok": True, "closed_sessions": closed})
+
+
+async def sandbox_reset_endpoint(request: Request) -> JSONResponse:
+    """POST /api/sandbox/{context_name}/reset -- destroy + recreate.
+
+    Wipes overlays, state directories, Docker images, libvirt domains,
+    and Lima instances.  Persistent volumes (libvirt) survive by design.
+    """
+    try:
+        await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    context_name = request.path_params["context_name"]
+    manager, err = _resolve_sandbox_manager(request, context_name)
+    if err is not None:
+        return err
+    assert manager is not None
+
+    closed = await close_sessions_for_context(context_name)
+    logger.info(
+        "Resetting sandbox for context '%s' (closed %d session(s))",
+        context_name, closed,
+    )
+    try:
+        await asyncio.to_thread(manager.destroy_context, context_name)
+    except Exception as e:
+        logger.exception(
+            "Failed to reset sandbox for context '%s'", context_name,
+        )
+        return JSONResponse(
+            {"error": f"Failed to reset sandbox: {e}"}, status_code=500,
+        )
+
+    return JSONResponse({"ok": True, "closed_sessions": closed})
+
+
 async def validate_path_endpoint(request: Request) -> JSONResponse:
     """POST /api/config/validate-path -- check if a directory exists."""
     try:
@@ -210,6 +323,16 @@ def create_config_routes() -> list[Route | Mount]:
         Route(
             "/api/config/validate-path",
             validate_path_endpoint,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/sandbox/{context_name}/reboot",
+            sandbox_reboot_endpoint,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/sandbox/{context_name}/reset",
+            sandbox_reset_endpoint,
             methods=["POST"],
         ),
     ]

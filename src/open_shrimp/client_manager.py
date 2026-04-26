@@ -753,6 +753,25 @@ async def close_all_sessions() -> None:
     )
 
 
+async def close_sessions_for_context(context_name: str) -> int:
+    """Close all active sessions bound to *context_name*.
+
+    Returns the number of sessions closed.  Used before sandbox
+    reboot/reset so SDK subprocesses don't orphan onto a dead runtime.
+    """
+    scopes = [
+        scope for scope, session in _active_sessions.items()
+        if session.context_name == context_name
+    ]
+    if not scopes:
+        return 0
+    await asyncio.gather(
+        *(close_session(scope) for scope in scopes),
+        return_exceptions=True,
+    )
+    return len(scopes)
+
+
 async def _sweep_idle_sessions() -> None:
     """Periodically close sessions that have been idle too long."""
     while True:

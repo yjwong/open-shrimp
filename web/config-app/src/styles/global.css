@@ -199,6 +199,58 @@ body {
   flex-shrink: 0;
 }
 
+.context-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sandbox-action-btn {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--text-muted);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.sandbox-action-btn:hover:not(:disabled) {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.sandbox-action-btn.destructive {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.sandbox-action-btn.destructive:hover:not(:disabled) {
+  background: rgba(244, 67, 54, 0.15);
+  color: var(--error);
+}
+
+.sandbox-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sandbox-action-status {
+  font-size: 11px;
+  margin-top: 6px;
+}
+
+.sandbox-action-status.ok {
+  color: var(--text-secondary);
+}
+
+.sandbox-action-status.err {
+  color: var(--error);
+}
+
 .add-btn {
   display: flex;
   align-items: center;

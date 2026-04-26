@@ -41,3 +41,36 @@ export async function validatePath(path: string): Promise<{ exists: boolean; pat
   }
   return response.json();
 }
+
+export interface SandboxActionResult {
+  ok: true;
+  closed_sessions: number;
+}
+
+async function sandboxAction(
+  contextName: string,
+  action: "reboot" | "reset",
+): Promise<SandboxActionResult> {
+  const response = await fetch(
+    `/api/sandbox/${encodeURIComponent(contextName)}/${action}`,
+    {
+      method: "POST",
+      headers: getAuthHeader(),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(
+      body.error || `Failed to ${action} sandbox: ${response.status}`,
+    );
+  }
+  return response.json() as Promise<SandboxActionResult>;
+}
+
+export function rebootSandbox(contextName: string): Promise<SandboxActionResult> {
+  return sandboxAction(contextName, "reboot");
+}
+
+export function resetSandbox(contextName: string): Promise<SandboxActionResult> {
+  return sandboxAction(contextName, "reset");
+}
