@@ -5,17 +5,9 @@ sidebar:
   order: 4
 ---
 
-## Start the bot
-
-```bash
-uv run openshrimp
-```
-
-You should see log output indicating the bot is running and connected to Telegram.
-
 ## Send a message
 
-Open Telegram and send any message to your bot. For example:
+With the bot running from [Installation](/getting-started/installation/), open Telegram and send any message to your bot. For example:
 
 > What files are in this project?
 
