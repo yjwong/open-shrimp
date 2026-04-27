@@ -31,6 +31,7 @@ except ImportError:
     pass
 
 from open_shrimp.config import SandboxConfig
+from open_shrimp.sandbox.base import VncQuirk
 from open_shrimp.sandbox.lima_helpers import (
     _lima_env,
     _log,
@@ -445,6 +446,9 @@ class LimaSandbox:
         creds = (getpass.getuser(), stdout.strip())
         self._vnc_credentials_cached = creds
         return creds
+
+    def get_vnc_quirks(self) -> frozenset[VncQuirk]:
+        return frozenset()
 
     def get_text_input_state_path(self) -> Path | None:
         if self._computer_use:

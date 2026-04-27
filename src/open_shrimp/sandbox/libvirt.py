@@ -20,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 
+from open_shrimp.sandbox.base import VncQuirk
+
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.libvirt_helpers import (
     _fs_tag_for_dir,
@@ -646,6 +648,9 @@ class LibvirtSandbox:
     def get_vnc_credentials(self) -> tuple[str, str] | None:
         # Libvirt computer-use runs wayvnc with no authentication.
         return None
+
+    def get_vnc_quirks(self) -> frozenset[VncQuirk]:
+        return frozenset()
 
     def get_text_input_state_path(self) -> Path | None:
         return None

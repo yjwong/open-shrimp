@@ -25,7 +25,9 @@ from open_shrimp.sandbox.docker_helpers import (
     get_text_input_state_path,
 )
 from open_shrimp.review.auth import AuthError, validate_token_param
+from open_shrimp.sandbox.base import VNC_QUIRK_RFB_DROPS_SET_ENCODINGS
 from open_shrimp.vnc.apple_dh import AppleDhAuthError, authenticate as apple_dh_authenticate
+from open_shrimp.vnc.rfb_filter import RfbClientFilter, RfbFilterError
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +213,7 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         await asyncio.to_thread(sandbox.get_vnc_credentials)
         if sandbox is not None else None
     )
+    quirks = sandbox.get_vnc_quirks() if sandbox is not None else frozenset()
 
     # Accept the WebSocket handshake.
     await websocket.accept()
@@ -223,9 +226,16 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=4005, reason="Cannot connect to VNC server")
         return
 
+    rfb_filter: RfbClientFilter | None = (
+        RfbClientFilter()
+        if VNC_QUIRK_RFB_DROPS_SET_ENCODINGS in quirks
+        else None
+    )
     logger.info(
-        "VNC proxy connected: context=%s, port=%d, auth=%s",
-        context_name, port, "apple-dh" if credentials else "passthrough",
+        "VNC proxy connected: context=%s, port=%d, auth=%s, filter=%s",
+        context_name, port,
+        "apple-dh" if credentials else "passthrough",
+        "rfb-strip" if rfb_filter is not None else "none",
     )
 
     ws_reader = _WSBufferedReader(websocket)
@@ -244,16 +254,23 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
 
     async def ws_to_tcp() -> None:
         """Forward WebSocket binary frames to TCP."""
-        # Drain any bytes the client already sent past the fake handshake.
-        leftover = ws_reader.leftover()
-        if leftover:
-            writer.write(leftover)
-            await writer.drain()
-        try:
-            while True:
-                data = await websocket.receive_bytes()
-                writer.write(data)
+        async def forward(data: bytes) -> None:
+            chunk = rfb_filter.feed(data) if rfb_filter is not None else data
+            if chunk:
+                writer.write(chunk)
                 await writer.drain()
+
+        try:
+            # Drain any bytes the client already sent past the fake handshake.
+            leftover = ws_reader.leftover()
+            if leftover:
+                await forward(leftover)
+            while True:
+                await forward(await websocket.receive_bytes())
+        except RfbFilterError as exc:
+            logger.warning(
+                "RFB filter aborted for %s: %s", context_name, exc,
+            )
         except Exception:
             pass
 

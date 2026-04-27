@@ -14,7 +14,16 @@ the appropriate backend.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Final, Literal, Protocol, runtime_checkable
+
+VNC_QUIRK_RFB_DROPS_SET_ENCODINGS: Final = "rfb_drops_set_encodings"
+"""The upstream RFB server crashes on ``SetPixelFormat`` (RFB type 0)
+and ``SetEncodings`` (type 2).  The proxy must filter both out of the
+client→server byte stream.  Apple's private ``_VZVNCServer`` SPI has
+this bug."""
+
+VncQuirk = Literal["rfb_drops_set_encodings"]
+"""A protocol-level workaround the WebSocket VNC proxy must apply."""
 
 
 @runtime_checkable
@@ -143,6 +152,16 @@ class Sandbox(Protocol):
         VNC server on behalf of clients that shouldn't see credentials
         (e.g. browser-side noVNC).  Backends with unauthenticated VNC
         servers — Linux ``wayvnc``, Docker computer-use — return ``None``.
+        """
+        ...
+
+    def get_vnc_quirks(self) -> frozenset[VncQuirk]:
+        """Return RFB-protocol workarounds the proxy must apply for this
+        backend's VNC server.
+
+        Default: empty — wayvnc, Apple Screen Sharing and QEMU's VNC are
+        all standards-compliant.  Override only when the upstream
+        violates the RFB protocol (e.g. crashes on ``SetEncodings``).
         """
         ...
 

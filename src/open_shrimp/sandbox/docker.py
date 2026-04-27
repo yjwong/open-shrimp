@@ -12,6 +12,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from open_shrimp.sandbox.base import VncQuirk
+
 import open_shrimp.sandbox.docker_helpers as _dh
 
 from open_shrimp.sandbox.docker_helpers import (
@@ -158,6 +160,9 @@ class DockerSandbox:
     def get_vnc_credentials(self) -> tuple[str, str] | None:
         # Docker computer-use runs wayvnc with no authentication.
         return None
+
+    def get_vnc_quirks(self) -> frozenset[VncQuirk]:
+        return frozenset()
 
     def get_text_input_state_path(self) -> Path | None:
         if self._computer_use:
