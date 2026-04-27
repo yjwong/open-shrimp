@@ -63,6 +63,7 @@ def _read_credentials_json() -> str | None:
 
 LIMA_VERSION = "2.1.1"
 
+
 def _bin_dir() -> Path:
     return _data_dir() / "bin"
 
@@ -80,9 +81,28 @@ def _lima_state_dir() -> Path:
         return Path.home() / ".openshrimp" / f"lima-{name}"
     return Path.home() / ".openshrimp" / "lima"
 
-_DOWNLOAD_BASE = (
-    f"https://github.com/lima-vm/lima/releases/download/v{LIMA_VERSION}"
-)
+def _download_base() -> str:
+    """Return the GitHub release base URL to download the lima tarball from.
+
+    OpenShrimp ships a custom-built ``limactl`` patched to attach Apple's
+    private ``_VZVNCServer`` SPI to the running ``VZVirtualMachine``,
+    enabling a host-side VNC server that doesn't require the ``limactl``
+    GUI window to be open. The patched binary is attached to the
+    OpenShrimp GitHub release this code shipped in, so a given install
+    always pulls the ``limactl`` built against the ``LIMA_VERSION`` it
+    pins. ``release.yaml`` lints the ``LIMA_VERSION`` ↔ ``patches/PIN``
+    agreement to keep the runtime constant and the build pin coupled.
+
+    Falls back to upstream Lima if the install version can't be
+    determined — works in dev, but the patched ``_VZVNCServer`` path
+    will be inert there.
+    """
+    from open_shrimp.updater import _REPO, get_current_version
+
+    version = get_current_version()
+    if version != "0.0.0":
+        return f"https://github.com/{_REPO}/releases/download/v{version}"
+    return f"https://github.com/lima-vm/lima/releases/download/v{LIMA_VERSION}"
 
 _DOWNLOAD_MAP: dict[tuple[str, str], str] = {
     ("Darwin", "arm64"): f"lima-{LIMA_VERSION}-Darwin-arm64.tar.gz",
@@ -147,7 +167,7 @@ def _download_lima_sync() -> str:
 
     bin_dir = _bin_dir()
     bin_dir.mkdir(parents=True, exist_ok=True)
-    url = f"{_DOWNLOAD_BASE}/{tarball_name}"
+    url = f"{_download_base()}/{tarball_name}"
     logger.info("Downloading Lima %s from %s ...", LIMA_VERSION, url)
 
     import httpx

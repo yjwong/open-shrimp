@@ -1,0 +1,6 @@
+repo: https://github.com/lima-vm/lima
+tag: v2.1.1
+tag-object-sha: 1d016f7bf1f388c1f6a555c84c95b0020372c25d
+commit-sha: 3f73aec2
+note: Matches LIMA_VERSION in src/open_shrimp/sandbox/lima_helpers.py.
+      Bump both this PIN and LIMA_VERSION together when upgrading lima.
