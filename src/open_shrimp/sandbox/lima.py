@@ -20,7 +20,11 @@ import subprocess
 from pathlib import Path
 
 from open_shrimp.config import SandboxConfig
-from open_shrimp.sandbox.base import VNC_QUIRK_RFB_DROPS_SET_ENCODINGS, VncQuirk
+from open_shrimp.sandbox.base import (
+    VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
+    VNC_QUIRK_RFB_DROPS_SET_ENCODINGS,
+    VncQuirk,
+)
 from open_shrimp.sandbox.lima_helpers import (
     _lima_env,
     _log,
@@ -359,10 +363,16 @@ class LimaSandbox:
 
     def get_vnc_quirks(self) -> frozenset[VncQuirk]:
         # The patched limactl drives Apple's _VZVNCServer SPI, which
-        # crashes on SetEncodings (RFB type 2) and resets on
-        # SetPixelFormat (type 0).  The proxy filter strips both.
+        # crashes on SetEncodings (RFB type 2), resets on SetPixelFormat
+        # (type 0), and advertises a ServerInit pixel format whose shifts
+        # don't match the BGRA bytes it puts on the wire.  The proxy
+        # strips the offending client messages and rewrites the server's
+        # pixel-format advertisement to match the actual byte order.
         if self._computer_use and self._guest_os == "macos":
-            return frozenset({VNC_QUIRK_RFB_DROPS_SET_ENCODINGS})
+            return frozenset({
+                VNC_QUIRK_RFB_DROPS_SET_ENCODINGS,
+                VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
+            })
         return frozenset()
 
     def _read_vz_vnc_port(self) -> int | None:

@@ -1,32 +1,48 @@
-"""Stateful filter for RFB client-to-server messages.
+"""Stateful filters for the RFB byte streams on the VZ-host VNC path.
 
 Apple's private ``_VZVNCServer`` SPI — the host-side VNC server attached
-to a ``VZVirtualMachine`` by our patched ``limactl`` — crashes the host
-process (SIGTRAP inside ``Base::report_fixme_if_and_trap``) on RFB
-``SetEncodings`` (type 2) and resets the connection on ``SetPixelFormat``
-(type 0).  Any noVNC / RealVNC / TigerVNC client *will* send both during
-its connection setup, so a filter that strips them before they reach the
-server is mandatory on the VZ-host VNC path.
+to a ``VZVirtualMachine`` by our patched ``limactl`` — has two bugs that
+the proxy must work around byte-by-byte:
 
-Wayvnc and Apple Screen Sharing handle these messages correctly; do not
-filter them, or client-driven encoding negotiation gets silently disabled
-and pixel quality regresses.
+1. **Crashes on client requests.**  ``SetEncodings`` (type 2) hits a
+   ``Base::report_fixme_if_and_trap`` (SIGTRAP) and ``SetPixelFormat``
+   (type 0) resets the TCP connection.  Any noVNC / RealVNC / TigerVNC
+   client *will* send both during connection setup, so
+   :class:`RfbClientFilter` strips them from the client→server stream.
+
+2. **Lies about its pixel format.**  The framebuffer rectangles on the
+   wire are 32-bit little-endian BGRA, but the ``ServerInit`` message
+   advertises a pixel format with shifts that don't match.  Because
+   ``SetPixelFormat`` is dropped under (1), the client can't renegotiate.
+   :class:`RfbServerFilter` rewrites ``ServerInit``'s 16-byte pixel
+   format struct on the server→client stream so noVNC interprets the
+   raw bytes correctly.  Without the rewrite, R and B channels appear
+   swapped (blue Finder icon shows orange).
+
+Wayvnc and Apple Screen Sharing handle the protocol correctly; do not
+apply either filter on those paths, or client-driven encoding
+negotiation gets silently disabled and pixel quality regresses.
 
 Usage::
 
-    f = RfbClientFilter()
+    cf = RfbClientFilter()
+    sf = RfbServerFilter()
     while data := await ws.receive_bytes():
-        out = f.feed(data)
+        out = cf.feed(data)
         if out:
             tcp_writer.write(out)
+    # ...separately, on the TCP→WS side:
+    while data := await tcp_reader.read(...):
+        await ws.send_bytes(sf.feed(data))
 
-The filter is stateful across :meth:`feed` calls so that messages split
-across WebSocket frame boundaries are reassembled correctly.
+Both filters are stateful across :meth:`feed` calls so that messages
+split across WebSocket / TCP read boundaries are reassembled correctly.
 """
 
 from __future__ import annotations
 
 import struct
+from typing import Literal
 
 # Drop these — Apple's _VZVNCServer crashes on them.
 _DROP_TYPES = frozenset({0, 2})
@@ -148,3 +164,161 @@ class RfbClientFilter:
         raise RfbFilterError(
             f"unknown RFB client message type {type_byte}"
         )
+
+
+# Pixel format ``_VZVNCServer`` actually puts on the wire (32-bit
+# little-endian BGRA).  Sent in place of the upstream's mismatched
+# ``ServerInit`` advertisement so noVNC decodes the bytes correctly.
+_BGRA_PIXEL_FORMAT: bytes = struct.pack(
+    "!BBBBHHHBBB3x",
+    32, 24, 0, 1,            # bpp, depth, big-endian, true-colour
+    255, 255, 255,           # max R/G/B
+    16, 8, 0,                # shifts R/G/B
+)
+
+
+_ServerState = Literal[
+    "version",
+    "security_count",
+    "security_types",
+    "security_result",
+    "server_init_header",
+    "server_init_name",
+    "passthrough",
+]
+
+
+class RfbServerFilter:
+    """Stateful filter for the server-to-client byte stream of an RFB
+    connection from ``_VZVNCServer``.
+
+    Walks the RFB 3.8 server-side handshake just far enough to find the
+    ``ServerInit`` message, rewrites its 16-byte ``PIXEL_FORMAT`` struct
+    to match the BGRA byte order the server actually sends, and
+    forwards everything else byte-identical.
+
+    Assumes the proxy is in passthrough mode (``credentials is None``):
+    the server's full handshake — ``ProtocolVersion``, security types,
+    ``SecurityResult``, ``ServerInit`` — flows through the filter.  When
+    the proxy intercepts auth instead, the upstream handshake is
+    consumed inside ``_authenticate_to_server`` and this filter would
+    see only ``ServerInit`` onward; that mode isn't used by Lima/macOS
+    today (``_VZVNCNoSecuritySecurityConfiguration``) so it isn't
+    handled here.
+    """
+
+    _STATE_VERSION: _ServerState = "version"
+    _STATE_SECURITY_COUNT: _ServerState = "security_count"
+    _STATE_SECURITY_TYPES: _ServerState = "security_types"
+    _STATE_SECURITY_RESULT: _ServerState = "security_result"
+    _STATE_SERVER_INIT_HEADER: _ServerState = "server_init_header"
+    _STATE_SERVER_INIT_NAME: _ServerState = "server_init_name"
+    _STATE_PASSTHROUGH: _ServerState = "passthrough"
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self._state: _ServerState = self._STATE_VERSION
+        self._security_types_remaining = 0
+        self._name_remaining = 0
+
+    def feed(self, data: bytes) -> bytes:
+        """Feed bytes from the server; return bytes to forward to the client.
+
+        Bytes are accumulated until each protocol section can be
+        forwarded in full (with ``ServerInit``'s pixel format rewritten);
+        partial data is buffered until the next call.
+        """
+        # Hot path: once past ServerInit, every framebuffer-update chunk
+        # flows through here.  Skip the buffer + state machine when there
+        # is nothing left to inspect — no copies, no allocation.
+        if self._state == self._STATE_PASSTHROUGH and not self._buf:
+            return data
+        self._buf.extend(data)
+        out = bytearray()
+        while self._step(out):
+            pass
+        return bytes(out)
+
+    def _step(self, out: bytearray) -> bool:  # noqa: PLR0911
+        """Advance one section if enough bytes are buffered.  Returns
+        ``True`` if any progress was made, ``False`` if blocked on more
+        input."""
+        if self._state == self._STATE_VERSION:
+            if len(self._buf) < 12:
+                return False
+            out.extend(self._buf[:12])
+            del self._buf[:12]
+            self._state = self._STATE_SECURITY_COUNT
+            return True
+
+        if self._state == self._STATE_SECURITY_COUNT:
+            if len(self._buf) < 1:
+                return False
+            count = self._buf[0]
+            out.extend(self._buf[:1])
+            del self._buf[:1]
+            if count == 0:
+                # Server refused the connection: a 4-byte reason length
+                # plus reason string follows; we have no ServerInit to
+                # rewrite so fall through to verbatim forwarding.
+                self._state = self._STATE_PASSTHROUGH
+            else:
+                self._security_types_remaining = count
+                self._state = self._STATE_SECURITY_TYPES
+            return True
+
+        if self._state == self._STATE_SECURITY_TYPES:
+            if not self._buf:
+                return False
+            take = min(self._security_types_remaining, len(self._buf))
+            out.extend(self._buf[:take])
+            del self._buf[:take]
+            self._security_types_remaining -= take
+            if self._security_types_remaining == 0:
+                self._state = self._STATE_SECURITY_RESULT
+            return True
+
+        if self._state == self._STATE_SECURITY_RESULT:
+            if len(self._buf) < 4:
+                return False
+            out.extend(self._buf[:4])
+            del self._buf[:4]
+            self._state = self._STATE_SERVER_INIT_HEADER
+            return True
+
+        if self._state == self._STATE_SERVER_INIT_HEADER:
+            if len(self._buf) < 24:
+                return False
+            header = bytearray(self._buf[:24])
+            header[4:20] = _BGRA_PIXEL_FORMAT
+            out.extend(header)
+            (self._name_remaining,) = struct.unpack_from(
+                "!I", self._buf, 20,
+            )
+            del self._buf[:24]
+            self._state = (
+                self._STATE_SERVER_INIT_NAME
+                if self._name_remaining > 0
+                else self._STATE_PASSTHROUGH
+            )
+            return True
+
+        if self._state == self._STATE_SERVER_INIT_NAME:
+            if not self._buf:
+                return False
+            take = min(self._name_remaining, len(self._buf))
+            out.extend(self._buf[:take])
+            del self._buf[:take]
+            self._name_remaining -= take
+            if self._name_remaining == 0:
+                self._state = self._STATE_PASSTHROUGH
+            return True
+
+        if self._state == self._STATE_PASSTHROUGH:
+            if not self._buf:
+                return False
+            out.extend(self._buf)
+            self._buf.clear()
+            return True
+
+        return False

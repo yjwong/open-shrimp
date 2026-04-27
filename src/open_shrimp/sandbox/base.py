@@ -22,7 +22,17 @@ and ``SetEncodings`` (type 2).  The proxy must filter both out of the
 client→server byte stream.  Apple's private ``_VZVNCServer`` SPI has
 this bug."""
 
-VncQuirk = Literal["rfb_drops_set_encodings"]
+VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT: Final = "rfb_bgra_pixel_format"
+"""The upstream RFB server sends 32-bit little-endian BGRA pixels on the
+wire but advertises a pixel format in ``ServerInit`` whose shifts don't
+match.  Because ``SetPixelFormat`` is dropped (see
+:data:`VNC_QUIRK_RFB_DROPS_SET_ENCODINGS`), the only fix is for the proxy
+to rewrite the advertised pixel-format on the server→client stream so
+clients render the bytes correctly.  Apple's private ``_VZVNCServer``
+SPI has this bug — without the rewrite, R and B channels appear swapped
+(blue Finder icon shows orange)."""
+
+VncQuirk = Literal["rfb_drops_set_encodings", "rfb_bgra_pixel_format"]
 """A protocol-level workaround the WebSocket VNC proxy must apply."""
 
 

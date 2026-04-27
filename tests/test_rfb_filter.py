@@ -1,4 +1,4 @@
-"""Tests for the RFB client→server filter used on the VZ-host VNC path."""
+"""Tests for the RFB byte-stream filters used on the VZ-host VNC path."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import pytest
 from open_shrimp.vnc.rfb_filter import (
     RfbClientFilter,
     RfbFilterError,
+    RfbServerFilter,
 )
 
 
@@ -267,3 +268,190 @@ class TestRecordedNoVNC:
         f = RfbClientFilter()
         out = f.feed(HANDSHAKE + spf + se + fur)
         assert out == HANDSHAKE + fur
+
+
+# ---- Builders for RFB server-to-client messages ----
+
+
+def server_version() -> bytes:
+    return b"RFB 003.008\n"
+
+
+def server_security_types(types: list[int]) -> bytes:
+    return bytes([len(types)]) + bytes(types)
+
+
+def server_security_result(result: int = 0) -> bytes:
+    return struct.pack("!I", result)
+
+
+def pixel_format(
+    bpp: int, depth: int, big_endian: int, true_color: int,
+    rmax: int, gmax: int, bmax: int,
+    rsh: int, gsh: int, bsh: int,
+) -> bytes:
+    return struct.pack(
+        "!BBBBHHHBBB3x",
+        bpp, depth, big_endian, true_color,
+        rmax, gmax, bmax, rsh, gsh, bsh,
+    )
+
+
+# Apple-advertised pixel format with the wrong shifts (R↔B swap symptom).
+# Real values were not captured but any non-BGRA layout reproduces the
+# bug; this one matches what RGBA-on-wire would look like.
+APPLE_BAD_PIXEL_FORMAT = pixel_format(32, 24, 0, 1, 255, 255, 255, 0, 8, 16)
+
+# What the filter should rewrite the ServerInit pixel format to: BGRA
+# little-endian, matching the bytes ``_VZVNCServer`` actually sends.
+BGRA_PIXEL_FORMAT = pixel_format(32, 24, 0, 1, 255, 255, 255, 16, 8, 0)
+
+
+def server_init(
+    width: int, height: int, name: bytes, pf: bytes = APPLE_BAD_PIXEL_FORMAT,
+) -> bytes:
+    return (
+        struct.pack("!HH", width, height)
+        + pf
+        + struct.pack("!I", len(name))
+        + name
+    )
+
+
+SERVER_HANDSHAKE = (
+    server_version()
+    + server_security_types([1])
+    + server_security_result(0)
+)
+
+
+# ---- ServerInit pixel-format rewrite ----
+
+
+class TestServerInitRewrite:
+    def test_rewrites_pixel_format_one_shot(self) -> None:
+        f = RfbServerFilter()
+        si = server_init(1280, 720, b"vz-host", APPLE_BAD_PIXEL_FORMAT)
+        out = f.feed(SERVER_HANDSHAKE + si)
+
+        expected = (
+            SERVER_HANDSHAKE
+            + server_init(1280, 720, b"vz-host", BGRA_PIXEL_FORMAT)
+        )
+        assert out == expected
+
+    def test_handshake_passes_through_when_pixfmt_already_bgra(self) -> None:
+        f = RfbServerFilter()
+        si = server_init(800, 600, b"name", BGRA_PIXEL_FORMAT)
+        out = f.feed(SERVER_HANDSHAKE + si)
+        # Idempotent: rewriting BGRA → BGRA is a no-op.
+        assert out == SERVER_HANDSHAKE + si
+
+    def test_post_serverinit_passthrough(self) -> None:
+        f = RfbServerFilter()
+        si = server_init(100, 100, b"x", APPLE_BAD_PIXEL_FORMAT)
+        # 4 bytes of pixel data after ServerInit must pass through untouched
+        # (raw FramebufferUpdate would have its own header but for this
+        # passthrough check any bytes work).
+        post = b"\xde\xad\xbe\xef\x01\x02\x03\x04"
+        out = f.feed(SERVER_HANDSHAKE + si + post)
+        # Pixel format rewrite happens, but bytes after ServerInit are
+        # untouched.
+        assert out.endswith(post)
+
+    def test_empty_name(self) -> None:
+        f = RfbServerFilter()
+        si = server_init(1024, 768, b"", APPLE_BAD_PIXEL_FORMAT)
+        out = f.feed(SERVER_HANDSHAKE + si)
+        expected = (
+            SERVER_HANDSHAKE
+            + server_init(1024, 768, b"", BGRA_PIXEL_FORMAT)
+        )
+        assert out == expected
+
+    def test_byte_by_byte(self) -> None:
+        f = RfbServerFilter()
+        si = server_init(640, 480, b"vz", APPLE_BAD_PIXEL_FORMAT)
+        data = SERVER_HANDSHAKE + si + b"\x00trailing"
+        out = b""
+        for b in data:
+            out += f.feed(bytes([b]))
+
+        expected = (
+            SERVER_HANDSHAKE
+            + server_init(640, 480, b"vz", BGRA_PIXEL_FORMAT)
+            + b"\x00trailing"
+        )
+        assert out == expected
+
+    @pytest.mark.parametrize("split", [1, 5, 12, 13, 15, 18, 22, 30, 42])
+    def test_split_at_boundary(self, split: int) -> None:
+        f = RfbServerFilter()
+        si = server_init(1280, 720, b"server", APPLE_BAD_PIXEL_FORMAT)
+        data = SERVER_HANDSHAKE + si + b"trailing-bytes"
+        first = f.feed(data[:split])
+        second = f.feed(data[split:])
+
+        expected = (
+            SERVER_HANDSHAKE
+            + server_init(1280, 720, b"server", BGRA_PIXEL_FORMAT)
+            + b"trailing-bytes"
+        )
+        assert first + second == expected
+
+    def test_multiple_security_types_handled(self) -> None:
+        f = RfbServerFilter()
+        # Server offers types [1, 2, 30] (None, VNC auth, Apple DH).
+        sec = server_security_types([1, 2, 30])
+        handshake = server_version() + sec + server_security_result(0)
+        si = server_init(640, 480, b"x", APPLE_BAD_PIXEL_FORMAT)
+        out = f.feed(handshake + si)
+
+        expected = handshake + server_init(640, 480, b"x", BGRA_PIXEL_FORMAT)
+        assert out == expected
+
+    def test_security_count_zero_passthrough(self) -> None:
+        """Server refusing the connection (count=0): forward verbatim and
+        never reach ServerInit."""
+        f = RfbServerFilter()
+        # count=0 followed by reason length + reason string.
+        reason = b"too many connections"
+        refusal = (
+            server_version()
+            + bytes([0])
+            + struct.pack("!I", len(reason))
+            + reason
+        )
+        out = f.feed(refusal)
+        assert out == refusal
+
+    def test_serverinit_split_inside_pixel_format(self) -> None:
+        """Pixel format struct delivered across two reads — must still be
+        rewritten as a unit, not partially."""
+        f = RfbServerFilter()
+        si = server_init(1280, 720, b"host", APPLE_BAD_PIXEL_FORMAT)
+        data = SERVER_HANDSHAKE + si
+
+        # Split inside the pixel format struct (handshake = 17 bytes,
+        # ServerInit header starts at 17, pixel format at 17+4=21).
+        split = 25  # mid-pixel-format
+        first = f.feed(data[:split])
+        second = f.feed(data[split:])
+
+        # Header+pixfmt+name-len must wait for the full 24 bytes, so the
+        # first chunk forwards only the handshake (17 bytes) and the
+        # rewrite happens atomically on the second chunk.
+        assert first == SERVER_HANDSHAKE
+        expected_si = server_init(1280, 720, b"host", BGRA_PIXEL_FORMAT)
+        assert second == expected_si
+
+    def test_idempotent_subsequent_feeds(self) -> None:
+        """After ServerInit is consumed the filter is in passthrough mode
+        and never re-parses anything."""
+        f = RfbServerFilter()
+        si = server_init(800, 600, b"x", APPLE_BAD_PIXEL_FORMAT)
+        f.feed(SERVER_HANDSHAKE + si)
+        # Subsequent bytes — even ones that look like a fresh handshake —
+        # are forwarded verbatim, not re-rewritten.
+        more = SERVER_HANDSHAKE + si
+        assert f.feed(more) == more

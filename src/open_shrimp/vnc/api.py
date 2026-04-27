@@ -25,9 +25,16 @@ from open_shrimp.sandbox.docker_helpers import (
     get_text_input_state_path,
 )
 from open_shrimp.review.auth import AuthError, validate_token_param
-from open_shrimp.sandbox.base import VNC_QUIRK_RFB_DROPS_SET_ENCODINGS
+from open_shrimp.sandbox.base import (
+    VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
+    VNC_QUIRK_RFB_DROPS_SET_ENCODINGS,
+)
 from open_shrimp.vnc.apple_dh import AppleDhAuthError, authenticate as apple_dh_authenticate
-from open_shrimp.vnc.rfb_filter import RfbClientFilter, RfbFilterError
+from open_shrimp.vnc.rfb_filter import (
+    RfbClientFilter,
+    RfbFilterError,
+    RfbServerFilter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -231,11 +238,21 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         if VNC_QUIRK_RFB_DROPS_SET_ENCODINGS in quirks
         else None
     )
+    # Server-side ServerInit pixel-format rewrite is only safe in the
+    # passthrough auth path: it walks the full RFB handshake from the
+    # upstream, which the auth-intercepting branch already consumes.
+    server_filter: RfbServerFilter | None = (
+        RfbServerFilter()
+        if VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT in quirks and credentials is None
+        else None
+    )
     logger.info(
-        "VNC proxy connected: context=%s, port=%d, auth=%s, filter=%s",
+        "VNC proxy connected: context=%s, port=%d, auth=%s, "
+        "client-filter=%s, server-filter=%s",
         context_name, port,
         "apple-dh" if credentials else "passthrough",
         "rfb-strip" if rfb_filter is not None else "none",
+        "bgra-pixfmt" if server_filter is not None else "none",
     )
 
     ws_reader = _WSBufferedReader(websocket)
@@ -281,7 +298,13 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
                 data = await reader.read(65536)
                 if not data:
                     break
-                await websocket.send_bytes(data)
+                chunk = (
+                    server_filter.feed(data)
+                    if server_filter is not None
+                    else data
+                )
+                if chunk:
+                    await websocket.send_bytes(chunk)
         except Exception:
             pass
 
