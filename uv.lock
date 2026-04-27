@@ -424,6 +424,7 @@ libvirt = [
     { name = "libvirt-python" },
 ]
 macos = [
+    { name = "pyobjc-framework-cocoa" },
     { name = "pyobjc-framework-quartz" },
     { name = "rumps" },
 ]
@@ -442,6 +443,7 @@ requires-dist = [
     { name = "libvirt-python", marker = "extra == 'libvirt'", specifier = ">=10.0" },
     { name = "mistune", specifier = ">=3.0,<4.0" },
     { name = "platformdirs", specifier = ">=4.0" },
+    { name = "pyobjc-framework-cocoa", marker = "extra == 'macos'", specifier = ">=10.0" },
     { name = "pyobjc-framework-quartz", marker = "extra == 'macos'", specifier = ">=10.0" },
     { name = "python-telegram-bot", extras = ["httpx", "job-queue"] },
     { name = "pyyaml" },

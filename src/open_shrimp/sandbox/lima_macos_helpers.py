@@ -63,8 +63,7 @@ def generate_lima_yaml_macos(
         "cpus": config.cpus,
         "memory": f"{config.memory}MiB",
         "disk": f"{config.disk_size}GiB",
-        # macOS guests require a display device.
-        "video": {"display": "default"},
+        "video": _video_config_macos(computer_use),
         "mountType": "virtiofs",
         "mounts": mounts,
         "provision": provision,
@@ -78,6 +77,29 @@ def generate_lima_yaml_macos(
     )
     logger.info("Generated macOS Lima YAML template at %s", yaml_path)
     return yaml_path
+
+
+def _video_config_macos(computer_use: bool) -> dict:
+    """Lima ``video`` config for macOS guests.
+
+    For computer-use contexts, request the OpenShrimp-patched ``vnc``
+    display mode: the patched ``limactl`` attaches Apple's private
+    ``_VZVNCServer`` SPI to the running ``VZVirtualMachine`` and binds a
+    localhost TCP listener instead of opening a graphics window.  The
+    bound port is published via ``DisplayConnection`` and recorded by the
+    hostagent in ``<LIMA_HOME>/<instance>/vncdisplay``.
+
+    The ``to=`` option in ``video.vnc.display`` is required to make the
+    hostagent call ``DisplayConnection`` — without it, Lima trusts the
+    static ``host:display`` from the YAML and never asks the driver for
+    the real port.
+    """
+    if computer_use:
+        return {
+            "display": "vnc",
+            "vnc": {"display": "127.0.0.1:0,to=99"},
+        }
+    return {"display": "default"}
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +466,7 @@ def lima_config_fingerprint_macos(
         "cpus": config.cpus,
         "memory": f"{config.memory}MiB",
         "disk": f"{config.disk_size}GiB",
-        "video": {"display": "default"},
+        "video": _video_config_macos(computer_use),
         "mountType": "virtiofs",
         "mounts": mounts,
         "provision": provision,

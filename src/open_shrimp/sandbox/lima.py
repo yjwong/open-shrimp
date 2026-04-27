@@ -14,24 +14,13 @@ Implements the :class:`~open_shrimp.sandbox.base.Sandbox` protocol.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
-import getpass
 import logging
 import shlex
 import subprocess
 from pathlib import Path
 
-# Bootstrap CoreGraphics/AppKit once for non-app processes (idempotent).
-# Required so SCScreenshotManager doesn't trip CGS_REQUIRE_INIT inside CLI
-# Python invocations. Skipped on non-macOS hosts where AppKit is absent.
-try:
-    import AppKit as _AppKit  # type: ignore[import-not-found]
-    _AppKit.NSApplicationLoad()
-except ImportError:
-    pass
-
 from open_shrimp.config import SandboxConfig
-from open_shrimp.sandbox.base import VncQuirk
+from open_shrimp.sandbox.base import VNC_QUIRK_RFB_DROPS_SET_ENCODINGS, VncQuirk
 from open_shrimp.sandbox.lima_helpers import (
     _lima_env,
     _log,
@@ -52,6 +41,7 @@ from open_shrimp.sandbox.lima_helpers import (
     state_dir_for,
     vnc_host_port,
 )
+from open_shrimp.vnc.rfb_snapshot import RfbSnapshotError, capture_to_png
 
 logger = logging.getLogger(__name__)
 
@@ -87,69 +77,6 @@ _MACOS_MODIFIER_MAP: dict[str, str] = {
     "command": "command down",
     "meta": "command down",
 }
-
-
-def _ax_find_content_rect(
-    pid: int, sc_frame: tuple[float, float, float, float],
-) -> tuple[float, float, float, float] | None:
-    """Return the VZ scroll-area's frame in window-local points.
-
-    Walks the limactl process's accessibility tree, finds the AXWindow
-    matching *sc_frame* (its screen-coord frame from ScreenCaptureKit),
-    and returns ``(x, y, w, h)`` of its AXScrollArea child relative to
-    the window's origin. Returns ``None`` if AX is unavailable or the
-    expected structure isn't present.
-
-    Requires Accessibility TCC permission for the calling process.
-    """
-    try:
-        from ApplicationServices import (  # type: ignore[import-not-found]
-            AXUIElementCopyAttributeValue,
-            AXUIElementCreateApplication,
-            AXValueGetValue,
-            kAXValueCGPointType,
-            kAXValueCGSizeType,
-        )
-    except ImportError:
-        return None
-
-    def _ax_get(elem, attr):
-        err, val = AXUIElementCopyAttributeValue(elem, attr, None)
-        return val if err == 0 else None
-
-    def _ax_frame(elem) -> tuple[float, float, float, float] | None:
-        pos = _ax_get(elem, "AXPosition")
-        siz = _ax_get(elem, "AXSize")
-        if pos is None or siz is None:
-            return None
-        _, p = AXValueGetValue(pos, kAXValueCGPointType, None)
-        _, s = AXValueGetValue(siz, kAXValueCGSizeType, None)
-        return (p.x, p.y, s.width, s.height)
-
-    app = AXUIElementCreateApplication(pid)
-    windows = _ax_get(app, "AXWindows")
-    if not windows:
-        return None
-    sx, sy, sw, sh = sc_frame
-    for w in windows:
-        wf = _ax_frame(w)
-        if wf is None:
-            continue
-        wx, wy, ww, wh = wf
-        if abs(wx - sx) > 2 or abs(wy - sy) > 2 \
-                or abs(ww - sw) > 2 or abs(wh - sh) > 2:
-            continue
-        children = _ax_get(w, "AXChildren") or []
-        for c in children:
-            if _ax_get(c, "AXRole") != "AXScrollArea":
-                continue
-            cf = _ax_frame(c)
-            if cf is None:
-                return None
-            cx, cy, cw, ch = cf
-            return (cx - wx, cy - wy, cw, ch)
-        return None
-    return None
 
 
 class LimaSandbox:
@@ -188,17 +115,6 @@ class LimaSandbox:
 
         # SSH tunnel processes for macOS guest port forwarding.
         self._ssh_tunnels: list[subprocess.Popen] = []
-
-        # Cached VNC credentials (read once from the guest).
-        self._vnc_credentials_cached: tuple[str, str] | None = None
-
-        # Cached chrome-crop rect, keyed by the Lima window's screen frame.
-        # Walking the limactl AX tree costs a few IPC roundtrips per call;
-        # the rect is stable until the user resizes the window.
-        self._crop_cache: dict[
-            tuple[float, float, float, float],
-            tuple[float, float, float, float] | None,
-        ] = {}
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -425,30 +341,51 @@ class LimaSandbox:
         return None
 
     def get_vnc_port(self) -> int | None:
-        if self._computer_use:
-            return vnc_host_port(self._context_name)
-        return None
+        if not self._computer_use:
+            return None
+        if self._guest_os == "macos":
+            # macOS guests render via VZMacGraphics; the patched limactl
+            # publishes an _VZVNCServer port through Lima's hostagent,
+            # which writes <LIMA_HOME>/<instance>/vncdisplay.
+            return self._read_vz_vnc_port()
+        # Linux guests use the YAML port-forward to in-VM wayvnc on 5900.
+        return vnc_host_port(self._context_name)
 
     def get_vnc_credentials(self) -> tuple[str, str] | None:
-        # Linux guests run wayvnc with no auth.  macOS guests run
-        # Apple Screen Sharing which always requires credentials.
-        if not self._computer_use or self._guest_os != "macos":
-            return None
-        if self._vnc_credentials_cached is not None:
-            return self._vnc_credentials_cached
-        rc, stdout, stderr = self._exec_in_vm_sync("cat ~/password")
-        if rc != 0 or not stdout.strip():
-            logger.warning(
-                "Failed to read VNC password from %s: %s",
-                self._inst_name, stderr.strip() or "empty",
-            )
-            return None
-        creds = (getpass.getuser(), stdout.strip())
-        self._vnc_credentials_cached = creds
-        return creds
+        # Linux wayvnc and the macOS-guest _VZVNCServer (configured with
+        # NoSecurity) both run unauthenticated on localhost; the WS proxy
+        # is the access boundary.
+        return None
 
     def get_vnc_quirks(self) -> frozenset[VncQuirk]:
+        # The patched limactl drives Apple's _VZVNCServer SPI, which
+        # crashes on SetEncodings (RFB type 2) and resets on
+        # SetPixelFormat (type 0).  The proxy filter strips both.
+        if self._computer_use and self._guest_os == "macos":
+            return frozenset({VNC_QUIRK_RFB_DROPS_SET_ENCODINGS})
         return frozenset()
+
+    def _read_vz_vnc_port(self) -> int | None:
+        """Read the bound _VZVNCServer port from Lima's ``vncdisplay`` file.
+
+        File format is ``<host>:<displaynum>`` with ``displaynum =
+        port - 5900``.  Lima writes it once after VM start; until then
+        the file is absent and the proxy reports "VNC port not available".
+        """
+        vnc_file = Path(self._env["LIMA_HOME"]) / self._inst_name / "vncdisplay"
+        try:
+            content = vnc_file.read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, OSError):
+            return None
+        try:
+            _host, num = content.rsplit(":", 1)
+            return int(num) + 5900
+        except ValueError:
+            logger.warning(
+                "Cannot parse %s: %r (expected host:displaynum)",
+                vnc_file, content,
+            )
+            return None
 
     def get_text_input_state_path(self) -> Path | None:
         if self._computer_use:
@@ -494,134 +431,22 @@ class LimaSandbox:
 
     def take_screenshot(self, output_path: Path) -> None:
         if self._guest_os == "macos":
-            self._capture_lima_window_macos(output_path)
+            port = self._read_vz_vnc_port()
+            if port is None:
+                raise RuntimeError(
+                    "VZ host VNC port not yet published — is the VM running "
+                    "with video.display=vnc and the patched limactl?"
+                )
+            try:
+                capture_to_png("127.0.0.1", port, output_path)
+            except RfbSnapshotError as e:
+                raise RuntimeError(f"VZ VNC snapshot failed: {e}") from e
             return
         ts = int(output_path.stem.split("-")[-1]) if "-" in output_path.stem else 0
         guest_path = f"/tmp/screenshots/screenshot-{ts}.png"
         rc, _, stderr = self._exec_in_vm_sync(f"grim {guest_path}")
         if rc != 0:
             raise RuntimeError(f"grim failed: {stderr.strip()}")
-
-    def _capture_lima_window_macos(self, output_path: Path) -> None:
-        """Capture the Lima VM window from the host via ScreenCaptureKit.
-
-        Avoids in-guest ``screencapture`` which fails when the guest is
-        locked or the user session is unavailable. Lima's hostagent owns
-        ~6 windows for a graphical VM: the VM display (e.g. 1165x780)
-        plus several off-screen menubar/toolbar surfaces (e.g. 1440x30);
-        we pick the largest on-screen one. The capture is cropped to
-        exclude the host window's titlebar/toolbar chrome (~52pt) using
-        the AX tree, so coordinates in the resulting PNG map directly
-        to the guest framebuffer. Falls back to a full-window capture
-        with chrome if Accessibility permission isn't granted.
-
-        Requires Screen Recording permission for OpenShrimp.
-        """
-        from Foundation import NSURL  # type: ignore[import-not-found]
-        from Quartz import (  # type: ignore[import-not-found]
-            CGImageDestinationAddImage,
-            CGImageDestinationCreateWithURL,
-            CGImageDestinationFinalize,
-            kCVPixelFormatType_32BGRA,
-        )
-        from ScreenCaptureKit import (  # type: ignore[import-not-found]
-            SCContentFilter,
-            SCScreenshotManager,
-            SCShareableContent,
-            SCStreamConfiguration,
-        )
-
-        pid = self._read_ha_pid()
-        future: concurrent.futures.Future = concurrent.futures.Future()
-
-        def on_image(image, error):
-            if error is not None or image is None:
-                future.set_exception(RuntimeError(f"capture failed: {error}"))
-            else:
-                future.set_result(image)
-
-        def on_content(content, error):
-            if error is not None:
-                future.set_exception(
-                    RuntimeError(f"shareable content failed: {error}"))
-                return
-            best = None
-            best_area = 0
-            for w in content.windows():
-                app = w.owningApplication()
-                if app is None or app.processID() != pid:
-                    continue
-                frame = w.frame()
-                area = int(frame.size.width * frame.size.height)
-                if area < 100_000:  # skip menubar/toolbar surfaces
-                    continue
-                if area > best_area:
-                    best_area, best = area, w
-            if best is None:
-                future.set_exception(RuntimeError(
-                    f"no on-screen Lima window for hostagent pid={pid}; "
-                    "is the VM running with video.display=vz?"))
-                return
-
-            sc_frame = (
-                best.frame().origin.x, best.frame().origin.y,
-                best.frame().size.width, best.frame().size.height,
-            )
-            crop = self._crop_for_window(pid, sc_frame)
-            if crop is not None:
-                cx, cy, cw, ch = crop
-            else:
-                cx, cy, cw, ch = 0.0, 0.0, sc_frame[2], sc_frame[3]
-
-            filt = SCContentFilter.alloc().initWithDesktopIndependentWindow_(best)
-            cfg = SCStreamConfiguration.alloc().init()
-            cfg.setSourceRect_(((cx, cy), (cw, ch)))
-            cfg.setWidth_(int(cw * 2))
-            cfg.setHeight_(int(ch * 2))
-            cfg.setShowsCursor_(False)
-            cfg.setPixelFormat_(kCVPixelFormatType_32BGRA)
-            SCScreenshotManager.captureImageWithFilter_configuration_completionHandler_(
-                filt, cfg, on_image)
-
-        SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
-            False, True, on_content)
-
-        try:
-            image = future.result(timeout=10.0)
-        except concurrent.futures.TimeoutError as e:
-            raise RuntimeError("ScreenCaptureKit timed out after 10s") from e
-
-        url = NSURL.fileURLWithPath_(str(output_path))
-        dest = CGImageDestinationCreateWithURL(url, "public.png", 1, None)
-        if dest is None:
-            raise RuntimeError(
-                f"CGImageDestinationCreateWithURL failed for {output_path}")
-        CGImageDestinationAddImage(dest, image, None)
-        if not CGImageDestinationFinalize(dest):
-            raise RuntimeError(
-                f"CGImageDestinationFinalize failed for {output_path}")
-
-    def _crop_for_window(
-        self, pid: int, sc_frame: tuple[float, float, float, float],
-    ) -> tuple[float, float, float, float] | None:
-        if sc_frame in self._crop_cache:
-            return self._crop_cache[sc_frame]
-        crop = _ax_find_content_rect(pid, sc_frame)
-        if crop is None:
-            logger.warning(
-                "AX content rect unavailable for pid=%d; capturing full "
-                "window with chrome — grant Accessibility permission to "
-                "remove the ~52pt offset.", pid,
-            )
-        self._crop_cache[sc_frame] = crop
-        return crop
-
-    def _read_ha_pid(self) -> int:
-        pid_file = Path(self._env["LIMA_HOME"]) / self._inst_name / "ha.pid"
-        try:
-            return int(pid_file.read_text().strip())
-        except (OSError, ValueError) as e:
-            raise RuntimeError(f"cannot read {pid_file}: {e}") from e
 
     def send_click(self, x: int, y: int, button: str = "left") -> None:
         if self._guest_os == "macos":
@@ -881,7 +706,9 @@ class LimaSandbox:
         """Set up SSH port-forwarding tunnels for macOS guest ports.
 
         macOS Lima guests don't support automatic port forwarding, so
-        we use ``ssh -L`` tunnels for VNC and CDP ports.
+        we use an ``ssh -L`` tunnel for the Chromium CDP port (Playwright
+        MCP).  The VNC port is exposed directly on the host by the
+        patched ``limactl`` via ``_VZVNCServer`` and needs no tunnel.
         """
         # Check if existing tunnels are still alive.
         alive = [p for p in self._ssh_tunnels if p.poll() is None]
@@ -900,20 +727,9 @@ class LimaSandbox:
             return
         ssh_target = f"lima-{self._inst_name}"
 
-        host_vnc_port = vnc_host_port(self._context_name)
-        tunnels_needed = [(host_vnc_port, 5900), (9222, 9222)]
+        tunnels_needed = [(9222, 9222)]
 
         for host_port, guest_port in tunnels_needed:
-            # Check if this tunnel is already running.
-            already_tunneled = any(
-                p.poll() is None
-                for p in alive
-                # Can't easily check which port a Popen maps to, so just
-                # check total count — if we lost any, restart all missing.
-            )
-            if already_tunneled and len(alive) >= len(tunnels_needed):
-                continue
-
             tunnel_cmd = [
                 "ssh", "-F", str(ssh_config), ssh_target,
                 "-N",
