@@ -400,6 +400,14 @@ def _build_mounts(
         "writable": True,
     })
 
+    host_skills = Path.home() / ".claude" / "skills"
+    if host_skills.is_dir():
+        mounts.append({
+            "location": str(host_skills),
+            "mountPoint": f"{vm_home}/.claude/skills",
+            "writable": False,
+        })
+
     # Host-side tmp directory (for task output files).
     tmp_dir = str(sdir / "tmp")
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)

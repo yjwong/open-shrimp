@@ -676,6 +676,12 @@ def _build_docker_run_argv(
         "-v", f"{state_dir}:/home/claude/.claude",
         "-v", f"{claude_tmp_dir}:/tmp/claude-{uid}",
     ])
+    # Sub-mount on top of state_dir; Docker resolves nested binds in flag order.
+    host_skills = Path.home() / ".claude" / "skills"
+    if host_skills.is_dir():
+        docker_argv.extend([
+            "-v", f"{host_skills}:/home/claude/.claude/skills:ro",
+        ])
     # Copy credentials into the state dir (which is directory-mounted as
     # /home/claude/.claude) instead of bind-mounting the file directly.
     # File bind mounts break when the host replaces the file via atomic

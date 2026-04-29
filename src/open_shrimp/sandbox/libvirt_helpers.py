@@ -511,6 +511,7 @@ def ensure_mounts(
     shared_dirs: list[str],
     fs_type: str = "virtiofs",
     mount_overrides: dict[str, str] | None = None,
+    readonly_dirs: set[str] | None = None,
 ) -> None:
     """Ensure shared directories are mounted inside the VM via SSH.
 
@@ -547,6 +548,7 @@ def ensure_mounts(
     # Use systemd-escape to get correct unit names (e.g. paths with dashes
     # need \x2d escaping — simple str.replace("/", "-") is wrong).
     _overrides = mount_overrides or {}
+    _readonly = readonly_dirs or set()
     desired: dict[str, tuple[str, str]] = {}  # unit_name -> (mount_path, unit_content)
     for host_dir in shared_dirs:
         tag = _fs_tag_for_dir(host_dir)
@@ -560,9 +562,12 @@ def ensure_mounts(
         )
         unit_name = esc.stdout.strip() + ".mount"
 
-        options_line = ""
+        opts: list[str] = []
         if fs_type == "9p":
-            options_line = "Options=trans=virtio,version=9p2000.L"
+            opts.extend(["trans=virtio", "version=9p2000.L"])
+        if host_dir in _readonly:
+            opts.append("ro")
+        options_line = f"Options={','.join(opts)}" if opts else ""
 
         unit_content = textwrap.dedent(f"""\
             [Unit]
@@ -919,7 +924,7 @@ def generate_domain_xml(
     ssh_port: int,
     memory_mb: int,
     vcpus: int,
-    shared_dirs: list[tuple[str, Path | None]] | None = None,
+    shared_dirs: list[tuple[str, Path | None, bool]] | None = None,
     use_virtiofs: bool = False,
     computer_use: bool = False,
     virgl: bool = False,
@@ -939,9 +944,10 @@ def generate_domain_xml(
         ssh_port: Host port to forward to guest SSH.
         memory_mb: Memory ceiling in MB.
         vcpus: Number of virtual CPUs.
-        shared_dirs: List of ``(host_directory, virtiofs_socket | None)``
+        shared_dirs: List of ``(host_directory, virtiofs_socket | None, readonly)``
             tuples.  In virtiofs mode each entry has a socket path; in 9p
-            mode the socket is ``None``.
+            mode the socket is ``None``.  ``readonly`` marks the
+            filesystem as read-only at the libvirt device level.
         use_virtiofs: Whether virtiofs is available.
         computer_use: Enable GUI support — adds VNC display (auto-port),
             virtio-gpu video model, and virtio-keyboard/mouse input devices.
@@ -1036,7 +1042,7 @@ def generate_domain_xml(
     )
 
     # Filesystem passthrough — one entry per shared directory.
-    for host_dir, virtiofs_sock in shared_dirs:
+    for host_dir, virtiofs_sock, readonly in shared_dirs:
         tag = _fs_tag_for_dir(host_dir)
         if use_virtiofs and virtiofs_sock is not None:
             fs = ET.SubElement(devices, "filesystem", type="mount")
@@ -1050,6 +1056,8 @@ def generate_domain_xml(
             )
             ET.SubElement(fs, "source", dir=host_dir)
             ET.SubElement(fs, "target", dir=tag)
+        if readonly:
+            ET.SubElement(fs, "readonly")
 
     # Computer-use: VNC display + virtio-gpu + input devices.
     if computer_use:
@@ -1102,6 +1110,8 @@ def generate_domain_xml(
 def start_virtiofsd(
     socket_path: Path,
     shared_dir: str,
+    *,
+    readonly: bool = False,
 ) -> subprocess.Popen[bytes]:
     """Start a virtiofsd process for filesystem passthrough.
 
@@ -1110,6 +1120,7 @@ def start_virtiofsd(
     Args:
         socket_path: Path for the virtiofsd Unix socket.
         shared_dir: Host directory to share.
+        readonly: Refuse writes from the guest at the virtiofsd layer.
 
     Returns:
         The virtiofsd :class:`subprocess.Popen` handle.
@@ -1125,13 +1136,17 @@ def start_virtiofsd(
     # Remove stale socket.
     socket_path.unlink(missing_ok=True)
 
+    argv = [
+        virtiofsd_bin,
+        f"--socket-path={socket_path}",
+        f"--shared-dir={shared_dir}",
+        "--sandbox=none",
+    ]
+    if readonly:
+        argv.append("--readonly")
+
     proc = subprocess.Popen(
-        [
-            virtiofsd_bin,
-            f"--socket-path={socket_path}",
-            f"--shared-dir={shared_dir}",
-            "--sandbox=none",
-        ],
+        argv,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )

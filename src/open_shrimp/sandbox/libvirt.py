@@ -253,14 +253,15 @@ class LibvirtSandbox:
         # Build shared_dirs list for domain XML: (host_dir, socket | None).
         # The domain must declare virtiofs/9p devices for all dirs even
         # though the guest-side mount is managed via SSH later.
-        all_dirs, _ = self._shared_dirs_and_overrides()
-        shared_dirs_xml: list[tuple[str, Path | None]] = []
+        all_dirs, _, readonly_dirs = self._shared_dirs_and_overrides()
+        shared_dirs_xml: list[tuple[str, Path | None, bool]] = []
         for host_dir in all_dirs:
+            ro = host_dir in readonly_dirs
             if self._use_virtiofs:
                 sock = self._virtiofs_socket_for(host_dir)
-                shared_dirs_xml.append((host_dir, sock))
+                shared_dirs_xml.append((host_dir, sock, ro))
             else:
-                shared_dirs_xml.append((host_dir, None))
+                shared_dirs_xml.append((host_dir, None, ro))
 
         xml = generate_domain_xml(
             self._dom_name,
@@ -489,7 +490,7 @@ class LibvirtSandbox:
         # Configure filesystem mounts via SSH (idempotent).
         # This handles config changes (added/removed additional_directories)
         # without requiring a VM rebuild.
-        all_dirs, mount_overrides = self._shared_dirs_and_overrides()
+        all_dirs, mount_overrides, readonly_dirs = self._shared_dirs_and_overrides()
         fs_type = "virtiofs" if self._use_virtiofs else "9p"
         ensure_mounts(
             ssh_port=self._ssh_port,
@@ -497,6 +498,7 @@ class LibvirtSandbox:
             shared_dirs=all_dirs,
             fs_type=fs_type,
             mount_overrides=mount_overrides,
+            readonly_dirs=readonly_dirs,
         )
 
         # Mount persistent volumes (format ext4 if needed, create systemd
@@ -818,12 +820,16 @@ class LibvirtSandbox:
 
     # -- Internal helpers -----------------------------------------------------
 
-    def _shared_dirs_and_overrides(self) -> tuple[list[str], dict[str, str]]:
-        """Return ``(all_dirs, mount_overrides)`` for domain XML / mounts.
+    def _shared_dirs_and_overrides(
+        self,
+    ) -> tuple[list[str], dict[str, str], set[str]]:
+        """Return ``(all_dirs, mount_overrides, readonly_dirs)`` for domain XML / mounts.
 
         ``all_dirs`` is the list of host directories that need virtiofs/9p
         filesystem devices.  ``mount_overrides`` maps host paths that
         should be mounted at a *different* guest path (tmp and .claude).
+        ``readonly_dirs`` is the subset of ``all_dirs`` that should be
+        mounted read-only inside the guest.
         """
         all_dirs = [self._project_dir] + self._additional_directories
         if self._screenshots_dir is not None:
@@ -834,7 +840,14 @@ class LibvirtSandbox:
             str(self._tmp_dir): f"/tmp/claude-{_VM_CLAUDE_UID}",
             str(self._claude_home_dir): "/home/claude/.claude",
         }
-        return all_dirs, mount_overrides
+        readonly_dirs: set[str] = set()
+        host_skills = Path.home() / ".claude" / "skills"
+        if host_skills.is_dir():
+            host_skills_str = str(host_skills)
+            all_dirs.append(host_skills_str)
+            mount_overrides[host_skills_str] = "/home/claude/.claude/skills"
+            readonly_dirs.add(host_skills_str)
+        return all_dirs, mount_overrides, readonly_dirs
 
     def _virtiofs_socket_for(self, host_dir: str) -> Path:
         """Return the virtiofsd socket path for a host directory."""
@@ -843,10 +856,10 @@ class LibvirtSandbox:
 
     def _start_all_virtiofsd(self) -> None:
         """Start virtiofsd instances for all shared directories."""
-        all_dirs, _ = self._shared_dirs_and_overrides()
+        all_dirs, _, readonly_dirs = self._shared_dirs_and_overrides()
         for host_dir in all_dirs:
             sock = self._virtiofs_socket_for(host_dir)
-            proc = start_virtiofsd(sock, host_dir)
+            proc = start_virtiofsd(sock, host_dir, readonly=host_dir in readonly_dirs)
             self._virtiofsd_procs.append(proc)
         # Wait for all sockets to appear.
         import time as _time
