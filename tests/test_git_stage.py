@@ -239,6 +239,107 @@ async def test_stale_hunk_detection(git_repo: str) -> None:
     assert "stale" in stage_result2.error.lower()
 
 
+# ---- Submodule integration tests ----
+
+
+@pytest.fixture
+def superproject_with_submodule(tmp_path):
+    """Same shape as the fixture in test_git_diff.py — small enough to
+    duplicate rather than share."""
+    sub_origin = tmp_path / "sub_origin"
+    sub_origin.mkdir()
+    os.system(
+        f"cd {sub_origin} && git init -b main "
+        f"&& git config user.email 'test@test.com' "
+        f"&& git config user.name 'Test'"
+    )
+    (sub_origin / "inner.py").write_text(
+        "import os\nimport sys\n\ndef main():\n    print('inner')\n"
+    )
+    os.system(
+        f"cd {sub_origin} && git add . && git commit -m 'initial sub'"
+    )
+
+    super_repo = tmp_path / "super"
+    super_repo.mkdir()
+    os.system(
+        f"cd {super_repo} && git init -b main "
+        f"&& git config user.email 'test@test.com' "
+        f"&& git config user.name 'Test' "
+        f"&& git config protocol.file.allow always"
+    )
+    (super_repo / "top.py").write_text("print('top')\n")
+    os.system(
+        f"cd {super_repo} && git -c protocol.file.allow=always submodule add {sub_origin} sub "
+        f"&& git add top.py "
+        f"&& git commit -m 'initial super'"
+    )
+    return str(super_repo)
+
+
+@pytest.mark.asyncio
+async def test_stage_hunk_inside_submodule(superproject_with_submodule: str) -> None:
+    """Staging a hunk for a submodule file should update the submodule's
+    index, not the superproject's."""
+    super_repo = superproject_with_submodule
+    inner = os.path.join(super_repo, "sub", "inner.py")
+    with open(inner, "w") as f:
+        f.write(
+            "import os\nimport sys\nimport json\n\ndef main():\n    print('inner')\n"
+        )
+
+    result = await get_hunks(super_repo, include_untracked=False)
+    sub_hunks = [h for h in result.hunks if h.repo_path == "sub"]
+    assert len(sub_hunks) == 1
+    hunk = sub_hunks[0]
+    assert hunk.staged is False
+
+    stage_result = await stage_hunk(super_repo, hunk)
+    assert stage_result.ok is True
+
+    # The submodule's own index now has a staged change for inner.py.
+    sub_status = os.popen(
+        f"cd {os.path.join(super_repo, 'sub')} && git diff --cached --name-only"
+    ).read().strip()
+    assert sub_status == "inner.py"
+
+
+@pytest.mark.asyncio
+async def test_stage_then_unstage_inside_submodule(
+    superproject_with_submodule: str,
+) -> None:
+    """Round-trip stage/unstage inside a submodule."""
+    super_repo = superproject_with_submodule
+    inner = os.path.join(super_repo, "sub", "inner.py")
+    with open(inner, "w") as f:
+        f.write(
+            "import os\nimport sys\nimport json\n\ndef main():\n    print('inner')\n"
+        )
+
+    result = await get_hunks(super_repo, include_untracked=False)
+    sub_hunks = [h for h in result.hunks if h.repo_path == "sub"]
+    hunk = sub_hunks[0]
+    await stage_hunk(super_repo, hunk)
+
+    result_after = await get_hunks(super_repo, include_untracked=False)
+    staged_sub = [
+        h for h in result_after.hunks if h.repo_path == "sub" and h.staged
+    ]
+    assert len(staged_sub) == 1
+
+    await unstage_hunk(super_repo, staged_sub[0])
+
+    result_final = await get_hunks(super_repo, include_untracked=False)
+    staged_sub_final = [
+        h for h in result_final.hunks if h.repo_path == "sub" and h.staged
+    ]
+    unstaged_sub_final = [
+        h for h in result_final.hunks if h.repo_path == "sub" and not h.staged
+    ]
+    assert staged_sub_final == []
+    assert len(unstaged_sub_final) == 1
+
+
 @pytest.mark.asyncio
 async def test_stage_selective_hunk(git_repo: str) -> None:
     """When a file has multiple hunks, stage only one."""

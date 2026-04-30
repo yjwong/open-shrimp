@@ -46,11 +46,28 @@ def _get_directories(ctx: ContextConfig) -> list[str]:
     return [ctx.directory] + ctx.additional_directories
 
 
+def _display_path(hunk: Hunk) -> str:
+    """Return the user-facing path for a hunk.
+
+    For submodule hunks this prefixes the in-repo file path with the
+    submodule's location so the frontend sees one flat namespace.
+    """
+    if hunk.repo_path:
+        return f"{hunk.repo_path}/{hunk.file_path}"
+    return hunk.file_path
+
+
 def _hunk_to_dict(hunk: Hunk) -> dict[str, Any]:
-    """Convert a Hunk dataclass to a JSON-serialisable dict."""
+    """Convert a Hunk dataclass to a JSON-serialisable dict.
+
+    ``file_path`` in the response is the display path (prefixed with
+    the submodule path when applicable); ``repo_path`` is exposed
+    separately so the UI can show a badge if it wants.
+    """
     return {
         "id": hunk.id,
-        "file_path": hunk.file_path,
+        "file_path": _display_path(hunk),
+        "repo_path": hunk.repo_path,
         "language": hunk.language,
         "is_new_file": hunk.is_new_file,
         "is_deleted_file": hunk.is_deleted_file,
@@ -161,23 +178,25 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
 
         # Build per-file summary from the full hunk list so the
         # frontend can populate the file picker even before all
-        # pages have been loaded.
+        # pages have been loaded.  Use the display path so submodule
+        # files namespace correctly under their submodule path.
         file_summary: list[dict[str, Any]] = []
         file_map: dict[str, dict[str, Any]] = {}
         for idx, h in enumerate(all_result.hunks):
-            if h.file_path not in file_map:
+            display = _display_path(h)
+            if display not in file_map:
                 entry = {
-                    "path": h.file_path,
+                    "path": display,
                     "first_hunk_index": idx,
                     "hunk_count": 1,
                     "staged_count": 1 if h.staged else 0,
                 }
-                file_map[h.file_path] = entry
+                file_map[display] = entry
                 file_summary.append(entry)
             else:
-                file_map[h.file_path]["hunk_count"] += 1
+                file_map[display]["hunk_count"] += 1
                 if h.staged:
-                    file_map[h.file_path]["staged_count"] += 1
+                    file_map[display]["staged_count"] += 1
 
         # Apply pagination, ensuring we never split a file's hunks
         # across page boundaries.
@@ -185,8 +204,8 @@ async def hunks_endpoint(request: Request) -> JSONResponse:
         end = min(offset + limit, total)
         # Extend the page to include all remaining hunks of the last file.
         if end < total and end > offset:
-            last_file = all_result.hunks[end - 1].file_path
-            while end < total and all_result.hunks[end].file_path == last_file:
+            last_display = _display_path(all_result.hunks[end - 1])
+            while end < total and _display_path(all_result.hunks[end]) == last_display:
                 end += 1
         paginated = all_result.hunks[offset:end]
 
@@ -524,13 +543,16 @@ async def stage_file_endpoint(request: Request) -> JSONResponse:
         except (ValueError, AuthError):
             pass
 
-    # Find all unstaged hunks for this file in the cache.
+    # Find all unstaged hunks for this file in the cache.  ``file_path``
+    # from the frontend is the display path (submodule-prefixed when
+    # applicable), so match against ``_display_path(h)`` rather than
+    # the raw in-repo ``h.file_path``.
     cache_key = (chat_id, context_name_hint, dir_index) if chat_id is not None and context_name_hint else None
     if cache_key is None:
         # Try to find any cache entry containing this file.
         for key, cached_hunks in _hunk_cache.items():
             for h in cached_hunks:
-                if h.file_path == file_path:
+                if _display_path(h) == file_path:
                     cache_key = key
                     break
             if cache_key:
@@ -543,7 +565,10 @@ async def stage_file_endpoint(request: Request) -> JSONResponse:
         )
 
     cached_hunks = _hunk_cache.get(cache_key, [])
-    unstaged_hunks = [h for h in cached_hunks if h.file_path == file_path and not h.staged]
+    unstaged_hunks = [
+        h for h in cached_hunks
+        if _display_path(h) == file_path and not h.staged
+    ]
 
     if not unstaged_hunks:
         return JSONResponse({"ok": True, "staged_ids": []})

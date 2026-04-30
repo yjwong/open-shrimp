@@ -8,6 +8,7 @@ reconstructing unified diff patches and applying them via
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from open_shrimp.review.git_diff import (
     Hunk,
@@ -26,6 +27,17 @@ def _get_lock(cwd: str) -> asyncio.Lock:
     if cwd not in _dir_locks:
         _dir_locks[cwd] = asyncio.Lock()
     return _dir_locks[cwd]
+
+
+def _repo_cwd(base_cwd: str, hunk: Hunk) -> str:
+    """Return the cwd of the repo that owns this hunk.
+
+    For superproject hunks (``repo_path == ""``) this is ``base_cwd``;
+    for submodule hunks it's ``base_cwd/<repo_path>``.
+    """
+    if not hunk.repo_path:
+        return base_cwd
+    return str(Path(base_cwd) / hunk.repo_path)
 
 
 @dataclass
@@ -100,11 +112,12 @@ async def stage_hunk(cwd: str, hunk: Hunk) -> StageResult:
         StageResult indicating success or failure.
     """
     patch = reconstruct_patch(hunk)
+    target_cwd = _repo_cwd(cwd, hunk)
 
-    async with _get_lock(cwd):
+    async with _get_lock(target_cwd):
         proc = await asyncio.create_subprocess_exec(
             "git", "apply", "--cached", "-",
-            cwd=cwd,
+            cwd=target_cwd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -138,11 +151,12 @@ async def unstage_hunk(cwd: str, hunk: Hunk) -> StageResult:
         StageResult indicating success or failure.
     """
     patch = reconstruct_patch(hunk)
+    target_cwd = _repo_cwd(cwd, hunk)
 
-    async with _get_lock(cwd):
+    async with _get_lock(target_cwd):
         proc = await asyncio.create_subprocess_exec(
             "git", "apply", "--cached", "-R", "-",
-            cwd=cwd,
+            cwd=target_cwd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -186,11 +200,12 @@ async def stage_file(cwd: str, hunks: list[Hunk]) -> StageResult:
 
     patches = [reconstruct_patch(h) for h in hunks]
     combined = "".join(patches)
+    target_cwd = _repo_cwd(cwd, hunks[0])
 
-    async with _get_lock(cwd):
+    async with _get_lock(target_cwd):
         proc = await asyncio.create_subprocess_exec(
             "git", "apply", "--cached", "-",
-            cwd=cwd,
+            cwd=target_cwd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -227,11 +242,12 @@ async def unstage_file(cwd: str, hunks: list[Hunk]) -> StageResult:
 
     patches = [reconstruct_patch(h) for h in hunks]
     combined = "".join(patches)
+    target_cwd = _repo_cwd(cwd, hunks[0])
 
-    async with _get_lock(cwd):
+    async with _get_lock(target_cwd):
         proc = await asyncio.create_subprocess_exec(
             "git", "apply", "--cached", "-R", "-",
-            cwd=cwd,
+            cwd=target_cwd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -268,10 +284,11 @@ async def remove_intent_to_add(cwd: str, hunk: Hunk) -> StageResult:
     Returns:
         StageResult indicating success or failure.
     """
-    async with _get_lock(cwd):
+    target_cwd = _repo_cwd(cwd, hunk)
+    async with _get_lock(target_cwd):
         proc = await asyncio.create_subprocess_exec(
             "git", "rm", "--cached", "--", hunk.file_path,
-            cwd=cwd,
+            cwd=target_cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

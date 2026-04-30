@@ -439,3 +439,126 @@ async def test_get_hunks_only_staged(git_repo: str) -> None:
     result = await get_hunks(git_repo)
     assert result.total_hunks == 1
     assert result.hunks[0].staged is True
+
+
+# ---- Submodule tests ----
+
+
+@pytest.fixture
+def superproject_with_submodule(tmp_path):
+    """Create a superproject with one initialised submodule.
+
+    Layout:
+        super/
+            top.py
+            sub/  <-- submodule (pointing at sub_origin)
+                inner.py
+    """
+    sub_origin = tmp_path / "sub_origin"
+    sub_origin.mkdir()
+    os.system(
+        f"cd {sub_origin} && git init -b main "
+        f"&& git config user.email 'test@test.com' "
+        f"&& git config user.name 'Test'"
+    )
+    (sub_origin / "inner.py").write_text("print('inner')\n")
+    os.system(
+        f"cd {sub_origin} && git add . && git commit -m 'initial sub'"
+    )
+
+    super_repo = tmp_path / "super"
+    super_repo.mkdir()
+    os.system(
+        f"cd {super_repo} && git init -b main "
+        f"&& git config user.email 'test@test.com' "
+        f"&& git config user.name 'Test' "
+        f"&& git config protocol.file.allow always"
+    )
+    (super_repo / "top.py").write_text("print('top')\n")
+    os.system(
+        f"cd {super_repo} && git -c protocol.file.allow=always submodule add {sub_origin} sub "
+        f"&& git add top.py "
+        f"&& git commit -m 'initial super'"
+    )
+    return str(super_repo)
+
+
+@pytest.mark.asyncio
+async def test_get_hunks_submodule_inner_edit(superproject_with_submodule: str) -> None:
+    """Edits inside a submodule's tracked file should appear as a hunk
+    with repo_path set to the submodule's path."""
+    super_repo = superproject_with_submodule
+    inner = os.path.join(super_repo, "sub", "inner.py")
+    with open(inner, "w") as f:
+        f.write("print('inner')\nprint('edited')\n")
+
+    result = await get_hunks(super_repo)
+    sub_hunks = [h for h in result.hunks if h.repo_path == "sub"]
+    assert len(sub_hunks) == 1
+    assert sub_hunks[0].file_path == "inner.py"
+    assert sub_hunks[0].staged is False
+
+
+@pytest.mark.asyncio
+async def test_get_hunks_super_unaffected_by_dirty_submodule(
+    superproject_with_submodule: str,
+) -> None:
+    """A dirty submodule should not produce a noisy hunk in the
+    superproject's diff (we use --ignore-submodules=dirty)."""
+    super_repo = superproject_with_submodule
+    inner = os.path.join(super_repo, "sub", "inner.py")
+    with open(inner, "w") as f:
+        f.write("print('inner edited')\n")
+
+    result = await get_hunks(super_repo)
+    super_hunks = [h for h in result.hunks if h.repo_path == ""]
+    # Only inner-submodule edit; super has no own changes.
+    assert super_hunks == []
+
+
+@pytest.mark.asyncio
+async def test_get_hunks_submodule_untracked_file(
+    superproject_with_submodule: str,
+) -> None:
+    """A new untracked file inside a submodule should show up under
+    repo_path == 'sub'."""
+    super_repo = superproject_with_submodule
+    new_inside = os.path.join(super_repo, "sub", "added.py")
+    with open(new_inside, "w") as f:
+        f.write("print('new in submodule')\n")
+
+    result = await get_hunks(super_repo, include_untracked=True)
+    matching = [
+        h for h in result.hunks
+        if h.repo_path == "sub" and h.file_path == "added.py"
+    ]
+    assert len(matching) == 1
+    assert matching[0].is_new_file is True
+
+
+@pytest.mark.asyncio
+async def test_get_hunks_super_and_sub_combined(
+    superproject_with_submodule: str,
+) -> None:
+    """Edits in both the superproject and a submodule should appear in
+    the same flat result list, distinguishable by repo_path."""
+    super_repo = superproject_with_submodule
+    with open(os.path.join(super_repo, "top.py"), "w") as f:
+        f.write("print('top edited')\n")
+    with open(os.path.join(super_repo, "sub", "inner.py"), "w") as f:
+        f.write("print('inner edited')\n")
+
+    result = await get_hunks(super_repo)
+    super_paths = {(h.repo_path, h.file_path) for h in result.hunks}
+    assert ("", "top.py") in super_paths
+    assert ("sub", "inner.py") in super_paths
+
+
+@pytest.mark.asyncio
+async def test_get_hunks_no_submodules_unaffected(git_repo: str) -> None:
+    """A repo with no submodules should behave exactly as before:
+    all hunks have repo_path == ''."""
+    with open(os.path.join(git_repo, "hello.py"), "w") as f:
+        f.write("print('changed')\n")
+    result = await get_hunks(git_repo)
+    assert all(h.repo_path == "" for h in result.hunks)

@@ -66,7 +66,13 @@ class HunkLine:
 
 @dataclass
 class Hunk:
-    """A parsed diff hunk with metadata."""
+    """A parsed diff hunk with metadata.
+
+    ``file_path`` is always relative to the repo that produced the diff
+    (the superproject for ``repo_path == ""``, or relative to the
+    submodule's worktree otherwise).  Patch reconstruction uses this
+    in-repo path; the display path is ``repo_path + "/" + file_path``.
+    """
 
     id: str
     file_path: str
@@ -78,6 +84,7 @@ class Hunk:
     staged: bool
     is_binary: bool
     is_empty: bool = False
+    repo_path: str = ""
 
 
 @dataclass
@@ -105,9 +112,18 @@ def detect_language(file_path: str) -> str:
     return _EXT_TO_LANGUAGE.get(ext, "text")
 
 
-def generate_hunk_id(file_path: str, hunk_header: str, lines: list[HunkLine]) -> str:
-    """Generate a stable, deterministic hash ID for a hunk."""
-    content = file_path + "\n" + hunk_header + "\n"
+def generate_hunk_id(
+    file_path: str,
+    hunk_header: str,
+    lines: list[HunkLine],
+    repo_path: str = "",
+) -> str:
+    """Generate a stable, deterministic hash ID for a hunk.
+
+    ``repo_path`` is included so that two repos (super + submodules)
+    with same-named files produce distinct IDs.
+    """
+    content = repo_path + "\n" + file_path + "\n" + hunk_header + "\n"
     for line in lines:
         content += f"{line.type}:{line.content}\n"
     return hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -122,12 +138,15 @@ _BINARY_RE = re.compile(r"^Binary files .* and .* differ$")
 _LARGE_FILE_RE = re.compile(r"^Large file \(.+\) skipped$")
 
 
-def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
+def parse_diff(diff_text: str, staged: bool, repo_path: str = "") -> list[Hunk]:
     """Parse unified diff output into structured Hunk objects.
 
     Args:
         diff_text: Raw output from `git diff`.
         staged: Whether this diff comes from `git diff --cached`.
+        repo_path: Path of the repo that produced this diff, relative
+            to the superproject.  Empty for the superproject; non-empty
+            for submodules.
 
     Returns:
         List of parsed Hunk objects.
@@ -173,7 +192,7 @@ def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
             # Binary file: create a single hunk with no lines.
             hunk_header = "(binary)"
             hunk_lines: list[HunkLine] = []
-            hunk_id = generate_hunk_id(file_path, hunk_header, hunk_lines)
+            hunk_id = generate_hunk_id(file_path, hunk_header, hunk_lines, repo_path)
             hunks.append(Hunk(
                 id=hunk_id,
                 file_path=file_path,
@@ -184,6 +203,7 @@ def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
                 lines=hunk_lines,
                 staged=staged,
                 is_binary=True,
+                repo_path=repo_path,
             ))
             continue
 
@@ -201,7 +221,7 @@ def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
             if is_new_file or is_deleted_file:
                 hunk_header = "(empty file)"
                 hunk_lines: list[HunkLine] = []
-                hunk_id = generate_hunk_id(file_path, hunk_header, hunk_lines)
+                hunk_id = generate_hunk_id(file_path, hunk_header, hunk_lines, repo_path)
                 hunks.append(Hunk(
                     id=hunk_id,
                     file_path=file_path,
@@ -213,6 +233,7 @@ def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
                     staged=staged,
                     is_binary=False,
                     is_empty=True,
+                    repo_path=repo_path,
                 ))
             continue
 
@@ -288,7 +309,7 @@ def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
                 i += 1
 
             if hunk_lines:
-                hunk_id = generate_hunk_id(file_path, hunk_header, hunk_lines)
+                hunk_id = generate_hunk_id(file_path, hunk_header, hunk_lines, repo_path)
                 hunks.append(Hunk(
                     id=hunk_id,
                     file_path=file_path,
@@ -299,6 +320,7 @@ def parse_diff(diff_text: str, staged: bool) -> list[Hunk]:
                     lines=hunk_lines,
                     staged=staged,
                     is_binary=False,
+                    repo_path=repo_path,
                 ))
 
     return hunks
@@ -392,6 +414,75 @@ async def _diff_untracked_files(cwd: str, files: list[str]) -> str:
     return "\n".join(all_diffs)
 
 
+async def _get_submodule_paths(cwd: str) -> list[str]:
+    """Return initialized submodule paths relative to ``cwd``.
+
+    Uses ``git submodule foreach --recursive`` so nested submodules are
+    discovered.  Returns an empty list when there are no submodules or
+    when the project doesn't use them at all (no ``.gitmodules``).
+    """
+    stdout, _, rc = await _run_git(
+        cwd, "submodule", "foreach", "--recursive", "--quiet",
+        "echo $displaypath",
+    )
+    if rc != 0:
+        return []
+    return [line for line in stdout.splitlines() if line.strip()]
+
+
+async def _get_hunks_for_repo(
+    cwd: str,
+    repo_path: str,
+    include_untracked: bool,
+) -> list[Hunk]:
+    """Collect staged + unstaged + untracked hunks for one repo.
+
+    ``cwd`` is the absolute path of the repo's working tree.
+    ``repo_path`` is its location relative to the superproject (empty
+    string for the superproject itself).
+    """
+    # For the superproject we suppress the noisy "submodule is dirty"
+    # entries — those edits surface inside each submodule's own diff.
+    extra_args = ["--ignore-submodules=dirty"] if not repo_path else []
+
+    unstaged_task = asyncio.ensure_future(
+        _run_git(cwd, "diff", "--no-color", "-U3", *extra_args)
+    )
+    staged_task = asyncio.ensure_future(
+        _run_git(cwd, "diff", "--cached", "--no-color", "-U3", *extra_args)
+    )
+
+    untracked_task: asyncio.Task[str] | None = None
+    if include_untracked:
+        untracked = await _get_untracked_files(cwd)
+        if untracked:
+            untracked_task = asyncio.ensure_future(
+                _diff_untracked_files(cwd, untracked)
+            )
+
+    (unstaged_out, unstaged_err, unstaged_rc) = await unstaged_task
+    (staged_out, staged_err, staged_rc) = await staged_task
+
+    untracked_diff = ""
+    if untracked_task is not None:
+        untracked_diff = await untracked_task
+
+    if unstaged_rc != 0:
+        logger.warning("git diff failed in %s: %s", cwd, unstaged_err.strip())
+    if staged_rc != 0:
+        logger.warning(
+            "git diff --cached failed in %s: %s", cwd, staged_err.strip()
+        )
+
+    unstaged = parse_diff(unstaged_out, staged=False, repo_path=repo_path)
+    staged = parse_diff(staged_out, staged=True, repo_path=repo_path)
+    untracked_hunks = (
+        parse_diff(untracked_diff, staged=False, repo_path=repo_path)
+        if untracked_diff else []
+    )
+    return staged + unstaged + untracked_hunks
+
+
 async def get_hunks(
     cwd: str,
     offset: int = 0,
@@ -401,8 +492,10 @@ async def get_hunks(
     """Get paginated diff hunks from a git working directory.
 
     Combines staged changes, unstaged changes, and (optionally) untracked
-    files.  Untracked files are diffed via ``git diff --no-index`` which
-    is read-only and does not mutate the git index.
+    files.  When the working directory is a superproject containing
+    submodules, hunks from each initialised submodule are merged into
+    the same flat result, with their ``repo_path`` set to the
+    submodule's location relative to the superproject.
 
     Args:
         cwd: Working directory (must be inside a git repo).
@@ -425,45 +518,26 @@ async def get_hunks(
             f"Directory is not inside a git repository: {cwd}"
         )
 
-    # Run tracked diffs (staged + unstaged) and untracked file diffs
-    # concurrently.  Untracked files are diffed via --no-index which is
-    # purely read-only — no index mutations needed.
-    unstaged_task = asyncio.ensure_future(_run_git(cwd, "diff", "--no-color", "-U3"))
-    staged_task = asyncio.ensure_future(_run_git(cwd, "diff", "--cached", "--no-color", "-U3"))
+    submodule_paths = await _get_submodule_paths(cwd)
 
-    untracked_task: asyncio.Task[str] | None = None
-    if include_untracked:
-        untracked = await _get_untracked_files(cwd)
-        if untracked:
-            untracked_task = asyncio.ensure_future(
-                _diff_untracked_files(cwd, untracked)
-            )
+    # Fan out per repo: superproject + each initialised submodule.
+    repo_tasks = [_get_hunks_for_repo(cwd, "", include_untracked)]
+    for sub in submodule_paths:
+        sub_cwd = str(Path(cwd) / sub)
+        repo_tasks.append(_get_hunks_for_repo(sub_cwd, sub, include_untracked))
 
-    (unstaged_out, unstaged_err, unstaged_rc) = await unstaged_task
-    (staged_out, staged_err, staged_rc) = await staged_task
+    per_repo_hunks = await asyncio.gather(*repo_tasks)
 
-    untracked_diff = ""
-    if untracked_task is not None:
-        untracked_diff = await untracked_task
-
-    if unstaged_rc != 0:
-        logger.warning("git diff failed: %s", unstaged_err.strip())
-    if staged_rc != 0:
-        logger.warning("git diff --cached failed: %s", staged_err.strip())
-
-    # Parse all diffs.
-    unstaged_hunks = parse_diff(unstaged_out, staged=False)
-    staged_hunks = parse_diff(staged_out, staged=True)
-    untracked_hunks = parse_diff(untracked_diff, staged=False) if untracked_diff else []
-
-    # Combine hunks grouped by file path so that all hunks for the same
-    # file are contiguous (staged before unstaged within each file).
-    # This prevents pagination from splitting a file's hunks across pages.
+    # Combine hunks grouped by (repo_path, file_path) so that all hunks
+    # for the same file are contiguous (staged before unstaged within
+    # each file).  This prevents pagination from splitting a file's
+    # hunks across pages.
     from collections import OrderedDict
 
-    hunks_by_file: OrderedDict[str, list[Hunk]] = OrderedDict()
-    for h in staged_hunks + unstaged_hunks + untracked_hunks:
-        hunks_by_file.setdefault(h.file_path, []).append(h)
+    hunks_by_file: OrderedDict[tuple[str, str], list[Hunk]] = OrderedDict()
+    for repo_hunks in per_repo_hunks:
+        for h in repo_hunks:
+            hunks_by_file.setdefault((h.repo_path, h.file_path), []).append(h)
 
     all_hunks: list[Hunk] = []
     for file_hunks in hunks_by_file.values():

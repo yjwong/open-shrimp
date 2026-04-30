@@ -8,6 +8,7 @@ export interface HunkLine {
 export interface Hunk {
   id: string;
   file_path: string;
+  repo_path: string;
   language: string;
   is_new_file: boolean;
   is_deleted_file: boolean;
