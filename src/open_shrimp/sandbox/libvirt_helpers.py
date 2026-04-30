@@ -924,7 +924,7 @@ def generate_domain_xml(
     ssh_port: int,
     memory_mb: int,
     vcpus: int,
-    shared_dirs: list[tuple[str, Path | None, bool]] | None = None,
+    shared_dirs: list[tuple[str, Path | None]] | None = None,
     use_virtiofs: bool = False,
     computer_use: bool = False,
     virgl: bool = False,
@@ -944,10 +944,9 @@ def generate_domain_xml(
         ssh_port: Host port to forward to guest SSH.
         memory_mb: Memory ceiling in MB.
         vcpus: Number of virtual CPUs.
-        shared_dirs: List of ``(host_directory, virtiofs_socket | None, readonly)``
+        shared_dirs: List of ``(host_directory, virtiofs_socket | None)``
             tuples.  In virtiofs mode each entry has a socket path; in 9p
-            mode the socket is ``None``.  ``readonly`` marks the
-            filesystem as read-only at the libvirt device level.
+            mode the socket is ``None``.
         use_virtiofs: Whether virtiofs is available.
         computer_use: Enable GUI support — adds VNC display (auto-port),
             virtio-gpu video model, and virtio-keyboard/mouse input devices.
@@ -1042,7 +1041,7 @@ def generate_domain_xml(
     )
 
     # Filesystem passthrough — one entry per shared directory.
-    for host_dir, virtiofs_sock, readonly in shared_dirs:
+    for host_dir, virtiofs_sock in shared_dirs:
         tag = _fs_tag_for_dir(host_dir)
         if use_virtiofs and virtiofs_sock is not None:
             fs = ET.SubElement(devices, "filesystem", type="mount")
@@ -1056,8 +1055,6 @@ def generate_domain_xml(
             )
             ET.SubElement(fs, "source", dir=host_dir)
             ET.SubElement(fs, "target", dir=tag)
-        if readonly:
-            ET.SubElement(fs, "readonly")
 
     # Computer-use: VNC display + virtio-gpu + input devices.
     if computer_use:

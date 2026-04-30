@@ -253,15 +253,14 @@ class LibvirtSandbox:
         # Build shared_dirs list for domain XML: (host_dir, socket | None).
         # The domain must declare virtiofs/9p devices for all dirs even
         # though the guest-side mount is managed via SSH later.
-        all_dirs, _, readonly_dirs = self._shared_dirs_and_overrides()
-        shared_dirs_xml: list[tuple[str, Path | None, bool]] = []
+        all_dirs, _, _ = self._shared_dirs_and_overrides()
+        shared_dirs_xml: list[tuple[str, Path | None]] = []
         for host_dir in all_dirs:
-            ro = host_dir in readonly_dirs
             if self._use_virtiofs:
                 sock = self._virtiofs_socket_for(host_dir)
-                shared_dirs_xml.append((host_dir, sock, ro))
+                shared_dirs_xml.append((host_dir, sock))
             else:
-                shared_dirs_xml.append((host_dir, None, ro))
+                shared_dirs_xml.append((host_dir, None))
 
         xml = generate_domain_xml(
             self._dom_name,
