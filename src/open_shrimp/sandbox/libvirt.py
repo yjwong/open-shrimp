@@ -20,7 +20,13 @@ import threading
 import time
 from pathlib import Path
 
-from open_shrimp.sandbox.base import VncQuirk
+from open_shrimp.sandbox.base import PortForward, VncQuirk
+from open_shrimp.sandbox.port_forward import (
+    SSH_TUNNEL_OPTS,
+    PortForwardRegistry,
+    allocate_host_port,
+    open_ssh_tunnel,
+)
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.libvirt_helpers import (
@@ -155,6 +161,8 @@ class LibvirtSandbox:
         # are written to the host so the terminal mini app can read them.
         self._tmp_dir = self._sdir / "tmp"
         self._claude_home_dir = self._sdir / "claude-home"
+
+        self._port_forwards = PortForwardRegistry()
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -583,6 +591,10 @@ class LibvirtSandbox:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""
         import libvirt
 
+        # Reap forward subprocesses before the VM goes away — ssh would
+        # die on its own but the Popen handles would linger as zombies.
+        self._port_forwards.cleanup()
+
         try:
             domain = self._conn.lookupByName(self._dom_name)
         except libvirt.libvirtError:
@@ -816,6 +828,52 @@ class LibvirtSandbox:
             )
 
         return result
+
+    # -- Port forwarding ------------------------------------------------------
+
+    def supports_port_forwarding(self) -> bool:
+        return True
+
+    def add_port_forward(
+        self,
+        guest_port: int,
+        requested_host_port: int | None,
+        scope_key: str | None,
+        description: str | None,
+    ) -> PortForward:
+        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
+
+        if self._ssh_port is None:
+            raise RuntimeError(
+                "Cannot add port forward: VM is not running"
+            )
+        host_port = allocate_host_port(requested_host_port, guest_port)
+        cmd = [
+            "ssh",
+            *_ssh_common_opts(self._sdir / "ssh_key", self._ssh_port),
+            *SSH_TUNNEL_OPTS,
+            "-L", f"127.0.0.1:{host_port}:127.0.0.1:{guest_port}",
+            "claude@localhost",
+        ]
+        return open_ssh_tunnel(
+            cmd,
+            guest_port=guest_port,
+            host_port=host_port,
+            scope_key=scope_key,
+            description=description,
+            registry=self._port_forwards,
+        )
+
+    def remove_port_forward(self, forward_id: str) -> bool:
+        return self._port_forwards.remove(forward_id)
+
+    def list_port_forwards(
+        self, scope_key: str | None = None,
+    ) -> list[PortForward]:
+        return self._port_forwards.list(scope_key)
+
+    def cleanup_port_forwards(self, scope_key: str | None = None) -> None:
+        self._port_forwards.cleanup(scope_key)
 
     # -- Internal helpers -----------------------------------------------------
 

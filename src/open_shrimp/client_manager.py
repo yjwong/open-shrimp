@@ -607,7 +607,7 @@ async def get_or_create_session(
         openshrimp_server = create_openshrimp_mcp_server(
             bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
             db=db, config=config, job_queue=job_queue,
-            sandbox=_computer_use_sandbox,
+            sandbox=sandbox,
             context_name=context_name,
             user_id=user_id,
             is_private_chat=is_private_chat,

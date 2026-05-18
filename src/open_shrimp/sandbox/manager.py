@@ -138,6 +138,15 @@ class SandboxManager(Protocol):
         """
         ...
 
+    def get_active_sandbox(self, context_name: str) -> Sandbox | None:
+        """Return the cached sandbox for *context_name*, or ``None``.
+
+        Does not create a new sandbox.  Used by callers that want to
+        interact with a sandbox only if it is already running (e.g.
+        cleaning up runtime port forwards on ``/clear``).
+        """
+        ...
+
     def destroy_context(self, context_name: str) -> None:
         """Permanently destroy all resources for a context.
 
@@ -428,6 +437,9 @@ class DockerSandboxManager:
                 logger.debug("Error stopping sandbox %s", context_name, exc_info=True)
             logger.info("Invalidated Docker sandbox for context '%s'", context_name)
 
+    def get_active_sandbox(self, context_name: str) -> Sandbox | None:
+        return self._sandbox_cache.get(context_name)
+
     def destroy_context(self, context_name: str) -> None:
         self.invalidate_sandbox(context_name)
 
@@ -620,6 +632,9 @@ class LimaSandboxManager:
             except Exception:
                 logger.debug("Error stopping Lima sandbox %s", context_name, exc_info=True)
             logger.info("Invalidated Lima sandbox for context '%s'", context_name)
+
+    def get_active_sandbox(self, context_name: str) -> Sandbox | None:
+        return self._sandbox_cache.get(context_name)
 
     def destroy_context(self, context_name: str) -> None:
         self.invalidate_sandbox(context_name)
@@ -963,6 +978,9 @@ class LibvirtSandboxManager:
             except Exception:
                 logger.debug("Error stopping libvirt sandbox %s", context_name, exc_info=True)
             logger.info("Invalidated libvirt sandbox for context '%s'", context_name)
+
+    def get_active_sandbox(self, context_name: str) -> Sandbox | None:
+        return self._sandbox_cache.get(context_name)
 
     def destroy_context(self, context_name: str) -> None:
         self.invalidate_sandbox(context_name)

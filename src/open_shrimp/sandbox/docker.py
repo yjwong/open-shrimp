@@ -12,7 +12,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from open_shrimp.sandbox.base import VncQuirk
+from open_shrimp.sandbox.base import PortForward, VncQuirk
 
 import open_shrimp.sandbox.docker_helpers as _dh
 
@@ -290,6 +290,33 @@ class DockerSandbox:
         )
         if result.returncode != 0:
             raise RuntimeError(f"wl-copy failed: {result.stderr.strip()}")
+
+    # -- Port forwarding ------------------------------------------------------
+
+    def supports_port_forwarding(self) -> bool:
+        return False
+
+    def add_port_forward(
+        self,
+        guest_port: int,
+        requested_host_port: int | None,
+        scope_key: str | None,
+        description: str | None,
+    ) -> PortForward:
+        raise NotImplementedError(
+            "Runtime port forwarding is not supported for Docker sandboxes."
+        )
+
+    def remove_port_forward(self, forward_id: str) -> bool:
+        return False
+
+    def list_port_forwards(
+        self, scope_key: str | None = None,
+    ) -> list[PortForward]:
+        return []
+
+    def cleanup_port_forwards(self, scope_key: str | None = None) -> None:
+        pass
 
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         if not host_paths:

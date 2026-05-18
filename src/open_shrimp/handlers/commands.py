@@ -345,6 +345,23 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _model_overrides.pop(scope, None)
     _effort_overrides.pop(scope, None)
     _active_bg_tasks.pop(scope, None)
+
+    if ctx.sandbox is not None:
+        sandbox_managers = context.bot_data.get("sandbox_managers") or {}
+        manager = sandbox_managers.get(ctx.sandbox.backend)
+        if manager is not None:
+            active = manager.get_active_sandbox(ctx_name)
+            if active is not None and active.supports_port_forwarding():
+                try:
+                    await asyncio.to_thread(
+                        active.cleanup_port_forwards, scope.key,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to clean up port forwards on /clear for %s",
+                        ctx_name,
+                    )
+
     await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
     await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
 

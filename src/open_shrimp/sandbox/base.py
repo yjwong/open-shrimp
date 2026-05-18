@@ -13,8 +13,26 @@ the appropriate backend.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Protocol, runtime_checkable
+
+
+@dataclass(frozen=True)
+class PortForward:
+    """A live guest→host TCP port forward exposed by a sandbox.
+
+    The host port is always bound to ``127.0.0.1``.  ``scope_key`` is an
+    opaque per-conversation key (typically ``"chat_id:thread_id"``) so
+    cleanup on ``/clear`` only affects the forwards created from that
+    conversation.
+    """
+
+    id: str
+    guest_port: int
+    host_port: int
+    scope_key: str | None = None
+    description: str | None = None
 
 VNC_QUIRK_RFB_DROPS_SET_ENCODINGS: Final = "rfb_drops_set_encodings"
 """The upstream RFB server crashes on ``SetPixelFormat`` (RFB type 0)
@@ -252,6 +270,48 @@ class Sandbox(Protocol):
         For non-container backends where host and sandbox share a
         filesystem, this is a no-op that returns *host_paths* unchanged.
         """
+        ...
+
+    # -- Port forwarding ------------------------------------------------------
+
+    def supports_port_forwarding(self) -> bool:
+        """Return ``True`` if this backend supports runtime port forwarding.
+
+        When ``False``, the ``port_forward`` MCP tool is not registered
+        and the other methods on this section may raise
+        :class:`NotImplementedError`.
+        """
+        ...
+
+    def add_port_forward(
+        self,
+        guest_port: int,
+        requested_host_port: int | None,
+        scope_key: str | None,
+        description: str | None,
+    ) -> PortForward:
+        """Open a TCP forward from *guest_port* in the sandbox to a host port.
+
+        The host port is bound to ``127.0.0.1`` only.  If
+        *requested_host_port* is taken (or ``None``), the system picks a
+        free port and returns it on the resulting :class:`PortForward`.
+
+        Raises :class:`NotImplementedError` for backends without support.
+        """
+        ...
+
+    def remove_port_forward(self, forward_id: str) -> bool:
+        """Tear down a previously created forward.  Returns ``True`` if removed."""
+        ...
+
+    def list_port_forwards(
+        self, scope_key: str | None = None,
+    ) -> list[PortForward]:
+        """List active forwards, optionally filtered by *scope_key*."""
+        ...
+
+    def cleanup_port_forwards(self, scope_key: str | None = None) -> None:
+        """Tear down all forwards, or just those owned by *scope_key*."""
         ...
 
 

@@ -430,6 +430,12 @@ def make_can_use_tool(
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResult:
+        # port_forward: list/remove don't expose new attack surface — only
+        # create needs the approval prompt.
+        if tool_name == "mcp__openshrimp__port_forward":
+            if tool_input.get("action") in ("list", "remove"):
+                return PermissionResultAllow()
+
         # Special handling for AskUserQuestion: present questions to user
         # via Telegram, collect answers, then DENY the tool to prevent the
         # CLI from trying its own interactive UI.  The user's answers are

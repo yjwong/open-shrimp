@@ -890,6 +890,158 @@ def create_openshrimp_mcp_server(
             computer_toplevel,
         ])
 
+    # --- Port forwarding (sandboxed contexts that support it) ---
+    if sandbox is not None and sandbox.supports_port_forwarding():
+        from open_shrimp.db import ChatScope
+        _scope_key = ChatScope(chat_id=chat_id, thread_id=thread_id).key
+
+        @tool(
+            "port_forward",
+            "Manage TCP port forwards from the sandbox to the host's "
+            "loopback interface (127.0.0.1). Use this to expose a service "
+            "running inside the sandbox (e.g. a dev server, API) to the "
+            "user on their host machine. Three actions: 'create' opens a "
+            "new forward and returns the host port (requires user approval); "
+            "'list' shows active forwards in this conversation; 'remove' "
+            "tears down a forward by id. Forwards are automatically cleaned "
+            "up on /clear or when the sandbox stops.",
+            {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "list", "remove"],
+                        "description": (
+                            "What to do: 'create' opens a new forward, "
+                            "'list' shows active forwards, 'remove' tears "
+                            "down a forward by id."
+                        ),
+                    },
+                    "guest_port": {
+                        "type": "integer",
+                        "description": (
+                            "[create only] Port inside the sandbox to "
+                            "expose (1-65535)."
+                        ),
+                    },
+                    "host_port": {
+                        "type": "integer",
+                        "description": (
+                            "[create only] Preferred host port. If "
+                            "omitted, the same number as guest_port is "
+                            "tried first; if that's taken, the system "
+                            "picks any free port. Always bound to "
+                            "127.0.0.1 only."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "[create only] Short human-readable label "
+                            "shown to the user in the approval prompt "
+                            "(e.g. 'Next.js dev server')."
+                        ),
+                    },
+                    "forward_id": {
+                        "type": "string",
+                        "description": (
+                            "[remove only] The id returned by a previous "
+                            "create call (e.g. 'pf-abc12345')."
+                        ),
+                    },
+                },
+                "required": ["action"],
+            },
+            annotations=ToolAnnotations(readOnlyHint=False),
+        )
+        async def port_forward(args: dict[str, Any]) -> dict[str, Any]:
+            action = args.get("action", "")
+
+            if action == "list":
+                forwards = await asyncio.to_thread(
+                    sandbox.list_port_forwards, _scope_key,
+                )
+                if not forwards:
+                    return _text_result(
+                        "No active port forwards in this conversation."
+                    )
+                lines = [f"Active port forwards ({len(forwards)}):"]
+                for f in forwards:
+                    desc = f" — {f.description}" if f.description else ""
+                    lines.append(
+                        f"• {f.id}: guest:{f.guest_port} -> "
+                        f"127.0.0.1:{f.host_port}{desc}"
+                    )
+                return _text_result("\n".join(lines))
+
+            if action == "remove":
+                forward_id = (args.get("forward_id") or "").strip()
+                if not forward_id:
+                    return _text_result(
+                        "Error: forward_id is required for action=remove.",
+                        is_error=True,
+                    )
+                removed = await asyncio.to_thread(
+                    sandbox.remove_port_forward, forward_id,
+                )
+                if not removed:
+                    return _text_result(
+                        f"No port forward with id {forward_id!r} found.",
+                        is_error=True,
+                    )
+                return _text_result(f"Removed port forward {forward_id}.")
+
+            if action == "create":
+                guest_port = args.get("guest_port")
+                if not isinstance(guest_port, int) or not (
+                    0 < guest_port < 65536
+                ):
+                    return _text_result(
+                        "Error: guest_port must be an integer in 1-65535.",
+                        is_error=True,
+                    )
+                host_port = args.get("host_port")
+                if host_port is not None and (
+                    not isinstance(host_port, int)
+                    or not (0 < host_port < 65536)
+                ):
+                    return _text_result(
+                        "Error: host_port must be an integer in 1-65535.",
+                        is_error=True,
+                    )
+                description = args.get("description")
+                try:
+                    forward = await asyncio.to_thread(
+                        sandbox.add_port_forward,
+                        guest_port,
+                        host_port,
+                        _scope_key,
+                        description,
+                    )
+                except Exception as exc:
+                    logger.exception("Failed to open port forward")
+                    return _text_result(
+                        f"Error opening port forward: {exc}", is_error=True,
+                    )
+                fallback = (
+                    f" (requested {host_port} was unavailable)"
+                    if host_port is not None and host_port != forward.host_port
+                    else ""
+                )
+                return _text_result(
+                    f"Port forward opened: guest:{forward.guest_port} -> "
+                    f"http://127.0.0.1:{forward.host_port}{fallback}\n"
+                    f"id: {forward.id}"
+                )
+
+            return _text_result(
+                f"Error: unknown action {action!r}. "
+                "Use 'create', 'list', or 'remove'.",
+                is_error=True,
+            )
+
+        tools_list.append(port_forward)
+
     return create_sdk_mcp_server(
         name="openshrimp",
         tools=tools_list,

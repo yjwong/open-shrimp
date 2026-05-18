@@ -23,7 +23,14 @@ from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.base import (
     VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
     VNC_QUIRK_RFB_DROPS_SET_ENCODINGS,
+    PortForward,
     VncQuirk,
+)
+from open_shrimp.sandbox.port_forward import (
+    SSH_TUNNEL_OPTS,
+    PortForwardRegistry,
+    allocate_host_port,
+    open_ssh_tunnel,
 )
 from open_shrimp.sandbox.lima_helpers import (
     _lima_env,
@@ -119,6 +126,8 @@ class LimaSandbox:
 
         # SSH tunnel processes for macOS guest port forwarding.
         self._ssh_tunnels: list[subprocess.Popen] = []
+
+        self._port_forwards = PortForwardRegistry()
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -323,7 +332,8 @@ class LimaSandbox:
 
     def stop(self) -> None:
         """Stop the Lima instance and any SSH tunnels."""
-        # Terminate SSH tunnels first.
+        # Reap forward subprocesses before the VM goes away.
+        self._port_forwards.cleanup()
         for proc in self._ssh_tunnels:
             try:
                 proc.terminate()
@@ -709,6 +719,54 @@ class LimaSandbox:
             )
             if rc2 != 0:
                 raise RuntimeError(f"focus failed: {stderr2.strip()}")
+
+    # -- Port forwarding ------------------------------------------------------
+
+    def supports_port_forwarding(self) -> bool:
+        return True
+
+    def add_port_forward(
+        self,
+        guest_port: int,
+        requested_host_port: int | None,
+        scope_key: str | None,
+        description: str | None,
+    ) -> PortForward:
+        ssh_config = (
+            Path(self._env["LIMA_HOME"]) / self._inst_name / "ssh.config"
+        )
+        if not ssh_config.is_file():
+            raise RuntimeError(
+                f"Cannot add port forward: Lima ssh.config not found at "
+                f"{ssh_config} — is the VM running?"
+            )
+
+        host_port = allocate_host_port(requested_host_port, guest_port)
+        cmd = [
+            "ssh", "-F", str(ssh_config), f"lima-{self._inst_name}",
+            *SSH_TUNNEL_OPTS,
+            "-L", f"127.0.0.1:{host_port}:127.0.0.1:{guest_port}",
+        ]
+        return open_ssh_tunnel(
+            cmd,
+            guest_port=guest_port,
+            host_port=host_port,
+            scope_key=scope_key,
+            description=description,
+            registry=self._port_forwards,
+            env=self._env,
+        )
+
+    def remove_port_forward(self, forward_id: str) -> bool:
+        return self._port_forwards.remove(forward_id)
+
+    def list_port_forwards(
+        self, scope_key: str | None = None,
+    ) -> list[PortForward]:
+        return self._port_forwards.list(scope_key)
+
+    def cleanup_port_forwards(self, scope_key: str | None = None) -> None:
+        self._port_forwards.cleanup(scope_key)
 
     # -- SSH tunnel management (macOS guests) ---------------------------------
 

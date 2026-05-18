@@ -28,6 +28,13 @@ class ChatScope(NamedTuple):
     chat_id: int
     thread_id: int | None = None  # None for private/non-forum chats
 
+    @property
+    def key(self) -> str:
+        """Stable string key for cross-module bookkeeping (cache keys, etc.)."""
+        if self.thread_id is None:
+            return str(self.chat_id)
+        return f"{self.chat_id}:{self.thread_id}"
+
 
 def _thread_id_to_db(thread_id: int | None) -> int:
     """Convert a thread_id to the DB representation (0 for None)."""
