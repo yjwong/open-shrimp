@@ -111,6 +111,15 @@ _session_approved_dirs: dict[tuple[ChatScope, str], set[str]] = {}
 # ---------------------------------------------------------------------------
 _pending_session_dirs: dict[str, tuple[ChatScope, str, str]] = {}
 
+# ---------------------------------------------------------------------------
+# Pending "Accept all <tool>" approvals: short key -> tool_name.
+# Telegram callback_data is limited to 64 bytes, which long MCP names like
+# ``mcp__playwright__browser_navigate`` blow past once tacked onto
+# ``accept_all_tool:<tool_use_id>:``.  Stash the name here and put only a
+# short UUID in the callback so the button is always offered.
+# ---------------------------------------------------------------------------
+_pending_tool_approvals: dict[str, str] = {}
+
 
 def clear_session_approvals(scope: ChatScope, context_name: str) -> None:
     """Drop every session-scoped approval for *(scope, context_name)*.

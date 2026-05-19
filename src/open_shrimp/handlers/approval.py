@@ -19,6 +19,7 @@ from open_shrimp.handlers.state import (
     _approval_tool_names,
     _pending_agent_inputs,
     _pending_session_dirs,
+    _pending_tool_approvals,
 )
 from open_shrimp.handlers.utils import _escape_mdv2
 from open_shrimp.hooks import _PATH_SCOPED_TOOLS, ApprovalRule, HostBashOutcome
@@ -389,13 +390,17 @@ async def _send_approval_keyboard(
     # per-tool rules must not bypass the directory boundary.  Bash and
     # ExitPlanMode have their own dedicated approval flows.
     _no_accept_all = _PATH_SCOPED_TOOLS.keys() | {"ExitPlanMode", "Bash", "Monitor"}
+    accept_all_tool_key = ""
+    accept_all_tool_data = ""
     if tool_name not in _no_accept_all:
-        accept_all_tool_data = f"accept_all_tool:{tool_use_id}:{tool_name}"
-        # Truncate callback_data to 64 bytes (Telegram limit)
-        if len(accept_all_tool_data.encode()) <= 64:
-            session_row.append(InlineKeyboardButton(
-                f"Accept all {tool_name}", callback_data=accept_all_tool_data,
-            ))
+        accept_all_tool_key = uuid.uuid4().hex[:12]
+        _pending_tool_approvals[accept_all_tool_key] = tool_name
+        accept_all_tool_data = f"accept_all_tool:{accept_all_tool_key}"
+        # The short token keeps callback_data well under 64 bytes even for
+        # MCP names like ``mcp__playwright__browser_navigate``.
+        session_row.append(InlineKeyboardButton(
+            f"Accept all {tool_name}", callback_data=accept_all_tool_data,
+        ))
 
     # Out-of-scope file access: offer to approve the entire directory
     # for the rest of the session (mirrors Claude Code).  Both readers
@@ -483,9 +488,8 @@ async def _send_approval_keyboard(
     _approval_futures[deny_data] = future
     if tool_name in ("Edit", "Write"):
         _approval_futures[f"accept_all_edits:{tool_use_id}"] = future
-    accept_all_tool_key = f"accept_all_tool:{tool_use_id}:{tool_name}"
-    if tool_name not in _no_accept_all and len(accept_all_tool_key.encode()) <= 64:
-        _approval_futures[accept_all_tool_key] = future
+    if accept_all_tool_data:
+        _approval_futures[accept_all_tool_data] = future
     # Register prefix-specific key for Bash.
     accept_prefix_key = ""
     if tool_name == "Bash":
@@ -504,7 +508,11 @@ async def _send_approval_keyboard(
         _approval_futures.pop(approve_data, None)
         _approval_futures.pop(deny_data, None)
         _approval_futures.pop(f"accept_all_edits:{tool_use_id}", None)
-        _approval_futures.pop(accept_all_tool_key, None)
+        if accept_all_tool_data:
+            _approval_futures.pop(accept_all_tool_data, None)
+        if accept_all_tool_key:
+            # The user may have resolved via approve/deny — drop the stash.
+            _pending_tool_approvals.pop(accept_all_tool_key, None)
         if accept_prefix_key:
             _approval_futures.pop(accept_prefix_key, None)
         if accept_dir_data:
@@ -1118,9 +1126,11 @@ async def handle_approval_callback(
             await query.answer("This approval has expired.")
             return True
 
-        # Parse tool name from callback data: "accept_all_tool:<id>:<tool_name>"
-        parts = data.split(":", 2)
-        accepted_tool_name = parts[2] if len(parts) >= 3 else ""
+        # Callback data is "accept_all_tool:<token>" — look the tool name up
+        # in the side dict so MCP names that wouldn't fit in 64 bytes still
+        # work.
+        token = data.split(":", 1)[1]
+        accepted_tool_name = _pending_tool_approvals.pop(token, "")
 
         # Determine the chat's active context to scope the flag
         if query.message and accepted_tool_name:
