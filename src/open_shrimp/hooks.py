@@ -29,7 +29,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from claude_agent_sdk.types import (
     PermissionResult,
@@ -57,6 +57,22 @@ ApprovalCallback = Callable[
 # Type for the question callback: receives list of question dicts,
 # returns answers dict mapping question text -> answer string.
 QuestionCallback = Callable[[list[dict[str, Any]]], Awaitable[dict[str, str]]]
+
+# Outcome of a host_bash approval prompt.
+HostBashOutcome = Literal["approved", "denied", "timeout"]
+
+# Type for the host_bash approval callback: receives the host-escape tool's
+# input dict and a tool_use_id, returns the resolution outcome. Distinct
+# from the generic approval callback so the host-escape flow can implement
+# its own UI (live countdown, no pattern rules, audit logging) without
+# complicating the standard approval path.
+HostBashApprovalCallback = Callable[
+    [dict[str, Any], str], Awaitable[HostBashOutcome]
+]
+
+# Fully-qualified name of the host_bash MCP tool — used in several places to
+# special-case the host-escape path.
+HOST_BASH_TOOL_NAME = "mcp__openshrimp__host_bash"
 
 # Type for the auto-approved edit notification callback: receives tool_name
 # and tool_input dict. Called (fire-and-forget) when a mutating tool is
@@ -363,6 +379,7 @@ def make_can_use_tool(
     is_tool_auto_approved: ToolAutoApprovedCallback | None = None,
     is_containerized: bool = False,
     get_session_approved_dirs: Callable[[], list[str]] | None = None,
+    request_host_bash_approval: HostBashApprovalCallback | None = None,
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext], Awaitable[PermissionResult]
 ]:
@@ -430,6 +447,37 @@ def make_can_use_tool(
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResult:
+        # host_bash (sudo mode): always route to the dedicated approval
+        # callback. Never auto-approved by patterns, session rules, or the
+        # containerized fast-path — the whole point is that this tool
+        # escapes the sandbox, so every invocation gets a fresh Telegram
+        # prompt with a 10-second auto-deny timer.
+        if tool_name == HOST_BASH_TOOL_NAME:
+            if request_host_bash_approval is None:
+                logger.warning(
+                    "host_bash invoked but no approval callback wired; denying"
+                )
+                return PermissionResultDeny(
+                    message="host_bash approval is not configured.",
+                )
+            outcome = await request_host_bash_approval(
+                tool_input, context.tool_use_id,
+            )
+            if outcome == "approved":
+                return PermissionResultAllow()
+            if outcome == "timeout":
+                return PermissionResultDeny(
+                    message=(
+                        "Auto-denied: the user did not respond to the "
+                        "host_bash approval prompt within 10 seconds. "
+                        "They may be away — try again later, or fall "
+                        "back to the sandboxed Bash tool."
+                    ),
+                )
+            return PermissionResultDeny(
+                message="User denied the host_bash command.",
+            )
+
         # port_forward: list/remove don't expose new attack surface — only
         # create needs the approval prompt.
         if tool_name == "mcp__openshrimp__port_forward":

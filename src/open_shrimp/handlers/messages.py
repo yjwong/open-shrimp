@@ -29,7 +29,11 @@ from open_shrimp.client_manager import (
 )
 from open_shrimp.config import Config, ContextConfig, is_sandboxed
 from open_shrimp.db import ChatScope, get_pinned_message_id, get_session_id, set_session_id
-from open_shrimp.handlers.approval import _send_approval_keyboard, _send_auto_approved_diff
+from open_shrimp.handlers.approval import (
+    _send_approval_keyboard,
+    _send_auto_approved_diff,
+    _send_host_bash_approval,
+)
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
 from open_shrimp.handlers.questions import (
     _complete_other_input,
@@ -690,6 +694,19 @@ async def _start_agent_task(
                     thread_id=scope.thread_id,
                 )
 
+            async def request_host_bash(
+                tool_input: dict[str, Any], tool_use_id: str,
+            ) -> Any:
+                await finalize_and_reset(context.bot, draft_state)
+                return await _send_host_bash_approval(
+                    bot=context.bot,
+                    chat_id=scope.chat_id,
+                    context_name=ctx_name,
+                    tool_input=tool_input,
+                    tool_use_id=tool_use_id,
+                    thread_id=scope.thread_id,
+                )
+
             # Mutable container for the latest todo list from TodoWrite.
             # Preserved across stream_response iterations so the pinned
             # message retains the task list when usage is updated.
@@ -729,6 +746,7 @@ async def _start_agent_task(
                 get_session_approved_dirs=lambda: list(
                     _session_approved_dirs.get((scope, ctx_name), set())
                 ),
+                request_host_bash_approval=request_host_bash,
             )
 
             session = await get_or_create_session(

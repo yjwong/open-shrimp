@@ -50,6 +50,11 @@ class SandboxConfig:
     provision: str | None = None  # shell script to run on first boot
     persistent_paths: list[str] = field(default_factory=list)  # guest paths with dedicated qcow2 volumes
 
+    # Sudo mode — when true, exposes an MCP tool that runs shell commands on
+    # the host (outside the sandbox), gated by a per-command Telegram
+    # approval prompt that auto-denies after 10 seconds.
+    allow_host_escape: bool = False
+
 
 # Valid values for sandbox config fields.
 _SANDBOX_BACKENDS = {"docker", "libvirt", "lima"}
@@ -243,6 +248,15 @@ def _validate_raw(raw: dict) -> None:
                     f"must be absolute paths, got: {pp!r}"
                 )
 
+        allow_host_escape = sandbox.get("allow_host_escape")
+        if allow_host_escape is not None and not isinstance(
+            allow_host_escape, bool,
+        ):
+            raise ValueError(
+                f"Context '{name}': sandbox.allow_host_escape must be a "
+                f"boolean, got: {allow_host_escape!r}"
+            )
+
         guest_os = sandbox.get("guest_os", "linux")
         if guest_os not in _SANDBOX_GUEST_OS:
             raise ValueError(
@@ -286,6 +300,7 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
         base_image=raw.get("base_image"),
         provision=raw.get("provision"),
         persistent_paths=raw.get("persistent_paths", []),
+        allow_host_escape=bool(raw.get("allow_host_escape", False)),
     )
 
 
@@ -441,6 +456,8 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                 sandbox_dict["computer_use"] = True
             if ctx.sandbox.virgl:
                 sandbox_dict["virgl"] = True
+            if ctx.sandbox.allow_host_escape:
+                sandbox_dict["allow_host_escape"] = True
             # VM fields — only include non-defaults for VM backends.
             if ctx.sandbox.backend in ("libvirt", "lima"):
                 if ctx.sandbox.memory != 2048:

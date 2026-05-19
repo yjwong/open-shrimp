@@ -21,8 +21,9 @@ from open_shrimp.handlers.state import (
     _pending_session_dirs,
 )
 from open_shrimp.handlers.utils import _escape_mdv2
-from open_shrimp.hooks import _PATH_SCOPED_TOOLS, ApprovalRule
+from open_shrimp.hooks import _PATH_SCOPED_TOOLS, ApprovalRule, HostBashOutcome
 from open_shrimp.stream import _relative_path
+from open_shrimp.sudo_audit import log_sudo
 
 logger = logging.getLogger(__name__)
 
@@ -517,6 +518,238 @@ async def _send_approval_keyboard(
 
 
 # ---------------------------------------------------------------------------
+# host_bash (sudo mode) approval — dedicated flow with 10s auto-deny + live
+# countdown. Uses its own callback prefixes (hb_approve:/hb_deny:) so the
+# standard approve/deny handler doesn't fight with the countdown task over
+# message edits.
+# ---------------------------------------------------------------------------
+
+
+_HOST_BASH_TIMEOUT_SECONDS = 10.0
+_HOST_BASH_TICK_SECONDS = 2.0
+_HOST_BASH_APPROVE_PREFIX = "hb_approve:"
+_HOST_BASH_DENY_PREFIX = "hb_deny:"
+
+
+def _render_command_block(command: str, max_len: int) -> str:
+    """Render a bash command as a MarkdownV2 code block with truncation."""
+    shown = command
+    if len(shown) > max_len:
+        shown = shown[:max_len] + "\n..."
+    return f"```bash\n{_escape_mdv2(shown)}\n```"
+
+
+def _format_host_bash_approval(
+    tool_input: dict[str, Any], remaining: float,
+) -> str:
+    """Render the host_bash approval prompt with a countdown line."""
+    command = tool_input.get("command", "")
+    description = tool_input.get("description", "")
+    cwd = tool_input.get("cwd", "")
+
+    header = "\u26a0\ufe0f *HOST shell* \\(sudo mode\\)"
+    parts: list[str] = [header]
+    if description:
+        parts.append(_escape_mdv2(description))
+    parts.append(_render_command_block(command, 4096 - 400))
+    if cwd:
+        parts.append(f"_cwd:_ `{_escape_mdv2(cwd)}`")
+    secs = max(0, int(round(remaining)))
+    parts.append(
+        f"_Auto\\-deny in {secs}s \u2014 this command runs OUTSIDE the "
+        f"sandbox\\._"
+    )
+    return "\n\n".join(parts)
+
+
+def _format_host_bash_final(
+    tool_input: dict[str, Any], outcome: HostBashOutcome,
+) -> str:
+    """Render the final state of the host_bash approval message."""
+    icon = {
+        "approved": "\u2705",
+        "denied": "\u274c",
+        "timeout": "\u23f1\ufe0f",
+    }[outcome]
+    verb = {
+        "approved": "Approved",
+        "denied": "Denied",
+        "timeout": "Auto\\-denied \\(no response within 10s\\)",
+    }[outcome]
+    block = _render_command_block(tool_input.get("command", ""), 4096 - 200)
+    return f"{icon} *HOST shell* \u2014 {verb}\n\n{block}"
+
+
+async def _host_bash_countdown(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    tool_use_id: str,
+    tool_input: dict[str, Any],
+    deadline: float,
+    future: asyncio.Future[bool],
+) -> None:
+    """Edit the approval message every tick with the remaining countdown.
+
+    Exits as soon as ``future`` is done (user clicked, or timer fired). All
+    Telegram errors are swallowed — the countdown is purely cosmetic.
+    """
+    loop = asyncio.get_running_loop()
+    last_secs = int(round(_HOST_BASH_TIMEOUT_SECONDS))
+    # Skip the first edit since the initial send already shows the countdown
+    # — go straight to sleeping.
+    while True:
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(future), timeout=_HOST_BASH_TICK_SECONDS,
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            return
+        if future.done():
+            return
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        secs = max(0, int(round(remaining)))
+        # Telegram rejects edits with identical text — skip when the
+        # rounded second hasn't advanced (e.g. consecutive 2s ticks both
+        # round to the same display value).
+        if secs == last_secs:
+            continue
+        last_secs = secs
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=_format_host_bash_approval(tool_input, remaining),
+                parse_mode="MarkdownV2",
+                reply_markup=_host_bash_keyboard(tool_use_id),
+            )
+        except Exception:
+            # Likely a rate-limit or "message not modified" — ignore.
+            pass
+
+
+def _host_bash_keyboard(tool_use_id: str) -> InlineKeyboardMarkup:
+    """Build the two-button [Approve] [Deny] keyboard for host_bash.
+
+    No pattern/session rules — every host-escape command needs a fresh,
+    intentional approval.
+    """
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "Approve",
+            callback_data=f"{_HOST_BASH_APPROVE_PREFIX}{tool_use_id}",
+        ),
+        InlineKeyboardButton(
+            "Deny",
+            callback_data=f"{_HOST_BASH_DENY_PREFIX}{tool_use_id}",
+        ),
+    ]])
+
+
+async def _send_host_bash_approval(
+    bot: Bot,
+    chat_id: int,
+    context_name: str,
+    tool_input: dict[str, Any],
+    tool_use_id: str,
+    thread_id: int | None = None,
+) -> HostBashOutcome:
+    """Send a host_bash approval prompt and resolve to approved/denied/timeout.
+
+    Blocks until the user clicks one of the buttons or the 10-second timer
+    fires. Edits the message with a live countdown while waiting and writes
+    an audit entry to ``~/.config/openshrimp/sudo.log`` on resolution.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[bool] = loop.create_future()
+    timed_out = [False]
+
+    def _auto_deny() -> None:
+        if not future.done():
+            timed_out[0] = True
+            future.set_result(False)
+
+    timer = loop.call_later(_HOST_BASH_TIMEOUT_SECONDS, _auto_deny)
+    deadline = loop.time() + _HOST_BASH_TIMEOUT_SECONDS
+
+    approve_data = f"{_HOST_BASH_APPROVE_PREFIX}{tool_use_id}"
+    deny_data = f"{_HOST_BASH_DENY_PREFIX}{tool_use_id}"
+    _approval_futures[approve_data] = future
+    _approval_futures[deny_data] = future
+    _approval_tool_names[tool_use_id] = "mcp__openshrimp__host_bash"
+    _approval_metadata[tool_use_id] = {
+        "tool_name": "mcp__openshrimp__host_bash",
+        "tool_input": tool_input,
+        "chat_id": chat_id,
+    }
+
+    thread_kwargs: dict[str, Any] = {}
+    if thread_id is not None:
+        thread_kwargs["message_thread_id"] = thread_id
+
+    sent_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=_format_host_bash_approval(tool_input, _HOST_BASH_TIMEOUT_SECONDS),
+        parse_mode="MarkdownV2",
+        reply_markup=_host_bash_keyboard(tool_use_id),
+        **thread_kwargs,
+    )
+    message_id = sent_msg.message_id
+    _approval_metadata[tool_use_id]["message_id"] = message_id
+
+    countdown_task = asyncio.create_task(_host_bash_countdown(
+        bot, chat_id, message_id, tool_use_id, tool_input, deadline, future,
+    ))
+
+    try:
+        approved = await future
+    finally:
+        timer.cancel()
+        countdown_task.cancel()
+        try:
+            await countdown_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _approval_futures.pop(approve_data, None)
+        _approval_futures.pop(deny_data, None)
+        _approval_tool_names.pop(tool_use_id, None)
+        _approval_metadata.pop(tool_use_id, None)
+
+    if timed_out[0]:
+        outcome: HostBashOutcome = "timeout"
+    elif approved:
+        outcome = "approved"
+    else:
+        outcome = "denied"
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=_format_host_bash_final(tool_input, outcome),
+            parse_mode="MarkdownV2",
+            reply_markup=None,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to edit host_bash approval message", exc_info=True,
+        )
+
+    await log_sudo(
+        chat_id=chat_id,
+        context_name=context_name,
+        command=tool_input.get("command", ""),
+        outcome=outcome,
+    )
+    return outcome
+
+
+# ---------------------------------------------------------------------------
 # Auto-resolve parallel pending approvals after "accept all" actions
 # ---------------------------------------------------------------------------
 
@@ -935,6 +1168,21 @@ async def handle_approval_callback(
             await _auto_resolve_pending_approvals(
                 query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
             )
+        return True
+
+    # Handle host_bash (sudo mode) approve/deny — resolve the future only;
+    # the helper function is responsible for the final message edit and the
+    # audit log entry so the countdown task and the edit can't race.
+    if data.startswith(_HOST_BASH_APPROVE_PREFIX) or data.startswith(
+        _HOST_BASH_DENY_PREFIX,
+    ):
+        future = _approval_futures.get(data)
+        if not future or future.done():
+            await query.answer("This approval has expired.")
+            return True
+        approved = data.startswith(_HOST_BASH_APPROVE_PREFIX)
+        future.set_result(approved)
+        await query.answer("Approved." if approved else "Denied.")
         return True
 
     # Handle approve/deny

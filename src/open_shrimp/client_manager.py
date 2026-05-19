@@ -42,6 +42,7 @@ from open_shrimp.db import ChatScope
 from open_shrimp.hooks import (
     ApprovalCallback,
     EditNotifyCallback,
+    HostBashApprovalCallback,
     QuestionCallback,
 )
 from open_shrimp.sandbox import Sandbox, SandboxManager
@@ -246,6 +247,7 @@ class CallbackContext:
     notify_auto_approved_edit: EditNotifyCallback | None = None
     is_tool_auto_approved: Callable[[str, dict[str, Any]], bool] | None = None
     get_session_approved_dirs: Callable[[], list[str]] | None = None
+    request_host_bash_approval: HostBashApprovalCallback | None = None
 
 
 @dataclass
@@ -335,6 +337,7 @@ async def get_or_create_session(
                 existing.callback_context.notify_auto_approved_edit = callback_context.notify_auto_approved_edit
                 existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
                 existing.callback_context.get_session_approved_dirs = callback_context.get_session_approved_dirs
+                existing.callback_context.request_host_bash_approval = callback_context.request_host_bash_approval
                 existing.last_activity = time.monotonic()
                 logger.info(
                     "Reusing live client for scope %s context %s",
@@ -371,6 +374,7 @@ async def get_or_create_session(
         is_tool_auto_approved=_make_tool_approved_proxy(callback_context),
         is_containerized=is_sandboxed(context),
         get_session_approved_dirs=_make_session_dirs_proxy(callback_context),
+        request_host_bash_approval=_make_host_bash_approval_proxy(callback_context),
     )
 
     _last_stderr: list[str] = [""]
@@ -604,6 +608,17 @@ async def get_or_create_session(
     # Register in-process MCP tools (send_file, send_photo, etc.) so the
     # agent can send files directly to the Telegram chat.
     if bot is not None:
+        # Sudo mode (host_bash) is registered only when the context's
+        # sandbox config explicitly opts in. Commands run with cwd set to
+        # the context's source directory so they operate on the same tree
+        # the agent sees inside the sandbox, just unsandboxed.
+        _host_bash_workdir: str | None = None
+        if (
+            context.sandbox is not None
+            and context.sandbox.allow_host_escape
+        ):
+            _host_bash_workdir = context.directory
+
         openshrimp_server = create_openshrimp_mcp_server(
             bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
             db=db, config=config, job_queue=job_queue,
@@ -611,6 +626,7 @@ async def get_or_create_session(
             context_name=context_name,
             user_id=user_id,
             is_private_chat=is_private_chat,
+            host_bash_workdir=_host_bash_workdir,
         )
         mcp_servers: dict[str, Any] = {"openshrimp": openshrimp_server}
 
@@ -1023,5 +1039,21 @@ def _make_session_dirs_proxy(
         if ctx.get_session_approved_dirs is None:
             return []
         return ctx.get_session_approved_dirs()
+
+    return _proxy
+
+
+def _make_host_bash_approval_proxy(
+    ctx: CallbackContext,
+) -> HostBashApprovalCallback:
+    async def _proxy(
+        tool_input: dict[str, Any], tool_use_id: str,
+    ) -> Any:
+        if ctx.request_host_bash_approval is None:
+            logger.warning(
+                "host_bash invoked but no approval callback set; denying"
+            )
+            return "denied"
+        return await ctx.request_host_bash_approval(tool_input, tool_use_id)
 
     return _proxy

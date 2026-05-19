@@ -60,6 +60,7 @@ def create_openshrimp_mcp_server(
     context_name: str | None = None,
     user_id: int = 0,
     is_private_chat: bool = True,
+    host_bash_workdir: str | None = None,
 ) -> McpSdkServerConfig:
     """Create an in-process MCP server with OpenShrimp-specific tools.
 
@@ -1041,6 +1042,110 @@ def create_openshrimp_mcp_server(
             )
 
         tools_list.append(port_forward)
+
+    # --- host_bash (sudo mode): run a shell command on the host, OUTSIDE
+    # the sandbox.  Only registered when the context's sandbox config has
+    # ``allow_host_escape: true``.  Every invocation routes through a
+    # per-command Telegram approval prompt with a 10-second auto-deny
+    # timer; see ``handlers/approval.py``.
+    if host_bash_workdir is not None:
+        _host_workdir = host_bash_workdir
+
+        @tool(
+            "host_bash",
+            "Run a shell command on the HOST, outside the sandbox. Use this "
+            "only when a task fundamentally requires host access (e.g. "
+            "manipulating files outside the mounted project directory, "
+            "interacting with host-only services). Every invocation prompts "
+            "the user for approval and auto-denies after 10 seconds if they "
+            "don't respond. Prefer the sandboxed Bash tool whenever "
+            "possible. Captures stdout, stderr, and exit code.",
+            {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": (
+                            "The shell command to execute on the host. "
+                            "Runs via /bin/sh -c."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Short human-readable explanation shown to the "
+                            "user in the approval prompt (e.g. 'install "
+                            "system package'). Optional but strongly "
+                            "recommended — the user has 10 seconds to "
+                            "decide."
+                        ),
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum execution time in seconds. Default "
+                            "120. The command is killed if it exceeds this."
+                        ),
+                    },
+                },
+                "required": ["command"],
+            },
+            annotations=ToolAnnotations(readOnlyHint=False),
+        )
+        async def host_bash(args: dict[str, Any]) -> dict[str, Any]:
+            command = args.get("command", "")
+            if not command:
+                return _text_result(
+                    "Error: command is required.", is_error=True,
+                )
+            timeout_seconds = args.get("timeout_seconds", 120)
+            if not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
+                timeout_seconds = 120
+
+            logger.warning(
+                "host_bash (sudo) running on host: %s", command[:200],
+            )
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    cwd=_host_workdir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except Exception as exc:
+                return _text_result(
+                    f"Error spawning host shell: {exc}", is_error=True,
+                )
+
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(), timeout=float(timeout_seconds),
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                return _text_result(
+                    f"Error: host_bash timed out after {timeout_seconds}s.",
+                    is_error=True,
+                )
+
+            stdout = stdout_b.decode("utf-8", errors="replace")
+            stderr = stderr_b.decode("utf-8", errors="replace")
+            exit_code = proc.returncode if proc.returncode is not None else -1
+
+            parts = [f"exit_code: {exit_code}"]
+            if stdout:
+                parts.append(f"stdout:\n{stdout}")
+            if stderr:
+                parts.append(f"stderr:\n{stderr}")
+            return _text_result(
+                "\n\n".join(parts), is_error=(exit_code != 0),
+            )
+
+        tools_list.append(host_bash)
 
     return create_sdk_mcp_server(
         name="openshrimp",
