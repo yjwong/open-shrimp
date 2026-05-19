@@ -12,6 +12,7 @@ export interface SandboxConfig {
   base_image?: string | null;
   provision?: string | null;
   persistent_paths?: string[];
+  allow_host_escape?: boolean;
 }
 
 export interface ContextConfig {

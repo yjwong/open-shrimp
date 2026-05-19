@@ -87,6 +87,26 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
         />
       </div>
 
+      <div className="form-toggle-row">
+        <span className="form-toggle-label">
+          Allow Host Escape (sudo)
+        </span>
+        <button
+          type="button"
+          className={`toggle${sandbox.allow_host_escape ? " on" : ""}`}
+          onClick={() =>
+            update({ allow_host_escape: !sandbox.allow_host_escape })
+          }
+        />
+      </div>
+      {sandbox.allow_host_escape && (
+        <span className="form-hint error">
+          Grants a host_bash MCP tool that runs shell commands on the host
+          outside the sandbox. Each call requires explicit Telegram approval
+          (auto-deny after 10s).
+        </span>
+      )}
+
       {sandbox.backend === "lima" && (
         <div className="form-group">
           <label className="form-label">Guest OS</label>
