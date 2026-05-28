@@ -279,6 +279,41 @@ async def test_tool_input_fetched_from_message_on_cache_miss(
     assert seen_inputs == [{"file_path": "/fetched"}]
 
 
+async def test_permission_waits_for_non_empty_tool_input(
+    mock_server: MockOpenCode, wired_server,
+) -> None:
+    """Initial pending ToolParts have empty input; wait for running input."""
+    seen_inputs: list[dict[str, Any]] = []
+
+    async def can_use_tool(name, tool_input, ctx):
+        seen_inputs.append(tool_input)
+        return PermissionResultAllow()
+
+    opts = OpenCodeOptions(
+        cwd="/tmp", provider="openai", model="gpt-test",
+        can_use_tool=can_use_tool,
+    )
+    async with OpenCodeClient(opts) as client:
+        sid = client.session_id
+        mock_server.script(
+            sid,
+            [
+                tool_part_event("call_pending", "bash", "pending"),
+                permission_asked("req_pending", "bash", call_id="call_pending"),
+                tool_part_event(
+                    "call_pending", "bash", "running",
+                    tool_input={"command": "pwd"},
+                ),
+                session_idle(),
+            ],
+        )
+        await client.query("hi")
+        await _drain(client)
+        await _wait_for(lambda: bool(mock_server.permission_replies))
+
+    assert seen_inputs == [{"command": "pwd"}]
+
+
 async def test_updated_input_dropped_with_warning(
     mock_server: MockOpenCode, wired_server, caplog,
 ) -> None:

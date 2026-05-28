@@ -43,7 +43,7 @@ CanUseToolCallback = Callable[
     Awaitable[PermissionResult],
 ]
 
-_TOOLPART_WAIT_TIMEOUT = 0.2  # seconds — bound the race with ToolPart caching.
+_TOOLPART_WAIT_TIMEOUT = 1.0  # seconds — bound the race with ToolPart caching.
 _REPLIED_CACHE_MAX = 256  # FIFO eviction cap for the duplicate-asked guard.
 _TERMINAL_STATUSES = frozenset({"completed", "error"})
 
@@ -210,7 +210,7 @@ class PermissionBridge:
         3. Static category → hooks-name fallback, with metadata as input.
         """
         tool_part = self._tool_parts.get(call_id)
-        if tool_part is None and call_id:
+        if call_id and (tool_part is None or not tool_part[1]):
             ev = self._tool_part_events.get(call_id)
             if ev is None:
                 ev = asyncio.Event()
@@ -221,7 +221,7 @@ class PermissionBridge:
                 pass
             tool_part = self._tool_parts.get(call_id)
 
-        if tool_part is None and call_id and message_id:
+        if call_id and message_id and (tool_part is None or not tool_part[1]):
             tool_part = await self._fetch_tool_part(
                 session_id, message_id, call_id,
             )
