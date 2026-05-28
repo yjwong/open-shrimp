@@ -178,6 +178,12 @@ async def run_agent(
         max_buffer_size=10 * 1024 * 1024,  # 10MB
     )
 
+    if context.additional_directories:
+        options.system_prompt = (
+            "Additional working directories: "
+            + ", ".join(context.additional_directories)
+        )
+
     # Save attachments to temp files and build the prompt with file references.
     attachment_paths: list[Path] = []
     if attachments:

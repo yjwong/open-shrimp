@@ -490,6 +490,17 @@ async def _run_scheduled_prompt(
     def _log_stderr(line: str) -> None:
         logger.info("opencode stderr (scheduled %s): %s", task.name, line.rstrip())
 
+    system_prompt = (
+        f"You are running as a scheduled task named '{task.name}'. "
+        f"This is an automated execution — there is no human watching. "
+        f"Be concise and focused. Report findings clearly."
+    )
+    if ctx_config.additional_directories:
+        system_prompt += (
+            "\n\nAdditional working directories: "
+            + ", ".join(ctx_config.additional_directories)
+        )
+
     provider, model = split_provider_model(ctx_config.model)
     options = OpenCodeOptions(
         cwd=ctx_config.directory,
@@ -502,11 +513,7 @@ async def _run_scheduled_prompt(
         include_partial_messages=True,
         stderr=_log_stderr,
         max_buffer_size=10 * 1024 * 1024,  # 10MB
-        system_prompt=(
-            f"You are running as a scheduled task named '{task.name}'. "
-            f"This is an automated execution — there is no human watching. "
-            f"Be concise and focused. Report findings clearly."
-        ),
+        system_prompt=system_prompt,
     )
 
     client = OpenCodeClient(options=options)

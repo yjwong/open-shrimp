@@ -554,6 +554,12 @@ async def get_or_create_session(
 
     system_prompt_parts: list[str] = []
 
+    if context.additional_directories:
+        system_prompt_parts.append(
+            "Additional working directories: "
+            + ", ".join(context.additional_directories)
+        )
+
     if scope.thread_id is not None:
         system_prompt_parts.append(
             "This conversation is in a Telegram forum topic. "
