@@ -18,6 +18,8 @@ from open_shrimp.opencode_client import (
 from tests.opencode_client.mock_server import (
     MockOpenCode,
     permission_asked,
+    reasoning_delta,
+    reasoning_part_started,
     session_idle,
     step_ended,
     step_failed,
@@ -244,6 +246,48 @@ async def test_unknown_tool_passes_through_name(
         for b in m.content if isinstance(b, ToolUseBlock)
     ]
     assert tool_uses[0].name == "openshrimp_send_file"
+
+
+async def test_reasoning_deltas_are_dropped(
+    mock_server: MockOpenCode, wired_server,
+) -> None:
+    """Reasoning part deltas ride the same wire as text deltas
+    (field=text). The wrapper must drop them so thinking traces never
+    reach Telegram, while real text deltas still flow through."""
+    opts = OpenCodeOptions(cwd="/tmp", provider="openai", model="gpt-test")
+    async with OpenCodeClient(opts) as client:
+        sid = client.session_id
+        mock_server.script(
+            sid,
+            [
+                reasoning_part_started("r1"),
+                reasoning_delta("r1", "Let me think about this..."),
+                reasoning_delta("r1", " more thinking."),
+                text_delta("p1", "Final answer."),
+                session_idle(),
+            ],
+        )
+        await client.query("hi")
+        msgs = await _collect(client)
+
+    texts = [
+        b.text for m in msgs
+        if isinstance(m, AssistantMessage)
+        for b in m.content
+        if isinstance(b, TextBlock)
+    ]
+    assert texts == ["Final answer."], texts
+
+    from open_shrimp.opencode_client.client import _resolve_part_id
+
+    stream_events = [
+        m for m in msgs if m.__class__.__name__ == "StreamEvent"
+    ]
+    for ev in stream_events:
+        props = ev.event.get("properties") or {}
+        assert _resolve_part_id(props) != "r1", (
+            f"StreamEvent leaked reasoning delta for part r1: {ev.event}"
+        )
 
 
 async def test_permission_asked_does_not_yield_into_response_iter(

@@ -51,6 +51,9 @@ _TOOL_STATUS_COMPLETED = "completed"
 _TOOL_STATUS_ERROR = "error"
 _TOOL_STATUS_IN_FLIGHT = frozenset({_TOOL_STATUS_PENDING, _TOOL_STATUS_RUNNING})
 
+_PART_TYPE_TOOL = "tool"
+_PART_TYPE_REASONING = "reasoning"
+
 _MUTATING_OPENCODE_PERMS = frozenset({"edit", "write", "apply_patch"})
 _ALWAYS_ALLOWED_OPENCODE_PERMS = frozenset({"todowrite"})
 
@@ -416,6 +419,22 @@ def _is_not_found_error(exc: BaseException) -> bool:
     return "404" in msg
 
 
+def _resolve_part_id(props: dict[str, Any]) -> str | None:
+    """Extract a part id from an SSE event's ``properties``.
+
+    OpenCode publishes ``message.part.delta`` with the id either nested
+    as ``part.id`` or flat as ``partID``; older snapshots use one, newer
+    ones the other. Callers should treat them interchangeably.
+    """
+    part = props.get("part")
+    if isinstance(part, dict):
+        pid = part.get("id")
+        if isinstance(pid, str):
+            return pid
+    pid = props.get("partID")
+    return pid if isinstance(pid, str) else None
+
+
 async def _iter_response(
     queue: EventQueue,
     session_id: str,
@@ -427,6 +446,12 @@ async def _iter_response(
     part_order: list[str] = []
     tool_use_emitted: set[str] = set()
     tool_result_emitted: set[str] = set()
+    # Reasoning parts surface as message.part.delta with field="text", same as
+    # real text parts (opencode processor.ts emits updatePartDelta with
+    # field:"text" for reasoning-delta). The delta payload itself doesn't
+    # carry the part type, so we learn it from message.part.updated and
+    # drop matching deltas to keep thinking traces out of Telegram.
+    reasoning_part_ids: set[str] = set()
     loop = asyncio.get_running_loop()
     deadline = loop.time() + query_timeout
     turn_start_ms = int(loop.time() * 1000)
@@ -559,10 +584,9 @@ async def _iter_response(
             return
 
         if etype == EVT_MESSAGE_PART_DELTA and props.get("field") == "text":
-            part = props.get("part") or {}
-            part_id = part.get("id") if isinstance(part, dict) else None
-            if part_id is None:
-                part_id = props.get("partID")
+            part_id = _resolve_part_id(props)
+            if part_id in reasoning_part_ids:
+                continue
             delta = props.get("delta", "")
             if part_id is not None and isinstance(delta, str):
                 if part_id not in text_buffers:
@@ -574,14 +598,20 @@ async def _iter_response(
 
         if etype == EVT_MESSAGE_PART_UPDATED:
             part = props.get("part") or {}
-            if isinstance(part, dict) and part.get("type") == "tool":
-                if bridge is not None:
-                    bridge.observe_tool_part(part)
-                for msg in _toolpart_messages(
-                    part, tool_use_emitted, tool_result_emitted,
-                    flush_text=_flush_text,
-                ):
-                    yield msg
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type == _PART_TYPE_REASONING:
+                    pid = part.get("id")
+                    if isinstance(pid, str):
+                        reasoning_part_ids.add(pid)
+                elif part_type == _PART_TYPE_TOOL:
+                    if bridge is not None:
+                        bridge.observe_tool_part(part)
+                    for msg in _toolpart_messages(
+                        part, tool_use_emitted, tool_result_emitted,
+                        flush_text=_flush_text,
+                    ):
+                        yield msg
             continue
 
         if etype == EVT_PERMISSION_ASKED:

@@ -221,6 +221,34 @@ def text_delta(part_id: str, delta: str) -> dict[str, Any]:
     }
 
 
+def reasoning_part_started(part_id: str) -> dict[str, Any]:
+    """Mirror OpenCode emitting a ``message.part.updated`` for a new
+    reasoning part. Real opencode (processor.ts) fires this right before
+    streaming reasoning-deltas, which arrive with ``field: "text"`` — same
+    shape as real text deltas. The wrapper learns the part is reasoning
+    from this event and drops subsequent deltas for the id.
+    """
+    return {
+        "type": "message.part.updated",
+        "properties": {
+            "part": {"id": part_id, "type": "reasoning"},
+        },
+    }
+
+
+def reasoning_delta(part_id: str, delta: str) -> dict[str, Any]:
+    """OpenCode emits reasoning content as field=text deltas — only the
+    preceding part.updated tells you it's reasoning, not text."""
+    return {
+        "type": "message.part.delta",
+        "properties": {
+            "field": "text",
+            "delta": delta,
+            "partID": part_id,
+        },
+    }
+
+
 def session_idle() -> dict[str, Any]:
     return {"type": "session.idle", "properties": {}}
 
