@@ -400,6 +400,17 @@ def _build_mounts(
         "writable": True,
     })
 
+    # Per-context OpenCode state.  OpenCode's built-in tools run inside
+    # the VM server process, so its state must be mounted into the guest
+    # rather than shared with the host singleton.
+    opencode_home = str(sdir / "opencode-home")
+    Path(opencode_home).mkdir(parents=True, exist_ok=True)
+    mounts.append({
+        "location": opencode_home,
+        "mountPoint": f"{vm_home}/.local/share/opencode",
+        "writable": True,
+    })
+
     host_skills = Path.home() / ".claude" / "skills"
     if host_skills.is_dir():
         mounts.append({

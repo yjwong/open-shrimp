@@ -14,9 +14,13 @@ Implements the :class:`~open_shrimp.sandbox.base.Sandbox` protocol.
 from __future__ import annotations
 
 import asyncio
+import base64
+import getpass
 import logging
+import secrets
 import shlex
 import subprocess
+import threading
 from pathlib import Path
 
 from open_shrimp.config import SandboxConfig
@@ -53,6 +57,12 @@ from open_shrimp.sandbox.lima_helpers import (
     state_dir_for,
     vnc_host_port,
 )
+from open_shrimp.sandbox.docker import (
+    _drain_opencode_output,
+    _sync_opencode_auth,
+    _wait_for_opencode_ready,
+)
+from open_shrimp.sandbox.docker_helpers import OPENCODE_GUEST_PORT
 from open_shrimp.vnc.rfb_snapshot import RfbSnapshotError, capture_to_png
 
 logger = logging.getLogger(__name__)
@@ -123,12 +133,18 @@ class LimaSandbox:
         self._inst_name = _instance_name(context_name, instance_prefix)
         self._claude_home_dir = self._sdir / "claude-home"
         self._tmp_dir = self._sdir / "tmp"
+        self._opencode_home_dir = self._sdir / "opencode-home"
         self._env = _lima_env()  # cached — LIMA_HOME doesn't change
 
         # SSH tunnel processes for macOS guest port forwarding.
         self._ssh_tunnels: list[subprocess.Popen] = []
 
         self._port_forwards = PortForwardRegistry()
+        self._opencode_endpoint: SandboxOpenCodeServer | None = None
+        self._opencode_proc: subprocess.Popen[str] | None = None
+        self._opencode_forward: subprocess.Popen[bytes] | None = None
+        self._opencode_password: str | None = None
+        self._opencode_drain_thread: threading.Thread | None = None
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -198,6 +214,7 @@ class LimaSandbox:
         # Ensure shared directories exist on host.
         self._claude_home_dir.mkdir(parents=True, exist_ok=True)
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
+        self._opencode_home_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate YAML template.
         yaml_path = generate_lima_yaml(
@@ -287,7 +304,11 @@ class LimaSandbox:
                 ensure_mounts_macos,
                 reboot_if_first_provision,
             )
-            mount_points = [self._project_dir] + self._additional_directories
+            mount_points = [
+                self._project_dir,
+                *self._additional_directories,
+                self._guest_opencode_data_dir(),
+            ]
 
             # Auto-login only takes effect on boot —
             # reboot once after first provisioning.  Do this before
@@ -332,19 +353,107 @@ class LimaSandbox:
         return path, [path]
 
     def opencode_home_dir(self) -> Path:
-        return self._sdir / "opencode-home"
+        return self._opencode_home_dir
 
     def ensure_opencode_server(
         self, *, log_file: Path | None = None, provider_id: str | None = None,
     ) -> SandboxOpenCodeServer:
-        raise NotImplementedError(
-            "Sandboxed OpenCode is not yet implemented for backend 'lima'. "
-            "Use Docker or disable sandbox for this context."
+        if self._opencode_endpoint is not None and self._opencode_healthy():
+            return self._opencode_endpoint
+        self._stop_opencode_server()
+
+        if limactl_instance_status(self._limactl, self._inst_name) != "Running":
+            raise RuntimeError("Cannot start OpenCode: Lima VM is not running")
+
+        ssh_config = Path(self._env["LIMA_HOME"]) / self._inst_name / "ssh.config"
+        if not ssh_config.is_file():
+            raise RuntimeError(
+                f"Cannot start OpenCode: Lima ssh.config not found at {ssh_config}"
+            )
+
+        _sync_opencode_auth(provider_id, self.opencode_home_dir())
+
+        host_port = allocate_host_port(None, OPENCODE_GUEST_PORT)
+        password = secrets.token_hex(32)
+        token = base64.b64encode(f"opencode:{password}".encode()).decode("ascii")
+        endpoint = SandboxOpenCodeServer(
+            base_url=f"http://127.0.0.1:{host_port}",
+            auth_header=f"Basic {token}",
+            cleanup_paths=[],
         )
+
+        forward_cmd = [
+            "ssh", "-F", str(ssh_config),
+            *SSH_TUNNEL_OPTS,
+            "-L", f"127.0.0.1:{host_port}:127.0.0.1:{OPENCODE_GUEST_PORT}",
+            f"lima-{self._inst_name}",
+        ]
+        forward = subprocess.Popen(
+            forward_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=self._env,
+        )
+        try:
+            forward.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            err = (forward.stderr.read() if forward.stderr else b"").decode(
+                errors="replace"
+            ).strip()
+            raise RuntimeError(
+                "OpenCode SSH tunnel exited immediately "
+                f"(rc={forward.returncode}): {err or 'no stderr'}"
+            )
+
+        data_dir = self._guest_opencode_data_dir()
+        env_prefix = self._opencode_guest_env_prefix(password)
+        remote_cmd = (
+            f"mkdir -p {shlex.quote(str(Path(data_dir).parent))} && "
+            f"cd {shlex.quote(self._project_dir)} && "
+            f"{env_prefix} opencode serve --hostname 127.0.0.1 "
+            f"--port {OPENCODE_GUEST_PORT} --print-logs"
+        )
+        proc = subprocess.Popen(
+            [
+                self._limactl, "shell", self._inst_name,
+                "--", "bash", "-lc", remote_cmd,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=self._env,
+        )
+        try:
+            _wait_for_opencode_ready(proc, log_file=log_file)
+        except Exception:
+            self._terminate_process(proc)
+            self._terminate_process(forward)
+            raise
+
+        self._opencode_proc = proc
+        self._opencode_forward = forward
+        self._opencode_endpoint = endpoint
+        self._opencode_password = password
+        self._opencode_drain_thread = threading.Thread(
+            target=_drain_opencode_output,
+            args=(proc, log_file),
+            daemon=True,
+        )
+        self._opencode_drain_thread.start()
+        logger.info(
+            "Lima context '%s': OpenCode server up at %s",
+            self._context_name,
+            endpoint.base_url,
+        )
+        return endpoint
 
     def stop(self) -> None:
         """Stop the Lima instance and any SSH tunnels."""
         # Reap forward subprocesses before the VM goes away.
+        self._stop_opencode_server()
         self._port_forwards.cleanup()
         for proc in self._ssh_tunnels:
             try:
@@ -755,9 +864,10 @@ class LimaSandbox:
 
         host_port = allocate_host_port(requested_host_port, guest_port)
         cmd = [
-            "ssh", "-F", str(ssh_config), f"lima-{self._inst_name}",
+            "ssh", "-F", str(ssh_config),
             *SSH_TUNNEL_OPTS,
             "-L", f"127.0.0.1:{host_port}:127.0.0.1:{guest_port}",
+            f"lima-{self._inst_name}",
         ]
         return open_ssh_tunnel(
             cmd,
@@ -811,11 +921,12 @@ class LimaSandbox:
 
         for host_port, guest_port in tunnels_needed:
             tunnel_cmd = [
-                "ssh", "-F", str(ssh_config), ssh_target,
+                "ssh", "-F", str(ssh_config),
                 "-N",
                 "-o", "ExitOnForwardFailure=yes",
                 "-o", "ServerAliveInterval=30",
                 "-L", f"127.0.0.1:{host_port}:127.0.0.1:{guest_port}",
+                ssh_target,
             ]
             try:
                 proc = subprocess.Popen(
@@ -835,6 +946,59 @@ class LimaSandbox:
                     "Failed to start SSH tunnel for port %d", guest_port,
                     exc_info=True,
                 )
+
+    def _guest_home(self) -> str:
+        if self._guest_os == "macos":
+            return f"/Users/{getpass.getuser()}.guest"
+        return f"/home/{getpass.getuser()}.guest"
+
+    def _guest_opencode_data_dir(self) -> str:
+        if self._guest_os == "macos":
+            return f"{self._guest_home()}/Library/Application Support/opencode"
+        return f"{self._guest_home()}/.local/share/opencode"
+
+    def _opencode_guest_env_prefix(self, password: str) -> str:
+        home = self._guest_home()
+        if self._guest_os == "macos":
+            data_parent = f"{home}/Library/Application Support"
+        else:
+            data_parent = f"{home}/.local/share"
+        return (
+            f"HOME={shlex.quote(home)} "
+            f"XDG_DATA_HOME={shlex.quote(data_parent)} "
+            f"OPENCODE_SERVER_PASSWORD={shlex.quote(password)}"
+        )
+
+    def _opencode_healthy(self) -> bool:
+        return (
+            self._opencode_proc is not None
+            and self._opencode_proc.poll() is None
+            and self._opencode_forward is not None
+            and self._opencode_forward.poll() is None
+        )
+
+    def _stop_opencode_server(self) -> None:
+        if self._opencode_proc is not None:
+            self._terminate_process(self._opencode_proc)
+        if self._opencode_forward is not None:
+            self._terminate_process(self._opencode_forward)
+        self._opencode_proc = None
+        self._opencode_forward = None
+        self._opencode_endpoint = None
+        self._opencode_password = None
+
+    @staticmethod
+    def _terminate_process(proc: subprocess.Popen) -> None:
+        if proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     # -- Internal helpers -----------------------------------------------------
 

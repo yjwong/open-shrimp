@@ -141,6 +141,17 @@ def _build_mounts_macos(
         "writable": True,
     })
 
+    # Per-context OpenCode state for the sandbox-owned server.
+    # Use the macOS user data location and force XDG_DATA_HOME to its
+    # parent when starting OpenCode so this mount is authoritative.
+    opencode_home = str(sdir / "opencode-home")
+    Path(opencode_home).mkdir(parents=True, exist_ok=True)
+    mounts.append({
+        "location": opencode_home,
+        "mountPoint": f"{vm_home}/Library/Application Support/opencode",
+        "writable": True,
+    })
+
     host_skills = Path.home() / ".claude" / "skills"
     if host_skills.is_dir():
         mounts.append({

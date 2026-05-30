@@ -14,7 +14,10 @@ Implements the :class:`~open_shrimp.sandbox.base.Sandbox` protocol.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import secrets
+import shlex
 import subprocess
 import threading
 import time
@@ -64,6 +67,12 @@ from open_shrimp.sandbox.libvirt_helpers import (
     wait_for_ssh,
     _log,
 )
+from open_shrimp.sandbox.docker import (
+    _drain_opencode_output,
+    _sync_opencode_auth,
+    _wait_for_opencode_ready,
+)
+from open_shrimp.sandbox.docker_helpers import OPENCODE_GUEST_PORT
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +170,14 @@ class LibvirtSandbox:
         # are written to the host so the terminal mini app can read them.
         self._tmp_dir = self._sdir / "tmp"
         self._claude_home_dir = self._sdir / "claude-home"
+        self._opencode_home_dir = self._sdir / "opencode-home"
 
         self._port_forwards = PortForwardRegistry()
+        self._opencode_endpoint: SandboxOpenCodeServer | None = None
+        self._opencode_proc: subprocess.Popen[str] | None = None
+        self._opencode_forward: subprocess.Popen[bytes] | None = None
+        self._opencode_password: str | None = None
+        self._opencode_drain_thread: threading.Thread | None = None
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -257,6 +272,7 @@ class LibvirtSandbox:
         # Ensure host-side shared directories exist.
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._claude_home_dir.mkdir(parents=True, exist_ok=True)
+        self._opencode_home_dir.mkdir(parents=True, exist_ok=True)
 
         # Build shared_dirs list for domain XML: (host_dir, socket | None).
         # The domain must declare virtiofs/9p devices for all dirs even
@@ -588,15 +604,93 @@ class LibvirtSandbox:
         return path, [path]
 
     def opencode_home_dir(self) -> Path:
-        return self._sdir / "opencode-home"
+        return self._opencode_home_dir
 
     def ensure_opencode_server(
         self, *, log_file: Path | None = None, provider_id: str | None = None,
     ) -> SandboxOpenCodeServer:
-        raise NotImplementedError(
-            "Sandboxed OpenCode is not yet implemented for backend 'libvirt'. "
-            "Use Docker or disable sandbox for this context."
+        if self._opencode_endpoint is not None and self._opencode_healthy():
+            return self._opencode_endpoint
+        self._stop_opencode_server()
+
+        if self._ssh_port is None:
+            raise RuntimeError("Cannot start OpenCode: libvirt VM is not running")
+
+        _sync_opencode_auth(provider_id, self.opencode_home_dir())
+
+        host_port = allocate_host_port(None, OPENCODE_GUEST_PORT)
+        password = secrets.token_hex(32)
+        token = base64.b64encode(f"opencode:{password}".encode()).decode("ascii")
+        endpoint = SandboxOpenCodeServer(
+            base_url=f"http://127.0.0.1:{host_port}",
+            auth_header=f"Basic {token}",
+            cleanup_paths=[],
         )
+
+        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
+
+        ssh_key = self._sdir / "ssh_key"
+        ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
+        forward_cmd = [
+            "ssh", *ssh_opts, *SSH_TUNNEL_OPTS,
+            "-L", f"127.0.0.1:{host_port}:127.0.0.1:{OPENCODE_GUEST_PORT}",
+            "claude@localhost",
+        ]
+        forward = subprocess.Popen(
+            forward_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+        try:
+            forward.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            err = (forward.stderr.read() if forward.stderr else b"").decode(
+                errors="replace"
+            ).strip()
+            raise RuntimeError(
+                "OpenCode SSH tunnel exited immediately "
+                f"(rc={forward.returncode}): {err or 'no stderr'}"
+            )
+
+        remote_cmd = (
+            f"cd {shlex.quote(self._project_dir)} && "
+            "HOME=/home/claude "
+            f"OPENCODE_SERVER_PASSWORD={shlex.quote(password)} "
+            "opencode serve --hostname 127.0.0.1 "
+            f"--port {OPENCODE_GUEST_PORT} --print-logs"
+        )
+        proc = subprocess.Popen(
+            ["ssh", *ssh_opts, "claude@localhost", remote_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            _wait_for_opencode_ready(proc, log_file=log_file)
+        except Exception:
+            self._terminate_process(proc)
+            self._terminate_process(forward)
+            raise
+
+        self._opencode_proc = proc
+        self._opencode_forward = forward
+        self._opencode_endpoint = endpoint
+        self._opencode_password = password
+        self._opencode_drain_thread = threading.Thread(
+            target=_drain_opencode_output,
+            args=(proc, log_file),
+            daemon=True,
+        )
+        self._opencode_drain_thread.start()
+        logger.info(
+            "Libvirt context '%s': OpenCode server up at %s",
+            self._context_name,
+            endpoint.base_url,
+        )
+        return endpoint
 
     def stop(self) -> None:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""
@@ -604,6 +698,7 @@ class LibvirtSandbox:
 
         # Reap forward subprocesses before the VM goes away — ssh would
         # die on its own but the Popen handles would linger as zombies.
+        self._stop_opencode_server()
         self._port_forwards.cleanup()
 
         try:
@@ -904,9 +999,11 @@ class LibvirtSandbox:
             all_dirs.append(str(self._screenshots_dir))
         all_dirs.append(str(self._tmp_dir))
         all_dirs.append(str(self._claude_home_dir))
+        all_dirs.append(str(self._opencode_home_dir))
         mount_overrides = {
             str(self._tmp_dir): f"/tmp/claude-{_VM_CLAUDE_UID}",
             str(self._claude_home_dir): "/home/claude/.claude",
+            str(self._opencode_home_dir): "/home/claude/.local/share/opencode",
         }
         readonly_dirs: set[str] = set()
         host_skills = Path.home() / ".claude" / "skills"
@@ -953,6 +1050,37 @@ class LibvirtSandbox:
             else:
                 alive.append(proc)
         self._virtiofsd_procs = alive
+
+    def _opencode_healthy(self) -> bool:
+        return (
+            self._opencode_proc is not None
+            and self._opencode_proc.poll() is None
+            and self._opencode_forward is not None
+            and self._opencode_forward.poll() is None
+        )
+
+    def _stop_opencode_server(self) -> None:
+        if self._opencode_proc is not None:
+            self._terminate_process(self._opencode_proc)
+        if self._opencode_forward is not None:
+            self._terminate_process(self._opencode_forward)
+        self._opencode_proc = None
+        self._opencode_forward = None
+        self._opencode_endpoint = None
+        self._opencode_password = None
+
+    @staticmethod
+    def _terminate_process(proc: subprocess.Popen) -> None:
+        if proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     def _is_domain_active(self) -> bool:
         """Check if the domain is currently active."""
