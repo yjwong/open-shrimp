@@ -335,7 +335,7 @@ class LimaSandbox:
         return self._sdir / "opencode-home"
 
     def ensure_opencode_server(
-        self, *, log_file: Path | None = None,
+        self, *, log_file: Path | None = None, provider_id: str | None = None,
     ) -> SandboxOpenCodeServer:
         raise NotImplementedError(
             "Sandboxed OpenCode is not yet implemented for backend 'lima'. "

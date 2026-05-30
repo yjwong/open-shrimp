@@ -453,6 +453,7 @@ async def get_or_create_session(
     sandbox: Sandbox | None = None
     endpoint: OpenCodeEndpoint | None = None
     wrapper_cleanup_paths: list[str] = []
+    _provider, _model = split_provider_model(context.model)
     if is_containerized:
         assert sandbox_manager is not None, (
             "sandbox_manager is required for containerized contexts"
@@ -519,7 +520,10 @@ async def get_or_create_session(
                         assert _mgr is not None
                         _mgr.unregister_build(context_name)
                 _sandbox.provision_workspace()
-                server = _sandbox.ensure_opencode_server(log_file=log_file)
+                server = _sandbox.ensure_opencode_server(
+                    log_file=log_file,
+                    provider_id=_provider,
+                )
                 return OpenCodeEndpoint(
                     base_url=server.base_url,
                     auth_header=server.auth_header,
@@ -535,7 +539,6 @@ async def get_or_create_session(
                 endpoint.base_url,
             )
 
-    _provider, _model = split_provider_model(context.model)
     options = OpenCodeOptions(
         cwd=context.directory,
         provider=_provider,

@@ -171,7 +171,7 @@ class Sandbox(Protocol):
         ...
 
     def ensure_opencode_server(
-        self, *, log_file: Path | None = None,
+        self, *, log_file: Path | None = None, provider_id: str | None = None,
     ) -> SandboxOpenCodeServer:
         """Start or reuse ``opencode serve`` inside the sandbox.
 
@@ -337,4 +337,3 @@ class Sandbox(Protocol):
     def cleanup_port_forwards(self, scope_key: str | None = None) -> None:
         """Tear down all forwards, or just those owned by *scope_key*."""
         ...
-

@@ -56,6 +56,7 @@ from open_shrimp.handlers.state import (
 )
 from open_shrimp.handlers.utils import (
     _cancel_running,
+    _escape_mdv2,
     _get_context,
     _is_authorized,
     _is_bot_addressed,
@@ -859,7 +860,7 @@ async def _start_agent_task(
                     # Reset retry counter on successful iteration.
                     container_retries = 0
 
-                except (ProcessError, CLIConnectionError):
+                except CLIConnectionError:
                     if not is_containerized or container_retries >= max_container_retries:
                         raise
                     container_retries += 1
@@ -899,7 +900,7 @@ async def _start_agent_task(
 
         except asyncio.CancelledError:
             logger.info("Agent task cancelled for scope %s", scope)
-        except (CLIConnectionError, ProcessError) as exc:
+        except CLIConnectionError as exc:
             logger.exception("Agent task failed for scope %s", scope)
             # Close the dead session so the next message starts fresh
             # instead of reusing a broken client.
@@ -922,6 +923,26 @@ async def _start_agent_task(
                 await context.bot.send_message(
                     chat_id=scope.chat_id,
                     text=error_text,
+                    parse_mode="MarkdownV2",
+                    **_thread_kwargs(scope),
+                )
+            except Exception:
+                logger.exception("Failed to send error message")
+        except ProcessError as exc:
+            logger.exception("Agent task failed for scope %s", scope)
+            # OpenCode uses session error events for model/provider/API errors.
+            # Surface those directly instead of reporting a sandbox crash.
+            try:
+                await close_session(scope)
+            except Exception:
+                logger.debug("Failed to close errored session for scope %s", scope)
+            try:
+                message = str(exc) or "Unknown OpenCode error"
+                if len(message) > 1200:
+                    message = message[:1197] + "..."
+                await context.bot.send_message(
+                    chat_id=scope.chat_id,
+                    text="OpenCode returned an error:\n" + _escape_mdv2(message),
                     parse_mode="MarkdownV2",
                     **_thread_kwargs(scope),
                 )
