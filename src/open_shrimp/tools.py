@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
@@ -19,6 +20,8 @@ logger = logging.getLogger(__name__)
 _MAX_DOCUMENT_SIZE = 50 * 1024 * 1024
 _MAX_PHOTO_SIZE = 10 * 1024 * 1024
 _PHOTO_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_MAX_HOST_BASH_OUTPUT = 24_000
+_MAX_HOST_BASH_TIMEOUT = 600
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,8 @@ def create_openshrimp_tools(
     is_private_chat: bool = True,
     include_sandbox_tools: bool = False,
     sandbox: Any | None = None,
+    include_host_bash: bool = False,
+    context_directory: str | None = None,
 ) -> list[OpenShrimpTool]:
     """Create OpenShrimp tool definitions for a chat scope."""
 
@@ -159,6 +164,77 @@ def create_openshrimp_tools(
             handler=send_file,
         )
     ]
+
+    if include_host_bash:
+        host_cwd = os.path.abspath(context_directory or os.getcwd())
+
+        async def host_bash(args: dict[str, Any]) -> dict[str, Any]:
+            command = str(args.get("command", "")).strip()
+            if not command:
+                return _text_result("Error: command is required.", is_error=True)
+            timeout_raw = args.get("timeout_seconds", 120)
+            try:
+                timeout_seconds = int(timeout_raw)
+            except (TypeError, ValueError):
+                return _text_result("Error: timeout_seconds must be an integer.", is_error=True)
+            timeout_seconds = max(1, min(timeout_seconds, _MAX_HOST_BASH_TIMEOUT))
+
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    cwd=host_cwd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout_b, stderr_b = await asyncio.wait_for(
+                        proc.communicate(), timeout=timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return _text_result(
+                        f"Command timed out after {timeout_seconds}s.",
+                        is_error=True,
+                    )
+            except Exception as exc:
+                logger.exception("host_bash failed to start")
+                return _text_result(f"Error running host command: {exc}", is_error=True)
+
+            stdout = stdout_b.decode("utf-8", errors="replace")
+            stderr = stderr_b.decode("utf-8", errors="replace")
+            text = (
+                f"exit_code: {proc.returncode}\n"
+                f"cwd: {host_cwd}\n\n"
+                f"stdout:\n{stdout}\n"
+                f"stderr:\n{stderr}"
+            )
+            if len(text) > _MAX_HOST_BASH_OUTPUT:
+                text = text[:_MAX_HOST_BASH_OUTPUT] + "\n... (truncated)"
+            return _text_result(text, is_error=proc.returncode != 0)
+
+        tools.append(
+            OpenShrimpTool(
+                name="host_bash",
+                description=(
+                    "Run a shell command on the host machine outside the sandbox. "
+                    "Every invocation requires explicit Telegram approval and "
+                    "auto-denies after 10 seconds if the user does not respond. "
+                    "The command runs with cwd set to the context source directory."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Shell command to run on the host."},
+                        "description": {"type": "string", "description": "Brief reason for requesting host access."},
+                        "timeout_seconds": {"type": "integer", "description": "Execution timeout, max 600 seconds."},
+                    },
+                    "required": ["command"],
+                },
+                read_only=False,
+                handler=host_bash,
+            )
+        )
 
     if thread_id is not None:
         emoji_map: dict[str, str] | None = None

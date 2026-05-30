@@ -72,3 +72,16 @@ def test_old_sdk_mcp_tool_names_map_to_opencode_names() -> None:
         "pattern": "*",
         "action": "allow",
     } in rules
+
+
+def test_host_bash_is_never_auto_allowed_from_config() -> None:
+    rules = _client([
+        "openshrimp_host_bash",
+        "mcp__openshrimp__host_bash",
+    ])._build_initial_rules()
+
+    assert not any(
+        rule["permission"] == "openshrimp_host_bash"
+        and rule["action"] == "allow"
+        for rule in rules
+    )

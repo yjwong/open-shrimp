@@ -55,7 +55,12 @@ _TOOL_STATUS_IN_FLIGHT = frozenset({_TOOL_STATUS_PENDING, _TOOL_STATUS_RUNNING})
 _PART_TYPE_TOOL = "tool"
 _PART_TYPE_REASONING = "reasoning"
 
-_MUTATING_OPENCODE_PERMS = frozenset({"edit", "write", "apply_patch"})
+_MUTATING_OPENCODE_PERMS = frozenset({
+    "edit",
+    "write",
+    "apply_patch",
+    "openshrimp_host_bash",
+})
 _ASK_BY_DEFAULT_MCP_PERMS = frozenset({
     "openshrimp_create_schedule",
     "openshrimp_delete_schedule",

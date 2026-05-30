@@ -168,6 +168,41 @@ async def test_edit_category_disambiguated_by_toolpart(
     assert seen == ["Write"]
 
 
+async def test_openshrimp_host_bash_uses_mcp_tool_name(
+    mock_server: MockOpenCode, wired_server,
+) -> None:
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    async def can_use_tool(name, tool_input, ctx):
+        seen.append((name, tool_input))
+        return PermissionResultAllow()
+
+    opts = OpenCodeOptions(
+        cwd="/tmp", provider="openai", model="gpt-test",
+        can_use_tool=can_use_tool,
+    )
+    async with OpenCodeClient(opts) as client:
+        sid = client.session_id
+        mock_server.script(
+            sid,
+            [
+                tool_part_event(
+                    "call_host", "openshrimp_host_bash", "running",
+                    tool_input={"command": "id"},
+                ),
+                permission_asked(
+                    "req_host", "openshrimp_host_bash", call_id="call_host",
+                ),
+                session_idle(),
+            ],
+        )
+        await client.query("hi")
+        await _drain(client)
+        await _wait_for(lambda: bool(mock_server.permission_replies))
+
+    assert seen == [("openshrimp_host_bash", {"command": "id"})]
+
+
 async def test_can_use_tool_exception_yields_reject_reply(
     mock_server: MockOpenCode, wired_server,
 ) -> None:

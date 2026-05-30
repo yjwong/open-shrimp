@@ -450,6 +450,10 @@ async def get_or_create_session(
     if is_containerized:
         allowed_tools.append("bash")
 
+    include_host_bash = (
+        context.sandbox is not None and context.sandbox.allow_host_escape
+    )
+
     sandbox: Sandbox | None = None
     endpoint: OpenCodeEndpoint | None = None
     wrapper_cleanup_paths: list[str] = []
@@ -598,6 +602,15 @@ async def get_or_create_session(
             "screenshot first to understand the current state."
         )
 
+    if include_host_bash:
+        system_prompt_parts.append(
+            "This sandboxed context has sudo mode enabled. You have a "
+            "host_bash MCP tool for commands that must run on the host "
+            "outside the sandbox. Use it only when sandboxed Bash cannot "
+            "work; every call requires explicit Telegram approval and "
+            "auto-denies after 10 seconds."
+        )
+
     if system_prompt_parts:
         options.system_prompt = {
             "type": "preset",
@@ -625,6 +638,8 @@ async def get_or_create_session(
                 is_private_chat=is_private_chat,
                 include_sandbox_tools=_computer_use_sandbox is not None,
                 sandbox=_computer_use_sandbox,
+                include_host_bash=include_host_bash,
+                context_directory=context.directory,
             )
 
         scope_token = mcp_proxy.register_tool_scope(

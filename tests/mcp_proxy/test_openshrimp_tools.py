@@ -75,6 +75,8 @@ def _register_tools(
     config=None,
     job_queue=None,
     sandbox=None,
+    include_host_bash: bool = False,
+    context_directory: str | None = None,
 ) -> str:
     bot = bot or FakeBot()
 
@@ -91,6 +93,8 @@ def _register_tools(
             is_private_chat=is_private_chat,
             include_sandbox_tools=sandbox is not None,
             sandbox=sandbox,
+            include_host_bash=include_host_bash,
+            context_directory=context_directory,
         )
 
     return registry.register_tool_scope(
@@ -211,3 +215,26 @@ async def test_sandbox_computer_tools_are_scope_bound(tmp_path) -> None:
     assert "Screenshot saved" in shot["content"][0]["text"]
     assert click["content"][0]["text"] == "Click sent."
     assert sandbox.clicked == (12, 34, "left")
+
+
+async def test_host_bash_only_listed_when_enabled(tmp_path) -> None:
+    registry = ProxyRegistry()
+    token_without = _register_tools(registry)
+    token_with = _register_tools(
+        registry,
+        chat_id=2,
+        include_host_bash=True,
+        context_directory=str(tmp_path),
+    )
+    client, backing_client = await _client(registry)
+    try:
+        listed_without = await _rpc(client, token_without, "tools/list")
+        listed_with = await _rpc(client, token_with, "tools/list")
+    finally:
+        await client.aclose()
+        await backing_client.aclose()
+
+    names_without = {tool["name"] for tool in listed_without["tools"]}
+    names_with = {tool["name"] for tool in listed_with["tools"]}
+    assert "host_bash" not in names_without
+    assert "host_bash" in names_with

@@ -64,6 +64,8 @@ HostBashApprovalCallback = Callable[
 # Fully-qualified name of the host_bash MCP tool — used in several places to
 # special-case the host-escape path.
 HOST_BASH_TOOL_NAME = "mcp__openshrimp__host_bash"
+HOST_BASH_OPENCODE_TOOL_NAME = "openshrimp_host_bash"
+HOST_BASH_TOOL_NAMES = {HOST_BASH_TOOL_NAME, HOST_BASH_OPENCODE_TOOL_NAME}
 
 # Type for the auto-approved edit notification callback: receives tool_name
 # and tool_input dict. Called (fire-and-forget) when a mutating tool is
@@ -725,7 +727,7 @@ def make_can_use_tool(
         # containerized fast-path — the whole point is that this tool
         # escapes the sandbox, so every invocation gets a fresh Telegram
         # prompt with a 10-second auto-deny timer.
-        if tool_name == HOST_BASH_TOOL_NAME:
+        if tool_name in HOST_BASH_TOOL_NAMES:
             if request_host_bash_approval is None:
                 logger.warning(
                     "host_bash invoked but no approval callback wired; denying"
