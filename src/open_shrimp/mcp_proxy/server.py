@@ -168,7 +168,7 @@ def _create_proxy_app(
         if reg is None:
             return JSONResponse({"error": "unknown tool scope"}, status_code=404)
         if request.method in {"GET", "DELETE"}:
-            return Response(status_code=202)
+            return Response(status_code=405, headers={"Allow": "POST"})
         try:
             body = await request.json()
         except Exception:
