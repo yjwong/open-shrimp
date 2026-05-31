@@ -330,6 +330,12 @@ async def _drive_background_agent(
             tool_uses=task.tool_uses,
         )
         await _send_task_notification(ctx, task, status)
+        payload = agent_tasks.build_task_notification_payload(task)
+        agent_tasks.enqueue_parent_notification(task, payload)
+        if not agent_tasks.parent_session_busy(task.scope):
+            await agent_tasks.drain_parent_notifications(
+                task.parent_session_id, client,
+            )
 
 
 async def _send_task_notification(
@@ -337,6 +343,8 @@ async def _send_task_notification(
     task: agent_tasks.AgentBackgroundTask,
     status: str,
 ) -> None:
+    if task.notified:
+        return
     if ctx.bot is None or ctx.scope is None:
         return
     thread_kwargs: dict[str, Any] = {}
@@ -362,6 +370,7 @@ async def _send_task_notification(
         await ctx.bot.send_message(
             chat_id=ctx.scope.chat_id, text=text, **thread_kwargs,
         )
+        task.notified = True
     except Exception:
         logger.exception("Failed to send Agent task notification for %s", task.task_id)
 

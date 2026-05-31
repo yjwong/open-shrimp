@@ -9,11 +9,12 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from open_shrimp.db import ChatScope
-from open_shrimp.handlers.state import TrackedTask, _active_bg_tasks
+from open_shrimp.handlers.state import TrackedTask, _active_bg_tasks, _running_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +42,22 @@ class AgentBackgroundTask:
     tool_uses: int = 0
     final_text: str | None = None
     error: str | None = None
+    notified: bool = False
+    injected: bool = False
+
+
+class ParentPromptClient(Protocol):
+    async def prompt_session(
+        self,
+        session_id: str,
+        *,
+        parts: list[dict[str, object]],
+    ) -> None: ...
 
 
 _tasks: dict[str, AgentBackgroundTask] = {}
+_pending_notifications: dict[str, list[tuple[str, str]]] = {}
+_injection_locks: dict[str, asyncio.Lock] = {}
 
 
 def new_task_id() -> str:
@@ -94,6 +108,75 @@ def complete_task(task: AgentBackgroundTask, status: AgentTaskStatus) -> None:
 
 def get_task(task_id: str) -> AgentBackgroundTask | None:
     return _tasks.get(task_id)
+
+
+def parent_session_busy(scope: ChatScope) -> bool:
+    running = _running_tasks.get(scope)
+    return running is not None and not running.done()
+
+
+def build_task_notification_payload(task: AgentBackgroundTask) -> str:
+    status = task.status
+    summary_status = {
+        "completed": "completed",
+        "failed": "failed",
+        "killed": "stopped",
+    }.get(status, status)
+    if status == "completed":
+        result = task.final_text or "Agent completed without a text response."
+    elif status == "killed":
+        result = task.final_text or "Agent task was stopped."
+    else:
+        result = task.error or "unknown error"
+    return (
+        "<task-notification>\n"
+        f"<task-id>{escape(task.task_id)}</task-id>\n"
+        f"<status>{escape(status)}</status>\n"
+        f"<summary>Agent \"{escape(task.description)}\" {summary_status}</summary>\n"
+        f"<result>{escape(result)}</result>\n"
+        "</task-notification>"
+    )
+
+
+def enqueue_parent_notification(task: AgentBackgroundTask, payload: str) -> None:
+    if task.injected:
+        return
+    queue = _pending_notifications.setdefault(task.parent_session_id, [])
+    if not any(task_id == task.task_id for task_id, _payload in queue):
+        queue.append((task.task_id, payload))
+
+
+async def drain_parent_notifications(
+    parent_session_id: str,
+    client: ParentPromptClient,
+) -> int:
+    lock = _injection_locks.setdefault(parent_session_id, asyncio.Lock())
+    async with lock:
+        injected = 0
+        while True:
+            queue = _pending_notifications.get(parent_session_id)
+            if not queue:
+                _pending_notifications.pop(parent_session_id, None)
+                return injected
+            task_id, payload = queue.pop(0)
+            task = _tasks.get(task_id)
+            if task is None or task.injected:
+                continue
+            try:
+                await client.prompt_session(
+                    parent_session_id,
+                    parts=[{"type": "text", "text": payload}],
+                )
+            except Exception:
+                queue.insert(0, (task_id, payload))
+                logger.exception(
+                    "Failed to inject Agent notification %s into parent session %s",
+                    task_id,
+                    parent_session_id,
+                )
+                return injected
+            task.injected = True
+            injected += 1
 
 
 def find_task(scope: ChatScope, task_id_or_prefix: str) -> AgentBackgroundTask | None:

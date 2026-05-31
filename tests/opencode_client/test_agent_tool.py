@@ -9,6 +9,7 @@ from open_shrimp.agent_tool import AgentToolContext, create_agent_tool, validate
 from open_shrimp.client_manager import stop_background_task
 from open_shrimp.db import ChatScope
 from open_shrimp.handlers.state import _active_bg_tasks
+from open_shrimp.handlers.state import _running_tasks
 from open_shrimp.opencode_client import OpenCodeClient, OpenCodeOptions
 
 from tests.opencode_client.mock_server import MockOpenCode, session_idle, text_delta
@@ -127,6 +128,145 @@ async def test_background_agent_tool_registers_and_notifies(
     assert "done" in str(bot.messages[-1]["text"])
     assert task_id not in _active_bg_tasks.get(scope, {})
     assert (tmp_path / f"{task_id}.jsonl").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_background_agent_injects_parent_notification_once(
+    mock_server: MockOpenCode, wired_server, tmp_path, monkeypatch
+) -> None:
+    _active_bg_tasks.clear()
+    _running_tasks.clear()
+    monkeypatch.setattr(
+        agent_tasks,
+        "agent_task_output_path",
+        lambda task_id: tmp_path / f"{task_id}.jsonl",
+    )
+    scope = ChatScope(chat_id=321, thread_id=None)
+    bot = FakeBot()
+    opts = OpenCodeOptions(cwd="/repo", provider="openai", model="gpt-test")
+
+    async with OpenCodeClient(opts) as client:
+        parent_session_id = client.session_id
+        assert parent_session_id is not None
+        tool = create_agent_tool(
+            AgentToolContext(
+                client_getter=lambda: client,
+                cwd="/repo",
+                bot=bot,  # type: ignore[arg-type]
+                scope=scope,
+                context_name="default",
+            )
+        )
+        original_create_session = client.create_session
+
+        async def create_session_spy(**kwargs):
+            child_id = await original_create_session(**kwargs)
+            mock_server.script(child_id, [text_delta("p1", "done"), session_idle()])
+            return child_id
+
+        client.create_session = create_session_spy  # type: ignore[method-assign]
+        result = await tool.handler(
+            {
+                "description": "Explore code",
+                "prompt": "Summarize it",
+                "run_in_background": True,
+            }
+        )
+        task_id = result["content"][0]["text"].split("agentId: ", 1)[1].splitlines()[0]
+        for _ in range(100):
+            task = agent_tasks.get_task(task_id)
+            if task is not None and task.injected:
+                break
+            await asyncio.sleep(0.01)
+
+        parent_prompts = [
+            prompt for prompt in mock_server.prompts
+            if prompt["session_id"] == parent_session_id
+        ]
+        assert len(parent_prompts) == 1
+        text = parent_prompts[0]["body"]["parts"][0]["text"]
+        assert "<task-notification>" in text
+        assert f"<task-id>{task_id}</task-id>" in text
+
+        await agent_tasks.drain_parent_notifications(parent_session_id, client)
+        parent_prompts = [
+            prompt for prompt in mock_server.prompts
+            if prompt["session_id"] == parent_session_id
+        ]
+        assert len(parent_prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_background_agent_waits_to_inject_when_parent_busy(
+    mock_server: MockOpenCode, wired_server, tmp_path, monkeypatch
+) -> None:
+    _active_bg_tasks.clear()
+    _running_tasks.clear()
+    monkeypatch.setattr(
+        agent_tasks,
+        "agent_task_output_path",
+        lambda task_id: tmp_path / f"{task_id}.jsonl",
+    )
+    scope = ChatScope(chat_id=654, thread_id=None)
+    bot = FakeBot()
+    opts = OpenCodeOptions(cwd="/repo", provider="openai", model="gpt-test")
+
+    async with OpenCodeClient(opts) as client:
+        parent_session_id = client.session_id
+        assert parent_session_id is not None
+        busy_task = asyncio.create_task(asyncio.sleep(10))
+        _running_tasks[scope] = busy_task
+        try:
+            tool = create_agent_tool(
+                AgentToolContext(
+                    client_getter=lambda: client,
+                    cwd="/repo",
+                    bot=bot,  # type: ignore[arg-type]
+                    scope=scope,
+                    context_name="default",
+                )
+            )
+            original_create_session = client.create_session
+
+            async def create_session_spy(**kwargs):
+                child_id = await original_create_session(**kwargs)
+                mock_server.script(child_id, [text_delta("p1", "done"), session_idle()])
+                return child_id
+
+            client.create_session = create_session_spy  # type: ignore[method-assign]
+            result = await tool.handler(
+                {
+                    "description": "Explore code",
+                    "prompt": "Summarize it",
+                    "run_in_background": True,
+                }
+            )
+            task_id = result["content"][0]["text"].split("agentId: ", 1)[1].splitlines()[0]
+            for _ in range(100):
+                task = agent_tasks.get_task(task_id)
+                if task is not None and task.status == "completed":
+                    break
+                await asyncio.sleep(0.01)
+
+            parent_prompts = [
+                prompt for prompt in mock_server.prompts
+                if prompt["session_id"] == parent_session_id
+            ]
+            assert parent_prompts == []
+
+            busy_task.cancel()
+            _running_tasks.pop(scope, None)
+            await agent_tasks.drain_parent_notifications(parent_session_id, client)
+        finally:
+            busy_task.cancel()
+            _running_tasks.pop(scope, None)
+
+        parent_prompts = [
+            prompt for prompt in mock_server.prompts
+            if prompt["session_id"] == parent_session_id
+        ]
+        assert len(parent_prompts) == 1
+        assert "<task-notification>" in parent_prompts[0]["body"]["parts"][0]["text"]
 
 
 @pytest.mark.asyncio

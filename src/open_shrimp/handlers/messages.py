@@ -18,6 +18,7 @@ from open_shrimp.agent import (
     cleanup_attachments,
     save_attachments,
 )
+from open_shrimp import agent_tasks
 from open_shrimp.stt import transcribe as stt_transcribe
 from open_shrimp.opencode_client import CLIConnectionError, ProcessError
 from open_shrimp.client_manager import (
@@ -854,7 +855,18 @@ async def _start_agent_task(
                             todos=latest_todos if latest_todos else None,
                         )
 
-                    if result.num_steps == 0 and result.session_id is None:
+                    injected_notifications = 0
+                    if session.session_id:
+                        injected_notifications = await agent_tasks.drain_parent_notifications(
+                            session.session_id,
+                            session.client,
+                        )
+
+                    if (
+                        result.num_steps == 0
+                        and result.session_id is None
+                        and injected_notifications == 0
+                    ):
                         break
 
                     # Reset retry counter on successful iteration.
