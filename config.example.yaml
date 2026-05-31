@@ -52,12 +52,12 @@ contexts:
     #   docker_in_docker: true     # Enable rootless Docker inside the container.
     #                              # The agent can run docker build/run/compose etc.
     #                              # Adds --cap-add SYS_ADMIN (reduced isolation).
-    #   dockerfile: /path/to/Dockerfile.claude  # Custom Dockerfile for this context.
+    #   dockerfile: /path/to/Dockerfile.opencode  # Custom Dockerfile for this context.
     #                              # Use to install dev tools (Go, Node, Rust, etc.).
-    #                              # Should typically FROM openshrimp-claude:latest.
+    #                              # Should typically FROM openshrimp-opencode:latest.
     #                              # Build context is the Dockerfile's parent dir.
-    #                              # The Claude CLI binary is copied in as "claude"
-    #                              # (available via CLAUDE_CLI build arg).
+    #                              # The OpenCode binary is copied in as "opencode"
+    #                              # (available via OPENCODE_BIN build arg).
     #   allow_host_escape: false   # Sudo mode. Exposes a `host_bash` MCP tool that
     #                              # runs shell commands on the HOST (outside the
     #                              # sandbox). Every invocation prompts the user for

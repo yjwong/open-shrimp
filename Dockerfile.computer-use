@@ -8,7 +8,7 @@
 # Build:
 #   docker build -f Dockerfile.computer-use -t openshrimp-computer-use:latest .
 
-FROM openshrimp-claude:latest
+FROM openshrimp-opencode:latest
 
 # Wayland compositor + tools
 RUN apt-get update && apt-get install -y --no-install-recommends \

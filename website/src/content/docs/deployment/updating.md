@@ -89,7 +89,7 @@ If you use Docker sandboxes, updated code may require rebuilding the container i
 To force a rebuild, remove the existing image:
 
 ```bash
-docker rmi openshrimp-claude:your-context-name
+docker rmi openshrimp-opencode:your-context-name
 ```
 
 ## Configuration changes

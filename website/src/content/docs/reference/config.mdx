@@ -144,7 +144,7 @@ Chat IDs for groups are negative numbers. You can find them from the bot's logs 
 
 ## `contexts.<name>.sandbox`
 
-Run the Claude CLI inside an isolated environment. When a sandbox is enabled, all Bash commands and path-scoped tools are auto-approved since the sandbox provides the safety boundary.
+Run OpenCode inside an isolated environment. When a sandbox is enabled, all Bash commands and path-scoped tools are auto-approved since the sandbox provides the safety boundary.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -165,14 +165,14 @@ Run the Claude CLI inside an isolated environment. When a sandbox is enabled, al
 sandbox:
   backend: docker
   docker_in_docker: true
-  dockerfile: /path/to/Dockerfile.claude
+  dockerfile: /path/to/Dockerfile.opencode
   computer_use: true
 ```
 
 - The project directory is bind-mounted into the container
 - Session storage is isolated under `~/.config/openshrimp/containers/<context>/`
 - Container runs as host uid/gid
-- Custom Dockerfiles should `FROM openshrimp-claude:latest`; images are tagged `openshrimp-claude:<context-name>` and built lazily
+- Custom Dockerfiles should `FROM openshrimp-opencode:latest`; images are tagged `openshrimp-opencode:<context-name>` and built lazily
 - `docker_in_docker: true` adds `--cap-add SYS_ADMIN` (reduced isolation)
 
 See the [Docker Sandbox guide](/guides/docker-sandbox/) for detailed setup instructions.

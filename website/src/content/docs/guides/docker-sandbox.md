@@ -24,9 +24,9 @@ That's it. OpenShrimp handles building the image and starting the container.
 
 ## What happens under the hood
 
-1. **Image build** — On first use, OpenShrimp builds a Docker image based on the default `openshrimp-claude` base image. This is cached and reused.
+1. **Image build** — On first use, OpenShrimp builds a Docker image based on the default `openshrimp-opencode` base image. This is cached and reused.
 2. **Container start** — The container runs with your project directory bind-mounted at the same path. It runs as your host uid/gid.
-3. **CLI wrapper** — A shell wrapper script is generated that runs `docker exec` into the container, forwarding the Claude CLI args and your `ANTHROPIC_API_KEY`.
+3. **OpenCode server** — OpenShrimp starts `opencode serve` inside the container and connects to it over a loopback port.
 4. **Auto-approval** — All Bash commands and path-scoped tools are auto-approved since the sandbox isolates the filesystem.
 
 ## Custom Dockerfile
@@ -42,13 +42,13 @@ contexts:
       - LSP
     sandbox:
       backend: docker
-      dockerfile: /home/you/Documents/myproject/Dockerfile.claude
+      dockerfile: /home/you/Documents/myproject/Dockerfile.opencode
 ```
 
 The Dockerfile should extend the base image:
 
 ```dockerfile
-FROM openshrimp-claude:latest
+FROM openshrimp-opencode:latest
 
 # Install Node.js
 RUN apt-get update && apt-get install -y nodejs npm
@@ -57,7 +57,7 @@ RUN apt-get update && apt-get install -y nodejs npm
 RUN npm install -g typescript
 ```
 
-The image is tagged as `openshrimp-claude:<context-name>` and built lazily on first use. The build context is the Dockerfile's parent directory.
+The image is tagged as `openshrimp-opencode:<context-name>` and built lazily on first use. The build context is the Dockerfile's parent directory.
 
 ## Docker-in-Docker
 

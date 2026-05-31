@@ -253,10 +253,10 @@ class DockerSandboxManager:
         _c._INSTANCE_PREFIX = self._instance_prefix  # noqa: SLF001
         _c._CONTAINER_LABEL = self._container_label  # noqa: SLF001
         if instance_name:
-            _c.CONTAINER_IMAGE = f"openshrimp-{instance_name}-claude:latest"
+            _c.CONTAINER_IMAGE = f"openshrimp-{instance_name}-opencode:latest"
             _c.COMPUTER_USE_IMAGE = f"openshrimp-{instance_name}-computer-use:latest"
         else:
-            _c.CONTAINER_IMAGE = "openshrimp-claude:latest"
+            _c.CONTAINER_IMAGE = "openshrimp-opencode:latest"
             _c.COMPUTER_USE_IMAGE = "openshrimp-computer-use:latest"
 
     @property

@@ -68,7 +68,7 @@ def _image_id(image_name: str) -> str | None:
 
 
 # Docker image name used for containerized contexts.
-CONTAINER_IMAGE = "openshrimp-claude:latest"
+CONTAINER_IMAGE = "openshrimp-opencode:latest"
 
 # Docker image name for computer-use (GUI) contexts.
 COMPUTER_USE_IMAGE = "openshrimp-computer-use:latest"
@@ -124,7 +124,7 @@ def ensure_image(
     """Ensure the container image exists, building it if necessary.
 
     When *dockerfile* is ``None`` (the default), builds the base image from
-    the bundled ``Dockerfile.claude``. When a custom *dockerfile* path is
+    the bundled ``Dockerfile.opencode``. When a custom *dockerfile* path is
     provided, builds from that file instead.
 
     Args:
@@ -176,7 +176,7 @@ def ensure_image(
 
     if dockerfile is not None:
         # Ensure the base image exists before building a custom image
-        # that likely depends on it (e.g. FROM openshrimp-claude:latest).
+        # that likely depends on it (e.g. FROM openshrimp-opencode:latest).
         if base_image:
             # Caller explicitly specified which base to ensure (e.g.
             # the computer-use image).  That base's own dependencies
@@ -212,15 +212,15 @@ def ensure_image(
             log_file=log_file,
         )
     else:
-        # Default: bundled Dockerfile.claude in a temp build context.
+        # Default: bundled Dockerfile.opencode in a temp build context.
         repo_root = Path(__file__).resolve().parent.parent.parent.parent
-        repo_dockerfile = repo_root / "Dockerfile.claude"
+        repo_dockerfile = repo_root / "Dockerfile.opencode"
         if repo_dockerfile.is_file():
             dockerfile_text = repo_dockerfile.read_text(encoding="utf-8")
         else:
             dockerfile_text = (
                 _pkg_files("open_shrimp")
-                .joinpath("Dockerfile.claude")
+                .joinpath("Dockerfile.opencode")
                 .read_text(encoding="utf-8")
             )
 
@@ -309,9 +309,19 @@ def ensure_computer_use_image(
             # Copy computer-use assets.
             cu_dir = build_path / "computer-use"
             cu_dir.mkdir()
-            for asset_name in ("entrypoint.sh", "rc.xml", "autostart"):
+            for asset_name in (
+                "entrypoint.sh",
+                "rc.xml",
+                "autostart",
+                "seat-keyboard.c",
+                "virtual-keyboard-unstable-v1.xml",
+                "input-method-unstable-v2.xml",
+            ):
                 asset = pkg.joinpath("computer-use", asset_name)
-                (cu_dir / asset_name).write_text(asset.read_text(encoding="utf-8"), encoding="utf-8")
+                (cu_dir / asset_name).write_text(
+                    asset.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
 
             _docker_build(
                 image_name=image_name,
@@ -911,5 +921,3 @@ def _wait_for_compositor(container_name: str, timeout: int = 15) -> None:
         container_name,
         timeout,
     )
-
-

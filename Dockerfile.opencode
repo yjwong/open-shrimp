@@ -1,12 +1,11 @@
 # Minimal container image for running sandboxed OpenCode in isolation.
 #
 # Build:
-#   docker build -f Dockerfile.claude -t openshrimp-claude:latest .
-#   docker build -f Dockerfile.claude -t openshrimp-claude:latest .
+#   docker build -f Dockerfile.opencode -t openshrimp-opencode:latest .
 
 FROM debian:trixie-slim
 
-# Install common tools the agent might need (git, curl, etc.)
+# Install common tools the agent might need (git, curl, etc.).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -46,7 +45,7 @@ RUN mkdir -p /home/claude/.local/share/docker \
     && chmod -R 777 /home/claude
 
 # Allow the runtime user (arbitrary uid via --user) to write subuid/subgid
-# and passwd/group entries needed by rootless Docker.  Safe in an ephemeral
+# and passwd/group entries needed by rootless Docker. Safe in an ephemeral
 # container.
 RUN touch /etc/subuid /etc/subgid \
     && chmod 666 /etc/subuid /etc/subgid /etc/passwd /etc/group \

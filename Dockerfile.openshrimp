@@ -2,7 +2,7 @@
 # Adds uv (Python) and Node.js/npm on top of the base sandbox image.
 # BASE_IMAGE is overridden automatically when computer_use is enabled.
 
-ARG BASE_IMAGE=openshrimp-claude:latest
+ARG BASE_IMAGE=openshrimp-opencode:latest
 FROM ${BASE_IMAGE}
 
 # Install uv.
