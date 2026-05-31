@@ -586,16 +586,6 @@ class LibvirtSandbox:
             )
             logger.info("%s CLI installed in VM %s", name, self._dom_name)
 
-        # Copy credentials into the host-side claude-home directory.
-        # This directory is shared into the VM as /home/claude/.claude
-        # via virtiofs/9p, so the CLI picks them up automatically.
-        host_credentials = Path.home() / ".claude" / ".credentials.json"
-        if host_credentials.exists():
-            import shutil
-            dest = self._claude_home_dir / ".credentials.json"
-            shutil.copy2(str(host_credentials), str(dest))
-            logger.info("Copied credentials to %s", dest)
-
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         assert self._ssh_port is not None
         path = _build_cli_wrapper(

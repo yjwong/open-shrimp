@@ -79,4 +79,4 @@ This uses an ephemeral content store — previews are temporary and not persiste
 
 ## Authentication
 
-Mini Apps use token-based authentication. Use `/login` to authenticate if you encounter auth issues. The auth token is validated against your Telegram user identity.
+Mini Apps use token-based authentication tied to your Telegram identity. Use `/connect` to add or refresh model-provider credentials if agent authentication fails.

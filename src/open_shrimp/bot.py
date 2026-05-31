@@ -46,7 +46,7 @@ from open_shrimp.handlers.commands import (
     effort_handler,
     handle_context_callback,
     handle_resume_callback,
-    login_handler,
+    connect_handler,
     mcp_handler,
     model_handler,
     restart_handler,
@@ -202,7 +202,7 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CommandHandler("usage", usage_handler))
     app.add_handler(CommandHandler("vnc", vnc_handler))
-    app.add_handler(CommandHandler("login", login_handler))
+    app.add_handler(CommandHandler("connect", connect_handler))
     app.add_handler(CommandHandler("config", config_handler))
     app.add_handler(CommandHandler("restart", restart_handler))
 
@@ -292,7 +292,7 @@ async def run_bot(
             BotCommand("model", "Show or override the model for this chat"),
             BotCommand("effort", "Show or override the thinking effort level"),
             BotCommand("add_dir", "Add a working directory to the context"),
-            BotCommand("login", "Re-authenticate Claude Code OAuth"),
+            BotCommand("connect", "Connect model providers"),
             BotCommand("config", "Edit bot configuration"),
             BotCommand("restart", "Restart the bot process"),
         ],
@@ -406,15 +406,15 @@ async def run_bot(
                 await app.stop()
         except (Exception, TimeoutError):
             logger.warning("Error stopping PTB application", exc_info=True)
-        # Destroy any live `claude /login` PTY session before we tear
+        # Destroy any live provider-connect PTY session before we tear
         # down sandboxes — leaving it alive just delays the final SIGTERM
         # fan-out in the systemd cgroup.
-        from open_shrimp.terminal.api import shutdown_login_session
+        from open_shrimp.terminal.api import shutdown_connect_session
         try:
             async with asyncio.timeout(6):
-                await shutdown_login_session()
+                await shutdown_connect_session()
         except (Exception, TimeoutError):
-            logger.warning("Error shutting down login session", exc_info=True)
+            logger.warning("Error shutting down connect session", exc_info=True)
         stop_idle_sweep()
         await close_all_sessions()
         # Stop all sandbox managers.  Each stop_reaper() is wrapped in a

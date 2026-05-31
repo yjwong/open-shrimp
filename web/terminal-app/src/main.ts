@@ -60,8 +60,8 @@ function getLabels(sourceType: string): SourceLabels {
 const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode");
 
-if (mode === "login") {
-  loginMain().catch((e) => showError(`Fatal: ${e}`));
+if (mode === "connect") {
+  connectMain().catch((e) => showError(`Fatal: ${e}`));
 } else {
   tailMain().catch((e) => showError(`Fatal: ${e}`));
 }
@@ -256,10 +256,10 @@ async function tailMain(): Promise<void> {
   }
 }
 
-// ── Login mode ──
+// ── Connect mode ──
 
-async function loginMain(): Promise<void> {
-  showStatus("Initializing login...");
+async function connectMain(): Promise<void> {
+  showStatus("Initializing provider connection...");
 
   try {
     window.Telegram?.WebApp?.ready();
@@ -280,7 +280,7 @@ async function loginMain(): Promise<void> {
   const authLink = document.getElementById("auth-link") as HTMLAnchorElement;
 
   injectBaseStyles();
-  injectLoginStyles();
+  injectConnectStyles();
 
   const term = new Terminal({
     convertEol: true,
@@ -315,9 +315,12 @@ async function loginMain(): Promise<void> {
     params.get("token") ||
     "";
   const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-  const wsUrl = `${wsProto}//${location.host}/ws/terminal/login?token=${encodeURIComponent(tokenValue)}`;
+  const contextName = params.get("context") || "";
+  const provider = params.get("provider") || "";
+  let wsUrl = `${wsProto}//${location.host}/ws/terminal/connect?token=${encodeURIComponent(tokenValue)}`;
+  if (contextName) wsUrl += `&context=${encodeURIComponent(contextName)}`;
+  if (provider) wsUrl += `&provider=${encodeURIComponent(provider)}`;
 
-  let loginDone = false;
   let authUrlFound = false;
   let outputBuffer = "";
   let ws: WebSocket | null = null;
@@ -338,7 +341,7 @@ async function loginMain(): Promise<void> {
       term.write(data);
       outputBuffer += data;
 
-      // Scrape the OAuth URL from TUI output and show as a tappable button.
+      // Scrape provider auth URLs from TUI output and show a tappable button.
       // The TUI wraps the long URL across multiple lines, so we strip all
       // ANSI escape sequences, control chars, and whitespace before matching.
       if (!authUrlFound) {
@@ -347,51 +350,19 @@ async function loginMain(): Promise<void> {
           .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
           .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
           .replace(/\x1b[^[\]].?/g, "")
-          // Strip all whitespace and control chars within URLs.
-          // First, find the URL start, then reassemble.
           ;
-        const urlStart = clean.indexOf("https://claude.ai/oauth/authorize");
-        const urlStart2 = clean.indexOf("https://claude.com/cai/oauth/authorize");
-        const urlStart3 = clean.indexOf("https://platform.claude.com/oauth/authorize");
-        const start = [urlStart, urlStart2, urlStart3]
-          .filter(i => i >= 0)
-          .sort((a, b) => a - b)[0];
-        if (start !== undefined) {
-          // Extract from the start to the next non-URL character.
-          // Remove any embedded whitespace/newlines (from terminal wrapping).
-          const rest = clean.slice(start);
-          const urlChars = rest.replace(/[\s\r\n]+/g, "");
-          // Match the full URL (stops at first char that can't be in a URL).
-          const urlMatch = urlChars.match(/^(https:\/\/[^\s"'<>]+)/);
-          if (urlMatch && urlMatch[1] && urlMatch[1].includes("state=")) {
-            authLink.href = urlMatch[1];
-            authLinkBar.style.display = "flex";
-            authUrlFound = true;
-          }
+        const compact = clean.replace(/[\s\r\n]+/g, "");
+        const urlMatch = compact.match(/https:\/\/[^\s"'<>`|\\^\[\]{}]+/);
+        if (urlMatch && urlMatch[0]) {
+          authLink.href = urlMatch[0];
+          authLinkBar.style.display = "flex";
+          authUrlFound = true;
         }
-      }
-
-      // Detect successful login — auto-close the mini app.
-      if (data.includes("Login successful") || data.includes("login successful")) {
-        loginDone = true;
-        authLinkBar.style.display = "none";
-        setTimeout(() => {
-          try {
-            window.Telegram?.WebApp?.close();
-          } catch {
-            // Not in Telegram.
-          }
-        }, 1500);
       }
     };
 
     ws.onclose = () => {
       ws = null;
-      if (loginDone) {
-        term.writeln("");
-        term.writeln("\x1b[1;32m● Login complete.\x1b[0m");
-        authLinkBar.style.display = "none";
-      }
     };
 
     ws.onerror = () => {
@@ -401,7 +372,7 @@ async function loginMain(): Promise<void> {
 
   // Auto-reconnect when the page regains focus (user returns from browser).
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && !ws && !loginDone) {
+    if (document.visibilityState === "visible" && !ws) {
       term.writeln("\x1b[90mReconnecting...\x1b[0m");
       connect();
     }
@@ -479,7 +450,7 @@ function injectBaseStyles(): void {
   document.head.appendChild(style);
 }
 
-function injectLoginStyles(): void {
+function injectConnectStyles(): void {
   const style = document.createElement("style");
   style.textContent = `
     #terminal-container {

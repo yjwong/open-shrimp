@@ -40,7 +40,6 @@ from open_shrimp.sandbox.port_forward import (
 from open_shrimp.sandbox.lima_helpers import (
     _lima_env,
     _log,
-    _read_credentials_json,
     build_cli_wrapper as _build_cli_wrapper,
     ensure_claude_cli_in_vm,
     generate_lima_yaml,
@@ -328,17 +327,10 @@ class LimaSandbox:
                 self._ensure_ssh_tunnels()
 
     def provision_workspace(self) -> None:
-        """Ensure Claude CLI is installed in the VM and credentials are copied."""
+        """Ensure Claude CLI is installed in the VM."""
         ensure_claude_cli_in_vm(
             self._limactl, self._inst_name, guest_os=self._guest_os,
         )
-
-        # Copy credentials to host-side shared directory.
-        creds = _read_credentials_json()
-        if creds:
-            dest = self._claude_home_dir / ".credentials.json"
-            dest.write_text(creds, encoding="utf-8")
-            logger.info("Wrote credentials to %s", dest)
 
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         path = _build_cli_wrapper(

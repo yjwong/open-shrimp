@@ -7,7 +7,7 @@ sidebar:
 
 ## Prerequisites
 
-OpenShrimp bundles the Claude Code CLI via the Agent SDK, so there's nothing to install separately. You just need to authenticate Claude — either by running `/login` from inside the bot (see [Authenticate Claude](#authenticate-claude) below), or by setting `ANTHROPIC_API_KEY` in your environment.
+OpenShrimp uses OpenCode for model-provider access. You can authenticate providers by running `/connect` from inside the bot, or by setting provider API keys in your environment.
 
 ## Download
 
@@ -67,11 +67,11 @@ It writes the config to a platform-specific location (`~/.config/openshrimp/conf
 
 On subsequent runs, the binary starts instantly.
 
-## Authenticate Claude
+## Connect Providers
 
 Once the bot is running, open it in Telegram and send `/start` to see a welcome message confirming you're connected and showing your current context.
 
-If you haven't set `ANTHROPIC_API_KEY`, send `/login` (in a private chat) to authenticate Claude Code via OAuth. This opens a Mini App that runs the same OAuth flow you'd get from the Claude Code CLI — paste the resulting token to finish login. Use `/login` again any time you need to re-authenticate.
+If you haven't set provider API keys in the environment, send `/connect` in a private chat. This opens a Mini App around OpenCode's provider connection flow for API-key and OAuth providers. Use `/connect` again any time you need to refresh credentials.
 
 ## Building from source
 

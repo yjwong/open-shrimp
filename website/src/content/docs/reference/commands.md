@@ -129,12 +129,13 @@ Open the VNC viewer Mini App for computer-use contexts. Only available when the 
 /vnc
 ```
 
-### `/login`
+### `/connect [provider]`
 
-Open the authentication Mini App for token-based login. Used to re-authenticate Claude Code access for Mini Apps.
+Open the provider connection Mini App. Used to add or refresh OpenCode model-provider credentials.
 
 ```
-/login
+/connect
+/connect openai
 ```
 
 ## Server commands

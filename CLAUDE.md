@@ -186,9 +186,9 @@ Key fields:
 | `/mcp` | `mcp_handler` | List and manage MCP servers (reset/enable/disable) |
 | `/schedule` | `schedule_handler` | List and manage scheduled tasks |
 | `/tasks` | `tasks_handler` | List or stop background tasks |
-| `/usage` | `usage_handler` | Show Claude quota/usage statistics |
+| `/usage` | `usage_handler` | Show usage statistics when available |
 | `/vnc` | `vnc_handler` | Open VNC viewer for computer-use contexts |
-| `/login` | `login_handler` | Token-based authentication for Mini Apps |
+| `/connect` | `connect_handler` | Connect model providers |
 
 ## Conventions
 

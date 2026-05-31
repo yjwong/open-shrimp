@@ -1,16 +1,16 @@
 """Telegram command handlers (/start, /context, /clear, /status, /cancel, /model,
-/effort, /resume, /review, /mcp, /tasks, /usage, /login).
+/effort, /resume, /review, /mcp, /tasks, /usage, /connect).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json as _json
 import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import aiosqlite
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -1330,11 +1330,11 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-# ── /login ──
+# ── /connect ──
 
 
-async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /login -- open the login Mini App to re-authenticate Claude Code OAuth."""
+async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /connect -- open the provider connection Mini App."""
     if not update.effective_user or not update.message:
         return
 
@@ -1347,6 +1347,25 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
         return
 
+    db: aiosqlite.Connection = context.bot_data["db"]
+    scope = chat_scope_from_message(update.message)
+    context_name, _ctx = await _get_context(scope, config, db)
+
+    args = update.message.text.split(maxsplit=1) if update.message.text else []
+    provider = args[1].strip() if len(args) == 2 else ""
+    if provider == "list":
+        await update.message.reply_text(
+            "Open the provider connection Mini App to view and manage providers\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+    if provider.startswith("disconnect "):
+        await update.message.reply_text(
+            "Provider disconnect is not available in Telegram yet\. Use OpenCode's provider UI in `/connect`\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
     # Build the Mini App URL.
     if config.review.public_url:
         base_url = config.review.public_url.rstrip("/")
@@ -1354,12 +1373,16 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         base_url = f"https://{config.review.host}:{config.review.port}"
 
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    scope = chat_scope_from_message(update.message)
-    login_url = f"{base_url}/terminal/?mode=login"
+    connect_url = (
+        f"{base_url}/terminal/?mode=connect"
+        f"&context={quote(context_name, safe='')}"
+    )
+    if provider:
+        connect_url += f"&provider={quote(provider, safe='')}"
     keyboard = InlineKeyboardMarkup([
         [make_web_app_button(
-            text="Open login",
-            url=login_url,
+            text="Connect providers",
+            url=connect_url,
             chat_id=scope.chat_id,
             user_id=update.effective_user.id,
             bot_token=config.telegram.token,
@@ -1368,7 +1391,7 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ])
 
     await update.message.reply_text(
-        "Re\\-authenticate Claude Code OAuth",
+        "Connect model providers",
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
     )
@@ -1721,51 +1744,8 @@ _USAGE_CACHE_TTL = 60  # seconds
 
 
 async def _fetch_usage() -> dict[str, Any] | None:
-    """Fetch usage data from the Anthropic OAuth usage endpoint.
-
-    Returns the parsed JSON response, or None if unavailable.
-    Uses a 60-second cache to avoid hitting the rate limit.
-    """
-    global _usage_cache
-    now = time.monotonic()
-    if _usage_cache and now - _usage_cache[0] < _USAGE_CACHE_TTL:
-        return _usage_cache[1]
-
-    credentials_path = Path.home() / ".claude" / ".credentials.json"
-    if not credentials_path.exists():
-        return None
-
-    try:
-        creds = _json.loads(credentials_path.read_text(encoding="utf-8"))
-        oauth = creds["claudeAiOauth"]
-        token = oauth["accessToken"]
-        # Skip API call if token is expired (with 5-minute buffer)
-        expires_at = oauth.get("expiresAt")
-        if expires_at is not None:
-            buffer_ms = 5 * 60 * 1000
-            if (time.time() * 1000 + buffer_ms) >= expires_at:
-                return None
-    except (KeyError, _json.JSONDecodeError, OSError):
-        return None
-
-    import httpx
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://api.anthropic.com/api/oauth/usage",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "anthropic-beta": "oauth-2025-04-20",
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            _usage_cache = (now, data)
-            return data
-    except (httpx.HTTPError, _json.JSONDecodeError):
-        return None
+    """Usage data is not available through OpenCode provider auth yet."""
+    return None
 
 
 def _format_tier(name: str, tier: dict[str, Any] | None) -> str | None:
@@ -1810,7 +1790,7 @@ async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     data = await _fetch_usage()
     if data is None:
         await message.reply_text(
-            "Usage data unavailable\\. OAuth credentials not found or endpoint unreachable\\.",
+            "Usage data is not available through OpenCode provider auth yet\\.",
             parse_mode="MarkdownV2",
         )
         return

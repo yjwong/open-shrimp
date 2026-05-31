@@ -1,7 +1,7 @@
 """Locate the Claude CLI binary for host-side execution.
 
-Used by anything on the host that needs to spawn ``claude``: sandbox
-provisioning (Docker, libvirt, Lima) and the ``/login`` PTY endpoint.
+Used by sandbox provisioning paths that still need to install or wrap the
+legacy ``claude`` binary during the OpenCode cutover.
 The SDK-bundled binary is preferred so the version Claude runs with
 matches the SDK version pinned in this project, instead of drifting to
 whatever ``claude`` the user happens to have on PATH.

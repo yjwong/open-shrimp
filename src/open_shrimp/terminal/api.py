@@ -2,7 +2,7 @@
 
 Provides an SSE endpoint for tailing log sources (background task output,
 container build logs, etc.), a REST endpoint for reading their content,
-and a WebSocket PTY endpoint for interactive ``claude auth login``.
+and a WebSocket PTY endpoint for interactive OpenCode provider connection.
 """
 
 from __future__ import annotations
@@ -14,8 +14,10 @@ import json
 import logging
 import os
 import pty
+import shutil
 import struct
 import termios
+import tempfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -25,8 +27,8 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from open_shrimp.claude_binary import find_claude_binary
-from open_shrimp.config import Config
+from open_shrimp.config import Config, ContextConfig, is_sandboxed
+from open_shrimp.opencode_client.process import _find_binary as find_opencode_binary
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 from open_shrimp.terminal.jsonl_render import (
     render_jsonl_content,
@@ -344,46 +346,38 @@ def _render_log_lines(render: str, content: str) -> tuple[str, str]:
     return content, ""
 
 
-# ── Login PTY WebSocket endpoint ──
+# ── Provider Connect PTY WebSocket endpoint ──
 #
 # The PTY process is decoupled from the WebSocket lifetime so that the
 # user can switch to a browser to complete OAuth and come back without
-# the session being killed.  A single ``_LoginSession`` lives at module
+# the session being killed.  A single ``_ConnectSession`` lives at module
 # level; WebSocket clients attach/detach freely.
 #
-# Runs ``claude`` in TUI mode and sends ``/login\n`` to trigger the
-# interactive OAuth flow.  The TUI has a built-in paste prompt that
-# accepts ``code#state`` via stdin — no localhost callback proxy needed.
+# Runs ``opencode auth login`` in a PTY. Input is forwarded directly so
+# API keys and OAuth codes are handled by OpenCode, not OpenShrimp.
 
 
-class _LoginSession:
-    """Background PTY session for ``claude`` TUI login."""
-
-    # Marker printed by ConsoleOAuthFlow when OAuth completes successfully
-    # ("Login successful. Press Enter to continue…"). ``/login`` is a slash
-    # command that only dismisses its Dialog on Enter — the REPL then sits
-    # at the prompt indefinitely. When we see this, we drive the REPL to
-    # exit so the subprocess actually terminates.
-    _SUCCESS_MARKER = "Login successful"
+class _ConnectSession:
+    """Background PTY session for ``opencode`` provider connection."""
 
     def __init__(
         self,
         proc: asyncio.subprocess.Process,
         master_fd: int,
+        context_name: str,
+        xdg_tmp: Path | None = None,
     ) -> None:
         self.proc = proc
         self.master_fd = master_fd
+        self.context_name = context_name
+        self._xdg_tmp = xdg_tmp
         # Circular buffer of terminal output for replay on reconnect.
         self._output_chunks: list[str] = []
         self._output_bytes = 0
         self._MAX_BUFFER = 64 * 1024  # 64 KiB
         self._websocket: WebSocket | None = None
         self._reader_task: asyncio.Task | None = None
-        self._exit_task: asyncio.Task | None = None
         self._done = asyncio.Event()
-        # Small sliding window so the marker is detected even when it
-        # straddles two os.read() boundaries.
-        self._scan_tail = ""
 
     def start_background(self) -> None:
         self._reader_task = asyncio.create_task(self._pty_reader())
@@ -431,53 +425,16 @@ class _LoginSession:
                         await ws.send_text(text)
                     except Exception:
                         self._websocket = None
-                # Watch for the success marker and schedule a graceful
-                # REPL exit the first time we see it. Scan a small sliding
-                # window so a marker split across two reads still matches.
-                if self._exit_task is None:
-                    combined = self._scan_tail + text
-                    if self._SUCCESS_MARKER in combined:
-                        self._exit_task = asyncio.create_task(
-                            self._graceful_exit()
-                        )
-                    tail_len = len(self._SUCCESS_MARKER) - 1
-                    self._scan_tail = combined[-tail_len:]
         except OSError:
             pass
         finally:
             self._done.set()
-
-    async def _graceful_exit(self) -> None:
-        """Drive the REPL to exit after ``/login`` completes.
-
-        The ``/login`` slash command's ``onDone`` only dismisses the Login
-        Dialog — it does not terminate the process. We send:
-
-        1. ``\\r`` to fire the "Press Enter to continue…" confirmation,
-           which dismisses the dialog and lets the post-login
-           fire-and-forget refreshes (``enrollTrustedDevice``,
-           ``refreshPolicyLimits``, etc.) start.
-        2. A short delay so those in-flight network calls settle.
-        3. ``/exit\\r`` which routes through ``gracefulShutdown`` in the
-           Claude Code REPL and terminates the subprocess cleanly.
-        """
-        try:
-            os.write(self.master_fd, b"\r")
-            # Give the post-login refreshes in commands/login/login.tsx
-            # (enrollTrustedDevice, refreshRemoteManagedSettings, etc.)
-            # a moment to complete before we tear the REPL down.
-            await asyncio.sleep(2.0)
-            os.write(self.master_fd, b"/exit\r")
-        except OSError:
-            pass
 
     # ── Cleanup ──
 
     async def destroy(self) -> None:
         if self._reader_task:
             self._reader_task.cancel()
-        if self._exit_task:
-            self._exit_task.cancel()
         try:
             os.close(self.master_fd)
         except OSError:
@@ -489,7 +446,7 @@ class _LoginSession:
                     await self.proc.wait()
             except TimeoutError:
                 logger.warning(
-                    "claude /login (pid=%d) did not exit on SIGTERM, killing",
+                    "opencode /connect (pid=%d) did not exit on SIGTERM, killing",
                     self.proc.pid or 0,
                 )
                 try:
@@ -499,38 +456,29 @@ class _LoginSession:
                 with contextlib.suppress(Exception):
                     async with asyncio.timeout(2):
                         await self.proc.wait()
-        logger.info("Login session destroyed: pid=%d", self.proc.pid or 0)
+        if self._xdg_tmp is not None:
+            shutil.rmtree(self._xdg_tmp, ignore_errors=True)
+        logger.info("Connect session destroyed: pid=%d", self.proc.pid or 0)
 
 
-# The single active login session (if any).
-_login_session: _LoginSession | None = None
+# The single active provider-connect session (if any).
+_connect_session: _ConnectSession | None = None
 
 
-async def shutdown_login_session() -> None:
-    """Destroy any live ``claude /login`` PTY session.
-
-    Called from the bot shutdown path so the long-lived login subprocess
-    doesn't outlive the openshrimp service.  Without this, a stale
-    ``claude /login`` child sits in the systemd cgroup waiting to be
-    reaped by SIGTERM during the next restart, slowing things down.
-    """
-    global _login_session
-    if _login_session is None:
+async def shutdown_connect_session() -> None:
+    """Destroy any live OpenCode provider-connect PTY session."""
+    global _connect_session
+    if _connect_session is None:
         return
     try:
-        await _login_session.destroy()
+        await _connect_session.destroy()
     except Exception:
-        logger.warning("Error destroying login session", exc_info=True)
-    _login_session = None
+        logger.warning("Error destroying connect session", exc_info=True)
+    _connect_session = None
 
 
-async def login_ws_endpoint(websocket: WebSocket) -> None:
-    """WebSocket PTY: spawn or attach to ``claude`` TUI for /login.
-
-    Runs ``claude`` in interactive TUI mode and sends ``/login`` to
-    trigger the OAuth flow.  The TUI's built-in paste prompt accepts
-    ``code#state`` via stdin — the user copies the code from the
-    Anthropic callback page and pastes it in the mini app.
+async def connect_ws_endpoint(websocket: WebSocket) -> None:
+    """WebSocket PTY: spawn or attach to OpenCode TUI for /connect.
 
     The PTY process lives independently of the WebSocket so the user
     can switch to the browser and come back without losing the session.
@@ -538,7 +486,7 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
     Query params:
         token: Telegram initData or HMAC token for authentication.
     """
-    global _login_session
+    global _connect_session
 
     config: Config = websocket.app.state.config
     token = websocket.query_params.get("token", "")
@@ -553,31 +501,55 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
 
     await websocket.accept()
 
-    # If there's an existing live session, reattach to it.
-    if _login_session is not None and _login_session.alive:
-        logger.info("Login WS: reattaching to existing session")
-        await _login_session.attach(websocket)
+    context_name = websocket.query_params.get("context") or config.default_context
+    ctx = config.contexts.get(context_name)
+    if ctx is None:
+        await websocket.send_text("\x1b[31mError: unknown context\x1b[0m\r\n")
+        await websocket.close()
+        return
+
+    # If there's an existing live session for this context, reattach to it.
+    if (
+        _connect_session is not None
+        and _connect_session.alive
+        and _connect_session.context_name == context_name
+    ):
+        logger.info("Connect WS: reattaching to existing session")
+        await _connect_session.attach(websocket)
         try:
             while True:
                 raw = await websocket.receive_text()
-                _handle_ws_input(raw, _login_session)
+                _handle_ws_input(raw, _connect_session)
         except WebSocketDisconnect:
-            _login_session.detach()
-            logger.info("Login WS: client detached (session stays alive)")
+            _connect_session.detach()
+            logger.info("Connect WS: client detached (session stays alive)")
         except Exception:
-            _login_session.detach()
+            _connect_session.detach()
         return
 
     # Clean up any dead session.
-    if _login_session is not None:
-        await _login_session.destroy()
-        _login_session = None
+    if _connect_session is not None:
+        await _connect_session.destroy()
+        _connect_session = None
 
     # ── Start a new session ──
 
     try:
-        claude_bin = find_claude_binary()
-    except RuntimeError as e:
+        opencode_bin = find_opencode_binary()
+    except Exception as e:
+        await websocket.send_text(f"\x1b[31mError: {e}\x1b[0m\r\n")
+        await websocket.close()
+        return
+
+    provider = (websocket.query_params.get("provider") or "").strip()
+    xdg_tmp = None
+    env_extra: dict[str, str] = {}
+    try:
+        xdg_tmp, env_extra = await _prepare_connect_environment(
+            websocket, context_name, ctx,
+        )
+    except Exception as e:
+        logger.exception("Failed to prepare OpenCode connect environment")
         await websocket.send_text(f"\x1b[31mError: {e}\x1b[0m\r\n")
         await websocket.close()
         return
@@ -594,25 +566,36 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
     # TERM/COLORTERM: enable 256-color and truecolor output in the TUI.
     env = {
         **os.environ,
+        **env_extra,
         "BROWSER": "echo",
         "TERM": "xterm-256color",
         "COLORTERM": "truecolor",
     }
 
+    argv = [opencode_bin, "auth", "login"]
+    if provider:
+        argv.extend(["--provider", provider])
+
     proc = await asyncio.create_subprocess_exec(
-        claude_bin, "/login",
+        *argv,
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=slave_fd,
         env=env,
+        cwd=ctx.directory,
         preexec_fn=os.setsid,
     )
     os.close(slave_fd)
 
-    logger.info("Login PTY started: pid=%d", proc.pid or 0)
+    logger.info("Connect PTY started: pid=%d", proc.pid or 0)
 
-    session = _LoginSession(proc, master_fd)
-    _login_session = session
+    session = _ConnectSession(
+        proc,
+        master_fd,
+        context_name=context_name,
+        xdg_tmp=xdg_tmp,
+    )
+    _connect_session = session
     session.start_background()
     await session.attach(websocket)
 
@@ -622,17 +605,57 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
             _handle_ws_input(raw, session)
     except WebSocketDisconnect:
         session.detach()
-        logger.info("Login WS: client detached (session stays alive)")
+        logger.info("Connect WS: client detached (session stays alive)")
     except Exception:
-        logger.exception("Login WS error")
+        logger.exception("Connect WS error")
         session.detach()
 
     # Don't destroy the session here — it stays alive for reconnection.
     # It will be cleaned up when the process exits and the next connect
-    # finds a dead session, or on a fresh /login.
+    # finds a dead session, or on a fresh /connect.
 
 
-def _handle_ws_input(raw: str, session: _LoginSession) -> None:
+async def _prepare_connect_environment(
+    websocket: WebSocket,
+    context_name: str,
+    ctx: ContextConfig,
+) -> tuple[Path | None, dict[str, str]]:
+    if not is_sandboxed(ctx):
+        return None, {}
+
+    sandbox_managers = getattr(websocket.app.state, "sandbox_managers", None) or {}
+    manager = sandbox_managers.get(ctx.sandbox.backend if ctx.sandbox else "")
+    if manager is None:
+        raise RuntimeError(f"No sandbox manager for context {context_name}")
+
+    def _prepare() -> Path:
+        sandbox = manager.create_sandbox(context_name, ctx)
+        sandbox.ensure_environment()
+        sandbox.ensure_running()
+        sandbox.provision_workspace()
+        opencode_home = sandbox.opencode_home_dir()
+        opencode_home.mkdir(parents=True, exist_ok=True)
+        xdg_tmp = Path(tempfile.mkdtemp(prefix=f"openshrimp-connect-{context_name}-"))
+        (xdg_tmp / "data").mkdir()
+        (xdg_tmp / "config").mkdir()
+        (xdg_tmp / "state").mkdir()
+        (xdg_tmp / "cache").mkdir()
+        (xdg_tmp / "data" / "opencode").symlink_to(
+            opencode_home,
+            target_is_directory=True,
+        )
+        return xdg_tmp
+
+    xdg_tmp = await asyncio.to_thread(_prepare)
+    return xdg_tmp, {
+        "XDG_DATA_HOME": str(xdg_tmp / "data"),
+        "XDG_CONFIG_HOME": str(xdg_tmp / "config"),
+        "XDG_STATE_HOME": str(xdg_tmp / "state"),
+        "XDG_CACHE_HOME": str(xdg_tmp / "cache"),
+    }
+
+
+def _handle_ws_input(raw: str, session: _ConnectSession) -> None:
     """Parse a WebSocket message and write to the PTY or resize."""
     try:
         msg = json.loads(raw)
@@ -670,7 +693,7 @@ def create_terminal_routes() -> list[Route | Mount]:
     routes: list[Route | Mount] = [
         Route("/api/terminal/tail", tail_endpoint, methods=["GET"]),
         Route("/api/terminal/read", read_endpoint, methods=["GET"]),
-        WebSocketRoute("/ws/terminal/login", login_ws_endpoint),
+        WebSocketRoute("/ws/terminal/connect", connect_ws_endpoint),
     ]
 
     if _dist_dir.is_dir():
