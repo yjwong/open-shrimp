@@ -517,6 +517,8 @@ async def _send_approval_keyboard(
     that approval state.
     """
     import uuid
+    if tool_name in {"agent", "openshrimp_agent"}:
+        tool_name = "Agent"
     if tool_name == "Edit":
         text = _format_edit_approval(tool_input, cwd=cwd)
     elif tool_name == "Bash":

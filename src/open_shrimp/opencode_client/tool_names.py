@@ -33,9 +33,13 @@ OPENCODE_TO_HOOKS: dict[str, str] = {
     "todowrite": "TodoWrite",
     "apply_patch": "ApplyPatch",
     "task": "Task",
+    "agent": "Agent",
+    "openshrimp_agent": "Agent",
 }
 
-HOOKS_TO_OPENCODE: dict[str, str] = {v: k for k, v in OPENCODE_TO_HOOKS.items()}
+HOOKS_TO_OPENCODE: dict[str, str] = {}
+for _opencode_name, _hooks_name in OPENCODE_TO_HOOKS.items():
+    HOOKS_TO_OPENCODE.setdefault(_hooks_name, _opencode_name)
 
 
 def opencode_to_hooks(name: str) -> str:

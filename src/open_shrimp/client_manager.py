@@ -388,10 +388,11 @@ async def get_or_create_session(
         _stderr_repeat_count[0] = 1
         logger.info("CLI stderr: %s", stripped)
 
-    # Auto-approve the built-in OpenShrimp MCP tools (send_file, send_photo)
-    # alongside whatever the user configured.
+    # Auto-approve the built-in OpenShrimp MCP tools that are safe wrappers
+    # around existing OpenShrimp behavior, alongside user-configured tools.
     allowed_tools = list(context.allowed_tools or [])
     allowed_tools.append("openshrimp_send_file")
+    allowed_tools.append("openshrimp_agent")
     if scope.thread_id is not None:
         allowed_tools.append("openshrimp_edit_topic")
     # Auto-approve scheduling tools when available.
@@ -623,10 +624,13 @@ async def get_or_create_session(
     if bot is not None:
         if mcp_proxy is None:
             raise RuntimeError("MCP proxy is required for OpenShrimp tools under OpenCode")
+        from open_shrimp.agent_tool import AgentToolContext, create_agent_tool
         from open_shrimp.tools import create_openshrimp_tools
 
+        client_holder: dict[str, OpenCodeClient] = {}
+
         def _tool_factory():
-            return create_openshrimp_tools(
+            tools = create_openshrimp_tools(
                 bot=bot,
                 chat_id=scope.chat_id,
                 thread_id=scope.thread_id,
@@ -641,6 +645,15 @@ async def get_or_create_session(
                 include_host_bash=include_host_bash,
                 context_directory=context.directory,
             )
+            tools.append(
+                create_agent_tool(
+                    AgentToolContext(
+                        client_getter=lambda: client_holder.get("client"),
+                        cwd=context.directory,
+                    )
+                )
+            )
+            return tools
 
         scope_token = mcp_proxy.register_tool_scope(
             context_name=context_name,
@@ -759,6 +772,8 @@ async def get_or_create_session(
         options.resume = None
         client = OpenCodeClient(options=options)
         await client.connect()
+    if bot is not None:
+        client_holder["client"] = client
 
     session = AgentSession(
         client=client,

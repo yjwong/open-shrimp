@@ -37,8 +37,15 @@ def test_unknown_names_pass_through() -> None:
     )
 
 
+def test_agent_tool_names_map_to_agent() -> None:
+    assert opencode_to_hooks("agent") == "Agent"
+    assert opencode_to_hooks("openshrimp_agent") == "Agent"
+
+
 def test_hooks_to_opencode_is_inverse() -> None:
     for k, v in OPENCODE_TO_HOOKS.items():
+        if v == "Agent" and k == "openshrimp_agent":
+            continue
         assert HOOKS_TO_OPENCODE[v] == k
 
 

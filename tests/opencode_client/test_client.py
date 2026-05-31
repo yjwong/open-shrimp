@@ -166,6 +166,47 @@ async def test_post_session_passes_directory(
     assert mock_server.created_sessions[0]["params"].get("directory") == "/path/to/ctx"
 
 
+async def test_child_session_helpers(
+    mock_server: MockOpenCode, wired_server
+) -> None:
+    opts = OpenCodeOptions(cwd="/parent", provider="openai", model="gpt-test")
+    async with OpenCodeClient(opts) as client:
+        parent_id = client.session_id
+        assert parent_id is not None
+        child_id = await client.create_session(
+            directory="/child",
+            parent_id=parent_id,
+            title="Child task",
+            agent="explore",
+            model={"providerID": "openai", "modelID": "gpt-child"},
+        )
+        queue = client.subscribe_session(child_id)
+        try:
+            mock_server.script(child_id, [text_delta("p1", "child done"), session_idle()])
+            await client.prompt_session(
+                child_id,
+                parts=[{"type": "text", "text": "go"}],
+                provider="openai",
+                model="gpt-child",
+                agent="explore",
+            )
+            msgs = [m async for m in client.iter_session_response(child_id, queue)]
+        finally:
+            client.unsubscribe_session(child_id)
+        await client.abort_session(child_id)
+
+    child_create = mock_server.created_sessions[-1]
+    assert child_create["params"].get("directory") == "/child"
+    assert child_create["body"]["parentID"] == parent_id
+    assert child_create["body"]["title"] == "Child task"
+    assert child_create["body"]["agent"] == "explore"
+    assert child_create["body"]["model"] == {"providerID": "openai", "modelID": "gpt-child"}
+    assert mock_server.prompts[-1]["session_id"] == child_id
+    assert mock_server.prompts[-1]["body"]["agent"] == "explore"
+    assert any(isinstance(m, ResultMessage) and m.session_id == child_id for m in msgs)
+    assert mock_server.aborted_sessions[-1] == child_id
+
+
 async def test_supplied_endpoint_skips_host_singleton(mock_setup, monkeypatch) -> None:
     mock_server, base_url = mock_setup
 

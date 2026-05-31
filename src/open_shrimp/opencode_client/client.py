@@ -151,9 +151,9 @@ class OpenCodeClient:
             if self._options.resume:
                 self._session_id = self._options.resume
                 try:
-                    await self._patch_permission_rules(
-                        self._build_initial_rules()
-                    )
+                    rules = self._build_initial_rules()
+                    self._permission_rules = list(rules)
+                    await self._patch_permission_rules(rules)
                 except CLIConnectionError as exc:
                     if _is_not_found_error(exc):
                         logger.warning(
@@ -179,15 +179,38 @@ class OpenCodeClient:
             raise
 
     async def _create_session(self) -> str:
+        return await self.create_session()
+
+    async def create_session(
+        self,
+        *,
+        directory: str | None = None,
+        permission_rules: list[dict[str, Any]] | None = None,
+        parent_id: str | None = None,
+        title: str | None = None,
+        agent: str | None = None,
+        model: dict[str, Any] | str | None = None,
+    ) -> str:
+        """Create an arbitrary OpenCode session on the connected server."""
         assert self._http is not None
         params: dict[str, str] = {}
-        if self._options.cwd:
-            params["directory"] = self._options.cwd
-        rules = self._build_initial_rules()
-        self._permission_rules = list(rules)
+        session_directory = directory if directory is not None else self._options.cwd
+        if session_directory:
+            params["directory"] = session_directory
+        rules = permission_rules if permission_rules is not None else self._build_initial_rules()
+        if permission_rules is None:
+            self._permission_rules = list(rules)
         body: dict[str, Any] = {}
         if rules:
             body["permission"] = rules
+        if parent_id:
+            body["parentID"] = parent_id
+        if title:
+            body["title"] = title
+        if agent:
+            body["agent"] = agent
+        if model is not None:
+            body["model"] = model
         try:
             r = await self._http.post("/session", params=params, json=body)
         except httpx.HTTPError as exc:
@@ -323,20 +346,48 @@ class OpenCodeClient:
     async def query(self, prompt: str) -> None:
         if self._http is None or self._session_id is None:
             raise CLIConnectionError("OpenCodeClient.query called before connect()")
+        await self.prompt_session(
+            self._session_id,
+            parts=[{"type": "text", "text": prompt}],
+            provider=self._options.provider,
+            model=self._options.model,
+            variant=self._options.effort,
+            system=self._options.system_prompt,
+        )
+
+    async def prompt_session(
+        self,
+        session_id: str,
+        *,
+        parts: list[dict[str, Any]],
+        provider: str | None = None,
+        model: str | None = None,
+        agent: str | None = None,
+        variant: str | None = None,
+        system: str | dict[str, Any] | None = None,
+    ) -> None:
+        """Prompt an arbitrary OpenCode session."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.prompt_session called before connect()")
         body: dict[str, Any] = {
-            "model": {
-                "providerID": self._options.provider,
-                "modelID": self._options.model,
-            },
-            "parts": [{"type": "text", "text": prompt}],
+            "parts": parts,
         }
-        if self._options.system_prompt is not None:
-            body["system"] = _coerce_system_prompt(self._options.system_prompt)
-        if self._options.effort is not None:
-            body["variant"] = self._options.effort
+        provider_id = provider if provider is not None else self._options.provider
+        model_id = model if model is not None else self._options.model
+        if provider_id and model_id:
+            body["model"] = {
+                "providerID": provider_id,
+                "modelID": model_id,
+            }
+        if agent:
+            body["agent"] = agent
+        if system is not None:
+            body["system"] = _coerce_system_prompt(system)
+        if variant is not None:
+            body["variant"] = variant
         try:
             r = await self._http.post(
-                f"/session/{self._session_id}/prompt_async", json=body
+                f"/session/{session_id}/prompt_async", json=body
             )
         except httpx.HTTPError as exc:
             raise CLIConnectionError(f"prompt_async failed: {exc}") from exc
@@ -344,7 +395,7 @@ class OpenCodeClient:
             raise OpenCodeAuthError("opencode serve rejected our credentials")
         if r.status_code == 404:
             raise CLIConnectionError(
-                f"prompt_async returned 404 for session {self._session_id}"
+                f"prompt_async returned 404 for session {session_id}"
             )
         if r.status_code != 204:
             raise ProcessError(
@@ -370,10 +421,57 @@ class OpenCodeClient:
         """
         if self._http is None or self._session_id is None:
             return
+        await self.abort_session(self._session_id)
+
+    async def abort_session(self, session_id: str) -> None:
+        """Abort the in-flight turn for an arbitrary session."""
+        if self._http is None:
+            return
         try:
-            await self._http.post(f"/session/{self._session_id}/abort")
+            await self._http.post(f"/session/{session_id}/abort")
         except httpx.HTTPError as exc:
             logger.warning("interrupt: POST /abort failed: %s", exc)
+
+    def subscribe_session(self, session_id: str) -> EventQueue:
+        """Subscribe to events for an arbitrary session."""
+        if self._bus is None:
+            raise CLIConnectionError("OpenCodeClient.subscribe_session called before connect()")
+        return self._bus.subscribe(session_id)
+
+    def unsubscribe_session(self, session_id: str) -> None:
+        """Unsubscribe from events for an arbitrary session."""
+        if self._bus is not None:
+            self._bus.unsubscribe(session_id)
+
+    def create_permission_bridge(
+        self,
+        session_id: str,
+    ) -> PermissionBridge | None:
+        """Create a permission bridge for an arbitrary session."""
+        if self._http is None or self._options.can_use_tool is None:
+            return None
+        return PermissionBridge(
+            http=self._http,
+            can_use_tool=self._options.can_use_tool,
+            session_id=session_id,
+        )
+
+    async def iter_session_response(
+        self,
+        session_id: str,
+        queue: EventQueue,
+        *,
+        bridge: PermissionBridge | None = None,
+    ) -> AsyncIterator[Message]:
+        """Translate events for an arbitrary session until ``session.idle``."""
+        async for msg in _iter_response(
+            queue,
+            session_id,
+            self._http,
+            bridge,
+            self._options.handle_questions,
+        ):
+            yield msg
 
     async def update_permission_rules(
         self, rules: list[dict[str, Any]],
