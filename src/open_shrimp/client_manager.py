@@ -653,6 +653,12 @@ async def get_or_create_session(
                         bot=bot,
                         scope=scope,
                         context_name=context_name,
+                        terminal_base_url=terminal_base_url,
+                        user_id=user_id,
+                        bot_token=(
+                            config.telegram.token if config is not None else None
+                        ),
+                        is_private_chat=is_private_chat,
                     )
                 )
             )

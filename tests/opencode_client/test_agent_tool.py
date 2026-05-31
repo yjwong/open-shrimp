@@ -93,6 +93,10 @@ async def test_background_agent_tool_registers_and_notifies(
                 bot=bot,  # type: ignore[arg-type]
                 scope=scope,
                 context_name="default",
+                terminal_base_url="https://example.test",
+                user_id=999,
+                bot_token="123:abc",
+                is_private_chat=True,
             )
         )
         original_create_session = client.create_session
@@ -116,16 +120,35 @@ async def test_background_agent_tool_registers_and_notifies(
 
         assert "Async agent launched successfully" in text
         assert task_id in _active_bg_tasks[scope]
+        assert bot.messages
+        assert bot.messages[-1]["chat_id"] == scope.chat_id
+        assert bot.messages[-1]["message_thread_id"] == scope.thread_id
+        assert str(bot.messages[-1]["text"]).startswith("⏳ Explore code")
+        assert f"`{task_id}`" in str(bot.messages[-1]["text"])
+        assert bot.messages[-1]["parse_mode"] == "MarkdownV2"
+        assert bot.messages[-1]["disable_notification"] is True
+        keyboard = bot.messages[-1]["reply_markup"]
+        assert (  # type: ignore[attr-defined]
+            keyboard.inline_keyboard[0][0].text == "📺 View output"
+        )
+        assert keyboard.inline_keyboard[0][0].web_app.url == (  # type: ignore[attr-defined]
+            f"https://example.test/terminal/?type=task&id={task_id}"
+            "&task_type=opencode_agent"
+        )
         for _ in range(100):
-            if bot.messages:
+            if len(bot.messages) >= 2:
                 break
             await asyncio.sleep(0.01)
 
-    assert bot.messages
+    assert len(bot.messages) >= 2
     assert bot.messages[-1]["chat_id"] == scope.chat_id
     assert bot.messages[-1]["message_thread_id"] == scope.thread_id
-    assert "Agent task completed" in str(bot.messages[-1]["text"])
-    assert "done" in str(bot.messages[-1]["text"])
+    assert bot.messages[-1]["text"] == (
+        f"📋 Agent task completed: Explore code\nTask: `{task_id}`"
+    )
+    assert f"`{task_id}`" in str(bot.messages[-1]["text"])
+    assert bot.messages[-1]["parse_mode"] == "MarkdownV2"
+    assert bot.messages[-1].get("reply_markup") is None
     assert task_id not in _active_bg_tasks.get(scope, {})
     assert (tmp_path / f"{task_id}.jsonl").read_text(encoding="utf-8")
 

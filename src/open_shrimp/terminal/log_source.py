@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from open_shrimp import agent_tasks
 from open_shrimp.sandbox import SandboxManager
 from open_shrimp.sandbox.manager import lookup_active_build
 from open_shrimp.handlers.state import is_task_active
@@ -36,7 +37,7 @@ class LogSource:
 
     path: Path
     is_active: Callable[[], bool]
-    render: str = "raw"  # "raw" for plain text, "jsonl" for agent task rendering
+    render: str = "raw"
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +189,15 @@ def resolve_task(
     sandbox_managers: dict[str, SandboxManager] | None = None,
 ) -> LogSource | None:
     """Resolve a background task ID to a ``LogSource``."""
+    agent_output_path = agent_tasks.get_task_output_path(source_id)
+    if agent_output_path is not None:
+        tid = source_id
+        return LogSource(
+            path=agent_output_path,
+            is_active=lambda: agent_tasks.is_task_running(tid),
+            render="openshrimp-agent-jsonl",
+        )
+
     path = _find_task_output_file(source_id, sandbox_managers=sandbox_managers)
     if path is None:
         return None

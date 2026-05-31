@@ -62,6 +62,39 @@ def render_jsonl_lines(raw_text: str) -> tuple[str, str]:
     return "".join(parts), remainder
 
 
+def render_openshrimp_agent_content(raw_text: str) -> str:
+    """Render an OpenShrimp-normalized Agent transcript."""
+    parts: list[str] = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rendered = _render_openshrimp_agent_line(line)
+        if rendered:
+            parts.append(rendered)
+    return "".join(parts)
+
+
+def render_openshrimp_agent_lines(raw_text: str) -> tuple[str, str]:
+    """Render complete OpenShrimp Agent JSONL lines with a remainder."""
+    if not raw_text:
+        return "", ""
+
+    segments = raw_text.split("\n")
+    remainder = segments.pop()
+
+    parts: list[str] = []
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        rendered = _render_openshrimp_agent_line(seg)
+        if rendered:
+            parts.append(rendered)
+
+    return "".join(parts), remainder
+
+
 def _render_line(line: str) -> str:
     """Parse a single JSON line and render it."""
     try:
@@ -73,6 +106,47 @@ def _render_line(line: str) -> str:
         return ""
 
     return _render_message(obj)
+
+
+def _render_openshrimp_agent_line(line: str) -> str:
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return f"{_DIM_RED}[unreadable line]{_RESET}\n"
+
+    if not isinstance(obj, dict):
+        return ""
+
+    event = obj.get("event")
+    if event == "launched":
+        prompt = str(obj.get("prompt") or "").strip()
+        if not prompt:
+            return ""
+        return f"{_BOLD_CYAN}> {prompt}{_RESET}\n\n"
+    if event == "assistant_text":
+        text = str(obj.get("text") or "")
+        return text if text.endswith("\n") else text + "\n"
+    if event == "tool_start":
+        tool = str(obj.get("tool") or "unknown")
+        tool_input = obj.get("tool_input")
+        summary = ""
+        if isinstance(tool_input, dict):
+            summary = extract_tool_summary(tool, tool_input)
+        if summary:
+            return f"{_BOLD_YELLOW}🔧 {tool}: {summary}{_RESET}\n"
+        return f"{_BOLD_YELLOW}🔧 {tool}{_RESET}\n"
+    if event == "tool_result":
+        return ""
+    if event == "stopped":
+        return f"{_DIM_RED}[stopped]{_RESET}\n"
+    if event == "finished":
+        status = str(obj.get("status") or "completed")
+        if status == "completed":
+            return ""
+        detail = str(obj.get("error") or status)
+        return f"\n{_DIM_RED}[{status}] {detail}{_RESET}\n"
+
+    return ""
 
 
 def _render_message(obj: dict[str, Any]) -> str:

@@ -8,10 +8,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup
 
 from open_shrimp import agent_tasks
 from open_shrimp.db import ChatScope
+from open_shrimp.markdown import gfm_to_telegram
 from open_shrimp.opencode_client import (
     AssistantMessage,
     OpenCodeClient,
@@ -23,6 +24,7 @@ from open_shrimp.opencode_client import (
     split_provider_model,
 )
 from open_shrimp.tools import OpenShrimpTool
+from open_shrimp.web_app_button import make_web_app_button
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,10 @@ class AgentToolContext:
     bot: Bot | None = None
     scope: ChatScope | None = None
     context_name: str | None = None
+    terminal_base_url: str | None = None
+    user_id: int = 0
+    bot_token: str | None = None
+    is_private_chat: bool = True
 
 
 def create_agent_tool(ctx: AgentToolContext) -> OpenShrimpTool:
@@ -231,9 +237,11 @@ async def launch_agent_background(args: AgentArgs, ctx: AgentToolContext) -> str
         task,
         "launched",
         description=args.description,
+        prompt=args.prompt,
         subagent_type=args.subagent_type,
         child_session_id=child_session_id,
     )
+    await _send_task_launched_notification(ctx, task)
     bg_task = asyncio.create_task(
         _drive_background_agent(task, args, ctx, client, prompt_provider, prompt_model)
     )
@@ -283,7 +291,11 @@ async def _drive_background_agent(
                         task.last_tool_name = block.name
                         agent_tasks.update_projection(task)
                         await agent_tasks.append_transcript(
-                            task, "tool_start", tool=block.name, tool_use_id=block.id,
+                            task,
+                            "tool_start",
+                            tool=block.name,
+                            tool_use_id=block.id,
+                            tool_input=block.input,
                         )
                     elif isinstance(block, ToolResultBlock):
                         await agent_tasks.append_transcript(
@@ -351,28 +363,92 @@ async def _send_task_notification(
     if ctx.scope.thread_id is not None:
         thread_kwargs["message_thread_id"] = ctx.scope.thread_id
     if status == "completed":
-        result = (task.final_text or "").strip()
-        if len(result) > 3000:
-            result = result[:3000] + "\n... (truncated)"
-        text = (
-            f"Agent task completed: {task.description}\n"
-            f"Task: {task.task_id}\n\n{result}"
+        text = _telegram_task_text(
+            f"📋 Agent task completed: {task.description}\n"
+            f"Task: `{task.task_id}`"
         )
     elif status == "killed":
-        text = f"Agent task stopped: {task.description}\nTask: {task.task_id}"
+        text = _telegram_task_text(
+            f"📋 Agent task stopped: {task.description}\n"
+            f"Task: `{task.task_id}`"
+        )
     else:
-        text = (
-            f"Agent task failed: {task.description}\n"
-            f"Task: {task.task_id}\n"
+        text = _telegram_task_text(
+            f"📋 Agent task failed: {task.description}\n"
+            f"Task: `{task.task_id}`\n"
             f"Error: {task.error or 'unknown error'}"
         )
     try:
         await ctx.bot.send_message(
-            chat_id=ctx.scope.chat_id, text=text, **thread_kwargs,
+            chat_id=ctx.scope.chat_id,
+            text=text,
+            parse_mode="MarkdownV2",
+            **thread_kwargs,
         )
         task.notified = True
     except Exception:
         logger.exception("Failed to send Agent task notification for %s", task.task_id)
+
+
+async def _send_task_launched_notification(
+    ctx: AgentToolContext,
+    task: agent_tasks.AgentBackgroundTask,
+) -> None:
+    if ctx.bot is None or ctx.scope is None:
+        return
+    keyboard = _task_output_keyboard(ctx, task)
+    if keyboard is None:
+        return
+    thread_kwargs: dict[str, Any] = {}
+    if ctx.scope.thread_id is not None:
+        thread_kwargs["message_thread_id"] = ctx.scope.thread_id
+    try:
+        await ctx.bot.send_message(
+            chat_id=ctx.scope.chat_id,
+            text=_telegram_task_text(
+                f"⏳ {task.description}\nTask: `{task.task_id}`"
+            ),
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard,
+            disable_notification=True,
+            **thread_kwargs,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send Agent task launch notification for %s", task.task_id,
+        )
+
+
+def _task_output_keyboard(
+    ctx: AgentToolContext,
+    task: agent_tasks.AgentBackgroundTask,
+) -> InlineKeyboardMarkup | None:
+    if (
+        ctx.terminal_base_url is None
+        or ctx.scope is None
+        or ctx.bot_token is None
+        or ctx.user_id == 0
+    ):
+        return None
+    app_url = (
+        f"{ctx.terminal_base_url.rstrip('/')}/terminal/"
+        f"?type=task&id={task.task_id}&task_type=opencode_agent"
+    )
+    return InlineKeyboardMarkup([[
+        make_web_app_button(
+            "📺 View output",
+            app_url,
+            chat_id=ctx.scope.chat_id,
+            user_id=ctx.user_id,
+            bot_token=ctx.bot_token,
+            is_private_chat=ctx.is_private_chat,
+        )
+    ]])
+
+
+def _telegram_task_text(text: str) -> str:
+    chunks = gfm_to_telegram(text)
+    return chunks[0] if chunks else text
 
 
 def _total_tokens(usage: dict[str, Any] | None) -> int:

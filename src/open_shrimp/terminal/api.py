@@ -28,7 +28,12 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from open_shrimp.claude_binary import find_claude_binary
 from open_shrimp.config import Config
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
-from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
+from open_shrimp.terminal.jsonl_render import (
+    render_jsonl_content,
+    render_jsonl_lines,
+    render_openshrimp_agent_content,
+    render_openshrimp_agent_lines,
+)
 from open_shrimp.terminal.log_source import LogSource, resolve
 
 logger = logging.getLogger(__name__)
@@ -82,7 +87,7 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
     if offset < 0:
         offset = 0
 
-    is_agent = source.render == "jsonl"
+    is_rendered_jsonl = source.render in {"jsonl", "openshrimp-agent-jsonl"}
 
     async def event_stream() -> AsyncGenerator[str, None]:
         """Generate SSE events as the file grows.
@@ -101,8 +106,8 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
         def _flush_and_done(completed: bool) -> str:
             """Flush remaining agent buffer and return done SSE events."""
             parts = ""
-            if is_agent and line_buffer.strip():
-                rendered, _ = render_jsonl_lines(line_buffer + "\n")
+            if is_rendered_jsonl and line_buffer.strip():
+                rendered, _ = _render_log_lines(source.render, line_buffer + "\n")
                 if rendered:
                     payload = json.dumps({
                         "text": rendered,
@@ -129,9 +134,11 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
             nonlocal line_buffer, pos
             if not chunk:
                 return None
-            if is_agent:
+            if is_rendered_jsonl:
                 text_to_render = line_buffer + chunk
-                rendered, line_buffer = render_jsonl_lines(text_to_render)
+                rendered, line_buffer = _render_log_lines(
+                    source.render, text_to_render,
+                )
                 if rendered:
                     pos = file_size
                     payload = json.dumps({
@@ -301,7 +308,7 @@ async def read_endpoint(request: Request) -> JSONResponse:
             {"error": "type and id are required"}, status_code=400
         )
 
-    is_agent = source.render == "jsonl"
+    is_rendered_jsonl = source.render in {"jsonl", "openshrimp-agent-jsonl"}
 
     try:
         content = await asyncio.to_thread(source.path.read_text, "utf-8", "replace")
@@ -311,14 +318,30 @@ async def read_endpoint(request: Request) -> JSONResponse:
             {"error": "Log source not found"}, status_code=404
         )
 
-    if is_agent:
-        content = render_jsonl_content(content)
+    if is_rendered_jsonl:
+        content = _render_log_content(source.render, content)
 
     return JSONResponse({
         "id": request.query_params.get("id", ""),
         "content": content,
         "size": size,
     })
+
+
+def _render_log_content(render: str, content: str) -> str:
+    if render == "openshrimp-agent-jsonl":
+        return render_openshrimp_agent_content(content)
+    if render == "jsonl":
+        return render_jsonl_content(content)
+    return content
+
+
+def _render_log_lines(render: str, content: str) -> tuple[str, str]:
+    if render == "openshrimp-agent-jsonl":
+        return render_openshrimp_agent_lines(content)
+    if render == "jsonl":
+        return render_jsonl_lines(content)
+    return content, ""
 
 
 # ── Login PTY WebSocket endpoint ──

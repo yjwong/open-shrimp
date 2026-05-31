@@ -110,6 +110,18 @@ def get_task(task_id: str) -> AgentBackgroundTask | None:
     return _tasks.get(task_id)
 
 
+def get_task_output_path(task_id: str) -> Path | None:
+    task = _tasks.get(task_id)
+    if task is None:
+        return None
+    return task.output_path
+
+
+def is_task_running(task_id: str) -> bool:
+    task = _tasks.get(task_id)
+    return task is not None and task.status == "running"
+
+
 def parent_session_busy(scope: ChatScope) -> bool:
     running = _running_tasks.get(scope)
     return running is not None and not running.done()
