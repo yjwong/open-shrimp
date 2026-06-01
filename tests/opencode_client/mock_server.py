@@ -36,6 +36,8 @@ class MockOpenCode:
         self.question_rejections: list[str] = []
         # Records session patches (e.g. update_permission_rules).
         self.patched_sessions: list[dict[str, Any]] = []
+        self.config: dict[str, Any] = {}
+        self.config_patches: list[dict[str, Any]] = []
         # Records aborts.
         self.aborted_sessions: list[str] = []
         self.deleted_sessions: list[str] = []
@@ -63,6 +65,11 @@ class MockOpenCode:
                 Route("/event", self._event_stream),
                 Route("/session", self._create_session, methods=["POST"]),
                 Route("/session", self._list_sessions, methods=["GET"]),
+                Route(
+                    "/session/{sid}",
+                    self._get_session,
+                    methods=["GET"],
+                ),
                 Route(
                     "/session/{sid}",
                     self._patch_session,
@@ -107,6 +114,16 @@ class MockOpenCode:
                     "/mcp",
                     self._get_mcp,
                     methods=["GET"],
+                ),
+                Route(
+                    "/config",
+                    self._get_config,
+                    methods=["GET"],
+                ),
+                Route(
+                    "/config",
+                    self._patch_config,
+                    methods=["PATCH"],
                 ),
                 Route(
                     "/mcp/{name:path}/connect",
@@ -236,6 +253,18 @@ class MockOpenCode:
         self.patched_sessions.append({"session_id": sid, "body": body})
         return JSONResponse({"id": sid})
 
+    async def _get_session(self, request: Request) -> Response:
+        sid = request.path_params["sid"]
+        permission: list[dict[str, Any]] = []
+        for row in self.created_sessions:
+            if row["id"] == sid:
+                permission.extend(row.get("body", {}).get("permission", []))
+                break
+        for patch in self.patched_sessions:
+            if patch["session_id"] == sid:
+                permission.extend(patch.get("body", {}).get("permission", []))
+        return JSONResponse({"id": sid, "permission": permission})
+
     async def _abort_session(self, request: Request) -> Response:
         sid = request.path_params["sid"]
         self.aborted_sessions.append(sid)
@@ -271,6 +300,35 @@ class MockOpenCode:
 
     async def _get_mcp(self, request: Request) -> Response:
         return JSONResponse(self.mcp_status)
+
+    async def _get_config(self, request: Request) -> Response:
+        return JSONResponse(self.config)
+
+    async def _patch_config(self, request: Request) -> Response:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            body = {}
+        self.config_patches.append({
+            "body": body,
+            "params": dict(request.query_params),
+        })
+        permission = body.get("permission")
+        if isinstance(permission, dict):
+            current = self.config.setdefault("permission", {})
+            if isinstance(current, dict):
+                for perm_name, rules in permission.items():
+                    if isinstance(rules, dict):
+                        bucket = current.setdefault(perm_name, {})
+                        if isinstance(bucket, dict):
+                            bucket.update(rules)
+                        else:
+                            current[perm_name] = dict(rules)
+                    else:
+                        current[perm_name] = rules
+            else:
+                self.config["permission"] = permission
+        return JSONResponse(self.config)
 
     async def _connect_mcp(self, request: Request) -> Response:
         name = request.path_params["name"]

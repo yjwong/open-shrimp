@@ -38,6 +38,70 @@ logger = logging.getLogger(__name__)
 _BASH_SKIP_PREFIXES = {"sudo", "env", "nohup", "nice", "ionice", "time", "strace"}
 
 
+def _opencode_rule(rule: ApprovalRule) -> dict[str, str] | None:
+    """Translate the transitional ApprovalRule shape to OpenCode permission."""
+    from open_shrimp.opencode_client.tool_names import hooks_to_opencode
+
+    permission = hooks_to_opencode(rule.tool_name)
+    if not permission.startswith("_"):
+        permission = permission.lower()
+    if not permission:
+        return None
+    return {
+        "permission": permission,
+        "pattern": rule.pattern or "*",
+        "action": "allow",
+    }
+
+
+def _edit_opencode_rule() -> dict[str, str]:
+    return {"permission": "edit", "pattern": "*", "action": "allow"}
+
+
+def _external_directory_opencode_rule(directory: str) -> dict[str, str]:
+    return {
+        "permission": "external_directory",
+        "pattern": directory.rstrip(os.sep) + "/*",
+        "action": "allow",
+    }
+
+
+async def _patch_active_session_rules(
+    scope: ChatScope,
+    rules: list[dict[str, str]],
+) -> bool:
+    from open_shrimp.client_manager import get_session
+
+    session = get_session(scope)
+    if session is None:
+        logger.warning("No active OpenCode session for permission patch: %s", scope)
+        return False
+    try:
+        await session.client.update_permission_rules(rules)
+    except Exception:
+        logger.exception("Failed to patch OpenCode session permissions")
+        return False
+    return True
+
+
+async def _patch_project_bash_permission(
+    scope: ChatScope,
+    pattern: str,
+) -> bool:
+    from open_shrimp.client_manager import get_session
+
+    session = get_session(scope)
+    if session is None:
+        logger.warning("No active OpenCode session for config permission patch: %s", scope)
+        return False
+    try:
+        await session.client.patch_config_permission({"bash": {pattern: "allow"}})
+    except Exception:
+        logger.exception("Failed to patch OpenCode config permissions")
+        return False
+    return True
+
+
 def _extract_bash_prefix(command: str) -> str | None:
     """Extract the primary command name from a bash command string.
 
@@ -1132,6 +1196,7 @@ async def handle_approval_callback(
             db: aiosqlite.Connection = context.bot_data["db"]
             ctx_name, _ = await _get_context(scope, config, db)
             _edit_approved_sessions.add((scope, ctx_name))
+            await _patch_active_session_rules(scope, [_edit_opencode_rule()])
             logger.info(
                 "Accept-all-edits enabled for scope %s context %s",
                 scope,
@@ -1139,12 +1204,12 @@ async def handle_approval_callback(
             )
 
         future.set_result(True)
-        await query.answer("Approved. All future edits will be auto-approved.")
+        await query.answer("Approved. Edits allowed for this session.")
 
         if query.message:
             try:
                 original_md = query.message.text_markdown_v2 or query.message.text or ""
-                status = "\n\n\u2705 *Approved\\.* _All future edits auto\\-approved\\._"
+                status = "\n\n\u2705 *Approved\\.* _Edits allowed for this session\\._"
                 await query.message.edit_text(
                     text=original_md + status,
                     parse_mode="MarkdownV2",
@@ -1176,36 +1241,30 @@ async def handle_approval_callback(
         parts = data.split(":", 2)
         prefix = parts[2] if len(parts) >= 3 else ""
 
+        rule: ApprovalRule | None = None
+
         if query.message and prefix:
             from open_shrimp.handlers.state import _tool_approved_sessions
-            from open_shrimp.settings_local import save_persistent_rule
 
             scope = chat_scope_from_message(query.message)
             db: aiosqlite.Connection = context.bot_data["db"]
-            ctx_name, ctx_config = await _get_context(scope, config, db)
+            ctx_name, _ = await _get_context(scope, config, db)
             rule = ApprovalRule(tool_name="Bash", pattern=f"{prefix} *")
             _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
-
-            # Persist to .claude/settings.local.json so the rule survives
-            # restarts and is also respected by the Claude CLI directly.
-            try:
-                persisted = await save_persistent_rule(ctx_config.directory, rule)
-            except OSError:
-                logger.exception("Failed to persist rule to settings.local.json")
-                persisted = False
+            saved = await _patch_project_bash_permission(scope, rule.pattern)
 
             logger.info(
-                "Saved persistent Bash(%s:*) rule for scope %s context %s (persisted=%s)",
+                "Patched OpenCode project Bash rule %s for scope %s context %s (saved=%s)",
                 prefix,
                 scope,
                 ctx_name,
-                persisted,
+                saved,
             )
 
         future.set_result(True)
         escaped_prefix = _escape_mdv2(prefix)
         await query.answer(
-            f"Approved. Rule saved: {prefix} * auto-approved."
+            f"Approved. Always allow {prefix} * for this OpenCode project."
         )
 
         if query.message:
@@ -1213,7 +1272,7 @@ async def handle_approval_callback(
                 icon = '\u2705'
                 compact = (
                     f"{icon} *Bash* \u2014 Approved\\. "
-                    f"_Rule saved: {escaped_prefix} \\* auto\\-approved\\._"
+                    f"_Always allow `{escaped_prefix} \\*` for this OpenCode project\\._"
                 )
                 await query.message.edit_text(
                     text=compact,
@@ -1228,7 +1287,7 @@ async def handle_approval_callback(
 
         # Auto-resolve other pending parallel Bash approvals matching this prefix.
         chat_id = query.message.chat_id if query.message else None
-        if chat_id is not None and prefix:
+        if chat_id is not None and rule is not None:
             await _auto_resolve_pending_approvals(
                 query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
             )
@@ -1261,6 +1320,10 @@ async def handle_approval_callback(
         _session_approved_dirs.setdefault((scope, ctx_name), set()).add(
             directory,
         )
+        await _patch_active_session_rules(
+            scope,
+            [_external_directory_opencode_rule(directory)],
+        )
         logger.info(
             "Session-approved dir %s for scope %s context %s",
             directory,
@@ -1284,7 +1347,7 @@ async def handle_approval_callback(
                 status = (
                     f"\n\n\u2705 *Approved\\.* "
                     f"_All future tool calls in `{escaped_dir}` "
-                    f"auto\\-approved this session\\._"
+                    f"allowed for this session\\._"
                 )
                 await query.message.edit_text(
                     text=original_md + status,
@@ -1323,6 +1386,8 @@ async def handle_approval_callback(
         token = data.split(":", 1)[1]
         accepted_tool_name = _pending_tool_approvals.pop(token, "")
 
+        rule: ApprovalRule | None = None
+
         # Determine the chat's active context to scope the flag
         if query.message and accepted_tool_name:
             from open_shrimp.handlers.state import _tool_approved_sessions
@@ -1332,6 +1397,9 @@ async def handle_approval_callback(
             ctx_name, _ = await _get_context(scope, config, db)
             rule = ApprovalRule(tool_name=accepted_tool_name, pattern=None)
             _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
+            opencode_rule = _opencode_rule(rule)
+            if opencode_rule is not None:
+                await _patch_active_session_rules(scope, [opencode_rule])
             logger.info(
                 "Accept-all-%s enabled for scope %s context %s",
                 accepted_tool_name,
@@ -1342,7 +1410,7 @@ async def handle_approval_callback(
         future.set_result(True)
         escaped_tool = _escape_mdv2(accepted_tool_name)
         await query.answer(
-            f"Approved. All future {accepted_tool_name} calls will be auto-approved."
+            f"Approved. Future {accepted_tool_name} calls allowed for this session."
         )
 
         if query.message:
@@ -1350,7 +1418,7 @@ async def handle_approval_callback(
                 original_md = query.message.text_markdown_v2 or query.message.text or ""
                 status = (
                     f"\n\n\u2705 *Approved\\.* _All future {escaped_tool} "
-                    f"calls auto\\-approved\\._"
+                    f"calls allowed for this session\\._"
                 )
                 await query.message.edit_text(
                     text=original_md + status,
@@ -1365,7 +1433,7 @@ async def handle_approval_callback(
 
         # Auto-resolve other pending parallel approvals for this tool.
         chat_id = query.message.chat_id if query.message else None
-        if chat_id is not None and accepted_tool_name:
+        if chat_id is not None and rule is not None:
             await _auto_resolve_pending_approvals(
                 query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
             )

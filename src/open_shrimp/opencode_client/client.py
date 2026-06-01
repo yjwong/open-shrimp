@@ -154,7 +154,7 @@ class OpenCodeClient:
                 try:
                     rules = self._build_initial_rules()
                     self._permission_rules = list(rules)
-                    await self._patch_permission_rules(rules)
+                    await self.get_session_info(self._session_id)
                 except CLIConnectionError as exc:
                     if _is_not_found_error(exc):
                         logger.warning(
@@ -514,7 +514,11 @@ class OpenCodeClient:
         session_id: str,
         rules: list[dict[str, Any]],
     ) -> None:
-        """Replace permission rules for an arbitrary session."""
+        """Patch permission rules for an arbitrary session.
+
+        OpenCode appends incoming rules to the session ruleset; its evaluator
+        uses the last matching rule.
+        """
         if self._http is None:
             raise CLIConnectionError("OpenCodeClient.patch_session_permissions called before connect()")
         try:
@@ -532,6 +536,66 @@ class OpenCodeClient:
             raise ProcessError(
                 f"PATCH /session/{session_id} returned {r.status_code}: {r.text[:300]}"
             )
+
+    async def get_session_info(self, session_id: str) -> dict[str, Any]:
+        """Fetch an arbitrary OpenCode session."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.get_session_info called before connect()")
+        try:
+            r = await self._http.get(f"/session/{session_id}")
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(
+                f"GET /session/{session_id} failed: {exc}"
+            ) from exc
+        if r.status_code == 404:
+            raise CLIConnectionError(f"GET /session/{session_id} returned 404")
+        if r.status_code >= 400:
+            raise ProcessError(
+                f"GET /session/{session_id} returned {r.status_code}: {r.text[:300]}"
+            )
+        payload = r.json()
+        if not isinstance(payload, dict):
+            raise ProcessError(f"GET /session/{session_id} returned non-object: {payload!r}")
+        return payload
+
+    async def get_config(self) -> dict[str, Any]:
+        """Fetch OpenCode config for this client's project directory."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.get_config called before connect()")
+        params: dict[str, str] = {}
+        if self._options.cwd:
+            params["directory"] = self._options.cwd
+        try:
+            r = await self._http.get("/config", params=params)
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"GET /config failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"GET /config returned {r.status_code}: {r.text[:300]}")
+        payload = r.json()
+        if not isinstance(payload, dict):
+            raise ProcessError(f"GET /config returned non-object: {payload!r}")
+        return payload
+
+    async def patch_config_permission(
+        self,
+        permission_config: dict[str, Any],
+    ) -> None:
+        """Patch durable OpenCode config permission rules."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.patch_config_permission called before connect()")
+        params: dict[str, str] = {}
+        if self._options.cwd:
+            params["directory"] = self._options.cwd
+        try:
+            r = await self._http.patch(
+                "/config",
+                params=params,
+                json={"permission": permission_config},
+            )
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"PATCH /config failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"PATCH /config returned {r.status_code}: {r.text[:300]}")
 
     async def count_assistant_turns(self, session_id: str) -> int | None:
         """Return assistant message count for a session, if OpenCode exposes it."""
@@ -693,21 +757,14 @@ class OpenCodeClient:
     async def update_permission_rules(
         self, rules: list[dict[str, Any]],
     ) -> None:
-        """Replace the session's permission ruleset.
+        """Patch the session's permission ruleset.
 
         Used when the user toggles "accept all edits" — passes the
-        rebuilt ruleset to ``PATCH /session/{id}``.
+        new rules to ``PATCH /session/{id}``.
         """
-        self._permission_rules = list(rules)
+        self._permission_rules.extend(rules)
         if self._session_id is not None:
             await self.patch_session_permissions(self._session_id, rules)
-
-    async def _patch_permission_rules(
-        self, rules: list[dict[str, Any]],
-    ) -> None:
-        if self._http is None or self._session_id is None:
-            return
-        await self.patch_session_permissions(self._session_id, rules)
 
     @property
     def permission_rules(self) -> list[dict[str, Any]]:

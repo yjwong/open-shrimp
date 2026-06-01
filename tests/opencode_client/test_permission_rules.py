@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from open_shrimp.opencode_client.client import OpenCodeClient
 from open_shrimp.opencode_client.options import OpenCodeOptions
+from tests.opencode_client.mock_server import MockOpenCode
 
 
 def _client(allowed_tools: list[str] | None = None) -> OpenCodeClient:
@@ -106,3 +109,40 @@ def test_builtin_task_tool_deny_overrides_allowed_tools() -> None:
         "pattern": "*",
         "action": "deny",
     }
+
+
+@pytest.mark.asyncio
+async def test_patch_session_permissions_appends_rule(
+    mock_server: MockOpenCode,
+    wired_server,
+) -> None:
+    opts = OpenCodeOptions(cwd="/tmp/project", provider="openai", model="gpt-test")
+    async with OpenCodeClient(opts) as client:
+        sid = client.session_id
+        assert sid is not None
+        rule = {"permission": "bash", "pattern": "git *", "action": "allow"}
+        await client.patch_session_permissions(sid, [rule])
+        session = await client.get_session_info(sid)
+
+    assert mock_server.patched_sessions[-1] == {
+        "session_id": sid,
+        "body": {"permission": [rule]},
+    }
+    assert rule in session["permission"]
+
+
+@pytest.mark.asyncio
+async def test_patch_config_permission_writes_bash_rule(
+    mock_server: MockOpenCode,
+    wired_server,
+) -> None:
+    opts = OpenCodeOptions(cwd="/tmp/project", provider="openai", model="gpt-test")
+    async with OpenCodeClient(opts) as client:
+        await client.patch_config_permission({"bash": {"git *": "allow"}})
+        config = await client.get_config()
+
+    assert mock_server.config_patches[-1] == {
+        "body": {"permission": {"bash": {"git *": "allow"}}},
+        "params": {"directory": "/tmp/project"},
+    }
+    assert config["permission"]["bash"]["git *"] == "allow"
