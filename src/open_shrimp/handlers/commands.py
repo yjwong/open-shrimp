@@ -1,5 +1,5 @@
 """Telegram command handlers (/start, /context, /clear, /status, /cancel, /model,
-/effort, /resume, /review, /mcp, /tasks, /usage, /connect).
+/effort, /resume, /review, /mcp, /tasks, /connect).
 """
 
 from __future__ import annotations
@@ -1731,94 +1731,6 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         lines.append(line)
 
     lines.append(f"\nUse `/tasks stop <id>` to stop a task\\.")
-    text = "\n".join(lines)
-    await message.reply_text(text, parse_mode="MarkdownV2")
-
-
-# ── /usage ──
-
-# Cache: (timestamp, response_dict)
-_usage_cache: tuple[float, dict[str, Any]] | None = None
-_USAGE_CACHE_TTL = 60  # seconds
-
-
-async def _fetch_usage() -> dict[str, Any] | None:
-    """Usage data is not available through OpenCode provider auth yet."""
-    return None
-
-
-def _format_tier(name: str, tier: dict[str, Any] | None) -> str | None:
-    """Format a single usage tier line. Returns None if tier is absent."""
-    if not tier or tier.get("utilization") is None:
-        return None
-    util = tier["utilization"]
-    used = min(100, util)
-    bar = _usage_bar(used)
-    line = f"*{_escape_mdv2(name)}:* {bar} {_escape_mdv2(f'{used:.0f}% used')}"
-    resets_at = tier.get("resets_at")
-    if resets_at:
-        try:
-            reset_dt = datetime.fromisoformat(resets_at)
-            delta = reset_dt - datetime.now(timezone.utc)
-            total_seconds = int(delta.total_seconds())
-            if total_seconds > 0:
-                hours, remainder = divmod(total_seconds, 3600)
-                minutes = remainder // 60
-                if hours > 0:
-                    line += _escape_mdv2(f" (resets in {hours}h{minutes}m)")
-                else:
-                    line += _escape_mdv2(f" (resets in {minutes}m)")
-        except (ValueError, TypeError):
-            pass
-    return line
-
-
-def _usage_bar(used: float) -> str:
-    """Build a small text-based usage bar (10 segments)."""
-    filled = round(used / 10)
-    return _escape_mdv2("[" + "█" * filled + "░" * (10 - filled) + "]")
-
-
-async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /usage command: show Claude quota/usage stats."""
-    config: Config = context.bot_data["config"]
-    message = update.effective_message
-    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
-        return
-
-    data = await _fetch_usage()
-    if data is None:
-        await message.reply_text(
-            "Usage data is not available through OpenCode provider auth yet\\.",
-            parse_mode="MarkdownV2",
-        )
-        return
-
-    lines: list[str] = []
-    for label, key in [
-        ("5-hour session", "five_hour"),
-        ("7-day overall", "seven_day"),
-        ("7-day Sonnet", "seven_day_sonnet"),
-    ]:
-        line = _format_tier(label, data.get(key))
-        if line:
-            lines.append(line)
-
-    # Extra usage (overuse billing)
-    extra = data.get("extra_usage")
-    if extra and extra.get("is_enabled"):
-        used = (extra.get("used_credits") or 0) / 100
-        limit = (extra.get("monthly_limit") or 0) / 100
-        if limit > 0:
-            pct = min(100, used / limit * 100)
-            lines.append(
-                f"*Extra usage:* {_escape_mdv2(f'${used:.2f} / ${limit:.2f} ({pct:.0f}%)')}"
-            )
-
-    if not lines:
-        await message.reply_text("No usage data available\\.", parse_mode="MarkdownV2")
-        return
-
     text = "\n".join(lines)
     await message.reply_text(text, parse_mode="MarkdownV2")
 
