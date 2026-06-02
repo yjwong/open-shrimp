@@ -893,19 +893,9 @@ def _coerce_mcp_config(name: str, raw_config: Any) -> dict[str, Any]:
 
 
 def _coerce_system_prompt(value: Any) -> str:
-    """Normalise ``options.system_prompt`` into a string for OpenCode.
-
-    Older callers may pass a string OR a ``{"type": "preset", "preset": …,
-    "append": …}`` dict. OpenCode's ``system`` field is a plain
-    appendable string, so we pull out the ``append`` text when given
-    the preset shape and ignore the rest.
-    """
+    """Normalise ``options.system_prompt`` into a string for OpenCode."""
     if isinstance(value, str):
         return value
-    if isinstance(value, dict):
-        append = value.get("append")
-        if isinstance(append, str):
-            return append
     return ""
 
 

@@ -426,11 +426,7 @@ async def get_or_create_session(
         )
 
     if system_prompt_parts:
-        options.system_prompt = {
-            "type": "preset",
-            "preset": "claude_code",
-            "append": "\n\n".join(system_prompt_parts),
-        }
+        options.system_prompt = "\n\n".join(system_prompt_parts)
 
     # Register scope-bound OpenShrimp MCP tools so the agent can send files,
     # update forum topics, and manage schedules for this chat/thread only.

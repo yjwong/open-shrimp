@@ -44,7 +44,7 @@ class OpenCodeOptions:
     handle_questions: (
         Callable[[list[dict[str, Any]]], Awaitable[list[list[str]]]] | None
     ) = None
-    system_prompt: str | dict[str, Any] | None = None  # → system on prompt_async
+    system_prompt: str | None = None  # → system on prompt_async
 
     # Accepted-but-ignored fields for older OpenShrimp call sites.
     setting_sources: list[str] | None = None
