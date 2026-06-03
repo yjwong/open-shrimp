@@ -97,6 +97,48 @@ async def test_allow_sends_reply_once(
     ]
 
 
+async def test_allow_always_sends_reply_always_and_exposes_patterns(
+    mock_server: MockOpenCode, wired_server,
+) -> None:
+    calls: list[ToolPermissionContext] = []
+
+    async def can_use_tool(name, tool_input, ctx):
+        calls.append(ctx)
+        return PermissionResultAllow(reply="always")
+
+    opts = OpenCodeOptions(
+        cwd="/tmp", provider="openai", model="gpt-test",
+        can_use_tool=can_use_tool,
+    )
+    async with OpenCodeClient(opts) as client:
+        sid = client.session_id
+        assert sid
+        mock_server.script(
+            sid,
+            [
+                tool_part_event(
+                    "call_always", "bash", "running",
+                    tool_input={"command": "git status"},
+                ),
+                permission_asked(
+                    "req_always", "bash", call_id="call_always",
+                    metadata={"command": "git status"},
+                    always=["git status *"],
+                ),
+                session_idle(),
+            ],
+        )
+        await client.query("hi")
+        await _drain(client)
+        await _wait_for(lambda: bool(mock_server.permission_replies))
+
+    assert calls[0].always_patterns == ["git status *"]
+    assert calls[0].suggestions == ["git status *"]
+    assert mock_server.permission_replies == [
+        {"request_id": "req_always", "body": {"reply": "always"}},
+    ]
+
+
 async def test_deny_sends_reject_with_message(
     mock_server: MockOpenCode, wired_server,
 ) -> None:

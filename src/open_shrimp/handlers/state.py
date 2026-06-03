@@ -55,9 +55,9 @@ _setup_queues: dict[ChatScope, list[tuple[str, list[FileAttachment]]]] = {}
 _injected_attachment_paths: dict[ChatScope, list[Path]] = {}
 
 # ---------------------------------------------------------------------------
-# Pending tool approval futures: callback_data -> asyncio.Future[bool]
+# Pending tool approval futures: callback_data -> asyncio.Future[bool | approval result]
 # ---------------------------------------------------------------------------
-_approval_futures: dict[str, asyncio.Future[bool]] = {}
+_approval_futures: dict[str, asyncio.Future[Any]] = {}
 
 # ---------------------------------------------------------------------------
 # Pending Agent tool inputs for "Show prompt" expansion: tool_use_id -> tool_input

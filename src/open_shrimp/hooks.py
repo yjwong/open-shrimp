@@ -40,13 +40,21 @@ logger = logging.getLogger(__name__)
 # permission to read user-uploaded attachments.
 ATTACHMENT_TEMP_DIR = Path(tempfile.gettempdir()) / "openshrimp_uploads"
 
+@dataclass
+class ApprovalDecision:
+    """User approval outcome from the Telegram approval UI."""
+
+    approved: bool
+    remember: bool = False
+
+
 # Type for the approval callback: receives tool_name, tool_input dict,
-# tool_use_id, and an optional ``suggested_session_dir`` (set when the
-# tool's target path is outside the approved directories — the caller
-# may offer a "Allow <dir>/ this session" button); returns True (allow)
-# or False (deny).
+# tool_use_id, an optional ``suggested_session_dir`` (set when the tool's
+# target path is outside the approved directories), and OpenCode's exact
+# ``always`` patterns for durable approval; returns an approval decision.
 ApprovalCallback = Callable[
-    [str, dict[str, Any], str, str | None], Awaitable[bool]
+    [str, dict[str, Any], str, str | None, list[str]],
+    Awaitable[ApprovalDecision | bool],
 ]
 
 # Outcome of a host_bash approval prompt.
@@ -941,14 +949,26 @@ def make_can_use_tool(
             if path_scoped_out_of_scope
             else None
         )
-        approved = await request_approval(
-            tool_name, tool_input, tool_use_id, suggested_dir
+        approval = await request_approval(
+            tool_name,
+            tool_input,
+            tool_use_id,
+            suggested_dir,
+            context.always_patterns,
         )
-        decision = "allow" if approved else "deny"
-        logger.info("Tool %s %s", tool_name, decision)
+        approval_decision = (
+            approval
+            if isinstance(approval, ApprovalDecision)
+            else ApprovalDecision(approved=bool(approval))
+        )
+        approved = approval_decision.approved
+        decision_text = "allow" if approved else "deny"
+        logger.info("Tool %s %s", tool_name, decision_text)
 
         if approved:
-            return PermissionResultAllow()
+            return PermissionResultAllow(
+                reply="always" if approval_decision.remember else "once",
+            )
         else:
             return PermissionResultDeny(message="User denied tool use.")
 

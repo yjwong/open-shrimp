@@ -10,6 +10,7 @@ from typing import Any, Literal, Union
 class ToolPermissionContext:
     signal: Any | None = None
     suggestions: list[Any] = field(default_factory=list)
+    always_patterns: list[str] = field(default_factory=list)
     tool_use_id: str | None = None
     agent_id: str | None = None
 
@@ -21,6 +22,7 @@ class PermissionResultAllow:
     behavior: Literal["allow"] = "allow"
     updated_input: dict[str, Any] | None = None
     updated_permissions: list[Any] | None = None
+    reply: Literal["once", "always"] = "once"
 
 
 @dataclass

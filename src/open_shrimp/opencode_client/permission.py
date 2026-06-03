@@ -159,6 +159,10 @@ class PermissionBridge:
         metadata = props.get("metadata") or {}
         if not isinstance(metadata, dict):
             metadata = {}
+        always_patterns = props.get("always") or []
+        if not isinstance(always_patterns, list):
+            always_patterns = []
+        always_patterns = [p for p in always_patterns if isinstance(p, str)]
         tool_ref = props.get("tool") or {}
         if not isinstance(tool_ref, dict):
             tool_ref = {}
@@ -173,7 +177,11 @@ class PermissionBridge:
             metadata=metadata,
         )
 
-        ctx = ToolPermissionContext(tool_use_id=call_id or request_id)
+        ctx = ToolPermissionContext(
+            suggestions=list(always_patterns),
+            always_patterns=list(always_patterns),
+            tool_use_id=call_id or request_id,
+        )
 
         logger.info(
             "Permission asked: category=%s tool=%s callID=%s",
@@ -291,7 +299,7 @@ class PermissionBridge:
                     "OpenCode; dropping override for request %s",
                     request_id,
                 )
-            body = {"reply": "once"}
+            body = {"reply": result.reply}
         elif isinstance(result, PermissionResultDeny):
             body = {"reply": "reject", "message": result.message}
         else:

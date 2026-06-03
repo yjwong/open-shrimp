@@ -25,6 +25,7 @@ from open_shrimp.handlers.utils import _escape_mdv2
 from open_shrimp.hooks import (
     ACCEPT_ALL_EDITS_TOOLS,
     _PATH_SCOPED_TOOLS,
+    ApprovalDecision,
     ApprovalRule,
     HostBashOutcome,
 )
@@ -32,10 +33,6 @@ from open_shrimp.stream import _relative_path
 from open_shrimp.sudo_audit import log_sudo
 
 logger = logging.getLogger(__name__)
-
-
-# Prefixes to skip when extracting the bash command name (e.g. "sudo git").
-_BASH_SKIP_PREFIXES = {"sudo", "env", "nohup", "nice", "ionice", "time", "strace"}
 
 
 def _opencode_rule(rule: ApprovalRule) -> dict[str, str] | None:
@@ -66,6 +63,33 @@ def _external_directory_opencode_rule(directory: str) -> dict[str, str]:
     }
 
 
+def _format_always_patterns_label(patterns: list[str]) -> str:
+    """Return compact button text for OpenCode's durable allow patterns."""
+    if len(patterns) == 1:
+        pattern = patterns[0]
+        if len(pattern) > 28:
+            pattern = "..." + pattern[-25:]
+        return f"Always allow: {pattern}"
+    return f"Always allow {len(patterns)} patterns"
+
+
+def _format_always_patterns_status(patterns: list[str]) -> str:
+    """Render durable allow patterns for Telegram MarkdownV2 status text."""
+    if not patterns:
+        return "_Always allowed for this OpenCode project\._"
+    if len(patterns) == 1:
+        return (
+            f"_Always allow `{_escape_mdv2(patterns[0])}` "
+            "for this OpenCode project\._"
+        )
+    shown = patterns[:5]
+    lines = ["_Always allow these patterns for this OpenCode project:_"]
+    lines.extend(f"`{_escape_mdv2(pattern)}`" for pattern in shown)
+    if len(patterns) > len(shown):
+        lines.append(_escape_mdv2(f"...and {len(patterns) - len(shown)} more"))
+    return "\n".join(lines)
+
+
 async def _patch_active_session_rules(
     scope: ChatScope,
     rules: list[dict[str, str]],
@@ -82,79 +106,6 @@ async def _patch_active_session_rules(
         logger.exception("Failed to patch OpenCode session permissions")
         return False
     return True
-
-
-async def _patch_project_bash_permission(
-    scope: ChatScope,
-    pattern: str,
-) -> bool:
-    from open_shrimp.client_manager import get_session
-
-    session = get_session(scope)
-    if session is None:
-        logger.warning("No active OpenCode session for config permission patch: %s", scope)
-        return False
-    try:
-        await session.client.patch_config_permission({"bash": {pattern: "allow"}})
-    except Exception:
-        logger.exception("Failed to patch OpenCode config permissions")
-        return False
-    return True
-
-
-def _extract_bash_prefix(command: str) -> str | None:
-    """Extract the primary command name from a bash command string.
-
-    Handles chained commands (``&&``, ``||``, ``;``), skips common prefixes
-    like ``sudo`` and ``env VAR=val``, and returns the first significant
-    word.  Returns None if the command is too complex to extract a useful
-    prefix (e.g. starts with a subshell or heredoc).
-    """
-    cmd = command.strip()
-    if not cmd or cmd.startswith("(") or cmd.startswith("{"):
-        return None
-
-    # Take only the first command in a chain.
-    for sep in ("&&", "||", ";"):
-        cmd = cmd.split(sep, 1)[0].strip()
-
-    # Handle pipes: take only the first segment.
-    cmd = cmd.split("|", 1)[0].strip()
-
-    words = cmd.split()
-    if not words:
-        return None
-
-    # Skip common prefixes and their flags/arguments.
-    idx = 0
-    in_prefix = True
-    while idx < len(words) and in_prefix:
-        word = words[idx]
-        if word in _BASH_SKIP_PREFIXES:
-            idx += 1
-            # Skip any flags that belong to the prefix command
-            # (e.g. "nice -n 10", "sudo -u user").
-            while idx < len(words) and words[idx].startswith("-"):
-                idx += 1
-                # Skip the flag's argument if it looks like a value
-                if idx < len(words) and not words[idx].startswith("-"):
-                    idx += 1
-            continue
-        # env VAR=val ... — skip variable assignments.
-        if "=" in word and idx > 0:
-            idx += 1
-            continue
-        in_prefix = False
-
-    if idx >= len(words):
-        return None
-
-    prefix = words[idx]
-    # Reject if it looks like a path to a script rather than a command name.
-    if "/" in prefix and not prefix.startswith("./"):
-        return None
-
-    return prefix
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +521,8 @@ async def _send_approval_keyboard(
     suggested_session_dir: str | None = None,
     scope: ChatScope | None = None,
     context_name: str | None = None,
-) -> bool:
+    always_patterns: list[str] | None = None,
+) -> ApprovalDecision:
     """Send an inline keyboard for tool approval and wait for response.
 
     When ``suggested_session_dir`` is set (the file tool's target is
@@ -607,6 +559,7 @@ async def _send_approval_keyboard(
         "tool_name": tool_name,
         "tool_input": tool_input,
         "chat_id": chat_id,
+        "always_patterns": list(always_patterns or []),
     }
 
     # Build keyboard rows -- primary actions on top, session-scoped on bottom.
@@ -624,18 +577,16 @@ async def _send_approval_keyboard(
     if tool_name in ACCEPT_ALL_EDITS_TOOLS:
         accept_all_data = f"accept_all_edits:{tool_use_id}"
         session_row.append(InlineKeyboardButton("Accept all edits", callback_data=accept_all_data))
-    # Bash: prefix-specific persistent rule only (no blanket "Accept all
-    # Bash") — over-broad Bash approval is a security risk.
-    if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        prefix = _extract_bash_prefix(command)
-        if prefix:
-            accept_prefix_data = f"accept_bash_pfx:{tool_use_id}:{prefix}"
-            if len(accept_prefix_data.encode()) <= 64:
-                session_row.append(InlineKeyboardButton(
-                    f"Allow & remember: {prefix} *",
-                    callback_data=accept_prefix_data,
-                ))
+    # Durable approvals should reflect OpenCode's exact proposed patterns.
+    # The bridge will reply with {reply: "always"}, and OpenCode persists the
+    # patterns from the original permission request.
+    allow_always_data = ""
+    if always_patterns:
+        allow_always_data = f"approve_always:{tool_use_id}"
+        session_row.append(InlineKeyboardButton(
+            _format_always_patterns_label(always_patterns),
+            callback_data=allow_always_data,
+        ))
     # Path-scoped tools and edit-wide tools are excluded from the generic
     # "Accept all <tool>" button.  Edit-wide tools use the narrower
     # "Accept all edits" flow, which preserves path-boundary checks for
@@ -738,38 +689,34 @@ async def _send_approval_keyboard(
 
     # Create a future and wait for the callback
     loop = asyncio.get_running_loop()
-    future: asyncio.Future[bool] = loop.create_future()
+    future: asyncio.Future[bool | ApprovalDecision] = loop.create_future()
     _approval_futures[approve_data] = future
     _approval_futures[deny_data] = future
     if tool_name in ACCEPT_ALL_EDITS_TOOLS:
         _approval_futures[f"accept_all_edits:{tool_use_id}"] = future
+    if allow_always_data:
+        _approval_futures[allow_always_data] = future
     if accept_all_tool_data:
         _approval_futures[accept_all_tool_data] = future
-    # Register prefix-specific key for Bash.
-    accept_prefix_key = ""
-    if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        prefix = _extract_bash_prefix(command)
-        if prefix:
-            accept_prefix_key = f"accept_bash_pfx:{tool_use_id}:{prefix}"
-            if len(accept_prefix_key.encode()) <= 64:
-                _approval_futures[accept_prefix_key] = future
     if accept_dir_data:
         _approval_futures[accept_dir_data] = future
 
     try:
-        return await future
+        result = await future
+        if isinstance(result, ApprovalDecision):
+            return result
+        return ApprovalDecision(approved=bool(result))
     finally:
         _approval_futures.pop(approve_data, None)
         _approval_futures.pop(deny_data, None)
         _approval_futures.pop(f"accept_all_edits:{tool_use_id}", None)
+        if allow_always_data:
+            _approval_futures.pop(allow_always_data, None)
         if accept_all_tool_data:
             _approval_futures.pop(accept_all_tool_data, None)
         if accept_all_tool_key:
             # The user may have resolved via approve/deny — drop the stash.
             _pending_tool_approvals.pop(accept_all_tool_key, None)
-        if accept_prefix_key:
-            _approval_futures.pop(accept_prefix_key, None)
         if accept_dir_data:
             _approval_futures.pop(accept_dir_data, None)
             # If the user resolved via approve/deny instead of the
@@ -1110,7 +1057,7 @@ async def handle_approval_callback(
     """Handle approval-related callback queries.
 
     Handles: approve:*, deny:*, show_prompt:*, show_bash:*,
-    accept_all_edits:*, accept_bash_pfx:*, accept_all_tool:*.
+    accept_all_edits:*, approve_always:*, accept_all_tool:*.
     Returns True if the callback was handled.
     """
     import aiosqlite
@@ -1182,6 +1129,45 @@ async def handle_approval_callback(
                     logger.exception("Failed to remove bash button")
         return True
 
+    # Handle OpenCode-native durable approval. The exact patterns are supplied
+    # by OpenCode in the original permission.asked event; replying "always"
+    # tells OpenCode to persist those patterns in its project permission table.
+    if data.startswith("approve_always:"):
+        future = _approval_futures.get(data)
+        if not future or future.done():
+            await query.answer("This approval has expired.")
+            return True
+
+        tool_use_id = data.split(":", 1)[1] if ":" in data else ""
+        meta = _approval_metadata.get(tool_use_id, {})
+        patterns = meta.get("always_patterns") or []
+        if not isinstance(patterns, list):
+            patterns = []
+        patterns = [p for p in patterns if isinstance(p, str)]
+
+        future.set_result(ApprovalDecision(approved=True, remember=True))
+        await query.answer("Approved. Rule saved for this OpenCode project.")
+
+        if query.message:
+            try:
+                tool_name = _approval_tool_names.get(tool_use_id, "Tool")
+                escaped_tool = _escape_mdv2(tool_name)
+                compact = (
+                    f"✅ *{escaped_tool}* \- Approved\.\n"
+                    + _format_always_patterns_status(patterns)
+                )
+                await query.message.edit_text(
+                    text=compact,
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    logger.exception("Failed to edit approval message")
+        return True
+
     # Handle "Accept all edits" -- approve this tool and enable auto-approval
     # for all future Edit/Write calls within cwd for this session.
     if data.startswith("accept_all_edits:"):
@@ -1226,70 +1212,6 @@ async def handle_approval_callback(
         if chat_id is not None:
             await _auto_resolve_pending_approvals(
                 query.get_bot(), rule=None, is_edit_rule=True, chat_id=chat_id,
-            )
-        return True
-
-    # Handle "Accept all <prefix>" for Bash commands — approve this tool and
-    # enable auto-approval for future Bash commands matching "<prefix> *".
-    if data.startswith("accept_bash_pfx:"):
-        future = _approval_futures.get(data)
-        if not future or future.done():
-            await query.answer("This approval has expired.")
-            return True
-
-        # Parse: "accept_bash_pfx:<id>:<prefix>"
-        parts = data.split(":", 2)
-        prefix = parts[2] if len(parts) >= 3 else ""
-
-        rule: ApprovalRule | None = None
-
-        if query.message and prefix:
-            from open_shrimp.handlers.state import _tool_approved_sessions
-
-            scope = chat_scope_from_message(query.message)
-            db: aiosqlite.Connection = context.bot_data["db"]
-            ctx_name, _ = await _get_context(scope, config, db)
-            rule = ApprovalRule(tool_name="Bash", pattern=f"{prefix} *")
-            _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
-            saved = await _patch_project_bash_permission(scope, rule.pattern)
-
-            logger.info(
-                "Patched OpenCode project Bash rule %s for scope %s context %s (saved=%s)",
-                prefix,
-                scope,
-                ctx_name,
-                saved,
-            )
-
-        future.set_result(True)
-        escaped_prefix = _escape_mdv2(prefix)
-        await query.answer(
-            f"Approved. Always allow {prefix} * for this OpenCode project."
-        )
-
-        if query.message:
-            try:
-                icon = '\u2705'
-                compact = (
-                    f"{icon} *Bash* \u2014 Approved\\. "
-                    f"_Always allow `{escaped_prefix} \\*` for this OpenCode project\\._"
-                )
-                await query.message.edit_text(
-                    text=compact,
-                    parse_mode="MarkdownV2",
-                    reply_markup=None,
-                )
-            except Exception:
-                try:
-                    await query.message.edit_reply_markup(reply_markup=None)
-                except Exception:
-                    logger.exception("Failed to edit approval message")
-
-        # Auto-resolve other pending parallel Bash approvals matching this prefix.
-        chat_id = query.message.chat_id if query.message else None
-        if chat_id is not None and rule is not None:
-            await _auto_resolve_pending_approvals(
-                query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
             )
         return True
 

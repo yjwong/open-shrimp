@@ -848,12 +848,17 @@ def _make_approval_proxy(
         tool_input: dict[str, Any],
         tool_use_id: str,
         suggested_session_dir: str | None = None,
-    ) -> bool:
+        always_patterns: list[str] | None = None,
+    ):
         if ctx.request_approval is None:
             logger.warning("No approval callback set, denying tool %s", tool_name)
             return False
         return await ctx.request_approval(
-            tool_name, tool_input, tool_use_id, suggested_session_dir,
+            tool_name,
+            tool_input,
+            tool_use_id,
+            suggested_session_dir,
+            list(always_patterns or []),
         )
 
     return _proxy

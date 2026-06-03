@@ -840,7 +840,8 @@ async def _start_agent_task(
                 tool_input: dict[str, Any],
                 tool_use_id: str,
                 suggested_session_dir: str | None = None,
-            ) -> bool:
+                always_patterns: list[str] | None = None,
+            ):
                 await finalize_and_reset(context.bot, draft_state)
                 return await _send_approval_keyboard(
                     context.bot, scope.chat_id, tool_name, tool_input, tool_use_id,
@@ -853,6 +854,7 @@ async def _start_agent_task(
                     suggested_session_dir=suggested_session_dir,
                     scope=scope,
                     context_name=ctx_name,
+                    always_patterns=list(always_patterns or []),
                 )
 
             async def handle_questions(
