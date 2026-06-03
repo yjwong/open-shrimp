@@ -1103,6 +1103,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
+        await _cancel_running(scope)
         await close_session(scope)
         await set_session_id(db, scope, ctx_name, match.session_id)
         summary = _escape_mdv2(match.summary or "No summary")
@@ -1217,6 +1218,7 @@ async def handle_resume_callback(
     scope = chat_scope_from_message(query.message)
 
     ctx_name, ctx = await _get_context(scope, config, db)
+    await _cancel_running(scope)
     await close_session(scope)
     await set_session_id(db, scope, ctx_name, session_id)
     await query.answer(f"Resumed session {session_id[:8]}...")
