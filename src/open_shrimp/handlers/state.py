@@ -25,6 +25,11 @@ from open_shrimp.db import ChatScope
 # ---------------------------------------------------------------------------
 _running_tasks: dict[ChatScope, asyncio.Task[Any]] = {}
 
+# Durable tool permission writes requested during a running turn.  OpenCode
+# disposes the active instance after PATCH /config, so these are flushed only
+# once the scope is idle.
+_deferred_tool_permission_patches: dict[ChatScope, set[str]] = {}
+
 # ---------------------------------------------------------------------------
 # Per-scope dispatch lock: serialises _dispatch_to_agent so two messages
 # for the same scope cannot both slip through the "no task running" check

@@ -17,6 +17,7 @@ from open_shrimp.handlers.state import (
     _approval_futures,
     _approval_metadata,
     _approval_tool_names,
+    _deferred_tool_permission_patches,
     _pending_agent_inputs,
     _pending_session_dirs,
     _pending_tool_approvals,
@@ -86,6 +87,32 @@ async def _patch_project_tool_permission(scope: ChatScope, tool_name: str) -> bo
         )
         return False
     return True
+
+
+def defer_project_tool_permission_patch(scope: ChatScope, tool_name: str) -> None:
+    """Queue a durable tool allow rule to write after this scope is idle."""
+    _deferred_tool_permission_patches.setdefault(scope, set()).add(tool_name)
+
+
+async def flush_deferred_project_tool_permission_patches(scope: ChatScope) -> None:
+    """Persist queued tool allow rules now that no turn is running."""
+    tool_names = _deferred_tool_permission_patches.pop(scope, set())
+    if not tool_names:
+        return
+
+    failed: set[str] = set()
+    for tool_name in sorted(tool_names):
+        if await _patch_project_tool_permission(scope, tool_name):
+            logger.info(
+                "Always-allow-%s persisted for idle scope %s",
+                tool_name,
+                scope,
+            )
+            continue
+        failed.add(tool_name)
+
+    if failed:
+        _deferred_tool_permission_patches.setdefault(scope, set()).update(failed)
 
 
 def _edit_opencode_rule() -> dict[str, str]:
@@ -1374,33 +1401,14 @@ async def handle_approval_callback(
         rule = ApprovalRule(tool_name=accepted_tool_name, pattern=None)
         future.set_result(ApprovalDecision(approved=True, remember=True))
 
-        async def persist_always_allow() -> None:
-            # Reply to the in-flight permission before touching OpenCode config.
-            # Patching config/session rules can reconnect SSE and invalidate the
-            # pending permission id before /permission/{id}/reply is processed.
-            await asyncio.sleep(1)
-            durable_saved = await _patch_project_tool_permission(
-                scope, accepted_tool_name,
-            )
-            if not durable_saved:
-                logger.warning(
-                    "Always-allow-%s approved once but durable save failed: "
-                    "scope=%s context=%s",
-                    accepted_tool_name,
-                    scope,
-                    ctx_name,
-                )
-                return
-
-            _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
-            logger.info(
-                "Always-allow-%s enabled for scope %s context %s",
-                accepted_tool_name,
-                scope,
-                ctx_name,
-            )
-
-        context.application.create_task(persist_always_allow())
+        defer_project_tool_permission_patch(scope, accepted_tool_name)
+        _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
+        logger.info(
+            "Always-allow-%s queued for scope %s context %s",
+            accepted_tool_name,
+            scope,
+            ctx_name,
+        )
         escaped_tool = _escape_mdv2(accepted_tool_name)
         await query.answer(
             f"Approved. Future {accepted_tool_name} calls always allowed."

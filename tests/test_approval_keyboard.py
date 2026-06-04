@@ -13,6 +13,7 @@ from open_shrimp.handlers.approval import (
     handle_approval_callback,
 )
 from open_shrimp.handlers.state import _approval_futures
+from open_shrimp.handlers.state import _deferred_tool_permission_patches
 from open_shrimp.handlers.state import _pending_tool_approvals
 from open_shrimp.hooks import ApprovalDecision
 from open_shrimp.stream import _SUPPRESS_NOTIFICATION_TOOLS
@@ -125,13 +126,12 @@ async def test_skill_keyboard_uses_broad_full_width_buttons() -> None:
 
 
 @pytest.mark.asyncio
-async def test_always_allow_tool_remembers_without_session_patch(monkeypatch) -> None:
+async def test_always_allow_tool_defers_project_patch(monkeypatch) -> None:
     scope = ChatScope(chat_id=1, thread_id=2)
     token = "skill_token"
     data = f"accept_all_tool_always:{token}"
     loop = asyncio.get_running_loop()
     future: asyncio.Future[bool | ApprovalDecision] = loop.create_future()
-    tasks: list[asyncio.Task[None]] = []
 
     class _FakeMessage:
         chat_id = scope.chat_id
@@ -154,30 +154,18 @@ async def test_always_allow_tool_remembers_without_session_patch(monkeypatch) ->
         def get_bot(self) -> Any:
             return SimpleNamespace(edit_message_text=lambda **kwargs: None)
 
-    class _FakeApplication:
-        def create_task(self, coro: Any) -> asyncio.Task[None]:
-            task = asyncio.create_task(coro)
-            tasks.append(task)
-            return task
-
     async def fake_get_context(*args: Any, **kwargs: Any) -> tuple[str, Any]:
         return "ctx", SimpleNamespace()
-
-    async def fake_sleep(delay: float) -> None:
-        return None
 
     async def fake_patch_project_tool_permission(
         patch_scope: ChatScope, tool_name: str,
     ) -> bool:
-        assert patch_scope == scope
-        assert tool_name == "skill"
-        return True
+        raise AssertionError("project config should not be patched immediately")
 
     async def fail_patch_active_session_rules(*args: Any, **kwargs: Any) -> bool:
         raise AssertionError("active session rules should not be patched")
 
     monkeypatch.setattr("open_shrimp.handlers.utils._get_context", fake_get_context)
-    monkeypatch.setattr(approval_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(
         approval_module,
         "_patch_project_tool_permission",
@@ -198,7 +186,7 @@ async def test_always_allow_tool_remembers_without_session_patch(monkeypatch) ->
             SimpleNamespace(),
             SimpleNamespace(
                 bot_data={"db": object()},
-                application=_FakeApplication(),
+                application=SimpleNamespace(),
             ),
         )
         assert handled is True
@@ -206,11 +194,11 @@ async def test_always_allow_tool_remembers_without_session_patch(monkeypatch) ->
         assert isinstance(result, ApprovalDecision)
         assert result.approved is True
         assert result.remember is True
-        if tasks:
-            await asyncio.gather(*tasks)
+        assert _deferred_tool_permission_patches[scope] == {"skill"}
     finally:
         _approval_futures.pop(data, None)
         _pending_tool_approvals.pop(token, None)
+        _deferred_tool_permission_patches.pop(scope, None)
         from open_shrimp.handlers.state import _tool_approved_sessions
 
         _tool_approved_sessions.pop((scope, "ctx"), None)

@@ -39,6 +39,7 @@ from open_shrimp.handlers.approval import (
     _send_approval_keyboard,
     _send_auto_approved_diff,
     _send_host_bash_approval,
+    flush_deferred_project_tool_permission_patches,
 )
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
 from open_shrimp.handlers.questions import (
@@ -751,6 +752,7 @@ async def _run_parent_notification_continuation(
         await finalize_and_reset(context.bot, draft_state)
         _injectable_sessions.pop(scope, None)
         _running_tasks.pop(scope, None)
+        await flush_deferred_project_tool_permission_patches(scope)
         _wake_after_busy_parent_exit(
             scope,
             config,
@@ -1163,6 +1165,7 @@ async def _start_agent_task(
                         "Failed to save session on cleanup for scope %s", scope
                     )
             _running_tasks.pop(scope, None)
+            await flush_deferred_project_tool_permission_patches(scope)
             _wake_after_busy_parent_exit(
                 scope,
                 config,
