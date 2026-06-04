@@ -36,7 +36,7 @@ from open_shrimp.web_app_button import make_web_app_button
 
 from open_shrimp.agent import AgentEvent
 from open_shrimp.config import ContextConfig, is_sandboxed
-from open_shrimp.db import ChatScope
+from open_shrimp.db import ChatScope, set_session_id
 from open_shrimp.hooks import (
     ApprovalCallback,
     EditNotifyCallback,
@@ -608,9 +608,21 @@ async def get_or_create_session(
     if bot is not None:
         client_holder["client"] = client
 
+    live_session_id = client.session_id or session_id
+    if db is not None and live_session_id is not None:
+        try:
+            await set_session_id(db, scope, context_name, live_session_id)
+        except Exception:
+            logger.debug(
+                "Failed to save session id for scope %s context %s",
+                scope,
+                context_name,
+                exc_info=True,
+            )
+
     session = AgentSession(
         client=client,
-        session_id=session_id,
+        session_id=live_session_id,
         context_name=context_name,
         callback_context=callback_context,
         sandbox=sandbox,
