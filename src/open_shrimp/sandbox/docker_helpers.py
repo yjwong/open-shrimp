@@ -411,6 +411,13 @@ def get_opencode_home_dir(context_name: str) -> Path:
     return path
 
 
+def get_openshrimp_data_dir(context_name: str) -> Path:
+    """Return the host-side OpenShrimp state directory for a context."""
+    path = _ensure_state_dir(context_name) / "openshrimp-data"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _find_opencode_binary() -> str:
     env_bin = os.environ.get("OPENCODE_BIN")
     if env_bin and Path(env_bin).is_file():
@@ -718,9 +725,11 @@ def _build_docker_run_argv(
     task_tmp_dir = state_dir / "tmp"
     task_tmp_dir.mkdir(exist_ok=True)
     opencode_home = get_opencode_home_dir(context_name)
+    openshrimp_data = get_openshrimp_data_dir(context_name)
     docker_argv.extend([
         "-v", f"{project_dir}:{project_dir}",
         "-v", f"{opencode_home}:{SANDBOX_HOME}/.local/share/opencode",
+        "-v", f"{openshrimp_data}:{SANDBOX_HOME}/.local/share/openshrimp",
         "-v", f"{task_tmp_dir}:{SANDBOX_TMP.replace('1000', str(uid))}",
     ])
 

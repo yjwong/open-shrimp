@@ -30,11 +30,13 @@ from open_shrimp.sandbox.docker_helpers import (
     ensure_image as _ensure_image,
     get_screenshots_dir as _get_screenshots_dir,
     get_opencode_home_dir as _get_opencode_home_dir,
+    get_openshrimp_data_dir as _get_openshrimp_data_dir,
     get_opencode_host_port as _get_opencode_host_port,
     get_text_input_active as _get_text_input_active,
     get_text_input_state_path as _get_text_input_state_path,
     get_vnc_port as _get_vnc_port,
 )
+from open_shrimp.sandbox.opencode_plugins import ensure_opencode_plugin_config
 from open_shrimp.sandbox.skill_paths import SANDBOX_HOME
 
 logger = logging.getLogger(__name__)
@@ -243,6 +245,9 @@ class DockerSandbox:
     def opencode_home_dir(self) -> Path:
         return _get_opencode_home_dir(self._context_name)
 
+    def _openshrimp_data_dir(self) -> Path:
+        return _get_openshrimp_data_dir(self._context_name)
+
     def ensure_opencode_server(
         self, *, log_file: Path | None = None, provider_id: str | None = None,
     ) -> SandboxOpenCodeServer:
@@ -265,7 +270,13 @@ class DockerSandbox:
                 "Recreate the sandbox container and try again."
             )
 
-        _sync_opencode_auth(provider_id, self.opencode_home_dir())
+        opencode_home = self.opencode_home_dir()
+        ensure_opencode_plugin_config(self._openshrimp_data_dir())
+        guest_config = (
+            f"{SANDBOX_HOME}/.local/share/openshrimp/"
+            "managed-opencode/plugin-config.json"
+        )
+        _sync_opencode_auth(provider_id, opencode_home)
 
         password = secrets.token_hex(32)
         token = base64.b64encode(f"opencode:{password}".encode()).decode("ascii")
@@ -277,6 +288,7 @@ class DockerSandbox:
         cmd = [
             "docker", "exec",
             "-e", f"HOME={SANDBOX_HOME}",
+            "-e", f"OPENCODE_CONFIG={guest_config}",
             "-e", f"OPENCODE_SERVER_PASSWORD={password}",
             "-w", self._project_dir,
             self.container_name,

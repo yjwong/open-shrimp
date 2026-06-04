@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from open_shrimp.sandbox.libvirt import LibvirtSandbox
 from open_shrimp.sandbox.lima import LimaSandbox
 from open_shrimp.sandbox.lima_helpers import _build_mounts
 from open_shrimp.sandbox.lima_macos_helpers import _build_mounts_macos
+from open_shrimp.sandbox.opencode_plugins import APPLY_PATCH_LARGE_DELETE_GUARD_PLUGIN
 from open_shrimp.sandbox.skill_paths import global_skill_dir_candidates
 
 
@@ -66,8 +68,18 @@ def test_lima_mounts_opencode_home_for_linux_and_macos(tmp_path, monkeypatch):
         "writable": True,
     } in linux_mounts
     assert {
+        "location": str(tmp_path / "openshrimp-data"),
+        "mountPoint": "/home/alice.guest/.local/share/openshrimp",
+        "writable": True,
+    } in linux_mounts
+    assert {
         "location": str(tmp_path / "opencode-home"),
         "mountPoint": "/Users/alice.guest/Library/Application Support/opencode",
+        "writable": True,
+    } in macos_mounts
+    assert {
+        "location": str(tmp_path / "openshrimp-data"),
+        "mountPoint": "/Users/alice.guest/Library/Application Support/openshrimp",
         "writable": True,
     } in macos_mounts
 
@@ -145,6 +157,7 @@ def test_libvirt_mounts_global_skill_dirs(tmp_path, monkeypatch):
     assert mount_overrides[str(agents_skills)] == "/home/openshrimp/.agents/skills"
     assert mount_overrides[str(opencode_skills)] == "/home/openshrimp/.config/opencode/skills"
     assert mount_overrides[str(opencode_skill)] == "/home/openshrimp/.config/opencode/skill"
+    assert mount_overrides[str(tmp_path / "state" / "openshrimp-data")] == "/home/openshrimp/.local/share/openshrimp"
     assert {str(legacy_skills), str(agents_skills), str(opencode_skills), str(opencode_skill)} <= readonly_dirs
 
 
@@ -185,6 +198,12 @@ def test_libvirt_ensure_opencode_server_starts_guest_server(tmp_path):
     assert procs[0].args[-1] == "openshrimp@localhost"
     assert "-L" in procs[0].args
     assert "opencode serve --hostname 127.0.0.1" in procs[1].args[-1]
+    assert "OPENCODE_CONFIG=/home/openshrimp/.local/share/openshrimp/managed-opencode/plugin-config.json" in procs[1].args[-1]
+    assert "XDG_CONFIG_HOME=" not in procs[1].args[-1]
+    config = tmp_path / "openshrimp-data" / "managed-opencode" / "plugin-config.json"
+    assert json.loads(config.read_text(encoding="utf-8"))["plugin"] == [
+        APPLY_PATCH_LARGE_DELETE_GUARD_PLUGIN
+    ]
 
 
 def test_lima_ensure_opencode_server_uses_internal_tunnel_and_cache(
@@ -232,4 +251,10 @@ def test_lima_ensure_opencode_server_uses_internal_tunnel_and_cache(
     assert "-L" in procs[0].args
     assert procs[1].args[:4] == ["limactl", "shell", "dev", "--"]
     assert "OPENCODE_SERVER_PASSWORD=" in procs[1].args[-1]
+    assert "OPENCODE_CONFIG=/home/alice.guest/.local/share/openshrimp/managed-opencode/plugin-config.json" in procs[1].args[-1]
+    assert "XDG_CONFIG_HOME=" not in procs[1].args[-1]
     assert "opencode serve --hostname 127.0.0.1" in procs[1].args[-1]
+    config = tmp_path / "state" / "openshrimp-data" / "managed-opencode" / "plugin-config.json"
+    assert json.loads(config.read_text(encoding="utf-8"))["plugin"] == [
+        APPLY_PATCH_LARGE_DELETE_GUARD_PLUGIN
+    ]

@@ -139,6 +139,14 @@ def _build_mounts_macos(
         "writable": True,
     })
 
+    openshrimp_data = str(sdir / "openshrimp-data")
+    Path(openshrimp_data).mkdir(parents=True, exist_ok=True)
+    mounts.append({
+        "location": openshrimp_data,
+        "mountPoint": f"{vm_home}/Library/Application Support/openshrimp",
+        "writable": True,
+    })
+
     for host_skills, mount_point in existing_global_skill_dirs(guest_home=vm_home):
         mounts.append({
             "location": str(host_skills),

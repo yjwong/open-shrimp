@@ -7,6 +7,7 @@ Uses a tiny Python script as a fake `opencode` binary: prints the
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import textwrap
@@ -16,6 +17,7 @@ import pytest
 from open_shrimp.opencode_client import process as proc_mod
 from open_shrimp.opencode_client.errors import OpenCodeNotFoundError
 from open_shrimp.opencode_client.process import OpenCodeServer
+from open_shrimp.sandbox.opencode_plugins import APPLY_PATCH_LARGE_DELETE_GUARD_PLUGIN
 
 pytestmark = pytest.mark.asyncio
 
@@ -81,6 +83,31 @@ async def test_password_propagates_to_child(fake_binary, monkeypatch) -> None:
         assert len(server.password) == 64
     finally:
         await server.stop()
+
+
+async def test_build_env_sets_managed_opencode_config(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.setattr(proc_mod, "data_dir", lambda: tmp_path)
+
+    env = proc_mod._build_env("pw")
+
+    config_path = tmp_path / "managed-opencode" / "plugin-config.json"
+    assert env["OPENCODE_SERVER_PASSWORD"] == "pw"
+    assert env["OPENCODE_CONFIG"] == str(config_path)
+    assert json.loads(config_path.read_text(encoding="utf-8"))["plugin"] == [
+        APPLY_PATCH_LARGE_DELETE_GUARD_PLUGIN
+    ]
+
+
+async def test_build_env_preserves_existing_opencode_config(monkeypatch, tmp_path) -> None:
+    existing = tmp_path / "custom-opencode.json"
+    monkeypatch.setenv("OPENCODE_CONFIG", str(existing))
+    monkeypatch.setattr(proc_mod, "data_dir", lambda: tmp_path)
+
+    env = proc_mod._build_env("pw")
+
+    assert env["OPENCODE_CONFIG"] == str(existing)
+    assert not (tmp_path / "managed-opencode").exists()
 
 
 async def test_missing_binary_raises(monkeypatch) -> None:

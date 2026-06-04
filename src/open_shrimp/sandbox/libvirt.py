@@ -71,6 +71,7 @@ from open_shrimp.sandbox.docker import (
     _wait_for_opencode_ready,
 )
 from open_shrimp.sandbox.docker_helpers import OPENCODE_GUEST_PORT
+from open_shrimp.sandbox.opencode_plugins import ensure_opencode_plugin_config
 from open_shrimp.sandbox.skill_paths import (
     SANDBOX_HOME,
     SANDBOX_TMP,
@@ -176,6 +177,7 @@ class LibvirtSandbox:
         # written to the host so the terminal and resume views can read them.
         self._tmp_dir = self._sdir / "tmp"
         self._opencode_home_dir = self._sdir / "opencode-home"
+        self._openshrimp_data_dir = self._sdir / "openshrimp-data"
 
         self._port_forwards = PortForwardRegistry()
         self._opencode_endpoint: SandboxOpenCodeServer | None = None
@@ -277,6 +279,7 @@ class LibvirtSandbox:
         # Ensure host-side shared directories exist.
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._opencode_home_dir.mkdir(parents=True, exist_ok=True)
+        self._openshrimp_data_dir.mkdir(parents=True, exist_ok=True)
 
         # Build shared_dirs list for domain XML: (host_dir, socket | None).
         # The domain must declare virtiofs/9p devices for all dirs even
@@ -599,7 +602,13 @@ class LibvirtSandbox:
         if self._ssh_port is None:
             raise RuntimeError("Cannot start OpenCode: libvirt VM is not running")
 
-        _sync_opencode_auth(provider_id, self.opencode_home_dir())
+        opencode_home = self.opencode_home_dir()
+        ensure_opencode_plugin_config(self._openshrimp_data_dir)
+        guest_config = (
+            f"{SANDBOX_HOME}/.local/share/openshrimp/"
+            "managed-opencode/plugin-config.json"
+        )
+        _sync_opencode_auth(provider_id, opencode_home)
 
         host_port = allocate_host_port(None, OPENCODE_GUEST_PORT)
         password = secrets.token_hex(32)
@@ -641,6 +650,7 @@ class LibvirtSandbox:
         remote_cmd = (
             f"cd {shlex.quote(self._project_dir)} && "
             f"HOME={SANDBOX_HOME} "
+            f"OPENCODE_CONFIG={shlex.quote(guest_config)} "
             f"OPENCODE_SERVER_PASSWORD={shlex.quote(password)} "
             "opencode serve --hostname 127.0.0.1 "
             f"--port {OPENCODE_GUEST_PORT} --print-logs"
@@ -982,9 +992,11 @@ class LibvirtSandbox:
             all_dirs.append(str(self._screenshots_dir))
         all_dirs.append(str(self._tmp_dir))
         all_dirs.append(str(self._opencode_home_dir))
+        all_dirs.append(str(self._openshrimp_data_dir))
         mount_overrides = {
             str(self._tmp_dir): SANDBOX_TMP,
             str(self._opencode_home_dir): f"{SANDBOX_HOME}/.local/share/opencode",
+            str(self._openshrimp_data_dir): f"{SANDBOX_HOME}/.local/share/openshrimp",
         }
         readonly_dirs: set[str] = set()
         for host_skills, guest_skills in existing_global_skill_dirs():

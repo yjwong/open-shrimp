@@ -16,6 +16,8 @@ from open_shrimp.opencode_client.errors import (
     CLIConnectionError,
     OpenCodeNotFoundError,
 )
+from open_shrimp.paths import data_dir
+from open_shrimp.sandbox.opencode_plugins import ensure_opencode_plugin_config
 
 logger = logging.getLogger("opencode.serve")
 
@@ -93,8 +95,7 @@ class OpenCodeServer:
     async def _spawn(cls) -> "OpenCodeServer":
         binary = _find_binary()
         password = secrets.token_hex(32)
-        env = dict(os.environ)
-        env["OPENCODE_SERVER_PASSWORD"] = password
+        env = _build_env(password)
 
         logger.info("spawning %s serve", binary)
         proc = await asyncio.create_subprocess_exec(
@@ -167,6 +168,29 @@ async def _read_until_listening(stream: asyncio.StreamReader) -> str | None:
         m = _LISTENING_RE.search(line)
         if m:
             return m.group(1).rstrip("/")
+
+
+def _build_env(password: str) -> dict[str, str]:
+    env = dict(os.environ)
+    env["OPENCODE_SERVER_PASSWORD"] = password
+    _configure_plugin_guard(env)
+    return env
+
+
+def _configure_plugin_guard(env: dict[str, str]) -> None:
+    if env.get("OPENCODE_CONFIG"):
+        logger.warning(
+            "OPENCODE_CONFIG is already set; skipping OpenShrimp OpenCode plugin config"
+        )
+        return
+
+    try:
+        config_path = ensure_opencode_plugin_config(data_dir())
+    except Exception:
+        logger.exception("failed to prepare OpenShrimp OpenCode plugin config")
+        return
+
+    env["OPENCODE_CONFIG"] = str(config_path)
 
 
 async def _drain(stream: asyncio.StreamReader) -> None:

@@ -1,0 +1,25 @@
+{
+  "name": "@openshrimp/opencode-apply-patch-large-delete-guard",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that blocks apply_patch Delete File operations on large files.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./server": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "openshrimp",
+    "apply_patch"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

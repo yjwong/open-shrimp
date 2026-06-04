@@ -1,13 +1,30 @@
 """Tests for container image auto-build."""
 
-import pytest
+import json
 from unittest.mock import patch, MagicMock
 
+import pytest
+
+from open_shrimp.sandbox.docker import DockerSandbox
 from open_shrimp.sandbox.docker_helpers import (
     OPENCODE_GUEST_PORT,
     _build_docker_run_argv,
     ensure_image,
 )
+from open_shrimp.sandbox.opencode_plugins import APPLY_PATCH_LARGE_DELETE_GUARD_PLUGIN
+
+
+class FakeProc:
+    def __init__(self, args):
+        self.args = args
+        self.stdout = []
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = 0
 
 
 def test_ensure_image_skips_when_image_exists():
@@ -97,6 +114,7 @@ def test_docker_run_mounts_opencode_home_and_port(tmp_path, monkeypatch):
 
     joined = "\n".join(argv)
     assert f"{tmp_path}/containers/dev/opencode-home:/home/openshrimp/.local/share/opencode" in joined
+    assert f"{tmp_path}/containers/dev/openshrimp-data:/home/openshrimp/.local/share/openshrimp" in joined
     assert f"{tmp_path}/containers/dev:/home/openshrimp/.claude" not in joined
     assert "-p" in argv
     assert f"127.0.0.1::{OPENCODE_GUEST_PORT}" in argv
@@ -130,3 +148,35 @@ def test_docker_run_mounts_global_skill_dirs(tmp_path, monkeypatch):
     assert f"type=bind,source={agents_skills},target=/home/openshrimp/.agents/skills,readonly" in joined
     assert f"type=bind,source={opencode_skills},target=/home/openshrimp/.config/opencode/skills,readonly" in joined
     assert f"type=bind,source={opencode_skill},target=/home/openshrimp/.config/opencode/skill,readonly" in joined
+
+
+def test_docker_opencode_server_writes_plugin_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "open_shrimp.sandbox.docker_helpers.container_state_dir",
+        lambda: tmp_path / "containers",
+    )
+    procs: list[FakeProc] = []
+
+    def fake_popen(args, **kwargs):
+        proc = FakeProc(args)
+        procs.append(proc)
+        return proc
+
+    with (
+        patch("open_shrimp.sandbox.docker._get_opencode_host_port", return_value=49154),
+        patch("open_shrimp.sandbox.docker._sync_opencode_auth") as sync_auth,
+        patch("open_shrimp.sandbox.docker._wait_for_opencode_ready"),
+        patch("open_shrimp.sandbox.docker._drain_opencode_output"),
+        patch("open_shrimp.sandbox.docker.subprocess.Popen", side_effect=fake_popen),
+    ):
+        sandbox = DockerSandbox("dev", "/workspace/project")
+        endpoint = sandbox.ensure_opencode_server(provider_id="openai")
+
+    assert endpoint.base_url == "http://127.0.0.1:49154"
+    sync_auth.assert_called_once_with("openai", tmp_path / "containers" / "dev" / "opencode-home")
+    assert "OPENCODE_CONFIG=/home/openshrimp/.local/share/openshrimp/managed-opencode/plugin-config.json" in procs[0].args
+    assert not any(arg.startswith("XDG_CONFIG_HOME=") for arg in procs[0].args)
+    config = tmp_path / "containers" / "dev" / "openshrimp-data" / "managed-opencode" / "plugin-config.json"
+    assert json.loads(config.read_text(encoding="utf-8"))["plugin"] == [
+        APPLY_PATCH_LARGE_DELETE_GUARD_PLUGIN
+    ]

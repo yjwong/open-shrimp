@@ -59,6 +59,7 @@ from open_shrimp.sandbox.docker import (
     _wait_for_opencode_ready,
 )
 from open_shrimp.sandbox.docker_helpers import OPENCODE_GUEST_PORT
+from open_shrimp.sandbox.opencode_plugins import ensure_opencode_plugin_config
 from open_shrimp.vnc.rfb_snapshot import RfbSnapshotError, capture_to_png
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,7 @@ class LimaSandbox:
         self._inst_name = _instance_name(context_name, instance_prefix)
         self._tmp_dir = self._sdir / "tmp"
         self._opencode_home_dir = self._sdir / "opencode-home"
+        self._openshrimp_data_dir = self._sdir / "openshrimp-data"
         self._env = _lima_env()  # cached — LIMA_HOME doesn't change
 
         # SSH tunnel processes for macOS guest port forwarding.
@@ -209,6 +211,7 @@ class LimaSandbox:
         # Ensure shared directories exist on host.
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._opencode_home_dir.mkdir(parents=True, exist_ok=True)
+        self._openshrimp_data_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate YAML template.
         yaml_path = generate_lima_yaml(
@@ -302,6 +305,7 @@ class LimaSandbox:
                 self._project_dir,
                 *self._additional_directories,
                 self._guest_opencode_data_dir(),
+                self._guest_openshrimp_data_dir(),
             ]
 
             # Auto-login only takes effect on boot —
@@ -344,7 +348,9 @@ class LimaSandbox:
                 f"Cannot start OpenCode: Lima ssh.config not found at {ssh_config}"
             )
 
-        _sync_opencode_auth(provider_id, self.opencode_home_dir())
+        opencode_home = self.opencode_home_dir()
+        ensure_opencode_plugin_config(self._openshrimp_data_dir)
+        _sync_opencode_auth(provider_id, opencode_home)
 
         host_port = allocate_host_port(None, OPENCODE_GUEST_PORT)
         password = secrets.token_hex(32)
@@ -930,6 +936,11 @@ class LimaSandbox:
             return f"{self._guest_home()}/Library/Application Support/opencode"
         return f"{self._guest_home()}/.local/share/opencode"
 
+    def _guest_openshrimp_data_dir(self) -> str:
+        if self._guest_os == "macos":
+            return f"{self._guest_home()}/Library/Application Support/openshrimp"
+        return f"{self._guest_home()}/.local/share/openshrimp"
+
     def _opencode_guest_env_prefix(self, password: str) -> str:
         home = self._guest_home()
         if self._guest_os == "macos":
@@ -939,6 +950,7 @@ class LimaSandbox:
         return (
             f"HOME={shlex.quote(home)} "
             f"XDG_DATA_HOME={shlex.quote(data_parent)} "
+            f"OPENCODE_CONFIG={shlex.quote(self._guest_openshrimp_data_dir() + '/managed-opencode/plugin-config.json')} "
             f"OPENCODE_SERVER_PASSWORD={shlex.quote(password)}"
         )
 
