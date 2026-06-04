@@ -1372,9 +1372,7 @@ async def handle_approval_callback(
         db: aiosqlite.Connection = context.bot_data["db"]
         ctx_name, _ = await _get_context(scope, config, db)
         rule = ApprovalRule(tool_name=accepted_tool_name, pattern=None)
-        opencode_rule = _opencode_rule(rule)
-
-        future.set_result(True)
+        future.set_result(ApprovalDecision(approved=True, remember=True))
 
         async def persist_always_allow() -> None:
             # Reply to the in-flight permission before touching OpenCode config.
@@ -1395,8 +1393,6 @@ async def handle_approval_callback(
                 return
 
             _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
-            if opencode_rule is not None:
-                await _patch_active_session_rules(scope, [opencode_rule])
             logger.info(
                 "Always-allow-%s enabled for scope %s context %s",
                 accepted_tool_name,

@@ -85,10 +85,12 @@ class EventBus:
         self,
         server: OpenCodeServer | OpenCodeEndpoint,
         *,
+        directory: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         queue_size: int = _DEFAULT_QUEUE_SIZE,
     ) -> None:
         self._server = server
+        self._directory = directory
         self._owns_client = http_client is None
         self._http = http_client or httpx.AsyncClient(
             base_url=server.base_url,
@@ -170,7 +172,8 @@ class EventBus:
             backoff = min(backoff * 2, _BACKOFF_MAX)
 
     async def _read_stream(self) -> None:
-        async with self._http.stream("GET", "/event") as r:
+        params = {"directory": self._directory} if self._directory else None
+        async with self._http.stream("GET", "/event", params=params) as r:
             r.raise_for_status()
             async for event in _sse_events(r):
                 if self._stop.is_set():

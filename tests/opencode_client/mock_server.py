@@ -54,6 +54,7 @@ class MockOpenCode:
         # Each /event subscriber gets its own queue. _subscribers is a list
         # of asyncio.Queue[dict | None]. None signals end-of-stream.
         self._subscribers: list[asyncio.Queue[dict[str, Any] | None]] = []
+        self.event_params: list[dict[str, str]] = []
         # Whether new subscribers should receive the initial server.connected.
         self.send_initial_connected = True
 
@@ -172,6 +173,7 @@ class MockOpenCode:
     # --- HTTP handlers ------------------------------------------------
 
     async def _event_stream(self, request: Request) -> Response:
+        self.event_params.append(dict(request.query_params))
         q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self._subscribers.append(q)
         if self.send_initial_connected:

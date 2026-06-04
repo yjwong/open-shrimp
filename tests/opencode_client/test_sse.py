@@ -22,6 +22,16 @@ async def test_start_waits_for_server_connected(mock_setup) -> None:
         await bus.stop()
 
 
+async def test_start_passes_directory_to_event_stream(mock_setup) -> None:
+    mock, base = mock_setup
+    bus = EventBus(make_fake_server(base), directory="/tmp/project")
+    try:
+        await bus.start()
+        assert mock.event_params[-1] == {"directory": "/tmp/project"}
+    finally:
+        await bus.stop()
+
+
 async def test_start_times_out_when_no_connected_event(mock_setup) -> None:
     mock, base = mock_setup
     mock.send_initial_connected = False

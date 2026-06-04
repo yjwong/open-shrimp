@@ -64,10 +64,12 @@ class PermissionBridge:
         http: httpx.AsyncClient,
         can_use_tool: CanUseToolCallback,
         session_id: str,
+        directory: str | None = None,
     ) -> None:
         self._http = http
         self._can_use_tool = can_use_tool
         self._session_id = session_id
+        self._directory = directory
         self._tasks: set[asyncio.Task[None]] = set()
         # callID -> (tool_name, input_dict, message_id)
         self._tool_parts: dict[str, tuple[str, dict[str, Any], str]] = {}
@@ -247,8 +249,10 @@ class PermissionBridge:
         call_id: str,
     ) -> tuple[str, dict[str, Any], str] | None:
         try:
+            params = {"directory": self._directory} if self._directory else None
             r = await self._http.get(
-                f"/session/{session_id}/message/{message_id}"
+                f"/session/{session_id}/message/{message_id}",
+                params=params,
             )
         except httpx.HTTPError as exc:
             logger.warning(
@@ -310,8 +314,9 @@ class PermissionBridge:
             body = {"reply": "reject", "message": "unknown permission result"}
 
         try:
+            params = {"directory": self._directory} if self._directory else None
             r = await self._http.post(
-                f"/permission/{request_id}/reply", json=body,
+                f"/permission/{request_id}/reply", params=params, json=body,
             )
         except httpx.HTTPError as exc:
             logger.warning(

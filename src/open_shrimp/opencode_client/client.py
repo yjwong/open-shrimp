@@ -69,19 +69,22 @@ _ASK_BY_DEFAULT_MCP_PERMS = frozenset({
 _ALWAYS_ALLOWED_OPENCODE_PERMS = frozenset({"question", "todowrite"})
 
 
-_BUS_REGISTRY: dict[tuple[str, str], EventBus] = {}
+_BUS_REGISTRY: dict[tuple[str, str, str], EventBus] = {}
 _BUS_LOCK: asyncio.Lock | None = None
 
 
-async def _get_bus(server: OpenCodeServer | OpenCodeEndpoint) -> EventBus:
+async def _get_bus(
+    server: OpenCodeServer | OpenCodeEndpoint,
+    directory: str | None,
+) -> EventBus:
     global _BUS_LOCK
     if _BUS_LOCK is None:
         _BUS_LOCK = asyncio.Lock()
     async with _BUS_LOCK:
-        key = (server.base_url, server.auth_header)
+        key = (server.base_url, server.auth_header, directory or "")
         bus = _BUS_REGISTRY.get(key)
         if bus is None:
-            bus = EventBus(server)
+            bus = EventBus(server, directory=directory)
             await bus.start()
             _BUS_REGISTRY[key] = bus
         return bus
@@ -141,7 +144,7 @@ class OpenCodeClient:
         if self._server is not None:
             return
         self._server = self._options.endpoint or await OpenCodeServer.get_or_start()
-        self._bus = await _get_bus(self._server)
+        self._bus = await _get_bus(self._server, self._options.cwd)
         self._http = httpx.AsyncClient(
             base_url=self._server.base_url,
             timeout=30.0,
@@ -173,6 +176,7 @@ class OpenCodeClient:
                     http=self._http,
                     can_use_tool=self._options.can_use_tool,
                     session_id=self._session_id,
+                    directory=self._options.cwd,
                 )
         except BaseException:
             await self._http.aclose()
@@ -753,6 +757,7 @@ class OpenCodeClient:
             http=self._http,
             can_use_tool=self._options.can_use_tool,
             session_id=session_id,
+            directory=self._options.cwd,
         )
 
     async def iter_session_response(
