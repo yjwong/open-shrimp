@@ -51,6 +51,43 @@ def _opencode_rule(rule: ApprovalRule) -> dict[str, str] | None:
     }
 
 
+def _opencode_permission_name(tool_name: str) -> str | None:
+    """Return the OpenCode permission key for a hooks/OpenCode tool name."""
+    from open_shrimp.opencode_client.tool_names import hooks_to_opencode
+
+    permission = hooks_to_opencode(tool_name)
+    if not permission.startswith("_"):
+        permission = permission.lower()
+    return permission or None
+
+
+async def _patch_project_tool_permission(scope: ChatScope, tool_name: str) -> bool:
+    """Persist a wildcard allow rule for this tool in OpenCode project config."""
+    from open_shrimp.client_manager import get_session
+
+    permission = _opencode_permission_name(tool_name)
+    if permission is None:
+        return False
+    session = get_session(scope)
+    if session is None:
+        logger.warning(
+            "No active OpenCode session for durable permission patch: %s",
+            scope,
+        )
+        return False
+    try:
+        await session.client.patch_config_permission({
+            permission: {"*": "allow"},
+        })
+    except Exception:
+        logger.exception(
+            "Failed to patch durable OpenCode permission for %s",
+            tool_name,
+        )
+        return False
+    return True
+
+
 def _edit_opencode_rule() -> dict[str, str]:
     return {"permission": "edit", "pattern": "*", "action": "allow"}
 
@@ -562,7 +599,8 @@ async def _send_approval_keyboard(
         "always_patterns": list(always_patterns or []),
     }
 
-    # Build keyboard rows -- primary actions on top, session-scoped on bottom.
+    # Build keyboard rows -- primary actions on top; broad approvals get
+    # full-width rows because tool names and MCP identifiers can be long.
     # Row 1: [Approve] [Deny] (and optional [Show prompt] for Agent)
     primary_row: list[InlineKeyboardButton] = []
     if tool_name == "Agent":
@@ -572,21 +610,22 @@ async def _send_approval_keyboard(
     primary_row.append(InlineKeyboardButton("Approve", callback_data=approve_data))
     primary_row.append(InlineKeyboardButton("Deny", callback_data=deny_data))
 
-    # Row 2: session-scoped auto-approval buttons
-    session_row: list[InlineKeyboardButton] = []
+    extra_rows: list[list[InlineKeyboardButton]] = []
     if tool_name in ACCEPT_ALL_EDITS_TOOLS:
         accept_all_data = f"accept_all_edits:{tool_use_id}"
-        session_row.append(InlineKeyboardButton("Accept all edits", callback_data=accept_all_data))
+        extra_rows.append([InlineKeyboardButton(
+            "Accept all edits", callback_data=accept_all_data,
+        )])
     # Durable approvals should reflect OpenCode's exact proposed patterns.
     # The bridge will reply with {reply: "always"}, and OpenCode persists the
     # patterns from the original permission request.
     allow_always_data = ""
-    if always_patterns:
+    if tool_name == "Bash" and always_patterns:
         allow_always_data = f"approve_always:{tool_use_id}"
-        session_row.append(InlineKeyboardButton(
+        extra_rows.append([InlineKeyboardButton(
             _format_always_patterns_label(always_patterns),
             callback_data=allow_always_data,
-        ))
+        )])
     # Path-scoped tools and edit-wide tools are excluded from the generic
     # "Accept all <tool>" button.  Edit-wide tools use the narrower
     # "Accept all edits" flow, which preserves path-boundary checks for
@@ -598,15 +637,27 @@ async def _send_approval_keyboard(
     )
     accept_all_tool_key = ""
     accept_all_tool_data = ""
+    accept_all_tool_always_key = ""
+    accept_all_tool_always_data = ""
     if tool_name not in _no_accept_all:
         accept_all_tool_key = uuid.uuid4().hex[:12]
         _pending_tool_approvals[accept_all_tool_key] = tool_name
         accept_all_tool_data = f"accept_all_tool:{accept_all_tool_key}"
         # The short token keeps callback_data well under 64 bytes even for
         # MCP names like ``mcp__playwright__browser_navigate``.
-        session_row.append(InlineKeyboardButton(
-            f"Accept all {tool_name}", callback_data=accept_all_tool_data,
-        ))
+        extra_rows.append([InlineKeyboardButton(
+            f"Allow all {tool_name} this session",
+            callback_data=accept_all_tool_data,
+        )])
+        accept_all_tool_always_key = uuid.uuid4().hex[:12]
+        _pending_tool_approvals[accept_all_tool_always_key] = tool_name
+        accept_all_tool_always_data = (
+            f"accept_all_tool_always:{accept_all_tool_always_key}"
+        )
+        extra_rows.append([InlineKeyboardButton(
+            f"Always allow {tool_name}",
+            callback_data=accept_all_tool_always_data,
+        )])
 
     # Out-of-scope file access: offer to approve the entire directory
     # for the rest of the session. Both readers
@@ -631,9 +682,9 @@ async def _send_approval_keyboard(
                 btn_label = f"Allow all edits in {dir_label}/"
             else:
                 btn_label = f"Allow reading from {dir_label}/"
-            session_row.append(InlineKeyboardButton(
+            extra_rows.append([InlineKeyboardButton(
                 btn_label, callback_data=accept_dir_data,
-            ))
+            )])
         else:
             # Couldn't fit — drop the pending entry.
             _pending_session_dirs.pop(accept_dir_key, None)
@@ -670,8 +721,7 @@ async def _send_approval_keyboard(
                 bot_token=bot_token,
                 is_private_chat=is_private_chat,
             )])
-    if session_row:
-        rows.append(session_row)
+    rows.extend(extra_rows)
     keyboard = InlineKeyboardMarkup(rows)
 
     thread_kwargs: dict[str, Any] = {}
@@ -698,6 +748,8 @@ async def _send_approval_keyboard(
         _approval_futures[allow_always_data] = future
     if accept_all_tool_data:
         _approval_futures[accept_all_tool_data] = future
+    if accept_all_tool_always_data:
+        _approval_futures[accept_all_tool_always_data] = future
     if accept_dir_data:
         _approval_futures[accept_dir_data] = future
 
@@ -714,9 +766,13 @@ async def _send_approval_keyboard(
             _approval_futures.pop(allow_always_data, None)
         if accept_all_tool_data:
             _approval_futures.pop(accept_all_tool_data, None)
+        if accept_all_tool_always_data:
+            _approval_futures.pop(accept_all_tool_always_data, None)
         if accept_all_tool_key:
             # The user may have resolved via approve/deny — drop the stash.
             _pending_tool_approvals.pop(accept_all_tool_key, None)
+        if accept_all_tool_always_key:
+            _pending_tool_approvals.pop(accept_all_tool_always_key, None)
         if accept_dir_data:
             _approval_futures.pop(accept_dir_data, None)
             # If the user resolved via approve/deny instead of the
@@ -1057,7 +1113,8 @@ async def handle_approval_callback(
     """Handle approval-related callback queries.
 
     Handles: approve:*, deny:*, show_prompt:*, show_bash:*,
-    accept_all_edits:*, approve_always:*, accept_all_tool:*.
+    accept_all_edits:*, approve_always:*, accept_all_tool:*,
+    accept_all_tool_always:*.
     Returns True if the callback was handled.
     """
     import aiosqlite
@@ -1291,6 +1348,90 @@ async def handle_approval_callback(
                 is_edit_rule=False,
                 chat_id=chat_id,
                 approved_dir=directory,
+            )
+        return True
+
+    # Handle "Always allow <tool>" -- approve this tool and persist a
+    # wildcard allow rule in OpenCode's project config. Bash intentionally
+    # uses OpenCode's pattern-specific approve_always flow instead.
+    if data.startswith("accept_all_tool_always:"):
+        future = _approval_futures.get(data)
+        if not future or future.done():
+            await query.answer("This approval has expired.")
+            return True
+
+        token = data.split(":", 1)[1]
+        accepted_tool_name = _pending_tool_approvals.pop(token, "")
+        if not query.message or not accepted_tool_name:
+            await query.answer("This approval has expired.")
+            return True
+
+        from open_shrimp.handlers.state import _tool_approved_sessions
+
+        scope = chat_scope_from_message(query.message)
+        db: aiosqlite.Connection = context.bot_data["db"]
+        ctx_name, _ = await _get_context(scope, config, db)
+        rule = ApprovalRule(tool_name=accepted_tool_name, pattern=None)
+        opencode_rule = _opencode_rule(rule)
+
+        future.set_result(True)
+
+        async def persist_always_allow() -> None:
+            # Reply to the in-flight permission before touching OpenCode config.
+            # Patching config/session rules can reconnect SSE and invalidate the
+            # pending permission id before /permission/{id}/reply is processed.
+            await asyncio.sleep(1)
+            durable_saved = await _patch_project_tool_permission(
+                scope, accepted_tool_name,
+            )
+            if not durable_saved:
+                logger.warning(
+                    "Always-allow-%s approved once but durable save failed: "
+                    "scope=%s context=%s",
+                    accepted_tool_name,
+                    scope,
+                    ctx_name,
+                )
+                return
+
+            _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
+            if opencode_rule is not None:
+                await _patch_active_session_rules(scope, [opencode_rule])
+            logger.info(
+                "Always-allow-%s enabled for scope %s context %s",
+                accepted_tool_name,
+                scope,
+                ctx_name,
+            )
+
+        context.application.create_task(persist_always_allow())
+        escaped_tool = _escape_mdv2(accepted_tool_name)
+        await query.answer(
+            f"Approved. Future {accepted_tool_name} calls always allowed."
+        )
+
+        if query.message:
+            try:
+                original_md = query.message.text_markdown_v2 or query.message.text or ""
+                status = (
+                    f"\n\n✅ *Approved\\.* _All future {escaped_tool} "
+                    f"calls always allowed for this OpenCode project\\._"
+                )
+                await query.message.edit_text(
+                    text=original_md + status,
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    logger.exception("Failed to edit approval message")
+
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is not None:
+            await _auto_resolve_pending_approvals(
+                query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
             )
         return True
 
