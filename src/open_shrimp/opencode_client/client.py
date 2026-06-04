@@ -576,6 +576,24 @@ class OpenCodeClient:
             raise ProcessError(f"GET /config returned non-object: {payload!r}")
         return payload
 
+    async def get_models(self) -> list[dict[str, Any]]:
+        """Fetch available OpenCode models for this client's project directory."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.get_models called before connect()")
+        params: dict[str, str] = {}
+        if self._options.cwd:
+            params["directory"] = self._options.cwd
+        try:
+            r = await self._http.get("/api/model", params=params)
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"GET /api/model failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"GET /api/model returned {r.status_code}: {r.text[:300]}")
+        payload = r.json()
+        if not isinstance(payload, list):
+            raise ProcessError(f"GET /api/model returned non-list: {payload!r}")
+        return [item for item in payload if isinstance(item, dict)]
+
     async def patch_config_permission(
         self,
         permission_config: dict[str, Any],

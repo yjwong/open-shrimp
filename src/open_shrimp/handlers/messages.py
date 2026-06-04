@@ -733,6 +733,7 @@ async def _run_parent_notification_continuation(
                     model_usage=result.model_usage,
                     turn_usage=result.turn_usage,
                     todos=latest_todos if latest_todos else None,
+                    opencode_client=session.client,
                 )
     except CLIConnectionError:
         logger.exception(
@@ -1017,6 +1018,7 @@ async def _start_agent_task(
                             model_usage=result.model_usage,
                             turn_usage=result.turn_usage,
                             todos=latest_todos if latest_todos else None,
+                            opencode_client=session.client,
                         )
 
                     schedule_prompt_suggestion(

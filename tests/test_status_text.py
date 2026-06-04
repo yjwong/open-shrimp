@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from open_shrimp.config import ContextConfig
-from open_shrimp.handlers.utils import _build_status_text
+from open_shrimp.handlers.utils import _build_status_text, _resolve_context_window
 
 
 def _ctx() -> ContextConfig:
@@ -11,7 +13,7 @@ def _ctx() -> ContextConfig:
         directory="/tmp/proj",
         description="test context",
         allowed_tools=[],
-        model="gpt-5.5",
+        model="openai/gpt-5.5",
     )
 
 
@@ -62,3 +64,29 @@ def test_status_text_missing_cache_key_does_not_crash() -> None:
         "alpha", _ctx(), model_usage=None, turn_usage=turn_usage,
     )
     assert "100" in text
+
+
+def test_status_text_uses_resolved_context_window() -> None:
+    turn_usage = {"input": 10_000, "output": 10, "cache": {"read": 0, "write": 0}}
+
+    text = _build_status_text(
+        "alpha", _ctx(), turn_usage=turn_usage, context_window=1_050_000,
+    )
+
+    assert r"10\.0k / 1\.1M" in text
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_window_from_opencode_catalog() -> None:
+    class FakeClient:
+        async def get_models(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "gpt-5.5",
+                    "apiID": "gpt-5.5",
+                    "providerID": "openai",
+                    "limit": {"context": 1_050_000, "input": 922_000, "output": 128_000},
+                }
+            ]
+
+    assert await _resolve_context_window(_ctx(), FakeClient()) == 1_050_000

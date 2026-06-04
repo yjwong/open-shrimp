@@ -23,8 +23,12 @@ from open_shrimp.handlers.state import (
     _effort_overrides,
     _model_overrides,
 )
+from open_shrimp.opencode_client import split_provider_model
+from open_shrimp.opencode_client._http import get_json
 
 logger = logging.getLogger(__name__)
+
+_context_limit_cache: dict[tuple[str, str, str], int] = {}
 
 
 def chat_scope_from_message(message: Message) -> ChatScope:
@@ -220,6 +224,7 @@ def _build_status_text(
     ctx: ContextConfig,
     model_usage: dict[str, Any] | None = None,
     turn_usage: dict[str, Any] | None = None,
+    context_window: int | None = None,
     todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the pinned status message text in MarkdownV2."""
@@ -241,15 +246,8 @@ def _build_status_text(
     # message). OpenCode-native shape — see
     # ``opencode_client/events.py`` for the schema.
     if turn_usage:
-        context_window = _DEFAULT_CONTEXT_LIMIT
-        if model_usage:
-            first_model = next(iter(model_usage.values()))
-            # TODO: per-model contextWindow lookup. OpenCode's
-            # step.started doesn't carry a context window; for now fall
-            # back to _DEFAULT_CONTEXT_LIMIT.
-            context_window = first_model.get(
-                "contextWindow", _DEFAULT_CONTEXT_LIMIT,
-            )
+        if not context_window:
+            context_window = _DEFAULT_CONTEXT_LIMIT
 
         cache = turn_usage.get("cache") or {}
         total_tokens = (
@@ -292,6 +290,58 @@ def _build_status_text(
     return "\n".join(lines)
 
 
+async def _resolve_context_window(
+    ctx: ContextConfig,
+    opencode_client: Any | None = None,
+) -> int | None:
+    """Return the active model's context limit from OpenCode's model catalog."""
+    try:
+        provider_id, model_id = split_provider_model(ctx.model)
+    except ValueError:
+        return None
+
+    cache_key = (ctx.directory, provider_id, model_id)
+    cached = _context_limit_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        if opencode_client is not None:
+            models = await opencode_client.get_models()
+        else:
+            payload = await get_json(
+                "/api/model", params={"directory": ctx.directory},
+            )
+            if not isinstance(payload, list):
+                return None
+            models = [item for item in payload if isinstance(item, dict)]
+    except Exception:
+        logger.debug(
+            "Failed to fetch OpenCode model catalog for %s/%s",
+            provider_id,
+            model_id,
+            exc_info=True,
+        )
+        return None
+
+    for model in models:
+        if model.get("providerID") != provider_id:
+            continue
+        if model.get("id") != model_id and model.get("apiID") != model_id:
+            continue
+        limit = model.get("limit")
+        if not isinstance(limit, dict):
+            return None
+        context = limit.get("context")
+        if isinstance(context, (int, float)) and context > 0:
+            value = int(context)
+            _context_limit_cache[cache_key] = value
+            return value
+        return None
+
+    return None
+
+
 def _thread_kwargs(scope: ChatScope) -> dict[str, Any]:
     """Build message_thread_id kwargs for Telegram send methods."""
     if scope.thread_id is not None:
@@ -308,11 +358,15 @@ async def _update_pinned_status(
     model_usage: dict[str, Any] | None = None,
     turn_usage: dict[str, Any] | None = None,
     todos: list[dict[str, Any]] | None = None,
+    opencode_client: Any | None = None,
 ) -> None:
     """Send or update the pinned status message for a scope."""
+    context_window = None
+    if turn_usage:
+        context_window = await _resolve_context_window(ctx, opencode_client)
     text = _build_status_text(
         ctx_name, ctx, model_usage=model_usage, turn_usage=turn_usage,
-        todos=todos,
+        context_window=context_window, todos=todos,
     )
     existing_msg_id = await get_pinned_message_id(db, scope)
 
