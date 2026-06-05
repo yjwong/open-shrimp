@@ -45,6 +45,13 @@ _scope_dispatch_locks: dict[ChatScope, asyncio.Lock] = {}
 _injectable_sessions: dict[ChatScope, AgentSession] = {}
 
 # ---------------------------------------------------------------------------
+# Per-scope count of prompts submitted after a receive pass has already ended.
+# Prompts injected while OpenCode is still processing the current turn are not
+# counted; OpenCode can consume them before emitting the same final idle event.
+# ---------------------------------------------------------------------------
+_pending_injected_responses: dict[ChatScope, int] = {}
+
+# ---------------------------------------------------------------------------
 # Per-scope queue for messages that arrive during brief setup.
 # (before the session is ready for injection).  Drained immediately once
 # the session becomes injectable.

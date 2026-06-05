@@ -53,6 +53,7 @@ from open_shrimp.handlers.state import (
     _media_group_messages,
     _media_group_tasks,
     _MEDIA_GROUP_WAIT,
+    _pending_injected_responses,
     _scope_dispatch_locks,
     _session_approved_dirs,
     _tool_approved_sessions,
@@ -79,6 +80,26 @@ from open_shrimp.stream import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _add_pending_injected_responses(scope: ChatScope, count: int = 1) -> None:
+    if count <= 0:
+        return
+    _pending_injected_responses[scope] = (
+        _pending_injected_responses.get(scope, 0) + count
+    )
+
+
+def _consume_pending_injected_response(scope: ChatScope) -> bool:
+    pending = _pending_injected_responses.get(scope, 0)
+    if pending <= 0:
+        _pending_injected_responses.pop(scope, None)
+        return False
+    if pending == 1:
+        _pending_injected_responses.pop(scope, None)
+    else:
+        _pending_injected_responses[scope] = pending - 1
+    return True
 
 
 def _select_sandbox_manager(
@@ -751,6 +772,7 @@ async def _run_parent_notification_continuation(
     finally:
         await finalize_and_reset(context.bot, draft_state)
         _injectable_sessions.pop(scope, None)
+        _pending_injected_responses.pop(scope, None)
         _running_tasks.pop(scope, None)
         await flush_deferred_project_tool_permission_patches(scope)
         _wake_after_busy_parent_exit(
@@ -988,9 +1010,11 @@ async def _start_agent_task(
 
             container_retries = 0
             max_container_retries = 2
+            receive_iteration = 0
 
             while True:
                 try:
+                    receive_iteration += 1
                     events = receive_events(session)
                     # Build terminal base URL for background task
                     # "View output" buttons.
@@ -1039,12 +1063,9 @@ async def _start_agent_task(
                             session.session_id,
                             session.client,
                         )
+                    _add_pending_injected_responses(scope, injected_notifications)
 
-                    if (
-                        result.num_steps == 0
-                        and result.session_id is None
-                        and injected_notifications == 0
-                    ):
+                    if not _consume_pending_injected_response(scope):
                         break
 
                     # Reset retry counter on successful iteration.
@@ -1157,6 +1178,7 @@ async def _start_agent_task(
             cleanup_attachments(all_attachment_paths)
             _injectable_sessions.pop(scope, None)
             _setup_queues.pop(scope, None)
+            _pending_injected_responses.pop(scope, None)
             if draft_state.session_id:
                 try:
                     await set_session_id(db, scope, ctx_name, draft_state.session_id)

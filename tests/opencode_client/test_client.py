@@ -68,6 +68,43 @@ async def test_happy_path_text_streaming(
     assert results[0].is_error is False
 
 
+async def test_repeated_queries_on_same_client_receive_each_idle(
+    mock_server: MockOpenCode, wired_server
+) -> None:
+    opts = OpenCodeOptions(cwd="/tmp", provider="openai", model="gpt-test")
+    async with OpenCodeClient(opts) as client:
+        sid = client.session_id
+        assert sid is not None
+
+        mock_server.script(sid, [text_delta("p1", "first"), session_idle()])
+        await client.query("first prompt")
+        first = await _collect(client)
+
+        mock_server.script(sid, [text_delta("p2", "second"), session_idle()])
+        await client.query("second prompt")
+        second = await asyncio.wait_for(_collect(client), timeout=1.0)
+
+    first_text = "".join(
+        block.text
+        for msg in first
+        if isinstance(msg, AssistantMessage)
+        for block in msg.content
+        if isinstance(block, TextBlock)
+    )
+    second_text = "".join(
+        block.text
+        for msg in second
+        if isinstance(msg, AssistantMessage)
+        for block in msg.content
+        if isinstance(block, TextBlock)
+    )
+
+    assert first_text == "first"
+    assert second_text == "second"
+    assert sum(isinstance(msg, ResultMessage) for msg in first) == 1
+    assert sum(isinstance(msg, ResultMessage) for msg in second) == 1
+
+
 async def test_session_error_raises_process_error(
     mock_server: MockOpenCode, wired_server
 ) -> None:
