@@ -9,7 +9,6 @@ from open_shrimp.agent_tool import AgentToolContext, create_agent_tool, validate
 from open_shrimp.client_manager import stop_background_task
 from open_shrimp.db import ChatScope
 from open_shrimp.handlers.state import _active_bg_tasks
-from open_shrimp.handlers.state import _running_tasks
 from open_shrimp.opencode_client import OpenCodeClient, OpenCodeOptions
 
 from tests.opencode_client.mock_server import MockOpenCode, session_idle, text_delta
@@ -211,7 +210,6 @@ async def test_foreground_agent_auto_backgrounds_after_timeout(
     mock_server: MockOpenCode, wired_server, tmp_path, monkeypatch
 ) -> None:
     _active_bg_tasks.clear()
-    _running_tasks.clear()
     monkeypatch.setenv("OPENSHRIMP_AGENT_AUTO_BACKGROUND_MS", "20")
     monkeypatch.setattr(
         agent_tasks,
@@ -281,7 +279,6 @@ async def test_background_agent_injects_parent_notification_once(
     mock_server: MockOpenCode, wired_server, tmp_path, monkeypatch
 ) -> None:
     _active_bg_tasks.clear()
-    _running_tasks.clear()
     monkeypatch.setattr(
         agent_tasks,
         "agent_task_output_path",
@@ -348,7 +345,6 @@ async def test_background_agent_wakes_idle_parent_notification_runner(
     mock_server: MockOpenCode, wired_server, tmp_path, monkeypatch
 ) -> None:
     _active_bg_tasks.clear()
-    _running_tasks.clear()
     monkeypatch.setattr(
         agent_tasks,
         "agent_task_output_path",
@@ -417,7 +413,6 @@ async def test_background_agent_injects_when_parent_busy(
     mock_server: MockOpenCode, wired_server, tmp_path, monkeypatch
 ) -> None:
     _active_bg_tasks.clear()
-    _running_tasks.clear()
     monkeypatch.setattr(
         agent_tasks,
         "agent_task_output_path",
@@ -430,8 +425,6 @@ async def test_background_agent_injects_when_parent_busy(
     async with OpenCodeClient(opts) as client:
         parent_session_id = client.session_id
         assert parent_session_id is not None
-        busy_task = asyncio.create_task(asyncio.sleep(10))
-        _running_tasks[scope] = busy_task
         try:
             tool = create_agent_tool(
                 AgentToolContext(
@@ -475,12 +468,9 @@ async def test_background_agent_injects_when_parent_busy(
                 in parent_prompts[0]["body"]["parts"][0]["text"]
             )
 
-            busy_task.cancel()
-            _running_tasks.pop(scope, None)
             await agent_tasks.drain_parent_notifications(parent_session_id, client)
         finally:
-            busy_task.cancel()
-            _running_tasks.pop(scope, None)
+            pass
 
         parent_prompts = [
             prompt for prompt in mock_server.prompts

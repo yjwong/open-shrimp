@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from open_shrimp.db import ChatScope
-from open_shrimp.handlers.state import TrackedTask, _active_bg_tasks, _running_tasks
+from open_shrimp.handlers.state import TrackedTask, _active_bg_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -123,11 +123,6 @@ def is_task_running(task_id: str) -> bool:
     return task is not None and task.status == "running"
 
 
-def parent_session_busy(scope: ChatScope) -> bool:
-    running = _running_tasks.get(scope)
-    return running is not None and not running.done()
-
-
 def build_task_notification_payload(task: AgentBackgroundTask) -> str:
     status = task.status
     summary_status = {
@@ -195,6 +190,37 @@ async def drain_parent_notifications(
                 return injected
             task.injected = True
             injected += 1
+
+
+async def submit_parent_notifications(
+    parent_session_id: str,
+    submit: Callable[[str], Awaitable[None]],
+) -> int:
+    """Submit queued notifications, requeueing the first failed payload."""
+    lock = _injection_locks.setdefault(parent_session_id, asyncio.Lock())
+    async with lock:
+        submitted = 0
+        while True:
+            queue = _pending_notifications.get(parent_session_id)
+            if not queue:
+                _pending_notifications.pop(parent_session_id, None)
+                return submitted
+            task_id, payload = queue.pop(0)
+            task = _tasks.get(task_id)
+            if task is None or task.injected:
+                continue
+            try:
+                await submit(payload)
+            except Exception:
+                queue.insert(0, (task_id, payload))
+                logger.exception(
+                    "Failed to submit Agent notification %s for parent session %s",
+                    task_id,
+                    parent_session_id,
+                )
+                return submitted
+            task.injected = True
+            submitted += 1
 
 
 def find_task(scope: ChatScope, task_id_or_prefix: str) -> AgentBackgroundTask | None:

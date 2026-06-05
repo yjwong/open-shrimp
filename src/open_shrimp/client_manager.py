@@ -759,16 +759,30 @@ async def _sweep_idle_sessions() -> None:
     """Periodically close sessions that have been idle too long."""
     while True:
         await asyncio.sleep(60)
+        from open_shrimp.session_runner import get_runner, stop_runner
+
         now = time.monotonic()
-        stale = [
-            scope for scope, session in _active_sessions.items()
-            if now - session.last_activity > _IDLE_TIMEOUT
-        ]
-        for scope in stale:
+        for scope, session in list(_active_sessions.items()):
+            runner = get_runner(scope)
+            if runner is not None:
+                if (
+                    runner.state.status != "idle"
+                    or now - runner.state.last_activity <= _IDLE_TIMEOUT
+                ):
+                    continue
+                logger.info(
+                    "Evicting idle runner for scope %s (idle %.0fs)",
+                    scope,
+                    now - runner.state.last_activity,
+                )
+                await stop_runner(scope)
+                continue
+            if now - session.last_activity <= _IDLE_TIMEOUT:
+                continue
             logger.info(
                 "Closing idle session for scope %s (idle %.0fs)",
                 scope,
-                now - _active_sessions[scope].last_activity,
+                now - session.last_activity,
             )
             await close_session(scope)
 
@@ -813,23 +827,6 @@ async def stop_background_task(scope: ChatScope, task_id: str) -> bool:
     except Exception:
         logger.exception("Failed to stop task %s for scope %s", task_id, scope)
         return False
-
-
-def has_session(scope: ChatScope) -> bool:
-    """Return True if *scope* has a live session."""
-    return scope in _active_sessions
-
-
-async def query_and_stream(
-    session: AgentSession,
-    prompt: str,
-) -> AsyncIterator[AgentEvent]:
-    """Send a query on an existing session and yield events."""
-    session.last_activity = time.monotonic()
-    logger.info("Sending query on live client: %s", prompt[:200])
-    await session.client.query(prompt)
-    async for message in receive_events(session):
-        yield message
 
 
 async def receive_events(

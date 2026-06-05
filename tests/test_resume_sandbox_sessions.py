@@ -179,9 +179,9 @@ async def test_direct_resume_cancels_running_task_before_switching(
     async def fake_list_sessions_for_context(*args: Any, **kwargs: Any) -> list[SessionInfo]:
         return [SessionInfo("ses_target", "target title", 10)]
 
-    async def fake_cancel_running(scope_arg: ChatScope) -> None:
+    async def fake_stop_runner(scope_arg: ChatScope) -> None:
         assert scope_arg == scope
-        calls.append("cancel")
+        calls.append("stop_runner")
 
     async def fake_close_session(scope_arg: ChatScope) -> None:
         assert scope_arg == scope
@@ -201,12 +201,12 @@ async def test_direct_resume_cancels_running_task_before_switching(
     monkeypatch.setattr(commands, "_get_context", fake_get_context)
     monkeypatch.setattr(commands, "_select_sandbox_manager_for_context", lambda ctx, context: None)
     monkeypatch.setattr(commands, "_list_sessions_for_context", fake_list_sessions_for_context)
-    monkeypatch.setattr(commands, "_cancel_running", fake_cancel_running)
+    monkeypatch.setattr(commands, "stop_runner", fake_stop_runner)
     monkeypatch.setattr(commands, "close_session", fake_close_session)
     monkeypatch.setattr(commands, "set_session_id", fake_set_session_id)
     monkeypatch.setattr(commands, "_update_pinned_status", fake_update_pinned_status)
 
     await commands.resume_handler(update, context)  # type: ignore[arg-type]
 
-    assert calls == ["cancel", "close", "set", "pin"]
+    assert calls == ["stop_runner", "close", "set", "pin"]
     assert update.effective_message.replies

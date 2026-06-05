@@ -23,6 +23,7 @@ from open_shrimp.client_manager import (
     close_session,
     get_session,
 )
+from open_shrimp.session_runner import get_runner, runner_status, stop_runner
 from open_shrimp.config import Config, ContextConfig, is_sandboxed
 from open_shrimp.db import ChatScope, delete_session, get_session_id, set_session_id
 from open_shrimp.opencode_client import list_sessions
@@ -31,17 +32,13 @@ from open_shrimp.handlers.state import (
     _RESUME_LIST_LIMIT,
     _active_bg_tasks,
     _effort_overrides,
-    _injectable_sessions,
     _model_overrides,
     _resume_page_cache,
     _resume_selections,
     _resume_session_cache,
-    _running_tasks,
-    _setup_queues,
     clear_session_approvals,
 )
 from open_shrimp.handlers.utils import (
-    _cancel_running,
     _escape_mdv2,
     _get_context,
     _get_context_name,
@@ -165,9 +162,7 @@ async def handle_context_callback(
         ctx_name = await _get_context_name(scope, config, db)
 
         if target == ctx_name:
-            await _cancel_running(scope)
-            _injectable_sessions.pop(scope, None)
-            _setup_queues.pop(scope, None)
+            await stop_runner(scope)
             await close_session(scope)
             await delete_session(db, scope, ctx_name)
             clear_session_approvals(scope, ctx_name)
@@ -215,6 +210,7 @@ async def handle_context_callback(
         clear_session_approvals(scope, current)
         _model_overrides.pop(scope, None)
         _effort_overrides.pop(scope, None)
+        await stop_runner(scope)
         await close_session(scope)
 
         from open_shrimp.db import set_active_context
@@ -300,6 +296,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     clear_session_approvals(scope, old_ctx_name)
     _model_overrides.pop(scope, None)
     _effort_overrides.pop(scope, None)
+    await stop_runner(scope)
     await close_session(scope)
 
     from open_shrimp.db import set_active_context
@@ -337,9 +334,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     scope = chat_scope_from_message(message)
     ctx_name, ctx = await _get_context(scope, config, db)
 
-    await _cancel_running(scope)
-    _injectable_sessions.pop(scope, None)
-    _setup_queues.pop(scope, None)
+    await stop_runner(scope)
     await close_session(scope)
     await delete_session(db, scope, ctx_name)
     clear_session_approvals(scope, ctx_name)
@@ -381,19 +376,25 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     scope = chat_scope_from_message(message)
     ctx_name, ctx = await _get_context(scope, config, db)
     session_id = await get_session_id(db, scope, ctx_name)
-    running = scope in _running_tasks and not _running_tasks[scope].done()
-    injectable = scope in _injectable_sessions
-    setup_queued = len(_setup_queues.get(scope, []))
+    state = runner_status(scope)
+    runner = get_runner(scope)
+    running = bool(runner and runner.is_running_turn())
+    setup_queued = state.startup_buffer_depth if state else 0
+    live_session_id = (
+        (state.session.session_id or state.session.client.session_id)
+        if state and state.session else session_id
+    )
 
     lines = [
         f"*Context:* `{ctx_name}`",
         f"*Directory:* `{ctx.directory}`",
         f"*Model:* `{ctx.model or 'CLI default'}`" + (" (override)" if scope in _model_overrides else ""),
         f"*Effort:* `{ctx.effort or 'default'}`" + (" (override)" if scope in _effort_overrides else ""),
-        f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
-        f"*Running:* {'Yes' if running else 'No'}",
-        f"*Injectable:* {'Yes' if injectable else 'No'}",
+        f"*Session:* {'`' + live_session_id[:12] + '...' + '`' if live_session_id else 'None'}",
+        f"*Runner:* {state.status if state else 'None'}",
+        f"*Running turn:* {'Yes' if running else 'No'}",
         f"*Setup queued:* {setup_queued}",
+        f"*Steering inputs:* {state.steering_submissions if state else 0}",
     ]
     # Background tasks.
     scope_tasks = _active_bg_tasks.get(scope, {})
@@ -428,15 +429,15 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     scope = chat_scope_from_message(message)
-    had_running = scope in _running_tasks and not _running_tasks[scope].done()
-    setup_queued = len(_setup_queues.pop(scope, []))
+    runner = get_runner(scope)
+    had_running = bool(runner and runner.is_running_turn())
+    setup_queued = runner.state.startup_buffer_depth if runner else 0
 
-    if had_running:
-        _injectable_sessions.pop(scope, None)
-        await _cancel_running(scope)
+    if runner is not None:
+        await runner.cancel_current()
 
-    if had_running:
-        parts = ["Cancelled running task"]
+    if runner is not None and (had_running or setup_queued):
+        parts = ["Interrupt requested"]
         if setup_queued:
             parts.append(f"cleared {setup_queued} queued message{'s' if setup_queued != 1 else ''}")
         text = "\\. ".join(parts) + "\\."
@@ -492,6 +493,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if target == "reset":
         if current_override:
             del _model_overrides[scope]
+            await stop_runner(scope)
             await close_session(scope)
             model_escaped = _escape_mdv2(ctx_default_model or "CLI default")
             await message.reply_text(
@@ -507,6 +509,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Set override
     _model_overrides[scope] = target
+    await stop_runner(scope)
     await close_session(scope)
     model_escaped = _escape_mdv2(target)
     await message.reply_text(
@@ -567,6 +570,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if target == "reset":
         if current_override:
             del _effort_overrides[scope]
+            await stop_runner(scope)
             await close_session(scope)
             effort_escaped = _escape_mdv2(ctx_default_effort or "default")
             await message.reply_text(
@@ -590,6 +594,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Set override
     _effort_overrides[scope] = target
+    await stop_runner(scope)
     await close_session(scope)
     effort_escaped = _escape_mdv2(target)
     await message.reply_text(
@@ -846,6 +851,7 @@ async def _reconnect_after_dir_change(
     from open_shrimp.config import is_sandboxed
     from open_shrimp.handlers.messages import _select_sandbox_manager
 
+    await stop_runner(scope)
     await close_session(scope)
 
     if is_sandboxed(ctx):
@@ -1103,7 +1109,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-        await _cancel_running(scope)
+        await stop_runner(scope)
         await close_session(scope)
         await set_session_id(db, scope, ctx_name, match.session_id)
         summary = _escape_mdv2(match.summary or "No summary")
@@ -1218,7 +1224,7 @@ async def handle_resume_callback(
     scope = chat_scope_from_message(query.message)
 
     ctx_name, ctx = await _get_context(scope, config, db)
-    await _cancel_running(scope)
+    await stop_runner(scope)
     await close_session(scope)
     await set_session_id(db, scope, ctx_name, session_id)
     await query.answer(f"Resumed session {session_id[:8]}...")

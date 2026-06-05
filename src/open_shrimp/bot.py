@@ -28,6 +28,7 @@ from open_shrimp.client_manager import (
     start_idle_sweep,
     stop_idle_sweep,
 )
+from open_shrimp.session_runner import stop_all_runners
 from open_shrimp.config import Config, load_config
 from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
 from open_shrimp.sandbox.manager import destroy_contexts_background
@@ -413,6 +414,7 @@ async def run_bot(
         except (Exception, TimeoutError):
             logger.warning("Error shutting down connect session", exc_info=True)
         stop_idle_sweep()
+        await stop_all_runners()
         await close_all_sessions()
         # Stop all sandbox managers.  Each stop_reaper() is wrapped in a
         # timeout because closing a wedged libvirt connection can block

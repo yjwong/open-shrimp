@@ -7,64 +7,18 @@ avoids circular imports.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
+import asyncio
 
-# ---------------------------------------------------------------------------
-# Forward references (to avoid importing heavy modules at module level)
-# ---------------------------------------------------------------------------
-# AgentSession is referenced by type only; the actual import happens at
-# usage sites in the handler modules.
-from open_shrimp.client_manager import AgentSession
 from open_shrimp.db import ChatScope
-
-# ---------------------------------------------------------------------------
-# Per-scope running asyncio task (for cancellation)
-# ---------------------------------------------------------------------------
-_running_tasks: dict[ChatScope, asyncio.Task[Any]] = {}
 
 # Durable tool permission writes requested during a running turn.  OpenCode
 # disposes the active instance after PATCH /config, so these are flushed only
 # once the scope is idle.
 _deferred_tool_permission_patches: dict[ChatScope, set[str]] = {}
 
-# ---------------------------------------------------------------------------
-# Per-scope dispatch lock: serialises _dispatch_to_agent so two messages
-# for the same scope cannot both slip through the "no task running" check
-# before either sets _running_tasks[scope].
-# ---------------------------------------------------------------------------
 _scope_dispatch_locks: dict[ChatScope, asyncio.Lock] = {}
-
-# ---------------------------------------------------------------------------
-# Per-scope live session reference for message injection.
-# Set once get_or_create_session + initial query() completes inside _run(),
-# cleared in the finally block.
-# ---------------------------------------------------------------------------
-_injectable_sessions: dict[ChatScope, AgentSession] = {}
-
-# ---------------------------------------------------------------------------
-# Per-scope count of prompts submitted after a receive pass has already ended.
-# Prompts injected while OpenCode is still processing the current turn are not
-# counted; OpenCode can consume them before emitting the same final idle event.
-# ---------------------------------------------------------------------------
-_pending_injected_responses: dict[ChatScope, int] = {}
-
-# ---------------------------------------------------------------------------
-# Per-scope queue for messages that arrive during brief setup.
-# (before the session is ready for injection).  Drained immediately once
-# the session becomes injectable.
-# ---------------------------------------------------------------------------
-from open_shrimp.agent import FileAttachment
-
-_setup_queues: dict[ChatScope, list[tuple[str, list[FileAttachment]]]] = {}
-
-# ---------------------------------------------------------------------------
-# Attachment temp-file paths created by injected messages.  Cleaned up in
-# _run()'s finally block after the agent has finished processing.
-# ---------------------------------------------------------------------------
-_injected_attachment_paths: dict[ChatScope, list[Path]] = {}
 
 # ---------------------------------------------------------------------------
 # Pending tool approval futures: callback_data -> asyncio.Future[bool | approval result]

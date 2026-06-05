@@ -170,38 +170,6 @@ def _strip_mention(text: str, bot_username: str) -> str:
     return text.strip()
 
 
-async def _cancel_running(scope: ChatScope) -> None:
-    """Cancel any running agent task for a scope.
-
-    Sends an interrupt to the persistent CLI client (if any) so it stops
-    processing, then cancels the asyncio task.  The persistent client
-    stays alive for reuse by the next message.
-    """
-    import asyncio
-
-    from open_shrimp.client_manager import get_session
-    from open_shrimp.handlers.state import _running_tasks
-
-    session = get_session(scope)
-    if session is not None:
-        try:
-            await session.client.interrupt()
-            logger.info("Sent interrupt to CLI for scope %s", scope)
-        except Exception:
-            logger.debug(
-                "Failed to send interrupt for scope %s", scope, exc_info=True
-            )
-
-    task = _running_tasks.pop(scope, None)
-    if task and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        logger.info("Cancelled running task for scope %s", scope)
-
-
 def _format_token_count(count: int) -> str:
     """Format a token count as a human-readable string (e.g. 12.3k, 1.2M)."""
     if count >= 1_000_000:

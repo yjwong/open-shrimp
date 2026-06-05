@@ -573,6 +573,180 @@ async def finalize_and_reset(
     state.live_edit_last_text = ""
 
 
+class TelegramTurnRenderer:
+    """Stateful event-to-Telegram renderer for one runner turn cycle."""
+
+    def __init__(
+        self,
+        *,
+        bot: Bot,
+        chat_id: int,
+        draft_state: _DraftState | None = None,
+        allowed_tools: list[str] | None = None,
+        cwd: str | None = None,
+        on_todo_update: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
+        terminal_base_url: str | None = None,
+        scope: ChatScope | None = None,
+    ) -> None:
+        self.bot = bot
+        self.chat_id = chat_id
+        self.state = draft_state or _DraftState(chat_id=chat_id)
+        self.auto_set = set(allowed_tools or [])
+        self.cwd = cwd
+        self.on_todo_update = on_todo_update
+        self.terminal_base_url = terminal_base_url
+        self.scope = scope
+        self.result = StreamResult()
+        self._sent_message_start = len(self.state.sent_message_ids)
+        self._draft_task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        if self._draft_task is not None:
+            return
+        self._draft_task = asyncio.create_task(self._periodic_flush())
+
+    async def _periodic_flush(self) -> None:
+        while True:
+            await asyncio.sleep(DRAFT_INTERVAL_SECONDS)
+            if self.state.dirty:
+                await _send_draft(self.bot, self.state)
+
+    async def process_event(self, event: AgentEvent) -> StreamResult | None:
+        """Render one event. Return a turn result at ResultMessage boundaries."""
+        if isinstance(event, AssistantMessage):
+            self.result.assistant_turn_count = (self.result.assistant_turn_count or 0) + 1
+            turn_usage = event.usage
+            if turn_usage:
+                self.result.turn_usage = turn_usage
+
+            if event.error:
+                self.result.last_turn_had_error = True
+                error_detail = None
+                for block in event.content:
+                    if isinstance(block, TextBlock) and block.text:
+                        error_detail = block.text
+                        break
+                await _handle_assistant_error(
+                    self.bot, self.state, event.error, error_detail,
+                )
+
+            if self.state.raw_text:
+                self.state.turn_complete = True
+
+            for block in event.content:
+                if isinstance(block, TextBlock):
+                    pass
+                elif isinstance(block, ToolUseBlock):
+                    self.state.tool_use_map[block.id] = (block.name, block.input)
+                    if block.name not in _SUPPRESS_NOTIFICATION_TOOLS:
+                        add_tool_notification(
+                            self.state,
+                            tool_name=block.name,
+                            tool_input=block.input,
+                            auto=block.name in self.auto_set,
+                            cwd=self.cwd,
+                        )
+                    if block.name == "TodoWrite" and self.on_todo_update is not None:
+                        todos = block.input.get("todos", [])
+                        try:
+                            await self.on_todo_update(todos)
+                        except Exception:
+                            logger.exception(
+                                "Failed to update todos for chat %d",
+                                self.state.chat_id,
+                            )
+
+        elif isinstance(event, UserMessage):
+            if isinstance(event.content, list):
+                for block in event.content:
+                    if not isinstance(block, ToolResultBlock):
+                        continue
+                    tool_info = self.state.tool_use_map.get(block.tool_use_id)
+                    if tool_info and tool_info[0] == "Bash":
+                        await _send_bash_button(
+                            self.bot, self.state, tool_info[1], block.content,
+                        )
+                    elif tool_info and tool_info[0] == "mcp__openshrimp__host_bash":
+                        await _send_bash_button(
+                            self.bot, self.state, tool_info[1], block.content,
+                            icon="🔓", label="host_bash",
+                        )
+
+        elif isinstance(event, StreamEvent):
+            raw = event.event
+            if (
+                raw.get("type") == "message.part.delta"
+                and (raw.get("properties") or {}).get("field") == "text"
+            ):
+                text = (raw.get("properties") or {}).get("delta", "")
+                if isinstance(text, str) and text:
+                    if self.state.turn_complete:
+                        self.state.raw_text += "\n\n"
+                        self.state.turn_complete = False
+                    if self.state.last_was_notification:
+                        stripped = self.state.raw_text.rstrip()
+                        self.state.raw_text = stripped + "\n\n"
+                        self.state.last_was_notification = False
+                    self.state.raw_text += text
+                    self.state.dirty = True
+                    converted = gfm_to_telegram(_build_full_text(self.state))
+                    if len(converted) > 1:
+                        await _finalize_current(self.bot, self.state)
+
+        elif isinstance(event, ResultMessage):
+            self.result.session_id = event.session_id
+            self.state.session_id = event.session_id
+            self.result.model_usage = event.model_usage
+            self.result.num_steps = event.num_steps
+            self.result.duration_ms = event.duration_ms
+            if event.errors:
+                logger.warning(
+                    "ResultMessage errors for chat %d: %s",
+                    self.state.chat_id,
+                    event.errors,
+                )
+            return await self.finalize_turn(notify=True)
+
+        elif isinstance(event, SystemMessage):
+            sid = getattr(event, "session_id", None)
+            if sid:
+                self.state.session_id = sid
+                self.result.session_id = sid
+
+        return None
+
+    async def finalize_turn(self, *, notify: bool = True) -> StreamResult:
+        if self.state.raw_text.strip():
+            msg_ids = await _finalize_message(self.bot, self.state, silent=not notify)
+            self.state.sent_message_ids.extend(msg_ids)
+        self.result.sent_message_ids = list(
+            self.state.sent_message_ids[self._sent_message_start:]
+        )
+        final = self.result
+        self._reset_for_next_turn()
+        return final
+
+    async def close(self) -> StreamResult:
+        if self._draft_task:
+            self._draft_task.cancel()
+            try:
+                await self._draft_task
+            except asyncio.CancelledError:
+                pass
+            self._draft_task = None
+        return await self.finalize_turn(notify=True)
+
+    def _reset_for_next_turn(self) -> None:
+        self.state.raw_text = ""
+        self.state.draft_id = random.randint(1, 2**31 - 1)
+        self.state.dirty = False
+        self.state.turn_complete = False
+        self.state.live_edit_message_id = None
+        self.state.live_edit_last_text = ""
+        self._sent_message_start = len(self.state.sent_message_ids)
+        self.result = StreamResult(session_id=self.state.session_id)
+
+
 _ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
     "authentication_failed": (
         "⚠️ **Authentication failed.** OpenCode was unable to authenticate. "
@@ -684,198 +858,25 @@ async def stream_response(
     Returns:
         StreamResult with session_id, usage, cost, and timing info.
     """
-    state = draft_state or _DraftState(chat_id=chat_id)
-    sent_message_start = len(state.sent_message_ids)
-    auto_set = set(allowed_tools or [])
-    result = StreamResult()
-    draft_task: asyncio.Task[None] | None = None
-
-    async def periodic_flush() -> None:
-        """Periodically flush dirty drafts."""
-        while True:
-            await asyncio.sleep(DRAFT_INTERVAL_SECONDS)
-            if state.dirty:
-                await _send_draft(bot, state)
-
+    renderer = TelegramTurnRenderer(
+        bot=bot,
+        chat_id=chat_id,
+        draft_state=draft_state,
+        allowed_tools=allowed_tools,
+        cwd=cwd,
+        on_todo_update=on_todo_update,
+        terminal_base_url=terminal_base_url,
+        scope=scope,
+    )
     try:
-        draft_task = asyncio.create_task(periodic_flush())
-
+        await renderer.start()
         async for event in events:
-            if isinstance(event, AssistantMessage):
-                result.assistant_turn_count = (result.assistant_turn_count or 0) + 1
-                # Capture per-turn token usage.
-                turn_usage = event.usage
-                if turn_usage:
-                    result.turn_usage = turn_usage
-
-                # Check for SDK-level errors (auth failures, billing,
-                # rate limits, etc.) and surface them to the user.
-                if event.error:
-                    result.last_turn_had_error = True
-                    # Extract error detail from content blocks (the SDK
-                    # puts the human-readable reason in a TextBlock, e.g.
-                    # "Prompt is too long").
-                    error_detail = None
-                    for block in event.content:
-                        if isinstance(block, TextBlock) and block.text:
-                            error_detail = block.text
-                            break
-                    await _handle_assistant_error(
-                        bot, state, event.error, error_detail,
-                    )
-
-                # Mark this turn's text as complete. When the next
-                # turn's StreamEvent deltas arrive, we'll insert a
-                # newline separator to prevent text concatenation.
-                if state.raw_text:
-                    state.turn_complete = True
-
-                for block in event.content:
-                    if isinstance(block, TextBlock):
-                        # When include_partial_messages is enabled,
-                        # text arrives via StreamEvent deltas. The
-                        # AssistantMessage still arrives with the
-                        # complete text, so we skip it here to avoid
-                        # double-counting.
-                        pass
-
-                    elif isinstance(block, ToolUseBlock):
-                        # Record the mapping so we can correlate tool
-                        # results back to the tool that produced them.
-                        state.tool_use_map[block.id] = (
-                            block.name,
-                            block.input,
-                        )
-
-                        # Add tool invocation as an inline notification,
-                        # but suppress tools whose output is shown directly.
-                        if block.name not in _SUPPRESS_NOTIFICATION_TOOLS:
-                            add_tool_notification(
-                                state,
-                                tool_name=block.name,
-                                tool_input=block.input,
-                                auto=block.name in auto_set,
-                                cwd=cwd,
-                            )
-
-                        # TodoWrite: update the pinned message with the
-                        # current task list.
-                        if block.name == "TodoWrite" and on_todo_update is not None:
-                            todos = block.input.get("todos", [])
-                            try:
-                                await on_todo_update(todos)
-                            except Exception:
-                                logger.exception(
-                                    "Failed to update todos for chat %d",
-                                    state.chat_id,
-                                )
-
-            elif isinstance(event, UserMessage):
-                # UserMessage carries tool results (ToolResultBlock).
-                # For Bash, send a collapsible message with a "Show output"
-                # button instead of embedding the output inline.
-                if isinstance(event.content, list):
-                    for block in event.content:
-                        if isinstance(block, ToolResultBlock):
-                            tool_info = state.tool_use_map.get(
-                                block.tool_use_id
-                            )
-                            if tool_info and tool_info[0] == "Bash":
-                                tool_input = tool_info[1]
-                                await _send_bash_button(
-                                    bot, state, tool_input,
-                                    block.content,
-                                )
-                            elif (
-                                tool_info
-                                and tool_info[0]
-                                == "mcp__openshrimp__host_bash"
-                            ):
-                                tool_input = tool_info[1]
-                                await _send_bash_button(
-                                    bot, state, tool_input,
-                                    block.content,
-                                    icon="🔓",
-                                    label="host_bash",
-                                )
-
-            elif isinstance(event, StreamEvent):
-                # Token-level streaming: extract text deltas from raw
-                # OpenCode message.part.delta events (field=text).
-                raw = event.event
-                if (
-                    raw.get("type") == "message.part.delta"
-                    and (raw.get("properties") or {}).get("field") == "text"
-                ):
-                    text = (raw.get("properties") or {}).get("delta", "")
-                    if isinstance(text, str) and text:
-                            # Insert a newline separator if this is
-                            # the first text from a new assistant turn
-                            # to prevent concatenation with the
-                            # previous turn's text.
-                            if state.turn_complete:
-                                state.raw_text += "\n\n"
-                                state.turn_complete = False
-                            # Ensure a blank line after a tool notification
-                            # blockquote so assistant text isn't swallowed
-                            # into it.  Only trigger for notifications (tracked
-                            # via flag), NOT for the agent's own blockquote lines.
-                            if state.last_was_notification:
-                                stripped = state.raw_text.rstrip()
-                                state.raw_text = stripped + "\n\n"
-                                state.last_was_notification = False
-                            state.raw_text += text
-                            state.dirty = True
-
-                            # Check if we're approaching the message limit
-                            full = _build_full_text(state)
-                            converted = gfm_to_telegram(full)
-                            if len(converted) > 1:
-                                await _finalize_current(bot, state)
-
-            elif isinstance(event, ResultMessage):
-                result.session_id = event.session_id
-                state.session_id = event.session_id
-                result.model_usage = event.model_usage
-                result.num_steps = event.num_steps
-                result.duration_ms = event.duration_ms
-                if event.errors:
-                    logger.warning(
-                        "ResultMessage errors for chat %d: %s",
-                        state.chat_id,
-                        event.errors,
-                    )
-
-            elif isinstance(event, SystemMessage):
-                # Capture session_id from init messages as early as
-                # possible so it's available even if the task is
-                # cancelled before ResultMessage arrives.
-                sid = getattr(event, "session_id", None)
-                if sid:
-                    state.session_id = sid
-                    result.session_id = sid
+            turn_result = await renderer.process_event(event)
+            if turn_result is not None:
+                return turn_result
 
     finally:
-        if draft_task:
-            draft_task.cancel()
-            try:
-                await draft_task
-            except asyncio.CancelledError:
-                pass
-
-        # Final send of any remaining text — notify since the task is done.
-        if state.raw_text.strip():
-            msg_ids = await _finalize_message(bot, state, silent=False)
-            state.sent_message_ids.extend(msg_ids)
-        result.sent_message_ids = list(state.sent_message_ids[sent_message_start:])
-
-        # Reset for the next stream_response() iteration.
-        state.raw_text = ""
-        state.draft_id = random.randint(1, 2**31 - 1)
-        state.dirty = False
-        state.turn_complete = False
-        state.live_edit_message_id = None
-        state.live_edit_last_text = ""
+        result = await renderer.close()
 
     return result
 
