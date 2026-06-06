@@ -278,7 +278,7 @@ async def _resolve_context_window(
             models = await opencode_client.get_models()
         else:
             payload = await get_json(
-                "/api/model", params={"directory": ctx.directory},
+                "/api/model", params={"location[directory]": ctx.directory},
             )
             if not isinstance(payload, list):
                 return None

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { validatePath } from "../lib/api";
+import { fetchModels, validatePath, type ModelOption } from "../lib/api";
 import type { AppConfig, ContextConfig } from "../lib/types";
 import TagInput from "./TagInput";
 import SandboxForm from "./SandboxForm";
@@ -13,11 +13,6 @@ interface ContextEditorProps {
 }
 
 type PathStatus = "idle" | "checking" | "valid" | "invalid";
-
-const MODELS = [
-  { value: "openai/gpt-5.5", label: "openai/gpt-5.5" },
-  { value: "anthropic/claude-sonnet-4-6", label: "anthropic/claude-sonnet-4-6" },
-] as const;
 
 function usePathValidation() {
   const [status, setStatus] = useState<PathStatus>("idle");
@@ -41,6 +36,40 @@ function usePathValidation() {
   }, []);
 
   return { status, check };
+}
+
+function useModelOptions(directory: string) {
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    let cancelled = false;
+    timerRef.current = setTimeout(async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await fetchModels(directory);
+        if (!cancelled) setModels(result);
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Failed to fetch models");
+          setModels([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [directory]);
+
+  return { models, loading, error };
 }
 
 export default function ContextEditor({
@@ -74,6 +103,7 @@ export default function ContextEditor({
   );
 
   const dirValidation = usePathValidation();
+  const modelOptions = useModelOptions(directory);
 
   useEffect(() => {
     dirValidation.check(directory);
@@ -179,12 +209,20 @@ export default function ContextEditor({
             placeholder="provider/model, e.g. openai/gpt-5.5"
           />
           <datalist id="model-options">
-            {MODELS.map((m) => (
+            {modelOptions.models.map((m) => (
               <option key={m.value} value={m.value}>
                 {m.label}
               </option>
             ))}
           </datalist>
+          {modelOptions.loading && (
+            <span className="form-hint">Loading models from OpenCode...</span>
+          )}
+          {modelOptions.error && (
+            <span className="form-hint error">
+              Could not load OpenCode models; manual entry still works.
+            </span>
+          )}
         </div>
 
         <div className="form-group">

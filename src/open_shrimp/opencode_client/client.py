@@ -597,7 +597,7 @@ class OpenCodeClient:
             raise CLIConnectionError("OpenCodeClient.get_models called before connect()")
         params: dict[str, str] = {}
         if self._options.cwd:
-            params["directory"] = self._options.cwd
+            params["location[directory]"] = self._options.cwd
         try:
             r = await self._http.get("/api/model", params=params)
         except httpx.HTTPError as exc:

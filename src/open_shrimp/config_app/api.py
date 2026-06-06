@@ -28,6 +28,7 @@ from open_shrimp.config import (
     load_raw_yaml,
     write_raw_yaml,
 )
+from open_shrimp.opencode_client import OpenCodeClient, OpenCodeOptions
 from open_shrimp.review.auth import AuthError, authenticate
 from open_shrimp.sandbox import SandboxManager
 
@@ -167,6 +168,78 @@ async def config_put_endpoint(request: Request) -> JSONResponse:
             destroy_contexts_background(removed, sandbox_managers)
 
     return JSONResponse({"ok": True})
+
+
+def _normalise_model_options(
+    models: list[dict[str, Any]],
+    extra_values: set[str] | None = None,
+) -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for value in sorted(extra_values or set()):
+        if "/" not in value or value in seen:
+            continue
+        seen.add(value)
+        options.append({"value": value, "label": value})
+
+    for item in models:
+        provider_id = item.get("providerID")
+        model_id = item.get("id") or item.get("apiID")
+        if not isinstance(provider_id, str) or not isinstance(model_id, str):
+            continue
+        value = f"{provider_id}/{model_id}"
+        if value in seen:
+            continue
+        seen.add(value)
+        name = item.get("name")
+        label = value
+        if isinstance(name, str) and name and name != model_id:
+            label = f"{value} - {name}"
+        options.append({"value": value, "label": label})
+    return sorted(options, key=lambda option: option["value"])
+
+
+async def models_endpoint(request: Request) -> JSONResponse:
+    """GET /api/config/models -- return OpenCode model options."""
+    try:
+        await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    config: Config = request.app.state.config
+    directory = request.query_params.get("directory") or None
+    if directory is None and config.default_context in config.contexts:
+        directory = config.contexts[config.default_context].directory
+    if directory is None and config.contexts:
+        directory = next(iter(config.contexts.values())).directory
+    if directory is None:
+        directory = "."
+
+    client = OpenCodeClient(
+        OpenCodeOptions(cwd=directory, provider="", model=""),
+    )
+    try:
+        await client.connect_control()
+        models = await client.get_models()
+    except Exception as e:
+        logger.exception("Failed to fetch OpenCode model catalog")
+        return JSONResponse(
+            {"error": f"Failed to fetch OpenCode models: {e}"},
+            status_code=502,
+        )
+    finally:
+        await client.disconnect()
+
+    configured_models = {
+        ctx.model
+        for ctx in config.contexts.values()
+        if isinstance(ctx.model, str) and ctx.model
+    }
+
+    return JSONResponse({
+        "models": _normalise_model_options(models, configured_models),
+    })
 
 
 def _resolve_sandbox_manager(
@@ -320,6 +393,7 @@ def create_config_routes() -> list[Route | Mount]:
     routes: list[Route | Mount] = [
         Route("/api/config", config_get_endpoint, methods=["GET"]),
         Route("/api/config", config_put_endpoint, methods=["PUT"]),
+        Route("/api/config/models", models_endpoint, methods=["GET"]),
         Route(
             "/api/config/validate-path",
             validate_path_endpoint,
