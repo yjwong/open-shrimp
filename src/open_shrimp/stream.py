@@ -124,6 +124,9 @@ class _DraftState:
     user_id: int = 0
     is_private_chat: bool = True
     bot_token: str = ""
+    # Shared draft state can be touched by the stream renderer and by
+    # concurrent permission callbacks for parallel tool calls.
+    finalize_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
     def _thread_kwargs(self) -> dict[str, Any]:
@@ -562,15 +565,16 @@ async def finalize_and_reset(
     Args:
         silent: If True, send the finalized message silently (no notification).
     """
-    if state.raw_text.strip():
-        msg_ids = await _finalize_message(bot, state, silent=silent)
-        state.sent_message_ids.extend(msg_ids)
-    state.raw_text = ""
-    state.draft_id = random.randint(1, 2**31 - 1)
-    state.dirty = False
-    state.turn_complete = False
-    state.live_edit_message_id = None
-    state.live_edit_last_text = ""
+    async with state.finalize_lock:
+        if state.raw_text.strip():
+            msg_ids = await _finalize_message(bot, state, silent=silent)
+            state.sent_message_ids.extend(msg_ids)
+        state.raw_text = ""
+        state.draft_id = random.randint(1, 2**31 - 1)
+        state.dirty = False
+        state.turn_complete = False
+        state.live_edit_message_id = None
+        state.live_edit_last_text = ""
 
 
 class TelegramTurnRenderer:
