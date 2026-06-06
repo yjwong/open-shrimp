@@ -22,9 +22,11 @@ from open_shrimp.stream import _SUPPRESS_NOTIFICATION_TOOLS
 class _FakeBot:
     def __init__(self) -> None:
         self.reply_markup: Any = None
+        self.text: str | None = None
 
     async def send_message(self, **kwargs: Any) -> Any:
         self.reply_markup = kwargs.get("reply_markup")
+        self.text = kwargs.get("text")
         return SimpleNamespace(message_id=123)
 
 
@@ -81,6 +83,44 @@ async def test_apply_patch_keyboard_omits_generic_accept_all(tmp_path) -> None:
 
 def test_apply_patch_stream_notification_is_suppressed() -> None:
     assert "ApplyPatch" in _SUPPRESS_NOTIFICATION_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_generic_keyboard_escapes_markdown_v2_dots() -> None:
+    bot = _FakeBot()
+    tool_use_id = "tu_grep"
+    task = asyncio.create_task(
+        _send_approval_keyboard(
+            bot=bot,  # type: ignore[arg-type]
+            chat_id=1,
+            tool_name="Grep",
+            tool_input={
+                "pattern.name": "main.cpp",
+                "path": "/tmp/opencode/llama.cpp-host-check",
+            },
+            tool_use_id=tool_use_id,
+        ),
+    )
+
+    try:
+        while bot.text is None:
+            await asyncio.sleep(0)
+
+        assert "*pattern\\.name:* main\\.cpp" in bot.text
+        assert "/tmp/opencode/llama\\.cpp\\-host\\-check" in bot.text
+
+        _approval_futures[f"approve:{tool_use_id}"].set_result(False)
+        result = await task
+        assert isinstance(result, ApprovalDecision)
+        assert not result.approved
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        for key in list(_approval_futures):
+            if tool_use_id in key:
+                _approval_futures.pop(key, None)
 
 
 @pytest.mark.asyncio

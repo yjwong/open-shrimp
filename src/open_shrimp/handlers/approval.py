@@ -513,12 +513,12 @@ def _format_plan_approval(tool_input: dict[str, Any]) -> str:
 
 def _format_generic_approval(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Format a generic tool call for the approval prompt."""
-    summary_parts = [f"*Tool:* `{tool_name}`"]
+    summary_parts = [f"*Tool:* `{_escape_mdv2(str(tool_name))}`"]
     for key, val in tool_input.items():
         val_str = str(val)
         if len(val_str) > 200:
             val_str = val_str[:200] + "..."
-        key_escaped = key.replace("_", "\\_")
+        key_escaped = _escape_mdv2(str(key))
         val_escaped = _escape_mdv2(val_str)
         summary_parts.append(f"*{key_escaped}:* {val_escaped}")
     return "\n".join(summary_parts)
