@@ -45,6 +45,7 @@ CanUseToolCallback = Callable[
 
 _TOOLPART_WAIT_TIMEOUT = 1.0  # seconds — bound the race with ToolPart caching.
 _REPLIED_CACHE_MAX = 256  # FIFO eviction cap for the duplicate-asked guard.
+_CALL_APPROVAL_CACHE_MAX = 256  # FIFO cap for same-tool-call permission gates.
 _TERMINAL_STATUSES = frozenset({"completed", "error"})
 
 
@@ -78,6 +79,13 @@ class PermissionBridge:
         # Requests we've already replied to (request_id only — the bridge
         # is bound to one session). Bounded FIFO via insertion-ordered dict.
         self._replied: dict[str, None] = {}
+        # callID -> cached approval result. OpenCode may ask multiple
+        # permission categories for one tool call (e.g. external_directory,
+        # then read). Telegram users approve the concrete tool call, so reuse
+        # that decision for later gates with the same resolved tool/input.
+        self._call_approvals: dict[
+            str, tuple[str, tuple[tuple[str, str], ...], PermissionResult]
+        ] = {}
 
     async def stop(self) -> None:
         for task in list(self._tasks):
@@ -179,6 +187,16 @@ class PermissionBridge:
             metadata=metadata,
         )
 
+        cached = self._get_call_approval(str(call_id), tool_name, tool_input)
+        if cached is not None:
+            logger.info(
+                "Permission asked: category=%s tool=%s callID=%s "
+                "(reusing prior call approval)",
+                category, tool_name, call_id,
+            )
+            await self._send_reply(request_id, cached)
+            return
+
         ctx = ToolPermissionContext(
             suggestions=list(always_patterns),
             always_patterns=list(always_patterns),
@@ -200,6 +218,8 @@ class PermissionBridge:
                 evt, reject=f"internal error: {exc!r}",
             )
             return
+
+        self._mark_call_approval(str(call_id), tool_name, tool_input, result)
 
         await self._send_reply(request_id, result)
 
@@ -340,6 +360,47 @@ class PermissionBridge:
         self._replied[request_id] = None
         while len(self._replied) > _REPLIED_CACHE_MAX:
             self._replied.pop(next(iter(self._replied)))
+
+    def _get_call_approval(
+        self,
+        call_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> PermissionResult | None:
+        if not call_id:
+            return None
+        cached = self._call_approvals.get(call_id)
+        if cached is None:
+            return None
+        cached_tool, cached_input, result = cached
+        if cached_tool != tool_name:
+            return None
+        if cached_input != self._freeze_tool_input(tool_input):
+            return None
+        return result
+
+    def _mark_call_approval(
+        self,
+        call_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        result: PermissionResult,
+    ) -> None:
+        if not call_id:
+            return
+        self._call_approvals[call_id] = (
+            tool_name,
+            self._freeze_tool_input(tool_input),
+            result,
+        )
+        while len(self._call_approvals) > _CALL_APPROVAL_CACHE_MAX:
+            self._call_approvals.pop(next(iter(self._call_approvals)))
+
+    @staticmethod
+    def _freeze_tool_input(tool_input: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            sorted((str(k), repr(v)) for k, v in tool_input.items())
+        )
 
     async def _safe_reply(self, evt: dict[str, Any], *, reject: str) -> None:
         props = evt.get("properties") or {}

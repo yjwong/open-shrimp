@@ -308,6 +308,57 @@ async def test_duplicate_permission_asked_replies_once(
     assert len(mock_server.permission_replies) == 1
 
 
+async def test_same_tool_call_permission_gates_prompt_once(
+    mock_server: MockOpenCode, wired_server,
+) -> None:
+    """external_directory + read for one callID reuses the first approval."""
+    calls: list[tuple[str, dict[str, Any], ToolPermissionContext]] = []
+
+    async def can_use_tool(name, tool_input, ctx):
+        calls.append((name, tool_input, ctx))
+        return PermissionResultAllow()
+
+    opts = OpenCodeOptions(
+        cwd="/tmp", provider="openai", model="gpt-test",
+        can_use_tool=can_use_tool,
+    )
+    async with OpenCodeClient(opts) as client:
+        sid = client.session_id
+        mock_server.script(
+            sid,
+            [
+                tool_part_event(
+                    "call_read", "read", "running",
+                    tool_input={
+                        "filePath": "/etc/fstab",
+                        "offset": 1,
+                        "limit": 2000,
+                    },
+                ),
+                permission_asked(
+                    "req_ext", "external_directory", call_id="call_read",
+                ),
+                permission_asked(
+                    "req_read", "read", call_id="call_read",
+                ),
+                session_idle(),
+            ],
+        )
+        await client.query("hi")
+        await _drain(client)
+        await _wait_for(lambda: len(mock_server.permission_replies) == 2)
+
+    assert len(calls) == 1
+    name, tool_input, ctx = calls[0]
+    assert name == "Read"
+    assert tool_input == {"filePath": "/etc/fstab", "offset": 1, "limit": 2000}
+    assert ctx.tool_use_id == "call_read"
+    assert mock_server.permission_replies == [
+        {"request_id": "req_ext", "body": {"reply": "once"}},
+        {"request_id": "req_read", "body": {"reply": "once"}},
+    ]
+
+
 async def test_tool_input_fetched_from_message_on_cache_miss(
     mock_server: MockOpenCode, wired_server,
 ) -> None:
