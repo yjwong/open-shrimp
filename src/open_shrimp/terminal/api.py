@@ -1,35 +1,25 @@
 """HTTP API routes for the terminal Mini App.
 
 Provides an SSE endpoint for tailing log sources (background task output,
-container build logs, etc.), a REST endpoint for reading their content,
-and a WebSocket PTY endpoint for interactive OpenCode provider connection.
+container build logs, etc.) and a REST endpoint for reading their content.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
 import json
 import logging
-import os
-import pty
-import shutil
-import struct
-import termios
-import tempfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
-from starlette.routing import Mount, Route, WebSocketRoute
+from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
-from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from open_shrimp.config import Config, ContextConfig, is_sandboxed
-from open_shrimp.opencode_client.process import _find_binary as find_opencode_binary
-from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
+from open_shrimp.config import Config
+from open_shrimp.review.auth import AuthError, authenticate
 from open_shrimp.terminal.jsonl_render import (
     render_jsonl_content,
     render_jsonl_lines,
@@ -346,336 +336,6 @@ def _render_log_lines(render: str, content: str) -> tuple[str, str]:
     return content, ""
 
 
-# ── Provider Connect PTY WebSocket endpoint ──
-#
-# The PTY process is decoupled from the WebSocket lifetime so that the
-# user can switch to a browser to complete OAuth and come back without
-# the session being killed.  A single ``_ConnectSession`` lives at module
-# level; WebSocket clients attach/detach freely.
-#
-# Runs ``opencode auth login`` in a PTY. Input is forwarded directly so
-# API keys and OAuth codes are handled by OpenCode, not OpenShrimp.
-
-
-class _ConnectSession:
-    """Background PTY session for ``opencode`` provider connection."""
-
-    def __init__(
-        self,
-        proc: asyncio.subprocess.Process,
-        master_fd: int,
-        context_name: str,
-        xdg_tmp: Path | None = None,
-    ) -> None:
-        self.proc = proc
-        self.master_fd = master_fd
-        self.context_name = context_name
-        self._xdg_tmp = xdg_tmp
-        # Circular buffer of terminal output for replay on reconnect.
-        self._output_chunks: list[str] = []
-        self._output_bytes = 0
-        self._MAX_BUFFER = 64 * 1024  # 64 KiB
-        self._websocket: WebSocket | None = None
-        self._reader_task: asyncio.Task | None = None
-        self._done = asyncio.Event()
-
-    def start_background(self) -> None:
-        self._reader_task = asyncio.create_task(self._pty_reader())
-
-    # ── Attach / detach WebSocket ──
-
-    async def attach(self, websocket: WebSocket) -> None:
-        """Send buffered output, then start forwarding."""
-        self._websocket = websocket
-        for chunk in self._output_chunks:
-            await websocket.send_text(chunk)
-
-    def detach(self) -> None:
-        self._websocket = None
-
-    @property
-    def alive(self) -> bool:
-        return self.proc.returncode is None
-
-    async def wait(self) -> None:
-        await self._done.wait()
-
-    # ── Background tasks ──
-
-    async def _pty_reader(self) -> None:
-        loop = asyncio.get_event_loop()
-        try:
-            while True:
-                data = await loop.run_in_executor(
-                    None, os.read, self.master_fd, 4096
-                )
-                if not data:
-                    break
-                text = data.decode("utf-8", errors="replace")
-                # Buffer for replay.
-                self._output_chunks.append(text)
-                self._output_bytes += len(text)
-                while self._output_bytes > self._MAX_BUFFER:
-                    removed = self._output_chunks.pop(0)
-                    self._output_bytes -= len(removed)
-                # Forward to attached WebSocket.
-                ws = self._websocket
-                if ws is not None:
-                    try:
-                        await ws.send_text(text)
-                    except Exception:
-                        self._websocket = None
-        except OSError:
-            pass
-        finally:
-            self._done.set()
-
-    # ── Cleanup ──
-
-    async def destroy(self) -> None:
-        if self._reader_task:
-            self._reader_task.cancel()
-        try:
-            os.close(self.master_fd)
-        except OSError:
-            pass
-        if self.proc.returncode is None:
-            self.proc.terminate()
-            try:
-                async with asyncio.timeout(3):
-                    await self.proc.wait()
-            except TimeoutError:
-                logger.warning(
-                    "opencode /connect (pid=%d) did not exit on SIGTERM, killing",
-                    self.proc.pid or 0,
-                )
-                try:
-                    self.proc.kill()
-                except ProcessLookupError:
-                    pass
-                with contextlib.suppress(Exception):
-                    async with asyncio.timeout(2):
-                        await self.proc.wait()
-        if self._xdg_tmp is not None:
-            shutil.rmtree(self._xdg_tmp, ignore_errors=True)
-        logger.info("Connect session destroyed: pid=%d", self.proc.pid or 0)
-
-
-# The single active provider-connect session (if any).
-_connect_session: _ConnectSession | None = None
-
-
-async def shutdown_connect_session() -> None:
-    """Destroy any live OpenCode provider-connect PTY session."""
-    global _connect_session
-    if _connect_session is None:
-        return
-    try:
-        await _connect_session.destroy()
-    except Exception:
-        logger.warning("Error destroying connect session", exc_info=True)
-    _connect_session = None
-
-
-async def connect_ws_endpoint(websocket: WebSocket) -> None:
-    """WebSocket PTY: spawn or attach to OpenCode TUI for /connect.
-
-    The PTY process lives independently of the WebSocket so the user
-    can switch to the browser and come back without losing the session.
-
-    Query params:
-        token: Telegram initData or HMAC token for authentication.
-    """
-    global _connect_session
-
-    config: Config = websocket.app.state.config
-    token = websocket.query_params.get("token", "")
-
-    try:
-        await validate_token_param(
-            token, config.telegram.token, config.allowed_users
-        )
-    except AuthError:
-        await websocket.close(code=4001, reason="Unauthorized")
-        return
-
-    await websocket.accept()
-
-    context_name = websocket.query_params.get("context") or config.default_context
-    ctx = config.contexts.get(context_name)
-    if ctx is None:
-        await websocket.send_text("\x1b[31mError: unknown context\x1b[0m\r\n")
-        await websocket.close()
-        return
-
-    # If there's an existing live session for this context, reattach to it.
-    if (
-        _connect_session is not None
-        and _connect_session.alive
-        and _connect_session.context_name == context_name
-    ):
-        logger.info("Connect WS: reattaching to existing session")
-        await _connect_session.attach(websocket)
-        try:
-            while True:
-                raw = await websocket.receive_text()
-                _handle_ws_input(raw, _connect_session)
-        except WebSocketDisconnect:
-            _connect_session.detach()
-            logger.info("Connect WS: client detached (session stays alive)")
-        except Exception:
-            _connect_session.detach()
-        return
-
-    # Clean up any dead session.
-    if _connect_session is not None:
-        await _connect_session.destroy()
-        _connect_session = None
-
-    # ── Start a new session ──
-
-    try:
-        opencode_bin = find_opencode_binary()
-    except Exception as e:
-        await websocket.send_text(f"\x1b[31mError: {e}\x1b[0m\r\n")
-        await websocket.close()
-        return
-
-    provider = (websocket.query_params.get("provider") or "").strip()
-    xdg_tmp = None
-    env_extra: dict[str, str] = {}
-    try:
-        xdg_tmp, env_extra = await _prepare_connect_environment(
-            websocket, context_name, ctx,
-        )
-    except Exception as e:
-        logger.exception("Failed to prepare OpenCode connect environment")
-        await websocket.send_text(f"\x1b[31mError: {e}\x1b[0m\r\n")
-        await websocket.close()
-        return
-
-    master_fd, slave_fd = pty.openpty()
-    fcntl.ioctl(
-        slave_fd,
-        termios.TIOCSWINSZ,
-        struct.pack("HHHH", 24, 80, 0, 0),
-    )
-
-    # BROWSER=echo: openBrowser() "succeeds" without opening anything,
-    # and the TUI falls back to showing the paste prompt after 3s.
-    # TERM/COLORTERM: enable 256-color and truecolor output in the TUI.
-    env = {
-        **os.environ,
-        **env_extra,
-        "BROWSER": "echo",
-        "TERM": "xterm-256color",
-        "COLORTERM": "truecolor",
-    }
-
-    argv = [opencode_bin, "auth", "login"]
-    if provider:
-        argv.extend(["--provider", provider])
-
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        env=env,
-        cwd=ctx.directory,
-        preexec_fn=os.setsid,
-    )
-    os.close(slave_fd)
-
-    logger.info("Connect PTY started: pid=%d", proc.pid or 0)
-
-    session = _ConnectSession(
-        proc,
-        master_fd,
-        context_name=context_name,
-        xdg_tmp=xdg_tmp,
-    )
-    _connect_session = session
-    session.start_background()
-    await session.attach(websocket)
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            _handle_ws_input(raw, session)
-    except WebSocketDisconnect:
-        session.detach()
-        logger.info("Connect WS: client detached (session stays alive)")
-    except Exception:
-        logger.exception("Connect WS error")
-        session.detach()
-
-    # Don't destroy the session here — it stays alive for reconnection.
-    # It will be cleaned up when the process exits and the next connect
-    # finds a dead session, or on a fresh /connect.
-
-
-async def _prepare_connect_environment(
-    websocket: WebSocket,
-    context_name: str,
-    ctx: ContextConfig,
-) -> tuple[Path | None, dict[str, str]]:
-    if not is_sandboxed(ctx):
-        return None, {}
-
-    sandbox_managers = getattr(websocket.app.state, "sandbox_managers", None) or {}
-    manager = sandbox_managers.get(ctx.sandbox.backend if ctx.sandbox else "")
-    if manager is None:
-        raise RuntimeError(f"No sandbox manager for context {context_name}")
-
-    def _prepare() -> Path:
-        sandbox = manager.create_sandbox(context_name, ctx)
-        sandbox.ensure_environment()
-        sandbox.ensure_running()
-        sandbox.provision_workspace()
-        opencode_home = sandbox.opencode_home_dir()
-        opencode_home.mkdir(parents=True, exist_ok=True)
-        xdg_tmp = Path(tempfile.mkdtemp(prefix=f"openshrimp-connect-{context_name}-"))
-        (xdg_tmp / "data").mkdir()
-        (xdg_tmp / "config").mkdir()
-        (xdg_tmp / "state").mkdir()
-        (xdg_tmp / "cache").mkdir()
-        (xdg_tmp / "data" / "opencode").symlink_to(
-            opencode_home,
-            target_is_directory=True,
-        )
-        return xdg_tmp
-
-    xdg_tmp = await asyncio.to_thread(_prepare)
-    return xdg_tmp, {
-        "XDG_DATA_HOME": str(xdg_tmp / "data"),
-        "XDG_CONFIG_HOME": str(xdg_tmp / "config"),
-        "XDG_STATE_HOME": str(xdg_tmp / "state"),
-        "XDG_CACHE_HOME": str(xdg_tmp / "cache"),
-    }
-
-
-def _handle_ws_input(raw: str, session: _ConnectSession) -> None:
-    """Parse a WebSocket message and write to the PTY or resize."""
-    try:
-        msg = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        os.write(session.master_fd, raw.encode("utf-8"))
-        return
-
-    msg_type = msg.get("type")
-    if msg_type == "stdin":
-        os.write(session.master_fd, msg["data"].encode("utf-8"))
-    elif msg_type == "resize":
-        cols = msg.get("cols", 80)
-        rows = msg.get("rows", 24)
-        fcntl.ioctl(
-            session.master_fd,
-            termios.TIOCSWINSZ,
-            struct.pack("HHHH", rows, cols, 0, 0),
-        )
-
-
 def create_terminal_routes() -> list[Route | Mount]:
     """Create the routes for the terminal API and Mini App frontend.
 
@@ -693,7 +353,6 @@ def create_terminal_routes() -> list[Route | Mount]:
     routes: list[Route | Mount] = [
         Route("/api/terminal/tail", tail_endpoint, methods=["GET"]),
         Route("/api/terminal/read", read_endpoint, methods=["GET"]),
-        WebSocketRoute("/ws/terminal/connect", connect_ws_endpoint),
     ]
 
     if _dist_dir.is_dir():

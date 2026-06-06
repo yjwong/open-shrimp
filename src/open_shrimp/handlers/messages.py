@@ -21,6 +21,7 @@ from open_shrimp.db import ChatScope
 from open_shrimp.handlers.questions import (
     _complete_other_input,
 )
+from open_shrimp.handlers.provider_connect import maybe_handle_connect_message
 from open_shrimp.handlers.state import (
     _media_group_messages,
     _media_group_tasks,
@@ -166,6 +167,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     scope = chat_scope_from_message(message)
+
+    if has_text and await maybe_handle_connect_message(update, context):
+        logger.info("message_handler: handled provider-connect input for scope %s", scope)
+        return
 
     # Check if this is a text response to an "Other..." question prompt.
     # If there's a pending "Other" input for this scope, resolve it inline

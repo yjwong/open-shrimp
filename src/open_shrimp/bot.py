@@ -62,6 +62,7 @@ from open_shrimp.handlers.commands import (
 from open_shrimp.handlers.messages import message_handler, web_app_data_handler
 from open_shrimp.handlers.questions import _handle_question_callback
 from open_shrimp.handlers.utils import _is_authorized
+from open_shrimp.handlers.provider_connect import handle_connect_callback
 from open_shrimp.prompt_suggestion import CALLBACK_PREFIX, handle_suggestion_callback
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,9 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data.startswith(CALLBACK_PREFIX):
         await handle_suggestion_callback(query, data)
+        return
+
+    if await handle_connect_callback(update, context):
         return
 
     # /context selection and pagination
@@ -404,15 +408,6 @@ async def run_bot(
                 await app.stop()
         except (Exception, TimeoutError):
             logger.warning("Error stopping PTB application", exc_info=True)
-        # Destroy any live provider-connect PTY session before we tear
-        # down sandboxes — leaving it alive just delays the final SIGTERM
-        # fan-out in the systemd cgroup.
-        from open_shrimp.terminal.api import shutdown_connect_session
-        try:
-            async with asyncio.timeout(6):
-                await shutdown_connect_session()
-        except (Exception, TimeoutError):
-            logger.warning("Error shutting down connect session", exc_info=True)
         stop_idle_sweep()
         await stop_all_runners()
         await close_all_sessions()

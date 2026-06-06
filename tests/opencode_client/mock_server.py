@@ -50,6 +50,16 @@ class MockOpenCode:
         # Tests script this when they need the bridge's message-fetch
         # fallback to find a matching ToolPart.
         self.messages: dict[tuple[str, str], dict[str, Any]] = {}
+        self.providers: dict[str, Any] = {
+            "all": [],
+            "default": {},
+            "connected": [],
+        }
+        self.provider_auth_methods: dict[str, list[dict[str, Any]]] = {}
+        self.oauth_authorizations: list[dict[str, Any]] = []
+        self.oauth_callbacks: list[dict[str, Any]] = []
+        self.auth_sets: list[dict[str, Any]] = []
+        self.auth_removes: list[str] = []
 
         # Each /event subscriber gets its own queue. _subscribers is a list
         # of asyncio.Queue[dict | None]. None signals end-of-stream.
@@ -151,6 +161,36 @@ class MockOpenCode:
                     self._question_reject,
                     methods=["POST"],
                 ),
+                Route(
+                    "/provider",
+                    self._provider_list,
+                    methods=["GET"],
+                ),
+                Route(
+                    "/provider/auth",
+                    self._provider_auth,
+                    methods=["GET"],
+                ),
+                Route(
+                    "/provider/{provider_id}/oauth/authorize",
+                    self._provider_oauth_authorize,
+                    methods=["POST"],
+                ),
+                Route(
+                    "/provider/{provider_id}/oauth/callback",
+                    self._provider_oauth_callback,
+                    methods=["POST"],
+                ),
+                Route(
+                    "/auth/{provider_id}",
+                    self._auth_set,
+                    methods=["PUT"],
+                ),
+                Route(
+                    "/auth/{provider_id}",
+                    self._auth_remove,
+                    methods=["DELETE"],
+                ),
             ]
         )
 
@@ -204,6 +244,49 @@ class MockOpenCode:
             {"id": sid, "body": data, "params": dict(request.query_params)}
         )
         return JSONResponse({"id": sid})
+
+    async def _provider_list(self, request: Request) -> Response:
+        return JSONResponse(self.providers)
+
+    async def _provider_auth(self, request: Request) -> Response:
+        return JSONResponse(self.provider_auth_methods)
+
+    async def _provider_oauth_authorize(self, request: Request) -> Response:
+        body = await request.body()
+        data = json.loads(body) if body else {}
+        self.oauth_authorizations.append({
+            "provider_id": request.path_params["provider_id"],
+            "body": data,
+            "params": dict(request.query_params),
+        })
+        return JSONResponse({
+            "url": "https://example.test/oauth",
+            "method": "code",
+            "instructions": "Authorize in the browser",
+        })
+
+    async def _provider_oauth_callback(self, request: Request) -> Response:
+        body = await request.body()
+        data = json.loads(body) if body else {}
+        self.oauth_callbacks.append({
+            "provider_id": request.path_params["provider_id"],
+            "body": data,
+            "params": dict(request.query_params),
+        })
+        return JSONResponse(True)
+
+    async def _auth_set(self, request: Request) -> Response:
+        body = await request.body()
+        data = json.loads(body) if body else {}
+        self.auth_sets.append({
+            "provider_id": request.path_params["provider_id"],
+            "body": data,
+        })
+        return JSONResponse(True)
+
+    async def _auth_remove(self, request: Request) -> Response:
+        self.auth_removes.append(request.path_params["provider_id"])
+        return JSONResponse(True)
 
     async def _fork_session(self, request: Request) -> Response:
         parent_sid = request.path_params["sid"]

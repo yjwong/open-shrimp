@@ -448,3 +448,49 @@ async def test_session_permission_rules_allow_question(
 
     rules = mock_server.created_sessions[0]["body"]["permission"]
     assert {"permission": "question", "pattern": "*", "action": "allow"} in rules
+
+
+async def test_provider_auth_control_methods(
+    mock_server: MockOpenCode, wired_server
+) -> None:
+    mock_server.providers = {
+        "all": [{"id": "openai", "name": "OpenAI", "models": {}}],
+        "default": {},
+        "connected": ["openai"],
+    }
+    mock_server.provider_auth_methods = {
+        "openai": [{"type": "oauth", "label": "OAuth"}],
+    }
+    opts = OpenCodeOptions(cwd="/tmp/project", provider="openai", model="gpt-test")
+    client = OpenCodeClient(opts)
+    await client.connect_control()
+    try:
+        assert await client.list_providers() == mock_server.providers
+        assert await client.list_provider_auth_methods() == mock_server.provider_auth_methods
+        assert await client.authorize_provider("openai", 0, {"mode": "headless"}) == {
+            "url": "https://example.test/oauth",
+            "method": "code",
+            "instructions": "Authorize in the browser",
+        }
+        assert await client.complete_provider_oauth("openai", 0, code="abc123") is True
+        assert await client.set_provider_api_key("openai", "secret", {"org": "test"}) is True
+        assert await client.remove_provider_auth("openai") is True
+    finally:
+        await client.disconnect()
+
+    assert mock_server.created_sessions == []
+    assert mock_server.oauth_authorizations == [{
+        "provider_id": "openai",
+        "body": {"method": 0, "inputs": {"mode": "headless"}},
+        "params": {"directory": "/tmp/project"},
+    }]
+    assert mock_server.oauth_callbacks == [{
+        "provider_id": "openai",
+        "body": {"method": 0, "code": "abc123"},
+        "params": {"directory": "/tmp/project"},
+    }]
+    assert mock_server.auth_sets == [{
+        "provider_id": "openai",
+        "body": {"type": "api", "key": "secret", "metadata": {"org": "test"}},
+    }]
+    assert mock_server.auth_removes == ["openai"]

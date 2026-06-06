@@ -183,6 +183,17 @@ class OpenCodeClient:
             self._http = None
             raise
 
+    async def connect_control(self) -> None:
+        """Connect HTTP control-plane APIs without creating a session."""
+        if self._server is not None:
+            return
+        self._server = self._options.endpoint or await OpenCodeServer.get_or_start()
+        self._http = httpx.AsyncClient(
+            base_url=self._server.base_url,
+            timeout=30.0,
+            headers={"Authorization": self._server.auth_header},
+        )
+
     async def _create_session(self) -> str:
         return await self.create_session()
 
@@ -597,6 +608,133 @@ class OpenCodeClient:
         if not isinstance(payload, list):
             raise ProcessError(f"GET /api/model returned non-list: {payload!r}")
         return [item for item in payload if isinstance(item, dict)]
+
+    async def list_providers(self) -> dict[str, Any]:
+        """Fetch provider list and connected state from OpenCode."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.list_providers called before connect()")
+        params: dict[str, str] = {}
+        if self._options.cwd:
+            params["directory"] = self._options.cwd
+        try:
+            r = await self._http.get("/provider", params=params)
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"GET /provider failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"GET /provider returned {r.status_code}: {r.text[:300]}")
+        payload = r.json()
+        if not isinstance(payload, dict):
+            raise ProcessError(f"GET /provider returned non-object: {payload!r}")
+        return payload
+
+    async def list_provider_auth_methods(self) -> dict[str, list[dict[str, Any]]]:
+        """Fetch provider auth methods from OpenCode."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.list_provider_auth_methods called before connect()")
+        params: dict[str, str] = {}
+        if self._options.cwd:
+            params["directory"] = self._options.cwd
+        try:
+            r = await self._http.get("/provider/auth", params=params)
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"GET /provider/auth failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"GET /provider/auth returned {r.status_code}: {r.text[:300]}")
+        payload = r.json()
+        if not isinstance(payload, dict):
+            raise ProcessError(f"GET /provider/auth returned non-object: {payload!r}")
+        return {
+            str(key): [item for item in value if isinstance(item, dict)]
+            for key, value in payload.items()
+            if isinstance(value, list)
+        }
+
+    async def authorize_provider(
+        self,
+        provider_id: str,
+        method_index: int,
+        inputs: dict[str, str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Start an OAuth provider auth flow."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.authorize_provider called before connect()")
+        params: dict[str, str] = {}
+        if self._options.cwd:
+            params["directory"] = self._options.cwd
+        body: dict[str, Any] = {"method": method_index}
+        if inputs:
+            body["inputs"] = inputs
+        path = f"/provider/{quote(provider_id, safe='')}/oauth/authorize"
+        try:
+            r = await self._http.post(path, params=params, json=body)
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"POST {path} failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"POST {path} returned {r.status_code}: {r.text[:300]}")
+        payload = r.json()
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            raise ProcessError(f"POST {path} returned non-object: {payload!r}")
+        return payload
+
+    async def complete_provider_oauth(
+        self,
+        provider_id: str,
+        method_index: int,
+        code: str | None = None,
+    ) -> bool:
+        """Complete an OAuth provider auth flow."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.complete_provider_oauth called before connect()")
+        params: dict[str, str] = {}
+        if self._options.cwd:
+            params["directory"] = self._options.cwd
+        body: dict[str, Any] = {"method": method_index}
+        if code:
+            body["code"] = code
+        path = f"/provider/{quote(provider_id, safe='')}/oauth/callback"
+        try:
+            r = await self._http.post(path, params=params, json=body)
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"POST {path} failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"POST {path} returned {r.status_code}: {r.text[:300]}")
+        return bool(r.json())
+
+    async def set_provider_api_key(
+        self,
+        provider_id: str,
+        key: str,
+        metadata: dict[str, str] | None = None,
+    ) -> bool:
+        """Write API-key provider auth through OpenCode."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.set_provider_api_key called before connect()")
+        body: dict[str, Any] = {"type": "api", "key": key}
+        if metadata:
+            body["metadata"] = metadata
+        path = f"/auth/{quote(provider_id, safe='')}"
+        try:
+            r = await self._http.put(path, json=body)
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"PUT {path} failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"PUT {path} returned {r.status_code}: {r.text[:300]}")
+        return bool(r.json())
+
+    async def remove_provider_auth(self, provider_id: str) -> bool:
+        """Remove provider auth through OpenCode."""
+        if self._http is None:
+            raise CLIConnectionError("OpenCodeClient.remove_provider_auth called before connect()")
+        path = f"/auth/{quote(provider_id, safe='')}"
+        try:
+            r = await self._http.delete(path)
+        except httpx.HTTPError as exc:
+            raise CLIConnectionError(f"DELETE {path} failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise ProcessError(f"DELETE {path} returned {r.status_code}: {r.text[:300]}")
+        return bool(r.json())
 
     async def patch_config_permission(
         self,

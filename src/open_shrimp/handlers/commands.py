@@ -10,7 +10,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import aiosqlite
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -38,6 +37,7 @@ from open_shrimp.handlers.state import (
     _resume_session_cache,
     clear_session_approvals,
 )
+from open_shrimp.handlers.provider_connect import connect_handler
 from open_shrimp.handlers.utils import (
     _escape_mdv2,
     _get_context,
@@ -1379,73 +1379,6 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     escaped_context = _escape_mdv2(context_name)
     await update.message.reply_text(
         f"Desktop for *{escaped_context}*",
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
-    )
-
-
-# ── /connect ──
-
-
-async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /connect -- open the provider connection Mini App."""
-    if not update.effective_user or not update.message:
-        return
-
-    config: Config = context.bot_data["config"]
-
-    if not _is_authorized(update.effective_user.id, config):
-        return
-
-    if not _is_private_chat(update):
-        await update.message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
-        return
-
-    db: aiosqlite.Connection = context.bot_data["db"]
-    scope = chat_scope_from_message(update.message)
-    context_name, _ctx = await _get_context(scope, config, db)
-
-    args = update.message.text.split(maxsplit=1) if update.message.text else []
-    provider = args[1].strip() if len(args) == 2 else ""
-    if provider == "list":
-        await update.message.reply_text(
-            "Open the provider connection Mini App to view and manage providers\.",
-            parse_mode="MarkdownV2",
-        )
-        return
-    if provider.startswith("disconnect "):
-        await update.message.reply_text(
-            "Provider disconnect is not available in Telegram yet\. Use OpenCode's provider UI in `/connect`\.",
-            parse_mode="MarkdownV2",
-        )
-        return
-
-    # Build the Mini App URL.
-    if config.review.public_url:
-        base_url = config.review.public_url.rstrip("/")
-    else:
-        base_url = f"https://{config.review.host}:{config.review.port}"
-
-    chat_type = update.effective_chat.type if update.effective_chat else "private"
-    connect_url = (
-        f"{base_url}/terminal/?mode=connect"
-        f"&context={quote(context_name, safe='')}"
-    )
-    if provider:
-        connect_url += f"&provider={quote(provider, safe='')}"
-    keyboard = InlineKeyboardMarkup([
-        [make_web_app_button(
-            text="Connect providers",
-            url=connect_url,
-            chat_id=scope.chat_id,
-            user_id=update.effective_user.id,
-            bot_token=config.telegram.token,
-            is_private_chat=chat_type == "private",
-        )]
-    ])
-
-    await update.message.reply_text(
-        "Connect model providers",
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
     )

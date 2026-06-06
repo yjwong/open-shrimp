@@ -192,7 +192,7 @@ Provider credentials are managed by OpenCode. Users normally connect providers t
 - **Group chats**: Only respond to @mentions and replies. Check `message.entities` for bot mention or `message.reply_to_message`.
 - **Inline keyboards**: Use `InlineKeyboardMarkup` for tool approvals, context/resume choices, OpenCode questions, and prompt suggestions. Handle via `CallbackQueryHandler`.
 - **Forum topics**: Full support for Telegram forum chats. Each topic gets its own ChatScope, context/session state, and optional auto-title via the topic-edit MCP tool.
-- **Terminal Mini App**: When a long-running command starts in the background, the tool result can include a "View output" `web_app` button that opens an xterm.js terminal viewer. The viewer loads existing output via `/api/terminal/read`, streams new output via SSE at `/api/terminal/tail`, and also provides the provider-connection PTY used by `/connect`. Served at `/terminal/`.
+- **Terminal Mini App**: When a long-running command starts in the background, the tool result can include a "View output" `web_app` button that opens an xterm.js terminal viewer. The viewer loads existing output via `/api/terminal/read` and streams new output via SSE at `/api/terminal/tail`. Served at `/terminal/`.
 - **VNC Mini App**: For computer-use contexts, `/vnc` opens a noVNC-based viewer. The backend proxies WebSocket connections to the sandbox's VNC server. Served at `/vnc/`.
 - **Markdown Preview Mini App**: Ephemeral content store for rendering markdown previews. Served at `/preview/`.
 - **Tunnel support**: When `review.tunnel: cloudflared` is set, a cloudflared quick tunnel is auto-started to expose Mini Apps publicly. The binary is auto-downloaded if not installed.

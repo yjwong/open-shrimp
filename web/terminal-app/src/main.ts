@@ -55,16 +55,9 @@ function getLabels(sourceType: string): SourceLabels {
   }
 }
 
-// ── Mode dispatch ──
-
 const params = new URLSearchParams(window.location.search);
-const mode = params.get("mode");
 
-if (mode === "connect") {
-  connectMain().catch((e) => showError(`Fatal: ${e}`));
-} else {
-  tailMain().catch((e) => showError(`Fatal: ${e}`));
-}
+tailMain().catch((e) => showError(`Fatal: ${e}`));
 
 // ── Tail mode (existing logic) ──
 
@@ -256,144 +249,6 @@ async function tailMain(): Promise<void> {
   }
 }
 
-// ── Connect mode ──
-
-async function connectMain(): Promise<void> {
-  showStatus("Initializing provider connection...");
-
-  try {
-    window.Telegram?.WebApp?.ready();
-    window.Telegram?.WebApp?.expand();
-  } catch {
-    // Not in Telegram.
-  }
-
-  showStatus("Loading xterm.js...");
-
-  const { Terminal } = await import("@xterm/xterm");
-  const { FitAddon } = await import("@xterm/addon-fit");
-
-  showStatus("Creating terminal...");
-
-  const container = document.getElementById("terminal-container")!;
-  const authLinkBar = document.getElementById("login-auth-link")!;
-  const authLink = document.getElementById("auth-link") as HTMLAnchorElement;
-
-  injectBaseStyles();
-  injectConnectStyles();
-
-  const term = new Terminal({
-    convertEol: true,
-    cursorBlink: true,
-    cursorStyle: "bar",
-    disableStdin: false,
-    scrollback: 5000,
-    fontSize: 13,
-    fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", monospace',
-    theme: THEME,
-  });
-
-  const fitAddon = new FitAddon();
-  term.loadAddon(fitAddon);
-
-  showStatus("Connecting...");
-  term.open(container);
-  loadingEl.remove();
-
-  requestAnimationFrame(() => fitAddon.fit());
-  window.addEventListener("resize", () => fitAddon.fit());
-  try {
-    window.Telegram?.WebApp?.onEvent("viewportChanged", () => fitAddon.fit());
-  } catch {
-    // ignore
-  }
-
-  // ── WebSocket connection ──
-
-  const tokenValue =
-    window.Telegram?.WebApp?.initData ||
-    params.get("token") ||
-    "";
-  const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-  const contextName = params.get("context") || "";
-  const provider = params.get("provider") || "";
-  let wsUrl = `${wsProto}//${location.host}/ws/terminal/connect?token=${encodeURIComponent(tokenValue)}`;
-  if (contextName) wsUrl += `&context=${encodeURIComponent(contextName)}`;
-  if (provider) wsUrl += `&provider=${encodeURIComponent(provider)}`;
-
-  let authUrlFound = false;
-  let outputBuffer = "";
-  let ws: WebSocket | null = null;
-
-  function connect(): void {
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      ws!.send(JSON.stringify({
-        type: "resize",
-        cols: term.cols,
-        rows: term.rows,
-      }));
-    };
-
-    ws.onmessage = (event) => {
-      const data = event.data as string;
-      term.write(data);
-      outputBuffer += data;
-
-      // Scrape provider auth URLs from TUI output and show a tappable button.
-      // The TUI wraps the long URL across multiple lines, so we strip all
-      // ANSI escape sequences, control chars, and whitespace before matching.
-      if (!authUrlFound) {
-        const clean = outputBuffer
-          // Strip ANSI escape sequences (CSI, OSC, etc.)
-          .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
-          .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
-          .replace(/\x1b[^[\]].?/g, "")
-          ;
-        const compact = clean.replace(/[\s\r\n]+/g, "");
-        const urlMatch = compact.match(/https:\/\/[^\s"'<>`|\\^\[\]{}]+/);
-        if (urlMatch && urlMatch[0]) {
-          authLink.href = urlMatch[0];
-          authLinkBar.style.display = "flex";
-          authUrlFound = true;
-        }
-      }
-    };
-
-    ws.onclose = () => {
-      ws = null;
-    };
-
-    ws.onerror = () => {
-      // Will trigger onclose.
-    };
-  }
-
-  // Auto-reconnect when the page regains focus (user returns from browser).
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && !ws) {
-      term.writeln("\x1b[90mReconnecting...\x1b[0m");
-      connect();
-    }
-  });
-
-  connect();
-
-  // Forward keyboard input to the PTY.
-  term.onData((data) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "stdin", data }));
-    }
-  });
-
-  term.onResize(({ cols, rows }) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "resize", cols, rows }));
-    }
-  });
-}
-
 // ── Shared helpers ──
 
 const THEME = {
@@ -445,43 +300,6 @@ function injectBaseStyles(): void {
       font-family: monospace;
       font-size: 13px;
       z-index: 9999;
-    }
-  `;
-  document.head.appendChild(style);
-}
-
-function injectConnectStyles(): void {
-  const style = document.createElement("style");
-  style.textContent = `
-    #terminal-container {
-      bottom: 50px !important;
-    }
-    #login-auth-link {
-      position: fixed;
-      left: 0; right: 0; bottom: 0;
-      height: 50px;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      background: #24283b;
-      border-top: 1px solid #414868;
-      z-index: 100;
-    }
-    #auth-link {
-      display: block;
-      width: calc(100% - 24px);
-      padding: 10px 0;
-      text-align: center;
-      background: #7aa2f7;
-      color: #1a1b26;
-      font-family: monospace;
-      font-size: 14px;
-      font-weight: bold;
-      text-decoration: none;
-      border-radius: 6px;
-    }
-    #auth-link:active {
-      background: #5d8bdb;
     }
   `;
   document.head.appendChild(style);
