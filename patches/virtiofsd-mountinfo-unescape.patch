@@ -1,0 +1,101 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 2f03eb8..f153954 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,7 +1,7 @@
+ [package]
+ name = "virtiofsd"
+ description = "A virtio-fs vhost-user device daemon"
+-version = "1.13.3"
++version = "1.13.3+openshrimp.1"
+ authors = ["The Virtiofs Project Developers"]
+ edition = "2018"
+ homepage = "https://virtio-fs.gitlab.io/"
+diff --git a/src/passthrough/mount_fd.rs b/src/passthrough/mount_fd.rs
+index bfb55e6..a5a1368 100644
+--- a/src/passthrough/mount_fd.rs
++++ b/src/passthrough/mount_fd.rs
+@@ -405,6 +405,6 @@ impl MountFds {
+         match path {
+             Some(p) => {
+-                let p = String::from(p);
++                let p = decode_mountinfo_path(p);
+                 if let Some(prefix) = self.mountprefix.as_ref() {
+                     if let Some(suffix) = p.strip_prefix(prefix).filter(|s| !s.is_empty()) {
+                         Ok(suffix.into())
+@@ -465,3 +465,75 @@ impl MountFds {
+         }
+     }
+ }
++
++fn decode_mountinfo_path(path: &str) -> String {
++    let mut decoded = String::with_capacity(path.len());
++    let bytes = path.as_bytes();
++    let mut i = 0;
++
++    while i < bytes.len() {
++        if bytes[i] == b'\\'
++            && i + 3 < bytes.len()
++            && (b'0'..=b'7').contains(&bytes[i + 1])
++            && (b'0'..=b'7').contains(&bytes[i + 2])
++            && (b'0'..=b'7').contains(&bytes[i + 3])
++        {
++            let value = (bytes[i + 1] - b'0') * 64
++                + (bytes[i + 2] - b'0') * 8
++                + (bytes[i + 3] - b'0');
++            decoded.push(value as char);
++            i += 4;
++        } else {
++            let ch = path[i..].chars().next().unwrap();
++            decoded.push(ch);
++            i += ch.len_utf8();
++        }
++    }
++
++    decoded
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::env;
++    use std::fs::{self, File, OpenOptions};
++    use std::io::Write;
++    use std::process;
++
++    #[test]
++    fn get_mount_root_decodes_mountinfo_octal_escapes() {
++        let path = env::temp_dir().join(format!(
++            "virtiofsd-mountinfo-test-{}",
++            process::id()
++        ));
++        let mut mountinfo = OpenOptions::new()
++            .create(true)
++            .truncate(true)
++            .read(true)
++            .write(true)
++            .open(&path)
++            .unwrap();
++        writeln!(
++            mountinfo,
++            "42 1 8:1 / /mnt/source\\040directory rw,relatime - ext4 /dev/sda rw"
++        )
++        .unwrap();
++
++        let mount_fds = MountFds::new(File::from(mountinfo), None);
++
++        assert_eq!(
++            mount_fds.get_mount_root(42).unwrap(),
++            "/mnt/source directory"
++        );
++        fs::remove_file(path).unwrap();
++    }
++
++    #[test]
++    fn decode_mountinfo_path_preserves_invalid_escapes() {
++        assert_eq!(
++            decode_mountinfo_path("/mnt/foo\\bar/baz"),
++            "/mnt/foo\\bar/baz"
++        );
++    }
++}

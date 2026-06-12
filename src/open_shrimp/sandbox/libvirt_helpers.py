@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -78,6 +79,9 @@ after a transient ``process_queue_*()`` error, notifications are never
 re-enabled, so the guest blocks forever.  Fixed in v1.11.0 (dbfe3c4).
 """
 
+_MANAGED_VIRTIOFSD_BUILD = "openshrimp.1"
+"""Build metadata expected on OpenShrimp-managed patched virtiofsd binaries."""
+
 
 def _parse_virtiofsd_version(path: str) -> tuple[int, ...] | None:
     """Run ``virtiofsd --version`` and parse the version tuple."""
@@ -85,33 +89,55 @@ def _parse_virtiofsd_version(path: str) -> tuple[int, ...] | None:
         result = subprocess.run(
             [path, "--version"], capture_output=True, text=True, timeout=5,
         )
-        # Output: "virtiofsd 1.13.3"
-        for token in result.stdout.strip().split():
-            parts = token.split(".")
-            if len(parts) >= 2 and parts[0].isdigit():
-                return tuple(int(p) for p in parts)
+        # Output: "virtiofsd 1.13.3" or "virtiofsd 1.13.3+openshrimp.1".
+        match = re.search(
+            r"\b(\d+)\.(\d+)\.(\d+)(?:[-+][^\s]+)?\b", result.stdout,
+        )
+        if match:
+            return tuple(int(p) for p in match.groups())
     except Exception:
         pass
     return None
 
 
-def find_virtiofsd() -> str | None:
-    """Locate the virtiofsd binary.
+def _virtiofsd_has_managed_build(path: str) -> bool:
+    """Return whether ``path`` is the OpenShrimp-patched managed build."""
+    try:
+        result = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    return _MANAGED_VIRTIOFSD_BUILD in result.stdout
 
-    Prefers the managed binary in ``~/.local/share/openshrimp/bin/``
-    (auto-downloaded, known-good version), then falls back to ``$PATH``
-    and known system locations — but only if they meet the minimum
-    version requirement.
 
-    Returns:
-        Absolute path to virtiofsd, or ``None`` if not found.
-    """
-    # 1. Managed binary (auto-downloaded, always preferred).
+def _find_managed_virtiofsd() -> str | None:
+    """Return the managed patched virtiofsd binary if present and usable."""
     managed = _data_dir() / "bin" / "virtiofsd"
-    if managed.is_file() and os.access(str(managed), os.X_OK):
-        return str(managed)
+    if not (managed.is_file() and os.access(str(managed), os.X_OK)):
+        return None
 
-    # 2. $PATH and known system locations — version-gated.
+    managed_path = str(managed)
+    ver = _parse_virtiofsd_version(managed_path)
+    if (
+        ver is not None
+        and ver >= _MIN_VIRTIOFSD_VERSION
+        and _virtiofsd_has_managed_build(managed_path)
+    ):
+        return managed_path
+
+    logger.warning(
+        "Ignoring stale managed virtiofsd at %s; expected version >= %s "
+        "with %s build metadata",
+        managed,
+        ".".join(str(v) for v in _MIN_VIRTIOFSD_VERSION),
+        _MANAGED_VIRTIOFSD_BUILD,
+    )
+    return None
+
+
+def _find_system_virtiofsd() -> str | None:
+    """Return a system virtiofsd binary meeting the minimum version."""
     candidates: list[str] = []
     path = shutil.which("virtiofsd")
     if path:
@@ -127,6 +153,29 @@ def find_virtiofsd() -> str | None:
         ver = _parse_virtiofsd_version(candidate)
         if ver is not None and ver >= _MIN_VIRTIOFSD_VERSION:
             return candidate
+    return None
+
+
+def find_virtiofsd() -> str | None:
+    """Locate the virtiofsd binary.
+
+    Prefers the managed binary in ``~/.local/share/openshrimp/bin/`` when
+    it carries OpenShrimp's patch marker, then falls back to ``$PATH`` and
+    known system locations — but only if they meet the minimum version
+    requirement.
+
+    Returns:
+        Absolute path to virtiofsd, or ``None`` if not found.
+    """
+    # 1. Managed binary (auto-downloaded, always preferred).
+    managed = _find_managed_virtiofsd()
+    if managed is not None:
+        return managed
+
+    # 2. $PATH and known system locations — version-gated.
+    system = _find_system_virtiofsd()
+    if system is not None:
+        return system
 
     # 3. If system versions are too old, return None so the caller can
     #    trigger an auto-download or show an error.
@@ -161,9 +210,10 @@ def _download_virtiofsd() -> str:
     machine = _platform.machine()
     binary_name = _VIRTIOFSD_BINARY_MAP.get(machine)
     if binary_name is None:
+        min_version = ".".join(str(v) for v in _MIN_VIRTIOFSD_VERSION)
         raise RuntimeError(
             f"No pre-built virtiofsd for {_platform.system()} {machine}. "
-            f"Please install virtiofsd >= {'.'.join(str(v) for v in _MIN_VIRTIOFSD_VERSION)} manually."
+            f"Please install virtiofsd >= {min_version} manually."
         )
 
     bin_dir = _data_dir() / "bin"
@@ -205,15 +255,28 @@ def ensure_virtiofsd() -> str:
     Raises:
         RuntimeError: If virtiofsd cannot be found or downloaded.
     """
-    path = find_virtiofsd()
-    if path is not None:
-        return path
+    managed = _find_managed_virtiofsd()
+    if managed is not None:
+        return managed
 
     logger.warning(
-        "No virtiofsd >= %s found — downloading from GitHub releases...",
+        "No patched OpenShrimp virtiofsd >= %s found — downloading from "
+        "GitHub releases...",
         ".".join(str(v) for v in _MIN_VIRTIOFSD_VERSION),
     )
-    return _download_virtiofsd()
+    try:
+        return _download_virtiofsd()
+    except Exception:
+        system = _find_system_virtiofsd()
+        if system is not None:
+            logger.warning(
+                "Falling back to system virtiofsd at %s; paths on mount "
+                "points containing spaces may fail without the OpenShrimp "
+                "patch",
+                system,
+            )
+            return system
+        raise
 
 
 # ---------------------------------------------------------------------------

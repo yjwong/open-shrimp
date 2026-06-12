@@ -236,6 +236,8 @@ jobs:
             artifact: virtiofsd-linux-aarch64
 
     steps:
+      - uses: actions/checkout@v6
+
       - name: Install system build dependencies
         run: sudo apt-get update && sudo apt-get install -y libseccomp-dev libcap-ng-dev
 
@@ -253,6 +255,14 @@ jobs:
 
       - name: Clone virtiofsd
         run: git clone --depth 1 --branch v1.13.3 https://gitlab.com/virtio-fs/virtiofsd.git
+
+      - name: Apply OpenShrimp virtiofsd patch
+        working-directory: virtiofsd
+        run: git apply ../patches/virtiofsd-mountinfo-unescape.patch
+
+      - name: Test OpenShrimp virtiofsd patch
+        working-directory: virtiofsd
+        run: cargo test mountinfo
 
       - name: Build virtiofsd
         working-directory: virtiofsd
