@@ -1,9 +1,10 @@
 """Tests for the transport-neutral OpenShrimp tool descriptors.
 
-Covers the port off the SDK ``@tool`` decorator: the ``create_openshrimp_tools``
-factory's gating, the ``read_only`` flags, the ``to_sdk_tool`` adapter, and the
-``create_openshrimp_mcp_server`` backwards-compatible shim. Handler bodies are
-spot-checked for envelope parity.
+Covers the ``create_openshrimp_tools`` factory's gating, the ``read_only``
+flags, and handler-body edge cases (direct calls).  Transport-shaped
+coverage — the ``/tools/{scope_token}`` JSON-RPC bridge that actually
+serves these descriptors — lives in
+``tests/mcp_proxy/test_openshrimp_tools.py``.
 """
 
 from __future__ import annotations
@@ -16,9 +17,7 @@ import pytest
 
 from open_shrimp.tools import (
     OpenShrimpTool,
-    create_openshrimp_mcp_server,
     create_openshrimp_tools,
-    to_sdk_tool,
 )
 
 
@@ -122,29 +121,6 @@ def test_read_only_flags() -> None:
         "computer_toplevel", "port_forward", "host_bash",
     ):
         assert tools[name].read_only is False, name
-
-
-# --- to_sdk_tool ------------------------------------------------------------
-
-
-def test_to_sdk_tool_field_parity() -> None:
-    src = create_openshrimp_tools(bot=MagicMock(), chat_id=1)[0]
-    sdk = to_sdk_tool(src)
-    assert sdk.name == src.name
-    assert sdk.description == src.description
-    assert sdk.input_schema == src.input_schema
-    assert sdk.handler is src.handler
-    assert sdk.annotations.readOnlyHint == src.read_only
-
-
-# --- shim -------------------------------------------------------------------
-
-
-def test_shim_preserves_server_name() -> None:
-    """The mcp__openshrimp__ prefix derives from the server name; lock it."""
-    cfg = create_openshrimp_mcp_server(bot=MagicMock(), chat_id=1)
-    assert cfg["type"] == "sdk"
-    assert cfg["name"] == "openshrimp"
 
 
 # --- handler parity ---------------------------------------------------------

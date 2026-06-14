@@ -18,9 +18,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from claude_agent_sdk import SdkMcpTool
-    from claude_agent_sdk.types import McpSdkServerConfig
-
     from open_shrimp.sandbox.base import Sandbox
 
 from telegram import Bot, InlineKeyboardMarkup
@@ -36,10 +33,9 @@ ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 class OpenShrimpTool:
     """Transport-neutral descriptor for an OpenShrimp MCP tool.
 
-    Field-for-field compatible with the SDK's ``SdkMcpTool``; the
-    ``mcp__openshrimp__`` name prefix is added by whichever transport
-    installs the tool, not stored here. ``read_only`` maps to
-    ``ToolAnnotations.readOnlyHint`` for the SDK backend.
+    The ``mcp__openshrimp__`` name prefix is added by whichever transport
+    installs the tool, not stored here. ``read_only`` maps to MCP's
+    ``annotations.readOnlyHint`` in the ``tools/list`` response.
     """
 
     name: str
@@ -109,7 +105,8 @@ def create_openshrimp_tools(
 
     Returns:
         A ``list[OpenShrimpTool]`` for installation by a backend transport
-        (e.g. :func:`create_openshrimp_mcp_server` for the SDK).
+        (served over HTTP by the :class:`~open_shrimp.mcp_proxy.McpProxy`
+        ``/tools/{scope_token}`` JSON-RPC endpoint).
     """
 
     # Build common kwargs for message_thread_id support.
@@ -1232,41 +1229,3 @@ def create_openshrimp_tools(
         ))
 
     return tools_list
-
-
-def to_sdk_tool(t: OpenShrimpTool) -> "SdkMcpTool":
-    """Adapt a neutral :class:`OpenShrimpTool` into the SDK's ``SdkMcpTool``.
-
-    The single place that couples OpenShrimp's tools to the Claude Agent
-    SDK. ``read_only`` maps to ``ToolAnnotations.readOnlyHint``; the handler
-    contract (``async (dict) -> {"content": [...], "is_error": bool}``) is
-    byte-identical, so the handler is passed through unchanged.
-    """
-    from claude_agent_sdk import SdkMcpTool, ToolAnnotations
-
-    return SdkMcpTool(
-        name=t.name,
-        description=t.description,
-        input_schema=t.input_schema,
-        handler=t.handler,
-        annotations=ToolAnnotations(readOnlyHint=t.read_only),
-    )
-
-
-def create_openshrimp_mcp_server(*args: Any, **kwargs: Any) -> "McpSdkServerConfig":
-    """Build the neutral tools and install them for the SDK in-process.
-
-    Backwards-compatible shim: accepts the same arguments as
-    :func:`create_openshrimp_tools` and returns an ``McpSdkServerConfig``
-    ready for ``ClaudeAgentOptions.mcp_servers``. The server name
-    ``"openshrimp"`` is preserved so the ``mcp__openshrimp__<name>`` tool
-    prefix — referenced by ``allowed_tools`` config and the approval logic
-    in ``hooks.py`` — never changes.
-    """
-    from claude_agent_sdk import create_sdk_mcp_server
-
-    tools = create_openshrimp_tools(*args, **kwargs)
-    return create_sdk_mcp_server(
-        name="openshrimp",
-        tools=[to_sdk_tool(t) for t in tools],
-    )

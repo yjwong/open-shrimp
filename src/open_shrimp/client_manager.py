@@ -46,7 +46,7 @@ from open_shrimp.hooks import (
     QuestionCallback,
 )
 from open_shrimp.sandbox import Sandbox, SandboxManager
-from open_shrimp.tools import create_openshrimp_mcp_server
+from open_shrimp.tools import OpenShrimpTool, create_openshrimp_tools
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +274,38 @@ _idle_sweep_task: asyncio.Task[None] | None = None
 # the same libvirt context don't race on VM boot / virtiofsd / ports.
 _context_locks: dict[str, asyncio.Lock] = {}
 
+# Scopes that have already been warned about degraded (proxy-less) tool
+# availability, so the warning fires at most once per scope per process.
+_tools_degraded_warned: set[ChatScope] = set()
+
+
+async def _warn_tools_degraded_once(bot: Bot, scope: ChatScope) -> None:
+    """Tell the user once that OpenShrimp tools are unavailable this run.
+
+    Best-effort: never let a failed Telegram send break the turn.
+    """
+    if scope in _tools_degraded_warned:
+        return
+    _tools_degraded_warned.add(scope)
+    try:
+        kwargs: dict[str, Any] = {}
+        if scope.thread_id is not None:
+            kwargs["message_thread_id"] = scope.thread_id
+        await bot.send_message(
+            chat_id=scope.chat_id,
+            text=(
+                "⚠️ File, topic, schedule, and host tools are unavailable "
+                "this session — the local tool server didn't start. "
+                "Restart OpenShrimp to restore them."
+            ),
+            **kwargs,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to send degraded-tools warning to %s", scope,
+            exc_info=True,
+        )
+
 
 def _is_client_alive(client: ClaudeSDKClient) -> bool:
     """Check if the CLI subprocess is still running.
@@ -400,32 +432,39 @@ async def get_or_create_session(
         logger.info("CLI stderr: %s", stripped)
 
     # Auto-approve the built-in OpenShrimp MCP tools (send_file, send_photo)
-    # alongside whatever the user configured.
+    # alongside whatever the user configured.  The ``mcp__openshrimp__*``
+    # tools are served by the MCP proxy; when it failed to start
+    # (``mcp_proxy is None``, degraded mode) the ``openshrimp`` server is
+    # not registered, so we must NOT advertise its tools — otherwise the
+    # agent would attempt calls that surface as "unknown tool" errors
+    # mid-conversation.
     allowed_tools = list(context.allowed_tools or [])
-    allowed_tools.append("mcp__openshrimp__send_file")
-    if scope.thread_id is not None:
-        allowed_tools.append("mcp__openshrimp__edit_topic")
-    # Auto-approve scheduling tools when available.
-    if db is not None and config is not None and job_queue is not None:
-        allowed_tools.extend([
-            "mcp__openshrimp__create_schedule",
-            "mcp__openshrimp__list_schedules",
-            "mcp__openshrimp__delete_schedule",
-        ])
+    if mcp_proxy is not None:
+        allowed_tools.append("mcp__openshrimp__send_file")
+        if scope.thread_id is not None:
+            allowed_tools.append("mcp__openshrimp__edit_topic")
+        # Auto-approve scheduling tools when available.
+        if db is not None and config is not None and job_queue is not None:
+            allowed_tools.extend([
+                "mcp__openshrimp__create_schedule",
+                "mcp__openshrimp__list_schedules",
+                "mcp__openshrimp__delete_schedule",
+            ])
     # Auto-approve computer use tools when enabled.
     _computer_use_enabled = (
         (context.container is not None and context.container.computer_use)
         or (context.sandbox is not None and context.sandbox.computer_use)
     )
     if _computer_use_enabled:
-        allowed_tools.extend([
-            "mcp__openshrimp__computer_screenshot",
-            "mcp__openshrimp__computer_click",
-            "mcp__openshrimp__computer_type",
-            "mcp__openshrimp__computer_key",
-            "mcp__openshrimp__computer_scroll",
-            "mcp__openshrimp__computer_toplevel",
-        ])
+        if mcp_proxy is not None:
+            allowed_tools.extend([
+                "mcp__openshrimp__computer_screenshot",
+                "mcp__openshrimp__computer_click",
+                "mcp__openshrimp__computer_type",
+                "mcp__openshrimp__computer_key",
+                "mcp__openshrimp__computer_scroll",
+                "mcp__openshrimp__computer_toplevel",
+            ])
         # Auto-approve Playwright MCP browser tools (core + tabs,
         # always enabled).  Tool names from microsoft/playwright-mcp.
         allowed_tools.extend([
@@ -605,9 +644,13 @@ async def get_or_create_session(
             "append": "\n\n".join(system_prompt_parts),
         }
 
-    # Register in-process MCP tools (send_file, send_photo, etc.) so the
-    # agent can send files directly to the Telegram chat.
+    # Register OpenShrimp's own MCP tools (send_file, edit_topic, schedules,
+    # host_bash, computer use) over the MCP proxy's host-loopback HTTP
+    # endpoint so the agent can reach them.  The handlers run in *this*
+    # process; the HTTP hop is transport only and adds no sandbox boundary.
     if bot is not None:
+        mcp_servers: dict[str, Any] = {}
+
         # Sudo mode (host_bash) is registered only when the context's
         # sandbox config explicitly opts in. Commands run with cwd set to
         # the context's source directory so they operate on the same tree
@@ -619,16 +662,44 @@ async def get_or_create_session(
         ):
             _host_bash_workdir = context.directory
 
-        openshrimp_server = create_openshrimp_mcp_server(
-            bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
-            db=db, config=config, job_queue=job_queue,
-            sandbox=sandbox,
-            context_name=context_name,
-            user_id=user_id,
-            is_private_chat=is_private_chat,
-            host_bash_workdir=_host_bash_workdir,
-        )
-        mcp_servers: dict[str, Any] = {"openshrimp": openshrimp_server}
+        if mcp_proxy is not None:
+            def _tool_factory() -> list[OpenShrimpTool]:
+                return create_openshrimp_tools(
+                    bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
+                    db=db, config=config, job_queue=job_queue,
+                    sandbox=sandbox,
+                    context_name=context_name,
+                    user_id=user_id,
+                    is_private_chat=is_private_chat,
+                    host_bash_workdir=_host_bash_workdir,
+                )
+
+            scope_token = mcp_proxy.register_tool_scope(
+                context_name=context_name,
+                chat_id=scope.chat_id,
+                thread_id=scope.thread_id,
+                user_id=user_id,
+                tool_factory=_tool_factory,
+            )
+            # Sandboxed CLIs must reach the host proxy via the sandbox's
+            # host address; non-sandboxed CLIs use loopback.
+            host_ip = (
+                sandbox.host_address
+                if is_containerized and sandbox is not None
+                else "127.0.0.1"
+            )
+            mcp_servers["openshrimp"] = {
+                "type": "http",
+                "url": mcp_proxy.get_tools_url(scope_token, host_ip),
+            }
+        else:
+            # Degraded mode: the proxy failed to start, so OpenShrimp tools
+            # cannot be served.  Omit the server entirely (the matching
+            # ``allowed_tools`` appends were already skipped above) and warn
+            # the user once.  host_bash hook wiring is also moot here since
+            # the tool is absent.
+            logger.warning("OpenShrimp tools omitted: MCP proxy unavailable.")
+            await _warn_tools_degraded_once(bot, scope)
 
         # Add Playwright MCP for structured browser automation in
         # computer-use contexts.  The CLI runs inside the sandbox,
@@ -737,7 +808,10 @@ async def get_or_create_session(
         context_name=context_name,
         callback_context=callback_context,
         sandbox=sandbox,
-        mcp_proxy=mcp_proxy if is_containerized else None,
+        # Always thread the proxy through: it now serves OpenShrimp's own
+        # tools for every context (not just sandboxed ones), so its tool
+        # scope must be unregistered on close regardless of containerisation.
+        mcp_proxy=mcp_proxy,
         wrapper_cleanup_paths=wrapper_cleanup_paths,
     )
 
