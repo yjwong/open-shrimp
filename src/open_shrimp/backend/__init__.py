@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from open_shrimp.backend.errors import CLIConnectionError, ProcessError
 from open_shrimp.backend.sessions import SessionInfo
+from open_shrimp.backend.tools import serve_tools_over_mcp_http
 from open_shrimp.backend.types import (
     AssistantMessage,
     ContentBlock,
@@ -45,6 +46,7 @@ __all__ = [
     "RateLimitEvent",
     "ResultMessage",
     "SessionInfo",
+    "serve_tools_over_mcp_http",
     "StreamEvent",
     "SystemMessage",
     "TaskNotificationMessage",

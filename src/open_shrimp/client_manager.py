@@ -30,6 +30,7 @@ from claude_agent_sdk import (
     ProcessError,
 )
 
+from open_shrimp.backend.tools import serve_tools_over_mcp_http
 from open_shrimp.backend.types import ResultMessage, SystemMessage
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -677,13 +678,6 @@ async def get_or_create_session(
                     host_bash_workdir=_host_bash_workdir,
                 )
 
-            scope_token = mcp_proxy.register_tool_scope(
-                context_name=context_name,
-                chat_id=scope.chat_id,
-                thread_id=scope.thread_id,
-                user_id=user_id,
-                tool_factory=_tool_factory,
-            )
             # Sandboxed CLIs must reach the host proxy via the sandbox's
             # host address; non-sandboxed CLIs use loopback.
             host_ip = (
@@ -691,10 +685,15 @@ async def get_or_create_session(
                 if is_containerized and sandbox is not None
                 else "127.0.0.1"
             )
-            mcp_servers["openshrimp"] = {
-                "type": "http",
-                "url": mcp_proxy.get_tools_url(scope_token, host_ip),
-            }
+            mcp_servers["openshrimp"] = serve_tools_over_mcp_http(
+                mcp_proxy,
+                _tool_factory,
+                context_name=context_name,
+                chat_id=scope.chat_id,
+                thread_id=scope.thread_id,
+                user_id=user_id,
+                host_ip=host_ip,
+            )
         else:
             # Degraded mode: the proxy failed to start, so OpenShrimp tools
             # cannot be served.  Omit the server entirely (the matching
