@@ -46,6 +46,7 @@ from open_shrimp.hooks import (
     QuestionCallback,
 )
 from open_shrimp.sandbox import Sandbox, SandboxManager
+from open_shrimp.sandbox.agent_runtime import claude_runtime
 from open_shrimp.tools import OpenShrimpTool, create_openshrimp_tools
 
 logger = logging.getLogger(__name__)
@@ -565,6 +566,7 @@ async def get_or_create_session(
 
             _sandbox = sandbox  # capture for closure
             _mgr = sandbox_manager  # capture for closure
+            _runtime = claude_runtime(_mgr.agent_home_dir(context_name))
 
             def _ensure_and_build_wrapper() -> tuple[str, list[str]]:
                 try:
@@ -575,7 +577,8 @@ async def get_or_create_session(
                         assert _mgr is not None
                         _mgr.unregister_build(context_name)
                 _sandbox.provision_workspace()
-                return _sandbox.build_cli_wrapper()
+                handle = _sandbox.start_agent(_runtime)
+                return handle.cli_path, handle.cleanup_paths
 
             cli_path, wrapper_cleanup_paths = await asyncio.to_thread(
                 _ensure_and_build_wrapper,
@@ -818,7 +821,7 @@ async def get_or_create_session(
     # Register this sandbox for credential syncing (starts the watcher
     # if not already running).
     if sandbox is not None and sandbox_manager is not None and _host_creds_available():
-        claude_home = sandbox_manager.claude_home_dir(context_name)
+        claude_home = sandbox_manager.agent_home_dir(context_name)
         if claude_home.exists():
             _register_cred_sync(context_name, claude_home)
 

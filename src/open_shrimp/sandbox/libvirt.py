@@ -20,6 +20,7 @@ import threading
 import time
 from pathlib import Path
 
+from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime, WrappedCLI
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox.port_forward import (
     SSH_TUNNEL_OPTS,
@@ -575,6 +576,14 @@ class LibvirtSandbox:
             shutil.copy2(str(host_credentials), str(dest))
             logger.info("Copied credentials to %s", dest)
 
+    def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
+        if isinstance(runtime.launch, WrappedCLI):
+            cli_path, cleanup_paths = self.build_cli_wrapper()
+            return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
+        raise NotImplementedError(
+            f"Unsupported launch strategy: {runtime.launch!r}"
+        )
+
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         assert self._ssh_port is not None
         path = _build_cli_wrapper(
@@ -586,6 +595,15 @@ class LibvirtSandbox:
             claude_home_dir=self._claude_home_dir,
         )
         return path, [path]
+
+    def reach(self, guest_port: int) -> str:
+        forward = self.add_port_forward(
+            guest_port=guest_port,
+            requested_host_port=None,
+            scope_key=None,
+            description=f"reach({guest_port})",
+        )
+        return f"127.0.0.1:{forward.host_port}"
 
     def stop(self) -> None:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""

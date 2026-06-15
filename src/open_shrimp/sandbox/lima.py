@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 from open_shrimp.config import SandboxConfig
+from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime, WrappedCLI
 from open_shrimp.sandbox.base import (
     VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
     VNC_QUIRK_RFB_DROPS_SET_ENCODINGS,
@@ -318,6 +319,14 @@ class LimaSandbox:
             dest.write_text(creds, encoding="utf-8")
             logger.info("Wrote credentials to %s", dest)
 
+    def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
+        if isinstance(runtime.launch, WrappedCLI):
+            cli_path, cleanup_paths = self.build_cli_wrapper()
+            return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
+        raise NotImplementedError(
+            f"Unsupported launch strategy: {runtime.launch!r}"
+        )
+
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         path = _build_cli_wrapper(
             self._context_name,
@@ -329,6 +338,15 @@ class LimaSandbox:
             guest_os=self._guest_os,
         )
         return path, [path]
+
+    def reach(self, guest_port: int) -> str:
+        forward = self.add_port_forward(
+            guest_port=guest_port,
+            requested_host_port=None,
+            scope_key=None,
+            description=f"reach({guest_port})",
+        )
+        return f"127.0.0.1:{forward.host_port}"
 
     def stop(self) -> None:
         """Stop the Lima instance and any SSH tunnels."""

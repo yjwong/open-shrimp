@@ -207,11 +207,16 @@ class SandboxManager(Protocol):
         """Base directory for per-context sandbox state."""
         ...
 
-    def claude_home_dir(self, context_name: str) -> Path:
-        """Host-side directory mapped to ``~/.claude`` inside the sandbox.
+    def agent_home_dir(self, context_name: str) -> Path:
+        """Host-side directory mapped to the agent's home inside the sandbox.
 
         Used to locate session ``.jsonl`` files without creating a full
         :class:`Sandbox` instance (e.g. for ``/resume`` session listing).
+
+        For the Claude runtime this resolves to the per-context
+        ``claude-home`` dir (mapped to ``~/.claude`` inside the sandbox); the
+        name is the agent-neutral contract, the directory contents are the
+        active agent's.
         """
         ...
 
@@ -542,7 +547,7 @@ class DockerSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def claude_home_dir(self, context_name: str) -> Path:
+    def agent_home_dir(self, context_name: str) -> Path:
         return self._state_dir / context_name
 
 
@@ -759,7 +764,7 @@ class LimaSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def claude_home_dir(self, context_name: str) -> Path:
+    def agent_home_dir(self, context_name: str) -> Path:
         return self._state_dir / context_name / "claude-home"
 
 
@@ -1095,7 +1100,7 @@ class LibvirtSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def claude_home_dir(self, context_name: str) -> Path:
+    def agent_home_dir(self, context_name: str) -> Path:
         return self._state_dir / context_name / "claude-home"
 
 

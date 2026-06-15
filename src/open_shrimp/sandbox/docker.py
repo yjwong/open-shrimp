@@ -12,6 +12,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime, WrappedCLI
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 
 import open_shrimp.sandbox.docker_helpers as _dh
@@ -130,6 +131,14 @@ class DockerSandbox:
         # Docker uses bind mounts — workspace is already in place.
         pass
 
+    def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
+        if isinstance(runtime.launch, WrappedCLI):
+            cli_path, cleanup_paths = self.build_cli_wrapper()
+            return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
+        raise NotImplementedError(
+            f"Unsupported launch strategy: {runtime.launch!r}"
+        )
+
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         path = _build_cli_wrapper(
             context_name=self._context_name,
@@ -140,6 +149,33 @@ class DockerSandbox:
             image_name=self._image_name,
         )
         return path, [path]
+
+    def reach(self, guest_port: int) -> str:
+        # Docker publishes container ports with dynamic host mapping; query
+        # the actual mapped host port (same lookup ``get_vnc_port`` uses).
+        name = self.container_name
+        assert name is not None
+        result = subprocess.run(
+            ["docker", "port", name, str(guest_port)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"No published host port for guest port {guest_port} on "
+                f"container {name}: {result.stderr.strip()}"
+            )
+        for line in result.stdout.strip().splitlines():
+            port_str = line.rsplit(":", 1)[-1]
+            try:
+                host_port = int(port_str)
+            except ValueError:
+                continue
+            return f"127.0.0.1:{host_port}"
+        raise RuntimeError(
+            f"Could not parse published host port for guest port "
+            f"{guest_port} on container {name}: {result.stdout.strip()!r}"
+        )
 
     def stop(self) -> None:
         name = self.container_name

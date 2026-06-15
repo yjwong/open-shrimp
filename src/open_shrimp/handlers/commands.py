@@ -876,15 +876,22 @@ def _list_sessions_for_context(
         _sanitize_path,
     )
 
-    # Resolve the host-side claude-home directory for sandboxed contexts.
-    claude_home: Path | None = None
+    from open_shrimp.sandbox.agent_runtime import claude_runtime
+
+    # Resolve the host-side agent home directory for sandboxed contexts and
+    # source the session-corpus assumptions from the runtime's HomeMount
+    # rather than hardcoding them: where the corpus lives (``projects`` under
+    # the home dir) and whether the home dir holds it at all
+    # (``holds_session_state``).  For Claude this is unchanged behavior, now
+    # declared rather than assumed; a future agent can swap the runtime.
+    home_mount = None
     if ctx.sandbox is not None and ctx.sandbox.enabled and sandbox_managers:
         mgr = sandbox_managers.get(ctx.sandbox.backend)
         if mgr is not None:
-            claude_home = mgr.claude_home_dir(ctx_name)
+            home_mount = claude_runtime(mgr.agent_home_dir(ctx_name)).home_mount
 
-    if claude_home is not None:
-        projects_dir = claude_home / "projects"
+    if home_mount is not None and home_mount.holds_session_state:
+        projects_dir = home_mount.host_dir / "projects"
         canonical = _canonicalize_path(ctx.directory)
         sanitized = _sanitize_path(canonical)
         candidate = projects_dir / sanitized
@@ -909,6 +916,10 @@ def _list_sessions_for_context(
             sessions, kwargs.get("limit"), kwargs.get("offset", 0),
         )
 
+    # Non-sandboxed: the SDK default scan against the Claude runtime's host
+    # home mount (``~/.claude/projects``).  Step 5 (the sessions contract) can
+    # route this through a backend ``list_sessions``; step 0 only sources the
+    # sandboxed directory from the runtime.
     return list_sessions(directory=ctx.directory, **kwargs)
 
 
