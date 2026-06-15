@@ -28,9 +28,9 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ProcessError,
-    ResultMessage,
-    SystemMessage,
 )
+
+from open_shrimp.backend.types import ResultMessage, SystemMessage
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 

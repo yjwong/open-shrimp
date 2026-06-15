@@ -16,21 +16,19 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from claude_agent_sdk import (
+from open_shrimp.backend.types import (
     AssistantMessage,
+    RateLimitEvent,
     ResultMessage,
+    StreamEvent,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskProgressMessage,
+    TaskStartedMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
-)
-from claude_agent_sdk.types import (
-    RateLimitEvent,
-    StreamEvent,
-    TaskNotificationMessage,
-    TaskProgressMessage,
-    TaskStartedMessage,
 )
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
@@ -1116,13 +1114,14 @@ async def stream_response(
                         )
 
             elif isinstance(event, RateLimitEvent):
-                info = event.rate_limit_info
-                if info.status == "rejected":
+                # backend.types.RateLimitEvent is flat (the SDK's nested
+                # rate_limit_info was flattened in agent._to_backend_event).
+                if event.status == "rejected":
                     logger.warning(
                         "Rate limit hit (%s) for chat %d, resets at %s",
-                        info.rate_limit_type,
+                        event.rate_limit_type,
                         state.chat_id,
-                        info.resets_at,
+                        event.resets_at,
                     )
                     await finalize_and_reset(bot, state)
                     try:
@@ -1137,10 +1136,10 @@ async def stream_response(
                         if _is_thread_not_found(e):
                             raise
                         logger.exception("Failed to send rate limit message")
-                elif info.status == "allowed_warning":
+                elif event.status == "allowed_warning":
                     pct = (
-                        f" ({info.utilization:.0%})"
-                        if info.utilization is not None
+                        f" ({event.utilization:.0%})"
+                        if event.utilization is not None
                         else ""
                     )
                     logger.info(
