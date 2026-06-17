@@ -101,6 +101,9 @@ class Config:
     review: ReviewConfig = field(default_factory=ReviewConfig)
     instance_name: str | None = None
     auto_update: bool = True
+    # The agent backend, selected once at startup (resolved via
+    # ``open_shrimp.backend.get_backend``).  Absent defaults to ``claude_sdk``.
+    backend: str = "claude_sdk"
 
 
 def _validate_raw(raw: dict) -> None:
@@ -283,6 +286,17 @@ def _validate_raw(raw: dict) -> None:
             f"{list(contexts.keys())}"
         )
 
+    # Optional top-level backend: validate against the registry so a typo
+    # fails fast at startup rather than at first message.
+    backend = raw.get("backend")
+    if backend is not None:
+        from open_shrimp.backend import known_backends
+
+        if not isinstance(backend, str) or backend not in known_backends():
+            raise ValueError(
+                f"backend must be one of {known_backends()}, got: {backend!r}"
+            )
+
 
 def _parse_sandbox_config(raw: dict) -> SandboxConfig:
     """Parse a sandbox config dict into a SandboxConfig dataclass."""
@@ -390,6 +404,7 @@ def _parse(raw: dict) -> Config:
         review=review,
         instance_name=raw.get("instance_name"),
         auto_update=bool(raw.get("auto_update", True)),
+        backend=str(raw.get("backend", "claude_sdk")),
     )
 
 
@@ -512,6 +527,9 @@ def config_to_dict(config: Config) -> dict[str, Any]:
 
     if not config.auto_update:
         result["auto_update"] = False
+
+    if config.backend != "claude_sdk":
+        result["backend"] = config.backend
 
     return result
 

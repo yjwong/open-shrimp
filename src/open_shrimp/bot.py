@@ -259,6 +259,19 @@ async def run_bot(
     app = build_application(config, db)
     app.bot_data["config_path"] = config_path
     app.bot_data["mcp_proxy"] = mcp_proxy
+
+    # Resolve the agent backend once at startup (like SandboxManager / the MCP
+    # proxy) and install it as the process default so the client manager and
+    # session-handling paths use it.  Stored in bot_data so handlers thread it
+    # through ``get_or_create_session``.
+    from open_shrimp.backend import get_backend
+    from open_shrimp.client_manager import set_default_backend
+
+    backend = get_backend(config)
+    set_default_backend(backend)
+    app.bot_data["backend"] = backend
+    logger.info("Using agent backend: %s", backend.name)
+
     logger.info("Starting bot with long polling")
     await app.initialize()
 

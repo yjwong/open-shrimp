@@ -764,6 +764,7 @@ async def _start_agent_task(
                 is_private_chat=is_private_chat,
                 sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
                 mcp_proxy=context.bot_data.get("mcp_proxy"),
+                backend=context.bot_data.get("backend"),
             )
 
             # Copy attachments into sandbox (if applicable) and build prompt.
@@ -882,6 +883,7 @@ async def _start_agent_task(
                         is_private_chat=is_private_chat,
                         sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
                         mcp_proxy=context.bot_data.get("mcp_proxy"),
+                        backend=context.bot_data.get("backend"),
                     )
                     if new_session is None:
                         raise

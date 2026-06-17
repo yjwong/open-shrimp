@@ -1,4 +1,4 @@
-"""Equivalence tests for agent._to_backend_event (step 1 type contract).
+"""Equivalence tests for the claude_sdk adapter's _to_backend_event.
 
 The step's correctness claim is "zero behavior change": each SDK message must
 translate to the matching backend.types instance with the load-bearing fields
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import claude_agent_sdk.types as sdk
 
-from open_shrimp.agent import _to_backend_event
 from open_shrimp.backend import types as bt
+from open_shrimp.backend.claude_sdk.translate import _to_backend_event
 
 
 def test_assistant_message_translates_with_session_id():
@@ -198,6 +198,35 @@ def test_user_message_list_with_thinking_block_surfaces_tool_result():
     assert results[0].content == "output text"
     # The unknown block passes through untouched (not dropped, not crashed).
     assert thinking in out.content
+
+
+def test_parent_tool_use_id_round_trips():
+    assistant = _to_backend_event(
+        sdk.AssistantMessage(
+            content=[sdk.TextBlock(text="hi")],
+            model="claude-x",
+            parent_tool_use_id="parent-1",
+        )
+    )
+    assert isinstance(assistant, bt.AssistantMessage)
+    assert assistant.parent_tool_use_id == "parent-1"
+
+    user = _to_backend_event(
+        sdk.UserMessage(content="sub", parent_tool_use_id="parent-2")
+    )
+    assert isinstance(user, bt.UserMessage)
+    assert user.parent_tool_use_id == "parent-2"
+
+    stream = _to_backend_event(
+        sdk.StreamEvent(
+            uuid="u1",
+            session_id="s1",
+            event={"type": "content_block_delta"},
+            parent_tool_use_id="parent-3",
+        )
+    )
+    assert isinstance(stream, bt.StreamEvent)
+    assert stream.parent_tool_use_id == "parent-3"
 
 
 def test_unknown_message_passes_through():

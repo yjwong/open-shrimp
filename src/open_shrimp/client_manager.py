@@ -1,9 +1,16 @@
-"""Persistent Claude Agent SDK client manager for OpenShrimp.
+"""Persistent backend client manager for OpenShrimp.
 
-Manages long-lived ClaudeSDKClient instances keyed by ChatScope, so the CLI
+Manages long-lived backend clients keyed by ChatScope, so the agent CLI
 subprocess stays alive across multiple messages in the same conversation.
 This avoids the "Continue from where you left off." injection that the CLI
 performs when it detects an interrupted turn on session resume.
+
+The concrete client is produced by the configured ``Backend`` (step 3): the
+manager constructs ``BackendOptions``, calls ``backend.make_client(opts)``, and
+drives the resulting ``BackendClient`` through the protocol method set.  The
+SDK-specific details (options translation, the resume-fallback retry on
+connect, the subprocess liveness poke, SDK-message translation) live inside the
+``claude_sdk`` adapter, not here.
 
 Only the first message in a session uses ``--resume`` to restore history;
 subsequent messages simply call ``client.query()`` on the already-connected
@@ -23,14 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import (
-    CLIConnectionError,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ProcessError,
-)
-
-from open_shrimp.backend.tools import serve_tools_over_mcp_http
+from open_shrimp.backend import get_backend
+from open_shrimp.backend.protocol import Backend, BackendClient, BackendOptions
 from open_shrimp.backend.types import ResultMessage, SystemMessage
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -254,9 +255,9 @@ class CallbackContext:
 
 @dataclass
 class AgentSession:
-    """A long-lived SDK client associated with a chat scope."""
+    """A long-lived backend client associated with a chat scope."""
 
-    client: ClaudeSDKClient
+    client: BackendClient
     session_id: str | None = None
     context_name: str = ""
     callback_context: CallbackContext = field(default_factory=CallbackContext)
@@ -267,6 +268,28 @@ class AgentSession:
 
 
 _active_sessions: dict[ChatScope, AgentSession] = {}
+
+# Process-wide default backend.  Resolved once at startup (``main.py`` →
+# ``run_bot`` → bot_data), but kept here as a lazy fallback so callers that
+# don't thread a backend through (mirroring the optional ``sandbox_manager`` /
+# ``mcp_proxy`` kwargs) still get the configured default.
+_default_backend: Backend | None = None
+
+
+def set_default_backend(backend: Backend) -> None:
+    """Install the process-wide default backend (called once at startup)."""
+    global _default_backend
+    _default_backend = backend
+
+
+def _resolve_backend(backend: Backend | None) -> Backend:
+    """Return *backend* if given, else the process default (lazily resolved)."""
+    if backend is not None:
+        return backend
+    global _default_backend
+    if _default_backend is None:
+        _default_backend = get_backend({})
+    return _default_backend
 
 # Idle session timeout: sessions with no activity for this long are closed.
 _IDLE_TIMEOUT: float = 30 * 60  # 30 minutes
@@ -309,25 +332,6 @@ async def _warn_tools_degraded_once(bot: Bot, scope: ChatScope) -> None:
         )
 
 
-def _is_client_alive(client: ClaudeSDKClient) -> bool:
-    """Check if the CLI subprocess is still running.
-
-    Pokes into the transport's private state to detect a terminated
-    process.  Returns True if the process appears healthy or if the
-    state cannot be determined (fail-open).
-    """
-    try:
-        transport = client._transport
-        if transport is None:
-            return False
-        process = getattr(transport, "_process", None)
-        if process is None:
-            return False
-        return process.returncode is None
-    except Exception:
-        return True
-
-
 async def get_or_create_session(
     scope: ChatScope,
     context_name: str,
@@ -343,12 +347,14 @@ async def get_or_create_session(
     is_private_chat: bool = True,
     sandbox_manager: SandboxManager | None = None,
     mcp_proxy: Any | None = None,
+    backend: Backend | None = None,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
     If a session already exists for *scope* with the same context,
-    return it (after updating the callback context).  Otherwise create a
-    fresh ``ClaudeSDKClient``, connect, and store it.
+    return it (after updating the callback context).  Otherwise build
+    ``BackendOptions``, call ``backend.make_client(opts)``, connect, and
+    store the resulting ``BackendClient``.
 
     Args:
         scope: ChatScope identifying the chat/thread.
@@ -357,14 +363,18 @@ async def get_or_create_session(
         session_id: Session ID for ``--resume`` (only used when creating
             a new client).
         callback_context: Mutable callback holder to bind into hooks.
+        backend: The agent backend to build the client from.  Optional;
+            falls back to the process-wide default (``set_default_backend``)
+            so existing call sites need not thread it through immediately.
 
     Returns:
         An ``AgentSession`` with a connected client ready for ``query()``.
     """
+    backend = _resolve_backend(backend)
     existing = _active_sessions.get(scope)
     if existing is not None:
         if existing.context_name == context_name:
-            if _is_client_alive(existing.client):
+            if existing.client.is_alive():
                 existing.callback_context.request_approval = callback_context.request_approval
                 existing.callback_context.handle_user_questions = callback_context.handle_user_questions
                 existing.callback_context.is_edit_auto_approved = callback_context.is_edit_auto_approved
@@ -395,9 +405,7 @@ async def get_or_create_session(
             )
             await close_session(scope)
 
-    from open_shrimp.hooks import make_can_use_tool
-
-    can_use_tool = make_can_use_tool(
+    can_use_tool = backend.make_can_use_tool(
         request_approval=_make_approval_proxy(callback_context),
         cwd=context.directory,
         additional_directories=context.additional_directories or None,
@@ -590,7 +598,7 @@ async def get_or_create_session(
                 cli_path,
             )
 
-    options = ClaudeAgentOptions(
+    options = BackendOptions(
         cwd=context.directory,
         model=context.model,
         effort=context.effort,
@@ -685,7 +693,11 @@ async def get_or_create_session(
                 if is_containerized and sandbox is not None
                 else "127.0.0.1"
             )
-            mcp_servers["openshrimp"] = serve_tools_over_mcp_http(
+            # The backend selects the installer (the shared HTTP bridge for
+            # claude_sdk); the manager remains the caller, supplying the proxy
+            # handle and scope identity (decision §1(a)).
+            install_tools = backend.make_tool_server(_tool_factory)
+            mcp_servers["openshrimp"] = install_tools(
                 mcp_proxy,
                 _tool_factory,
                 context_name=context_name,
@@ -785,24 +797,15 @@ async def get_or_create_session(
             context.directory,
         )
 
-    client = ClaudeSDKClient(options=options)
-    try:
-        await client.connect()
-    except ProcessError:
-        if not session_id:
-            raise
-        # The session file may no longer exist (e.g. container state was
-        # rebuilt, or the .jsonl was deleted).  Fall back to a fresh
-        # session instead of surfacing a cryptic error.
-        logger.warning(
-            "Failed to resume session %s for scope %s – starting fresh",
-            session_id,
-            scope,
-        )
+    # The backend builds (does not connect) the client; ``connect()`` owns the
+    # resume-fallback retry (on a stale ``resume`` the wrapper rebuilds the
+    # inner client with resume cleared and reconnects).  The wrapper mutates
+    # *this* ``options`` object's ``resume`` to None when it falls back, so we
+    # read it back to keep ``AgentSession.session_id`` accurate.
+    client = backend.make_client(options)
+    await client.connect()
+    if session_id and options.resume is None:
         session_id = None
-        options.resume = None
-        client = ClaudeSDKClient(options=options)
-        await client.connect()
 
     session = AgentSession(
         client=client,
@@ -841,6 +844,7 @@ async def reconnect_session(
     is_private_chat: bool = True,
     sandbox_manager: SandboxManager | None = None,
     mcp_proxy: Any | None = None,
+    backend: Backend | None = None,
 ) -> AgentSession | None:
     """Reconnect after a mid-session container crash.
 
@@ -886,6 +890,7 @@ async def reconnect_session(
             is_private_chat=is_private_chat,
             sandbox_manager=sandbox_manager,
             mcp_proxy=mcp_proxy,
+            backend=backend,
         )
     except Exception:
         logger.exception(

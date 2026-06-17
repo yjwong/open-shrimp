@@ -866,6 +866,13 @@ def _list_sessions_for_context(
     sandbox), not the host's ``~/.claude``.  We scan that directory
     directly using the SDK's internal helpers to avoid mutating global
     process state (``CLAUDE_CONFIG_DIR``).
+
+    Both paths re-pack their rows into ``backend.SessionInfo`` (the shared
+    contract type) via the ``claude_sdk`` adapter, so callers consume the
+    backend-neutral shape regardless of which scan ran.  The SDK
+    ``_internal.sessions`` poke (sandboxed scan) is preserved as an SDK-adapter
+    detail here — step 3's ``Backend.list_sessions`` owns the non-sandboxed
+    default through the same re-pack.
     """
     from claude_agent_sdk import list_sessions
     from claude_agent_sdk._internal.sessions import (
@@ -876,6 +883,7 @@ def _list_sessions_for_context(
         _sanitize_path,
     )
 
+    from open_shrimp.backend.claude_sdk.backend import _to_session_info
     from open_shrimp.sandbox.agent_runtime import claude_runtime
 
     # Resolve the host-side agent home directory for sandboxed contexts and
@@ -912,15 +920,16 @@ def _list_sessions_for_context(
         if project_dir is None:
             return []
         sessions = _read_sessions_from_dir(project_dir, canonical)
-        return _apply_sort_limit_offset(
+        rows = _apply_sort_limit_offset(
             sessions, kwargs.get("limit"), kwargs.get("offset", 0),
         )
+        return [_to_session_info(r) for r in rows]
 
     # Non-sandboxed: the SDK default scan against the Claude runtime's host
-    # home mount (``~/.claude/projects``).  Step 5 (the sessions contract) can
-    # route this through a backend ``list_sessions``; step 0 only sources the
-    # sandboxed directory from the runtime.
-    return list_sessions(directory=ctx.directory, **kwargs)
+    # home mount (``~/.claude/projects``), routed through the ``claude_sdk``
+    # adapter's re-pack so callers receive ``backend.SessionInfo`` rows.
+    rows = list_sessions(directory=ctx.directory, **kwargs)
+    return [_to_session_info(r) for r in rows]
 
 
 # ── /resume ──

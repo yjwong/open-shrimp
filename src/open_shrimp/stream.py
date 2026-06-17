@@ -775,7 +775,8 @@ async def stream_response(
     Args:
         bot: Telegram Bot instance.
         chat_id: Telegram chat ID to send messages to.
-        events: Async iterator of AgentEvent from agent.run_agent().
+        events: Async iterator of AgentEvent from the backend client
+            (client_manager.query_and_stream / receive_events).
         draft_state: Optional pre-created draft state. If provided, the
             same state can be shared with tool approval callbacks so they
             can finalize the draft before sending approval keyboards,
@@ -1115,7 +1116,8 @@ async def stream_response(
 
             elif isinstance(event, RateLimitEvent):
                 # backend.types.RateLimitEvent is flat (the SDK's nested
-                # rate_limit_info was flattened in agent._to_backend_event).
+                # rate_limit_info is flattened in the claude_sdk adapter's
+                # translate._to_backend_event).
                 if event.status == "rejected":
                     logger.warning(
                         "Rate limit hit (%s) for chat %d, resets at %s",

@@ -91,6 +91,7 @@ class AssistantMessage:
     usage: dict[str, Any] | None = None
     error: str | None = None
     session_id: str | None = None
+    parent_tool_use_id: str | None = None
 
 
 @dataclass
@@ -99,6 +100,7 @@ class UserMessage:
     # block types this contract does not define (ThinkingBlock, ServerTool*).
     # _to_backend_event's _user_content preserves both shapes.
     content: Any
+    parent_tool_use_id: str | None = None
 
 
 @dataclass
@@ -125,6 +127,7 @@ class ResultMessage:
 class StreamEvent:
     event: dict[str, Any]
     session_id: str | None = None
+    parent_tool_use_id: str | None = None
 
 
 # Task* mirror the SDK inheritance (decision 4) so stream.py's nested
@@ -147,6 +150,7 @@ class TaskStartedMessage(SystemMessage):
 class TaskProgressMessage(SystemMessage):
     task_id: str = ""
     data: dict[str, Any] = field(default_factory=dict)
+    last_tool_name: str | None = None
     session_id: str | None = None
 
 
