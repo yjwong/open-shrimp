@@ -17,7 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from claude_agent_sdk.types import (
+from open_shrimp.backend.types import (
     PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,

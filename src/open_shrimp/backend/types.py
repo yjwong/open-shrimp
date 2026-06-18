@@ -18,8 +18,11 @@ from typing import Any, Literal, Union
 
 # --- Section 2: permissions -------------------------------------------------
 # Lifted verbatim from opencode's events.py; pure data, uniform across both
-# branches.  Defined (and re-exported) for contract completeness; the SDK
-# return path in hooks.py stays SDK-typed until step 3 (see plan → Risks).
+# branches.  As of step 2b, hooks.make_can_use_tool returns *these* neutral
+# results unconditionally; the claude_sdk backend translates them to the SDK's
+# permission types at its options seam (claude_sdk/permission.py) to satisfy
+# the SDK's isinstance contract.  No src/ module outside that adapter imports
+# the SDK permission types.
 
 
 @dataclass

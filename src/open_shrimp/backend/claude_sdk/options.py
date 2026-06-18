@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from open_shrimp.backend.claude_sdk.permission import to_sdk_permission_callback
 from open_shrimp.backend.protocol import BackendOptions
 
 
@@ -26,7 +27,18 @@ def translate_options(opts: BackendOptions) -> ClaudeAgentOptions:
     when present, matching how ``client_manager`` built the SDK options before
     step 3 (``system_prompt`` / ``mcp_servers`` / ``resume`` were assigned
     conditionally after construction).
+
+    ``can_use_tool`` returns ``backend.types`` permission results (the shared
+    ``hooks`` path imports no SDK type), so it is wrapped in
+    ``to_sdk_permission_callback`` to satisfy the SDK's ``isinstance`` contract
+    on the return value.  This is the single chokepoint where the neutral
+    callback becomes the SDK's callback.
     """
+    can_use_tool = (
+        to_sdk_permission_callback(opts.can_use_tool)
+        if opts.can_use_tool is not None
+        else None
+    )
     sdk = ClaudeAgentOptions(
         cwd=opts.cwd,
         model=opts.model,
@@ -36,7 +48,7 @@ def translate_options(opts: BackendOptions) -> ClaudeAgentOptions:
         setting_sources=opts.setting_sources,
         include_partial_messages=opts.include_partial_messages,
         stderr=opts.stderr,
-        can_use_tool=opts.can_use_tool,
+        can_use_tool=can_use_tool,
         cli_path=opts.cli_path,
         max_buffer_size=opts.max_buffer_size,
     )

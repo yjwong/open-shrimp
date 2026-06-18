@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from claude_agent_sdk.types import (
+from open_shrimp.backend.types import (
     PermissionResult,
     PermissionResultAllow,
     PermissionResultDeny,
