@@ -26,6 +26,7 @@ from pathlib import Path
 import yaml
 from open_shrimp.config import SandboxConfig
 from open_shrimp.paths import data_dir as _data_dir, get_instance_name as _get_instance_name
+from open_shrimp.sandbox.agent_runtime import GuestMount
 
 logger = logging.getLogger(__name__)
 
@@ -300,10 +301,16 @@ def generate_lima_yaml(
     *,
     context_name: str = "",
     guest_os: str = "linux",
+    served_home_mounts: "tuple[GuestMount, ...]" = (),
 ) -> Path:
     """Generate a Lima YAML template file.
 
     Writes to ``sdir/lima.yaml`` and returns the path.
+
+    Each :class:`GuestMount` in *served_home_mounts* is appended to the
+    ``mounts:`` block (see :func:`_build_mounts`), so the runtime's
+    ``inject``-written host dirs (provider ``auth.json``, plugin config)
+    reach the served process in the guest.
     """
     if guest_os == "macos":
         from open_shrimp.sandbox.lima_macos_helpers import generate_lima_yaml_macos
@@ -326,7 +333,10 @@ def generate_lima_yaml(
         images.append({"location": img_url, "arch": img_arch})
 
     # Build mounts.
-    mounts = _build_mounts(sdir, project_dir, additional_directories, computer_use)
+    mounts = _build_mounts(
+        sdir, project_dir, additional_directories, computer_use,
+        context_name=context_name, served_home_mounts=served_home_mounts,
+    )
 
     # Build provision scripts.
     provision = _build_provision_scripts(config, computer_use)
@@ -376,8 +386,16 @@ def _build_mounts(
     project_dir: str,
     additional_directories: list[str] | None,
     computer_use: bool = False,
+    *,
+    context_name: str = "",
+    served_home_mounts: "tuple[GuestMount, ...]" = (),
 ) -> list[dict]:
-    """Build Lima mount entries."""
+    """Build Lima mount entries.
+
+    Each :class:`GuestMount` in *served_home_mounts* is appended as a virtiofs
+    mount so the runtime's ``inject``-written host dirs (provider
+    ``auth.json``, plugin config) reach the served process in the guest.
+    """
     mounts = []
 
     # Project directory (writable).
@@ -434,6 +452,17 @@ def _build_mounts(
             "location": text_input_state_dir,
             "mountPoint": "/tmp/text-input-state-dir",
             "writable": True,
+        })
+
+    # Served-endpoint launch: each declared mount is a host dir the runtime's
+    # ``inject`` writes into (provider ``auth.json``, managed plugin config),
+    # synced into the guest so the served process (which runs under its own
+    # ``HOME``) sees them.  The wrapped-CLI launch contributes nothing here.
+    for mount in served_home_mounts:
+        mounts.append({
+            "location": str(mount.host_dir),
+            "mountPoint": mount.guest_mount_point,
+            "writable": mount.writable,
         })
 
     return mounts
@@ -658,12 +687,18 @@ def lima_config_fingerprint(
     *,
     context_name: str = "",
     guest_os: str = "linux",
+    served_home_mounts: "tuple[GuestMount, ...]" = (),
 ) -> str:
     """SHA-256 fingerprint of the Lima YAML template content.
 
     Uses the real state directory so mount paths are stable across
     invocations (matching the libvirt approach).  The YAML is rendered
     in memory — no temporary files are created.
+
+    Must mirror :func:`generate_lima_yaml` exactly (incl. the
+    *served_home_mounts*) so the fingerprint matches the YAML actually
+    written — otherwise drift is detected on every call and the VM rebuilds
+    in a loop.
     """
     if guest_os == "macos":
         from open_shrimp.sandbox.lima_macos_helpers import lima_config_fingerprint_macos
@@ -675,7 +710,10 @@ def lima_config_fingerprint(
     # Build the same template that generate_lima_yaml() would produce,
     # but dump to a string instead of writing a file.  Using the real
     # sdir keeps host-side mount paths deterministic.
-    mounts = _build_mounts(sdir, project_dir, additional_directories, computer_use)
+    mounts = _build_mounts(
+        sdir, project_dir, additional_directories, computer_use,
+        context_name=context_name, served_home_mounts=served_home_mounts,
+    )
     provision = _build_provision_scripts(config, computer_use)
 
     port_forward: list[dict] = []

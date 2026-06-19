@@ -1,10 +1,9 @@
 """SDK-message → backend-contract translation (the ``claude_sdk`` adapter).
 
 ``_to_backend_event`` is the single SDK-message-aware code path in OpenShrimp.
-It was moved here **verbatim** from ``agent.py`` in step 3 because it is
-SDK-specific and therefore belongs inside the SDK adapter package — SDK message
-types never escape this module.  The SDK ``BackendClient.receive_response``
-applies it to each message, so everything downstream consumes
+It is SDK-specific and lives inside the SDK adapter package — SDK message types
+never escape this module.  The SDK ``BackendClient.receive_response`` applies
+it to each message, so everything downstream consumes
 ``open_shrimp.backend.types`` only.
 """
 
@@ -74,9 +73,8 @@ def _user_content(content: Any) -> Any:
 def _to_backend_event(msg: Any) -> Any:
     """Convert one SDK message into the backend-neutral contract type.
 
-    The ONLY SDK-message-aware code path on master after step 1.  Order
-    matters: Task* subclass SystemMessage in the SDK, so check them first.
-    Unknown types pass through raw (defensive).
+    Order matters: Task* subclass SystemMessage in the SDK, so check them
+    first.  Unknown types pass through raw (defensive).
     """
     if isinstance(msg, _SdkTaskStarted):
         return bt.TaskStartedMessage(

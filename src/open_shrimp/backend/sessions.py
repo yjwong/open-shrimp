@@ -1,8 +1,7 @@
 """Backend-neutral session metadata.
 
-Matches the SDK's ``SDKSessionInfo`` field-for-field (verified).  Step 1 only
-*defines* this; the SDK ``list_sessions`` call in ``handlers/commands.py`` is
-not yet rewired (step 3's ``Backend.list_sessions`` owns that cutover).
+Matches the SDK's ``SDKSessionInfo`` field-for-field.  ``Backend.list_sessions``
+returns these rows; each backend re-packs its native shape into them.
 """
 
 from __future__ import annotations

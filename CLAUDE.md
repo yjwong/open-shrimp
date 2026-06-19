@@ -36,6 +36,13 @@ Telegram <-> OpenShrimp (Python, async) <-> Claude Agent SDK
 - **Client manager**: Persistent `ClaudeSDKClient` instances keyed by ChatScope (`client_manager.py`). Keeps the CLI subprocess alive across multiple messages in the same conversation, avoiding the "Continue from where you left off" injection on session resume. Only the first message uses `--resume`; subsequent messages call `client.query()` on the already-connected client.
 - **Scheduled tasks**: Cron-like recurring and one-shot Claude prompts. Users describe schedules in natural language; Claude calls MCP tools (`create_schedule`, `list_schedules`, `delete_schedule`) to manage them. Tasks run in isolated sessions with read-only tools only (no approval UI needed). Persistence via SQLite `scheduled_tasks` table, scheduling via `python-telegram-bot` JobQueue (APScheduler). Safety: 5-minute minimum interval, max 20 tasks per chat, max 3 concurrent executions (global semaphore), per-task timeout (default 10 minutes). One-shot tasks auto-delete after execution.
 
+### Backends
+
+The top-level `backend:` config key selects the agent runtime. Everything downstream — `client_manager`, tool serving, options, permissions — speaks the backend-neutral contract in `backend/protocol.py` and the shared message/permission types in `backend/types.py`. Two backends ship:
+
+- **`claude_sdk`** (default; `backend/claude_sdk/`): the Claude Agent SDK. Sandboxed launch generates a wrapper script and points the SDK's `cli_path` at it.
+- **`opencode`** (`backend/opencode/`): OpenCode (`sst/opencode`) driven over its HTTP `serve` API. Every context's `model:` must be provider-qualified (`provider/model`, e.g. `openai/gpt-5.5`); the host must be pre-authenticated (`opencode auth login`); and the `opencode` binary must be discoverable. Non-sandboxed contexts spawn a host-local `opencode serve`; sandboxed contexts run it inside the sandbox and reach it over a tunnel or published port. Docker contexts use a separate `openshrimp-opencode:latest` image (built lazily from `Dockerfile.opencode`); libvirt/lima base images must supply the `opencode` binary themselves.
+
 ### Key SDK Patterns
 
 ```python

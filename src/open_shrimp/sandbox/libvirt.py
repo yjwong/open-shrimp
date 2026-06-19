@@ -15,12 +15,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
-from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime, WrappedCLI
+from open_shrimp.sandbox.agent_runtime import (
+    AgentHandle,
+    AgentRuntime,
+    GuestMount,
+    ServedEndpoint,
+    WrappedCLI,
+    run_served_endpoint,
+    terminate_served_proc,
+)
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox.port_forward import (
     SSH_TUNNEL_OPTS,
@@ -28,6 +38,7 @@ from open_shrimp.sandbox.port_forward import (
     allocate_host_port,
     open_ssh_tunnel,
 )
+from open_shrimp.sandbox.skill_paths import SANDBOX_HOME, SANDBOX_USER
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.libvirt_helpers import (
@@ -136,6 +147,7 @@ class LibvirtSandbox:
         instance_prefix: str = "openshrimp",
         computer_use: bool = False,
         virgl: bool = False,
+        runtime: AgentRuntime | None = None,
     ) -> None:
         self._context_name = context_name
         self._config = config
@@ -147,6 +159,18 @@ class LibvirtSandbox:
         self._virgl = virgl
         self._virtiofsd_procs: list[subprocess.Popen[bytes]] = []
         self._use_virtiofs: bool = find_virtiofsd() is not None
+
+        # Served-endpoint launch's extra home mounts are synced into the
+        # guest (the runtime's data home, plugin-config dir, …) so the
+        # injected provider ``auth.json`` and the managed plugin config reach
+        # the served process.  The wrapped-CLI launch contributes none.  The
+        # mount SOURCE must match the inject TARGET (the runtime's host_dir)
+        # or the guest never sees the synced files.
+        launch = runtime.launch if runtime else None
+        if isinstance(launch, ServedEndpoint):
+            self._served_home_mounts: tuple[GuestMount, ...] = launch.home_mounts
+        else:
+            self._served_home_mounts = ()
 
         self._sdir = state_dir_for(context_name)
         self._dom_name = _domain_name(context_name, instance_prefix)
@@ -164,6 +188,11 @@ class LibvirtSandbox:
         self._claude_home_dir = self._sdir / "claude-home"
 
         self._port_forwards = PortForwardRegistry()
+
+        # Served-endpoint state.  ``_served_proc`` is read by the
+        # served-endpoint client's liveness check via the endpoint's ``owner``.
+        self._served_proc: subprocess.Popen[str] | None = None
+        self._served_endpoint: Any = None
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -258,6 +287,8 @@ class LibvirtSandbox:
         # Ensure host-side shared directories exist.
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._claude_home_dir.mkdir(parents=True, exist_ok=True)
+        for mount in self._served_home_mounts:
+            mount.host_dir.mkdir(parents=True, exist_ok=True)
 
         # Build shared_dirs list for domain XML: (host_dir, socket | None).
         # The domain must declare virtiofs/9p devices for all dirs even
@@ -580,9 +611,75 @@ class LibvirtSandbox:
         if isinstance(runtime.launch, WrappedCLI):
             cli_path, cleanup_paths = self.build_cli_wrapper()
             return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
+        if isinstance(runtime.launch, ServedEndpoint):
+            return self._start_served_endpoint(runtime, runtime.launch)
         raise NotImplementedError(
             f"Unsupported launch strategy: {runtime.launch!r}"
         )
+
+    def _start_served_endpoint(
+        self, runtime: AgentRuntime, launch: ServedEndpoint,
+    ) -> AgentHandle:
+        """Run the serve argv over SSH in the VM and reach its port.
+
+        The runtime supplies the serve argv + env + inject hook; this sandbox
+        owns only the remote SSH spawn and hands the tunnel to :meth:`reach` (an
+        ``ssh -L`` forward via :meth:`add_port_forward`).  The shared launch body
+        lives in :func:`run_served_endpoint`.
+
+        Guest-image precondition: this launch does **not** provision the VM
+        image.  The ``opencode`` binary must already be on the guest ``PATH``
+        for the ``{SANDBOX_USER}@localhost`` user (base image / ``provision``
+        script — operator's responsibility, documented in CLAUDE.md → Backends).
+        The per-context ``opencode-home`` (→
+        ``{SANDBOX_HOME}/.local/share/opencode``) and ``openshrimp-data`` (→
+        ``{SANDBOX_HOME}/.local/share/openshrimp``) host dirs are
+        virtiofs/9p-mounted into the guest (see
+        :meth:`_shared_dirs_and_overrides`), and ``runtime.inject`` syncs the
+        provider ``auth.json`` + managed plugin config into them, so they reach
+        the served process (which runs with ``HOME={SANDBOX_HOME}``).  When the
+        binary is absent, the serve process exits early and readiness wait raises.
+        """
+        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
+
+        if self._served_proc is not None and self._served_proc.poll() is None:
+            if self._served_endpoint is not None:
+                return AgentHandle(endpoint=self._served_endpoint)
+
+        if self._ssh_port is None:
+            raise RuntimeError("Cannot start served endpoint: libvirt VM is not running")
+
+        ssh_port = self._ssh_port
+
+        def spawn(
+            serve_argv: list[str], env: dict[str, str],
+        ) -> subprocess.Popen[str]:
+            env_prefix = " ".join(
+                f"{key}={shlex.quote(value)}" for key, value in env.items()
+            )
+            remote_cmd = (
+                f"cd {shlex.quote(self._project_dir)} && "
+                f"{env_prefix} {shlex.join(serve_argv)}"
+            )
+            ssh_opts = _ssh_common_opts(self._sdir / "ssh_key", ssh_port)
+            return subprocess.Popen(
+                ["ssh", *ssh_opts, f"{SANDBOX_USER}@localhost", remote_cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+        proc, endpoint = run_served_endpoint(
+            runtime,
+            launch,
+            spawn=spawn,
+            reach=self.reach,
+            owner=self,
+            log_label=f"Libvirt context '{self._context_name}'",
+        )
+        self._served_proc = proc
+        self._served_endpoint = endpoint
+        return AgentHandle(endpoint=endpoint)
 
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         assert self._ssh_port is not None
@@ -608,6 +705,12 @@ class LibvirtSandbox:
     def stop(self) -> None:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""
         import libvirt
+
+        # Tear down any served process (the ssh -L tunnel is reaped below with
+        # the rest of the port forwards).
+        terminate_served_proc(self._served_proc)
+        self._served_proc = None
+        self._served_endpoint = None
 
         # Reap forward subprocesses before the VM goes away — ssh would
         # die on its own but the Popen handles would linger as zombies.
@@ -915,6 +1018,16 @@ class LibvirtSandbox:
             str(self._tmp_dir): f"/tmp/claude-{_VM_CLAUDE_UID}",
             str(self._claude_home_dir): "/home/claude/.claude",
         }
+        # Served-endpoint launch only: sync each declared host_dir into the
+        # guest at its declared mount point.  The mount SOURCE is whatever
+        # path the served runtime's ``inject`` writes to host-side (provider
+        # ``auth.json``, managed plugin config), so the served process (which
+        # runs under its own ``HOME``) sees the synced files.  The wrapped-CLI
+        # launch contributes ZERO new mounts here.
+        for mount in self._served_home_mounts:
+            host_str = str(mount.host_dir)
+            all_dirs.append(host_str)
+            mount_overrides[host_str] = mount.guest_mount_point
         readonly_dirs: set[str] = set()
         host_skills = Path.home() / ".claude" / "skills"
         if host_skills.is_dir():

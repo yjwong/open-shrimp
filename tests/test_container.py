@@ -3,7 +3,11 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from open_shrimp.sandbox.docker_helpers import ensure_image, CONTAINER_IMAGE
+from open_shrimp.sandbox.docker_helpers import (
+    CONTAINER_IMAGE,
+    claude_image_bundle,
+    ensure_image,
+)
 
 
 def test_ensure_image_skips_when_image_exists():
@@ -11,7 +15,7 @@ def test_ensure_image_skips_when_image_exists():
     with patch("open_shrimp.sandbox.docker_helpers.subprocess.run") as mock_run:
         # docker image inspect succeeds -> image exists
         mock_run.return_value = MagicMock(returncode=0)
-        ensure_image()
+        ensure_image(bundle=claude_image_bundle())
 
     mock_run.assert_called_once()
     args = mock_run.call_args
@@ -39,9 +43,9 @@ def test_ensure_image_builds_when_missing(tmp_path):
     with (
         patch("open_shrimp.sandbox.docker_helpers.subprocess.run", mock_run),
         patch("open_shrimp.sandbox.docker_helpers.subprocess.Popen", mock_popen),
-        patch("open_shrimp.sandbox.docker_helpers.find_claude_binary", return_value=str(fake_binary)),
+        patch("open_shrimp.claude_binary.find_claude_binary", return_value=str(fake_binary)),
     ):
-        ensure_image()
+        ensure_image(bundle=claude_image_bundle())
 
     # Should have called inspect via run, then build via Popen
     mock_run.assert_called_once()
@@ -71,7 +75,7 @@ def test_ensure_image_raises_on_build_failure(tmp_path):
     with (
         patch("open_shrimp.sandbox.docker_helpers.subprocess.run", mock_run),
         patch("open_shrimp.sandbox.docker_helpers.subprocess.Popen", mock_popen),
-        patch("open_shrimp.sandbox.docker_helpers.find_claude_binary", return_value=str(fake_binary)),
+        patch("open_shrimp.claude_binary.find_claude_binary", return_value=str(fake_binary)),
     ):
         with pytest.raises(RuntimeError, match="Failed to build"):
-            ensure_image()
+            ensure_image(bundle=claude_image_bundle())

@@ -24,9 +24,7 @@ def translate_options(opts: BackendOptions) -> ClaudeAgentOptions:
 
     The SDK honours every honoured-intersection field, so this translation is
     total.  ``mcp_servers``, ``resume``, and ``system_prompt`` are only set
-    when present, matching how ``client_manager`` built the SDK options before
-    step 3 (``system_prompt`` / ``mcp_servers`` / ``resume`` were assigned
-    conditionally after construction).
+    when present.
 
     ``can_use_tool`` returns ``backend.types`` permission results (the shared
     ``hooks`` path imports no SDK type), so it is wrapped in

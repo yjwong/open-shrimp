@@ -2,13 +2,9 @@
 
 Serves the OpenShrimp tool surface (~22 tools) over the MCP proxy's
 host-loopback HTTP bridge (``/tools/{scope_token}``) and returns the
-``mcp_servers`` config handle the agent backend consumes.
-
-On ``master`` the SDK backend reaches tools over this same bridge
-(see ``docs/mcp-tool-http-bridge-plan.md``), so this one installer serves
-every path. Step 3's ``Backend.make_tool_server`` will delegate here; the
-OpenCode / PTY backends reuse it unchanged (they speak the identical
-``tools/list`` / ``tools/call`` protocol — protocol ref §3b).
+``mcp_servers`` config handle the agent backend consumes.  Every backend
+that speaks the MCP ``tools/list`` / ``tools/call`` protocol reaches tools
+over this same bridge; ``Backend.make_tool_server`` delegates here.
 """
 
 from __future__ import annotations

@@ -35,8 +35,9 @@ import tempfile
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 
-from open_shrimp.claude_binary import find_claude_binary
 from open_shrimp.paths import data_dir as _data_dir
+from open_shrimp.sandbox.agent_runtime import GuestMount, ImageBundle
+from open_shrimp.sandbox.skill_paths import existing_global_skill_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +77,62 @@ def _image_id(image_name: str) -> str | None:
     return result.stdout.strip()
 
 
-# Docker image name used for containerized contexts.
-CONTAINER_IMAGE = "openshrimp-claude:latest"
+# Live image-prefix root, rewritten by ``DockerSandboxManager.set_instance_prefix``
+# so per-instance deployments don't collide on image names.  Image tags are
+# derived as ``f"{_IMAGE_PREFIX}-{tag_suffix}:latest"``.
+_IMAGE_PREFIX = "openshrimp"
+
+# Back-compat alias for the wrapped-CLI bundle's live tag (the default
+# bundle).  Code that pre-dates the bundle plumbing (tests, computer-use
+# helpers) keeps reading this name; the value is kept in sync by
+# ``set_image_prefix``.
+CONTAINER_IMAGE = f"{_IMAGE_PREFIX}-claude:latest"
 
 # Docker image name for computer-use (GUI) contexts.
-COMPUTER_USE_IMAGE = "openshrimp-computer-use:latest"
+COMPUTER_USE_IMAGE = f"{_IMAGE_PREFIX}-computer-use:latest"
+
+
+def set_image_prefix(prefix: str) -> None:
+    """Update the live image-name prefix.
+
+    Called by ``DockerSandboxManager.set_instance_prefix`` so that, for
+    multi-instance deployments, image tags are namespaced.  Every bundle's
+    tag is derived from this prefix + the bundle's ``tag_suffix``.
+    """
+    global _IMAGE_PREFIX, CONTAINER_IMAGE, COMPUTER_USE_IMAGE
+    _IMAGE_PREFIX = prefix
+    CONTAINER_IMAGE = f"{prefix}-claude:latest"
+    COMPUTER_USE_IMAGE = f"{prefix}-computer-use:latest"
+
+
+def claude_image_bundle() -> ImageBundle:
+    """Construct the wrapped-CLI (Claude) :class:`ImageBundle`.
+
+    The computer-use image build, the PTY+JSONL spike, and tests call this
+    explicitly when they need the Claude base image; production sandboxes
+    receive a bundle from the runtime and never invoke this.  Resolved
+    lazily so this module's import stays light (no SDK imports at load).
+    """
+    from open_shrimp.claude_binary import find_claude_binary
+
+    return ImageBundle(
+        tag_suffix="claude",
+        bundled_dockerfile="Dockerfile.claude",
+        binary_finder=find_claude_binary,
+        context_binary_name="claude",
+        build_arg=("CLAUDE_CLI", "claude"),
+        guest_home="/home/claude",
+        dind_user="claude",
+    )
+
+
+def _base_image_for(bundle: ImageBundle) -> str:
+    """Return the live base image tag for *bundle*.
+
+    The current ``_IMAGE_PREFIX`` (rewritten by ``set_image_prefix``)
+    namespaces the tag for multi-instance deployments.
+    """
+    return f"{_IMAGE_PREFIX}-{bundle.tag_suffix}:latest"
 
 # Base directory for per-context container state (session storage, etc.).
 def container_state_dir() -> Path:
@@ -122,21 +174,25 @@ def _find_seccomp_profile() -> Path:
 
 
 def ensure_image(
-    image_name: str = CONTAINER_IMAGE,
+    *,
+    bundle: ImageBundle,
+    image_name: str | None = None,
     dockerfile: str | None = None,
     base_image: str | None = None,
     log_file: Path | None = None,
 ) -> None:
     """Ensure the container image exists, building it if necessary.
 
-    When *dockerfile* is ``None`` (the default), builds the base
-    ``openshrimp-claude`` image from the bundled ``Dockerfile.claude``.
-    When a custom *dockerfile* path is provided, builds from that file
-    instead — the Claude CLI binary is still copied into the build
-    context as ``claude`` and available via the ``CLAUDE_CLI`` build arg.
+    *bundle* carries every per-image build input — the bundled Dockerfile,
+    the binary finder, the build-arg and the binary name copied into the
+    build context — so this function has no agent-name branching.
 
     Args:
-        image_name: Docker image tag to build/check.
+        bundle: The :class:`ImageBundle` describing how to build this image.
+            Required so callers state the agent explicitly; ``ensure_image``
+            never assumes a default.
+        image_name: Docker image tag to build/check.  Defaults to the
+            bundle's base tag (``_base_image_for(bundle)``).
         dockerfile: Optional path to a custom Dockerfile.  When set,
             the build context is the directory containing the
             Dockerfile (so ``COPY`` instructions work relative to it).
@@ -146,9 +202,13 @@ def ensure_image(
             computer-use image.
 
     Raises:
-        RuntimeError: If the Claude CLI binary cannot be found or if
-            the Docker build fails.
+        RuntimeError: If the agent binary cannot be found or if the Docker
+            build fails.
     """
+    base_default = _base_image_for(bundle)
+    if image_name is None:
+        image_name = base_default
+
     image_exists = subprocess.run(
         ["docker", "image", "inspect", image_name],
         capture_output=True,
@@ -158,7 +218,7 @@ def ensure_image(
     needs_rebuild = False
     if image_exists and dockerfile is not None:
         effective_base = base_image or (
-            CONTAINER_IMAGE if image_name != CONTAINER_IMAGE else None
+            base_default if image_name != base_default else None
         )
         if effective_base:
             base_ts = _image_created_ts(effective_base)
@@ -179,8 +239,8 @@ def ensure_image(
     else:
         logger.info("Container image %s not found, building...", image_name)
 
-    cli_binary = find_claude_binary()
-    logger.info("Using Claude CLI binary: %s", cli_binary)
+    cli_binary = bundle.binary_finder()
+    logger.info("Using %s binary: %s", bundle.context_binary_name, cli_binary)
 
     if dockerfile is not None:
         # Ensure the base image exists before building a custom image
@@ -194,8 +254,8 @@ def ensure_image(
                 capture_output=True,
                 check=True,
             )
-        elif image_name != CONTAINER_IMAGE:
-            ensure_image(image_name=CONTAINER_IMAGE, dockerfile=None)
+        elif image_name != base_default:
+            ensure_image(image_name=base_default, dockerfile=None, bundle=bundle)
 
         # Custom Dockerfile: use its parent directory as the build
         # context, copying the CLI binary in alongside it.
@@ -206,7 +266,7 @@ def ensure_image(
             )
         build_dir_path = dockerfile_path.parent
         # Copy CLI binary into the build context (if not already there).
-        cli_dest = build_dir_path / "claude"
+        cli_dest = build_dir_path / bundle.context_binary_name
         if not cli_dest.exists() or not cli_dest.samefile(Path(cli_binary)):
             shutil.copy2(cli_binary, cli_dest)
         extra_args = None
@@ -217,18 +277,19 @@ def ensure_image(
             build_dir=str(build_dir_path),
             dockerfile_name=dockerfile_path.name,
             extra_build_args=extra_args,
+            build_arg=bundle.build_arg,
             log_file=log_file,
         )
     else:
-        # Default: bundled Dockerfile.claude in a temp build context.
+        # Default: bundled Dockerfile in a temp build context.
         repo_root = Path(__file__).resolve().parent.parent.parent.parent
-        repo_dockerfile = repo_root / "Dockerfile.claude"
+        repo_dockerfile = repo_root / bundle.bundled_dockerfile
         if repo_dockerfile.is_file():
             dockerfile_text = repo_dockerfile.read_text(encoding="utf-8")
         else:
             dockerfile_text = (
                 _pkg_files("open_shrimp")
-                .joinpath("Dockerfile.claude")
+                .joinpath(bundle.bundled_dockerfile)
                 .read_text(encoding="utf-8")
             )
 
@@ -236,11 +297,12 @@ def ensure_image(
             prefix="openshrimp-build-"
         ) as build_dir:
             build_path = Path(build_dir)
-            shutil.copy2(cli_binary, build_path / "claude")
+            shutil.copy2(cli_binary, build_path / bundle.context_binary_name)
             (build_path / "Dockerfile").write_text(dockerfile_text, encoding="utf-8")
             _docker_build(
                 image_name=image_name,
                 build_dir=build_dir,
+                build_arg=bundle.build_arg,
                 log_file=log_file,
             )
 
@@ -278,8 +340,15 @@ def ensure_computer_use_image(
         logger.info("Computer-use image %s already exists", image_name)
         return
 
-    # Ensure the base image exists first.
-    ensure_image(image_name=CONTAINER_IMAGE, dockerfile=None, log_file=log_file)
+    # Ensure the Claude base image exists first; computer-use layers on top
+    # of it.  The bundle is constructed explicitly so this call site is not
+    # relying on a silent default in ``ensure_image``.
+    ensure_image(
+        bundle=claude_image_bundle(),
+        image_name=CONTAINER_IMAGE,
+        dockerfile=None,
+        log_file=log_file,
+    )
 
     if needs_rebuild:
         logger.info("Rebuilding computer-use image %s...", image_name)
@@ -332,8 +401,10 @@ def ensure_computer_use_image(
 
 
 def _docker_build(
+    *,
     image_name: str,
     build_dir: str,
+    build_arg: tuple[str, str] | None = None,
     dockerfile_name: str = "Dockerfile",
     extra_build_args: list[str] | None = None,
     log_file: Path | None = None,
@@ -341,6 +412,10 @@ def _docker_build(
     """Run ``docker build`` and stream output to the logger.
 
     Args:
+        build_arg: The ``(name, value)`` of the agent-binary build arg the
+            Dockerfile reads (e.g. ``("CLAUDE_CLI", "claude")``).  ``None``
+            for derived Dockerfiles that take no ARG (e.g. the computer-use
+            image, which only ``FROM``s the already-built base).
         log_file: Optional path to a file where build output is also
             written line-by-line (with flush) for the terminal mini app.
 
@@ -351,8 +426,9 @@ def _docker_build(
         "docker", "build",
         "-t", image_name,
         "-f", dockerfile_name,
-        "--build-arg", "CLAUDE_CLI=claude",
     ]
+    if build_arg is not None:
+        cmd.extend(["--build-arg", f"{build_arg[0]}={build_arg[1]}"])
     if extra_build_args:
         cmd.extend(extra_build_args)
     cmd.append(".")
@@ -613,25 +689,68 @@ exec sleep infinity
 """
 
 
+def _dind_entrypoint_text(bundle: ImageBundle) -> str:
+    """Return the standalone-DinD entrypoint script for *bundle*.
+
+    The canonical script registers a ``claude`` user with home ``/home/claude``
+    (the wrapped-CLI bundle).  For any other bundle, rewrite the three
+    user/home lines (passwd, subuid, subgid) so the in-container user matches
+    the bundle's ``dind_user`` + ``guest_home`` — otherwise rootless Docker's
+    newuidmap setup fails (the user the entrypoint launches sub-processes as
+    isn't the one declared in passwd/subuid/subgid).
+    """
+    if bundle.dind_user == "claude" and bundle.guest_home == "/home/claude":
+        return _DIND_ENTRYPOINT
+    user = bundle.dind_user
+    home = bundle.guest_home
+    return (
+        _DIND_ENTRYPOINT
+        .replace(
+            'echo "claude:x:${MY_UID}:${MY_GID}::/home/claude:/bin/bash"',
+            f'echo "{user}:x:${{MY_UID}}:${{MY_GID}}::{home}:/bin/bash"',
+        )
+        .replace('echo "claude:x:${MY_GID}:"', f'echo "{user}:x:${{MY_GID}}:"')
+        .replace('echo "claude:100000:65536"', f'echo "{user}:100000:65536"')
+    )
+
+
 def _build_docker_run_argv(
+    *,
+    bundle: ImageBundle,
     context_name: str,
     project_dir: str,
     additional_directories: list[str] | None = None,
     docker_in_docker: bool = False,
     computer_use: bool = False,
-    image_name: str = CONTAINER_IMAGE,
+    image_name: str | None = None,
+    served_home_mounts: tuple[GuestMount, ...] = (),
+    served_guest_port: int | None = None,
 ) -> tuple[list[str], str]:
     """Build the ``docker run -d`` argv for creating a persistent container.
 
     Returns ``(docker_run_argv, container_name)`` where *docker_run_argv*
     is a complete argv list ending with the image and keep-alive command.
+
+    *bundle* selects guest user/home, the DinD-entrypoint passwd rewrite,
+    and (when no *served_guest_port* is given) the wrapped-CLI shape with
+    the per-context claude-home mount and credentials copy-in.  When
+    *served_guest_port* is set, the served-endpoint shape is produced:
+    *served_home_mounts* are bind-mounted in, the port is published for
+    ``reach()``, the unified skill dirs are sub-mounted, and the
+    credentials copy-in is skipped (the runtime's ``inject`` syncs creds
+    into the served home).  *image_name* defaults to the bundle's base tag.
     """
+    if image_name is None:
+        image_name = _base_image_for(bundle)
+    served = served_guest_port is not None
+
     state_dir = _ensure_state_dir(context_name)
     uid = os.getuid()
     gid = os.getgid()
     container_name = _container_name(context_name)
 
     host_credentials = Path.home() / ".claude" / ".credentials.json"
+    home_dir = bundle.guest_home
 
     # Git identity — baked into the container at creation time.
     git_env_args: list[str] = []
@@ -656,7 +775,7 @@ def _build_docker_run_argv(
         "--label", f"{_CONTAINER_LABEL}=true",
         "--label", f"{_CONTAINER_LABEL}.context={context_name}",
         "--user", f"{uid}:{gid}",
-        "-e", "HOME=/home/claude",
+        "-e", f"HOME={home_dir}",
     ]
     for env_arg in git_env_args:
         docker_argv.extend(["-e", env_arg])
@@ -667,29 +786,58 @@ def _build_docker_run_argv(
     # host and sandboxed contexts reach it via this hostname.
     docker_argv.extend(["--add-host", "host.docker.internal:host-gateway"])
 
-    # Mount Claude CLI tmp dir inside the container so background task
-    # outputs are written to the host-visible state directory.
-    claude_tmp_dir = state_dir / "tmp"
-    claude_tmp_dir.mkdir(exist_ok=True)
-    docker_argv.extend([
-        "-v", f"{project_dir}:{project_dir}",
-        "-v", f"{state_dir}:/home/claude/.claude",
-        "-v", f"{claude_tmp_dir}:/tmp/claude-{uid}",
-    ])
-    # Sub-mount on top of state_dir; Docker resolves nested binds in flag order.
-    host_skills = Path.home() / ".claude" / "skills"
-    if host_skills.is_dir():
+    if served:
+        # Served-endpoint shape: extra host dirs come from the launch's
+        # ``home_mounts`` (the runtime's data home, plugin-config dir, …),
+        # plus a published guest serve port so ``reach()`` (a ``docker
+        # port`` lookup) can resolve a host port.  No credential copy-in
+        # (the runtime's ``inject`` writes creds into the served home).
+        task_tmp_dir = state_dir / "tmp"
+        task_tmp_dir.mkdir(exist_ok=True)
+        tmp_target = f"/tmp/{bundle.dind_user}-{uid}"
         docker_argv.extend([
-            "-v", f"{host_skills}:/home/claude/.claude/skills:ro",
+            "-v", f"{project_dir}:{project_dir}",
+            "-v", f"{task_tmp_dir}:{tmp_target}",
         ])
-    # Copy credentials into the state dir (which is directory-mounted as
-    # /home/claude/.claude) instead of bind-mounting the file directly.
-    # File bind mounts break when the host replaces the file via atomic
-    # rename (new inode) — the container stays pinned to the stale inode.
-    # The wrapper script also copies before each `docker exec` to pick up
-    # host-side token refreshes.
-    if host_credentials.exists():
-        shutil.copy2(str(host_credentials), str(state_dir / ".credentials.json"))
+        for mount in served_home_mounts:
+            docker_argv.extend([
+                "-v", f"{mount.host_dir}:{mount.guest_mount_point}",
+            ])
+        # Expose the sandbox-owned agent server to the host via loopback.
+        docker_argv.extend(["-p", f"127.0.0.1::{served_guest_port}"])
+        # Unified global skill dirs; read-only sub-mounts.
+        for host_skills, guest_skills in existing_global_skill_dirs(
+            guest_home=home_dir,
+        ):
+            docker_argv.extend([
+                "--mount",
+                f"type=bind,source={host_skills},target={guest_skills},readonly",
+            ])
+    else:
+        # Wrapped-CLI shape: per-context home dir mounted as the agent's
+        # `.claude` (background task outputs land in the host-visible
+        # state directory), credentials copied in for token refresh.
+        claude_tmp_dir = state_dir / "tmp"
+        claude_tmp_dir.mkdir(exist_ok=True)
+        docker_argv.extend([
+            "-v", f"{project_dir}:{project_dir}",
+            "-v", f"{state_dir}:{home_dir}/.claude",
+            "-v", f"{claude_tmp_dir}:/tmp/{bundle.dind_user}-{uid}",
+        ])
+        # Sub-mount on top of state_dir; Docker resolves nested binds in flag order.
+        host_skills = Path.home() / ".claude" / "skills"
+        if host_skills.is_dir():
+            docker_argv.extend([
+                "-v", f"{host_skills}:{home_dir}/.claude/skills:ro",
+            ])
+        # Copy credentials into the state dir (which is directory-mounted as
+        # `{home_dir}/.claude`) instead of bind-mounting the file directly.
+        # File bind mounts break when the host replaces the file via atomic
+        # rename (new inode) — the container stays pinned to the stale inode.
+        # The wrapper script also copies before each `docker exec` to pick up
+        # host-side token refreshes.
+        if host_credentials.exists():
+            shutil.copy2(str(host_credentials), str(state_dir / ".credentials.json"))
     for extra_dir in additional_directories or []:
         docker_argv.extend(["-v", f"{extra_dir}:{extra_dir}"])
 
@@ -705,12 +853,14 @@ def _build_docker_run_argv(
         docker_data_dir = state_dir / "docker-data"
         docker_data_dir.mkdir(exist_ok=True)
         docker_argv.extend([
-            "-v", f"{docker_data_dir}:/home/claude/.local/share/docker",
+            "-v", f"{docker_data_dir}:{home_dir}/.local/share/docker",
         ])
         if not computer_use:
             # Standalone DinD: use the dedicated entrypoint script.
             entrypoint_path = state_dir / "dind-entrypoint.sh"
-            entrypoint_path.write_text(_DIND_ENTRYPOINT, encoding="utf-8")
+            entrypoint_path.write_text(
+                _dind_entrypoint_text(bundle), encoding="utf-8",
+            )
             entrypoint_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
                                   | stat.S_IROTH | stat.S_IXOTH)
             docker_argv.extend([
@@ -764,12 +914,16 @@ def _build_docker_run_argv(
 
 
 def ensure_container_running(
+    *,
+    bundle: ImageBundle,
     context_name: str,
     project_dir: str,
     additional_directories: list[str] | None = None,
     docker_in_docker: bool = False,
     computer_use: bool = False,
-    image_name: str = CONTAINER_IMAGE,
+    image_name: str | None = None,
+    served_home_mounts: tuple[GuestMount, ...] = (),
+    served_guest_port: int | None = None,
 ) -> str:
     """Ensure a persistent container is running for the given context.
 
@@ -785,6 +939,9 @@ def ensure_container_running(
         The container name (e.g. ``openshrimp-dev``).
     """
     name = _container_name(context_name)
+    if image_name is None:
+        image_name = _base_image_for(bundle)
+
     state = _get_container_state(name)
     if state == "running":
         # Check if the container's image matches the current image tag.
@@ -807,12 +964,15 @@ def ensure_container_running(
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
     docker_argv, _ = _build_docker_run_argv(
+        bundle=bundle,
         context_name=context_name,
         project_dir=project_dir,
         additional_directories=additional_directories,
         docker_in_docker=docker_in_docker,
         computer_use=computer_use,
         image_name=image_name,
+        served_home_mounts=served_home_mounts,
+        served_guest_port=served_guest_port,
     )
 
     result = subprocess.run(docker_argv, capture_output=True, text=True)

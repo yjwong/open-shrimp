@@ -869,10 +869,9 @@ def _list_sessions_for_context(
 
     Both paths re-pack their rows into ``backend.SessionInfo`` (the shared
     contract type) via the ``claude_sdk`` adapter, so callers consume the
-    backend-neutral shape regardless of which scan ran.  The SDK
-    ``_internal.sessions`` poke (sandboxed scan) is preserved as an SDK-adapter
-    detail here — step 3's ``Backend.list_sessions`` owns the non-sandboxed
-    default through the same re-pack.
+    backend-neutral shape regardless of which scan ran.  The non-sandboxed
+    default flows through ``Backend.list_sessions``; the sandboxed scan keeps
+    its SDK ``_internal.sessions`` poke here as an SDK-adapter detail.
     """
     from claude_agent_sdk import list_sessions
     from claude_agent_sdk._internal.sessions import (

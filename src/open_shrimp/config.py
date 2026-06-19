@@ -297,6 +297,50 @@ def _validate_raw(raw: dict) -> None:
                 f"backend must be one of {known_backends()}, got: {backend!r}"
             )
 
+    # OpenCode-specific startup validation.  OpenCode addresses models as
+    # ``provider/model`` (it has no implicit default provider), so every
+    # context must carry a provider-qualified ``model:``.  Fail fast at
+    # startup rather than at the first turn (where ``to_opencode`` would
+    # otherwise raise).  Also surface a missing ``opencode`` binary early.
+    if backend == "opencode":
+        from open_shrimp.backend.opencode.options import split_provider_model
+
+        for name, ctx in contexts.items():
+            model = ctx.get("model")
+            try:
+                split_provider_model(model)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Context '{name}': backend 'opencode' requires a "
+                    f"provider-qualified model (e.g. 'openai/gpt-5.5'): {exc}"
+                ) from exc
+
+            # ``computer_use`` is not supported with the OpenCode backend: the
+            # computer-use image is Claude-based (built from
+            # ``Dockerfile.computer-use``) and carries no ``opencode`` binary,
+            # while the run path still launches ``opencode serve`` — an opaque
+            # first-turn failure.  Fail fast at startup instead.  The flag may
+            # live under the modern ``sandbox:`` key or the legacy
+            # ``container:`` alias.
+            sandbox_raw = ctx.get("sandbox") or {}
+            container_raw = ctx.get("container") or {}
+            if sandbox_raw.get("computer_use") or container_raw.get("computer_use"):
+                raise ValueError(
+                    f"Context '{name}': computer_use is not supported with "
+                    f"backend 'opencode' (the computer-use image is "
+                    f"Claude-based and carries no opencode binary)."
+                )
+
+        from open_shrimp.sandbox.opencode_runtime import _find_opencode_binary
+
+        try:
+            _find_opencode_binary()
+        except RuntimeError as exc:
+            raise ValueError(
+                f"backend 'opencode' selected but the opencode binary could "
+                f"not be found: {exc}"
+            ) from exc
+
 
 def _parse_sandbox_config(raw: dict) -> SandboxConfig:
     """Parse a sandbox config dict into a SandboxConfig dataclass."""

@@ -5,9 +5,9 @@ subprocess stays alive across multiple messages in the same conversation.
 This avoids the "Continue from where you left off." injection that the CLI
 performs when it detects an interrupted turn on session resume.
 
-The concrete client is produced by the configured ``Backend`` (step 3): the
-manager constructs ``BackendOptions``, calls ``backend.make_client(opts)``, and
-drives the resulting ``BackendClient`` through the protocol method set.  The
+The concrete client is produced by the configured ``Backend``: the manager
+constructs ``BackendOptions``, calls ``backend.make_client(opts)``, and drives
+the resulting ``BackendClient`` through the protocol method set.  The
 SDK-specific details (options translation, the resume-fallback retry on
 connect, the subprocess liveness poke, SDK-message translation) live inside the
 ``claude_sdk`` adapter, not here.
@@ -48,7 +48,9 @@ from open_shrimp.hooks import (
     QuestionCallback,
 )
 from open_shrimp.sandbox import Sandbox, SandboxManager
-from open_shrimp.sandbox.agent_runtime import claude_runtime
+from open_shrimp.sandbox.agent_runtime import (
+    AgentHandle,
+)
 from open_shrimp.tools import OpenShrimpTool, create_openshrimp_tools
 
 logger = logging.getLogger(__name__)
@@ -511,13 +513,16 @@ async def get_or_create_session(
             "mcp__playwright__browser_verify_value",
         ])
 
-    # When sandboxed, generate a wrapper script that runs the Claude CLI
-    # in an isolated environment.  The wrapper is pointed at via cli_path;
-    # all other SDK machinery (stdin/stdout streaming, canUseTool, MCP) is
-    # unchanged.
+    # When sandboxed, launch the agent inside an isolated environment.  The
+    # launch fork is the *one* legitimate per-backend branch here: the
+    # wrapped-CLI flavour points ``cli_path`` at a wrapper script; the
+    # served-endpoint flavour returns a host-reachable endpoint that rides in
+    # ``options.extra["endpoint"]``.  Everything downstream (make_client,
+    # make_tool_server, options) stays backend-uniform.
     sandbox: Sandbox | None = None
     cli_path: str | None = None
     wrapper_cleanup_paths: list[str] = []
+    served_endpoint: Any = None  # the served endpoint handle, or None
     is_containerized = is_sandboxed(context)
     if is_containerized:
         assert sandbox_manager is not None, (
@@ -529,7 +534,24 @@ async def get_or_create_session(
         # boot, virtiofsd startup, port allocation, etc.
         ctx_lock = _context_locks.setdefault(context_name, asyncio.Lock())
         async with ctx_lock:
-            sandbox = sandbox_manager.create_sandbox(context_name, context)
+            # Resolved before create_sandbox so the runtime's image bundle +
+            # served-launch home mounts feed the Docker image/run-argv
+            # selection.  ``make_runtime`` is pure/cheap, so computing it
+            # first is safe.
+            _runtime = backend.make_runtime(
+                sandbox_manager.agent_home_dir(context_name),
+                context_name=context_name,
+                model=context.model,
+            )
+
+            # The runtime selects the Docker image/run-argv bundle and (for
+            # served launches) the extra host-synced home mounts; VM backends
+            # consume only the served-launch's mounts.
+            sandbox = sandbox_manager.create_sandbox(
+                context_name,
+                context,
+                runtime=_runtime,
+            )
 
             # Check if the environment needs building or the sandbox
             # needs starting — send user feedback before potentially
@@ -575,9 +597,8 @@ async def get_or_create_session(
 
             _sandbox = sandbox  # capture for closure
             _mgr = sandbox_manager  # capture for closure
-            _runtime = claude_runtime(_mgr.agent_home_dir(context_name))
 
-            def _ensure_and_build_wrapper() -> tuple[str, list[str]]:
+            def _ensure_and_start_agent() -> "AgentHandle":
                 try:
                     _sandbox.ensure_environment(log_file=log_file)
                     _sandbox.ensure_running(log_file=log_file)
@@ -586,17 +607,33 @@ async def get_or_create_session(
                         assert _mgr is not None
                         _mgr.unregister_build(context_name)
                 _sandbox.provision_workspace()
-                handle = _sandbox.start_agent(_runtime)
-                return handle.cli_path, handle.cleanup_paths
+                return _sandbox.start_agent(_runtime)
 
-            cli_path, wrapper_cleanup_paths = await asyncio.to_thread(
-                _ensure_and_build_wrapper,
-            )
-            logger.info(
-                "Sandbox context '%s': using wrapper %s",
-                context_name,
-                cli_path,
-            )
+            handle = await asyncio.to_thread(_ensure_and_start_agent)
+            # WrappedCLI → cli_path; ServedEndpoint → endpoint.
+            cli_path = handle.cli_path
+            wrapper_cleanup_paths = handle.cleanup_paths
+            served_endpoint = handle.endpoint
+            if served_endpoint is not None:
+                logger.info(
+                    "Sandbox context '%s': using served endpoint %s",
+                    context_name,
+                    served_endpoint.base_url,
+                )
+            else:
+                logger.info(
+                    "Sandbox context '%s': using wrapper %s",
+                    context_name,
+                    cli_path,
+                )
+
+    # Backend-specific overflow: the sandbox-provided served endpoint rides in
+    # ``extra`` (it is not an honoured-intersection field).  When no sandbox
+    # supplies one, it stays unset → the client spawns its own host-local
+    # server.  Backends that don't use a served endpoint ignore ``extra``.
+    extra: dict[str, Any] = {}
+    if served_endpoint is not None:
+        extra["endpoint"] = served_endpoint
 
     options = BackendOptions(
         cwd=context.directory,
@@ -610,6 +647,7 @@ async def get_or_create_session(
         can_use_tool=can_use_tool,
         cli_path=cli_path,
         max_buffer_size=10 * 1024 * 1024,  # 10MB
+        extra=extra,
     )
 
     system_prompt_parts: list[str] = []
@@ -693,9 +731,8 @@ async def get_or_create_session(
                 if is_containerized and sandbox is not None
                 else "127.0.0.1"
             )
-            # The backend selects the installer (the shared HTTP bridge for
-            # claude_sdk); the manager remains the caller, supplying the proxy
-            # handle and scope identity (decision §1(a)).
+            # The backend selects the installer; the manager calls it with
+            # the proxy handle and scope identity.
             install_tools = backend.make_tool_server(_tool_factory)
             mcp_servers["openshrimp"] = install_tools(
                 mcp_proxy,
@@ -798,14 +835,27 @@ async def get_or_create_session(
         )
 
     # The backend builds (does not connect) the client; ``connect()`` owns the
-    # resume-fallback retry (on a stale ``resume`` the wrapper rebuilds the
-    # inner client with resume cleared and reconnects).  The wrapper mutates
-    # *this* ``options`` object's ``resume`` to None when it falls back, so we
-    # read it back to keep ``AgentSession.session_id`` accurate.
+    # resume-fallback retry.  Backends surface the fallback differently:
+    #
+    # * One rebuilds its inner client with ``resume`` cleared and mutates *this*
+    #   ``options.resume`` to None — so a stale resume reads back as
+    #   ``options.resume is None``.  Its ``client.session_id`` is not populated
+    #   until the first ``receive_response`` (the init message), so we cannot
+    #   rely on it here.
+    # * Another validates the resume target in ``connect()`` and, on a stale
+    #   resume, creates a fresh session — leaving ``client.session_id`` already
+    #   set to the *new* id at connect time (it does not touch ``options.resume``).
+    #
+    # Reconcile both: prefer the client's own post-connect view when it has
+    # one, else fall back to the ``options.resume`` signal.
     client = backend.make_client(options)
     await client.connect()
-    if session_id and options.resume is None:
-        session_id = None
+    if session_id:
+        client_sid = client.session_id
+        if client_sid is not None:
+            session_id = client_sid
+        elif options.resume is None:
+            session_id = None
 
     session = AgentSession(
         client=client,

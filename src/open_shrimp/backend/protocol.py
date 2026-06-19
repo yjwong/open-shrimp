@@ -1,14 +1,13 @@
 """The runtime ``Backend`` / ``BackendClient`` protocols and ``BackendOptions``.
 
-Step 3 promotes the three not-yet-landed contracts from
-``docs/backend_protocol_reference.py`` (§3, §6, §7) into wired-in code:
+Three contracts:
 ``BackendOptions`` (the honoured configuration intersection), the
 ``BackendClient`` Protocol (the client lifecycle ``client_manager`` drives),
 and the ``Backend`` Protocol (the factory surface selected once at startup).
 
 No SDK imports — this is a pure structural contract.  The content/message
 types, permission results, ``SessionInfo``, and the error aliases it references
-are already landed (steps 1–2) and imported from their modules.
+are imported from their respective modules.
 """
 
 from __future__ import annotations
@@ -16,10 +15,16 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from open_shrimp.backend import types as bt
 from open_shrimp.backend.sessions import SessionInfo
+
+if TYPE_CHECKING:
+    # Import-light: the launch profile type lives in the sandbox package and is
+    # only referenced in an annotation, so it stays behind TYPE_CHECKING to keep
+    # this protocol module free of sandbox imports (no import cycle at runtime).
+    from open_shrimp.sandbox.agent_runtime import AgentRuntime
 
 # The callback the backend invokes before running a non-auto-approved tool.
 # Signature is already uniform across master + opencode (hooks.py builds it).
@@ -156,6 +161,23 @@ class Backend(Protocol):
         """Construct (do **not** connect) a client for one ChatScope."""
         ...
 
+    def make_runtime(
+        self,
+        home_dir: Path,
+        *,
+        context_name: str,
+        model: str | None,
+    ) -> "AgentRuntime":
+        """The sandbox launch profile for this backend.  Mirrors ``make_client``:
+        the backend owns which runtime it wants and how to derive its inputs.
+
+        ``claude_sdk`` → ``claude_runtime`` (WrappedCLI; ``context_name``/``model``
+        unused); ``opencode`` → ``opencode_runtime`` (ServedEndpoint, parsing the
+        provider id from ``model`` and resolving its per-context host dirs from
+        ``context_name``).
+        """
+        ...
+
     def make_tool_server(self, tools: ToolFactory) -> Callable[..., dict[str, Any]]:
         """Select the installer for the OpenShrimp tool surface.
 
@@ -166,7 +188,7 @@ class Backend(Protocol):
 
         The ``tools`` factory is accepted so a backend that needs to install
         eagerly can, but the shared bridge installer takes the factory at call
-        time, so this is the *selector* form (decision §1(a))."""
+        time, so this is the *selector* form."""
         ...
 
     def make_can_use_tool(

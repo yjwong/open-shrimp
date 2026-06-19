@@ -1,20 +1,20 @@
 """``ClaudeSdkBackend`` — the Claude Agent SDK as a ``Backend``.
 
-The one concrete backend Step 3 ships.  Each method is thin:
+Each method is thin:
 
 * ``make_client`` constructs (does not connect) a ``ClaudeSdkClient``.
 * ``make_tool_server`` returns the shared HTTP-bridge installer (the selector
   form — ``client_manager`` supplies the proxy + scope args).
-* ``make_can_use_tool`` delegates to ``hooks.make_can_use_tool`` unchanged.
+* ``make_can_use_tool`` delegates to ``hooks.make_can_use_tool``.
 * ``list_sessions`` wraps ``claude_agent_sdk.list_sessions`` and re-packs its
-  rows into ``backend.SessionInfo`` (field-for-field; see step 1).
+  rows into ``backend.SessionInfo`` (field-for-field).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from open_shrimp.backend.claude_sdk.client import ClaudeSdkClient
 from open_shrimp.backend.protocol import (
@@ -25,6 +25,9 @@ from open_shrimp.backend.protocol import (
 from open_shrimp.backend.sessions import SessionInfo
 from open_shrimp.backend.tools import serve_tools_over_mcp_http
 
+if TYPE_CHECKING:
+    from open_shrimp.sandbox.agent_runtime import AgentRuntime
+
 
 class ClaudeSdkBackend:
     """The Claude Agent SDK backend.  ``name == "claude_sdk"``."""
@@ -34,16 +37,26 @@ class ClaudeSdkBackend:
     def make_client(self, options: BackendOptions) -> ClaudeSdkClient:
         return ClaudeSdkClient(options)
 
+    def make_runtime(
+        self,
+        home_dir: Path,
+        *,
+        context_name: str,
+        model: str | None = None,
+    ) -> "AgentRuntime":
+        """The Claude wrapped-CLI launch profile.
+
+        ``context_name`` and ``model`` are unused — the wrapped-CLI runtime
+        needs only the host-side home dir.
+        """
+        from open_shrimp.sandbox.agent_runtime import claude_runtime
+
+        return claude_runtime(home_dir)
+
     def make_tool_server(
         self, tools: ToolFactory
     ) -> Callable[..., dict[str, Any]]:
-        """Select the installer for the OpenShrimp tool surface.
-
-        For ``claude_sdk`` the tool surface is reached over the same MCP HTTP
-        bridge every backend uses, so this returns ``serve_tools_over_mcp_http``
-        (the caller supplies the proxy handle, the tool factory, and the scope
-        args at call time — decision §1(a)).
-        """
+        """Select the installer for the OpenShrimp tool surface."""
         return serve_tools_over_mcp_http
 
     def make_can_use_tool(
@@ -69,11 +82,10 @@ class ClaudeSdkBackend:
     ) -> list[SessionInfo]:
         """Return the SDK's sessions for ``directory`` as ``SessionInfo`` rows.
 
-        The SDK's ``SDKSessionInfo`` is field-for-field ``SessionInfo`` (step 1),
-        so this is a shallow re-pack.  The sandboxed-directory scan and the
-        SDK ``_internal.sessions`` helpers stay in ``handlers/commands.py``'s
-        ``_list_sessions_for_context``, which already returns these rows; this
-        method is the non-sandboxed default path through the backend.
+        The SDK's ``SDKSessionInfo`` is field-for-field ``SessionInfo``, so
+        this is a shallow re-pack.  The sandboxed-directory scan and the SDK
+        ``_internal.sessions`` helpers stay in ``handlers/commands.py``'s
+        ``_list_sessions_for_context``; this method is the non-sandboxed path.
         """
         from claude_agent_sdk import list_sessions
 

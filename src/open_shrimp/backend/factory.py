@@ -15,6 +15,7 @@ from collections.abc import Callable
 from typing import Any
 
 from open_shrimp.backend.claude_sdk import ClaudeSdkBackend
+from open_shrimp.backend.opencode import OpenCodeBackend
 from open_shrimp.backend.protocol import Backend
 
 # The default when the ``backend:`` key is absent — so existing configs with no
@@ -23,6 +24,7 @@ DEFAULT_BACKEND = "claude_sdk"
 
 _BACKENDS: dict[str, Callable[[], Backend]] = {
     "claude_sdk": lambda: ClaudeSdkBackend(),
+    "opencode": lambda: OpenCodeBackend(),
 }
 
 

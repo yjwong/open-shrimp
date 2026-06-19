@@ -1,14 +1,8 @@
 """Backend-neutral message, content-block, and permission contracts.
 
-This is the shared type contract imported by every backend's stream layer.
-It is lifted from ``origin/opencode``'s ``opencode_client/events.py`` (which
-already proved out exactly these dataclasses) and extended with the
-``Task*`` / ``RateLimitEvent`` shapes and the ``session_id`` fields the
-SDK path carries.  See ``docs/step1-type-contract-implementation-plan.md``.
-
-No backend-specific types appear here.  The SDK path translates each SDK
-message into one of these instances in ``agent.py:_to_backend_event``; the
-``opencode`` / ``pty_jsonl`` backends construct them directly.
+The shared type contract imported by every backend's stream layer.  No
+backend-specific types appear here; each backend translates its native shape
+into these instances inside its own adapter.
 """
 
 from __future__ import annotations
@@ -17,12 +11,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Union
 
 # --- Section 2: permissions -------------------------------------------------
-# Lifted verbatim from opencode's events.py; pure data, uniform across both
-# branches.  As of step 2b, hooks.make_can_use_tool returns *these* neutral
-# results unconditionally; the claude_sdk backend translates them to the SDK's
-# permission types at its options seam (claude_sdk/permission.py) to satisfy
-# the SDK's isinstance contract.  No src/ module outside that adapter imports
-# the SDK permission types.
+# Pure data.  ``hooks.make_can_use_tool`` returns these neutral results; the
+# claude_sdk adapter translates them into the SDK's permission types at its
+# options seam (``claude_sdk/permission.py``) to satisfy the SDK's isinstance
+# contract.
 
 
 @dataclass

@@ -1,10 +1,10 @@
-"""Sandbox abstraction for isolated Claude CLI execution.
+"""Sandbox abstraction for isolated agent execution.
 
 Defines the :class:`Sandbox` protocol that encapsulates different isolation
 backends (Docker containers, Lima/libvirt VMs, etc.) behind a
 common lifecycle interface.  The agent is launched via
 :meth:`Sandbox.start_agent`, which for the wrapped-CLI strategy points the
-SDK's ``cli_path`` option at a generated wrapper script; all other SDK
+driver's ``cli_path`` option at a generated wrapper script; all other driver
 machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.
 
 Use :meth:`SandboxManager.create_sandbox
@@ -60,7 +60,7 @@ VncQuirk = Literal["rfb_drops_set_encodings", "rfb_bgra_pixel_format"]
 
 @runtime_checkable
 class Sandbox(Protocol):
-    """Isolated execution environment for the Claude CLI.
+    """Isolated execution environment for the agent CLI.
 
     A single instance represents one VM/container and is shared across
     multiple sessions (ChatScopes) using the same context.  Instances
@@ -157,8 +157,9 @@ class Sandbox(Protocol):
         * ``wrapped_cli`` — generate the wrapper script and return its
           ``cli_path`` (today's :meth:`build_cli_wrapper` body, wrapped in an
           :class:`~open_shrimp.sandbox.agent_runtime.AgentHandle`).
-        * ``served_endpoint`` — run the serve argv, call :meth:`reach`, return
-          the endpoint.  (Not yet implemented; the served half lands later.)
+        * ``served_endpoint`` — run the serve argv inside the sandbox, call
+          :meth:`reach` to expose its guest port, and return a served-endpoint
+          handle (the served-endpoint launch flavour).
         """
         ...
 
@@ -169,7 +170,7 @@ class Sandbox(Protocol):
         outside the sandbox layer should use :meth:`start_agent`.
 
         The script must:
-        - Accept Claude CLI args as ``"$@"``
+        - Accept the agent CLI args as ``"$@"``
         - Forward stdin/stdout (interactive, ``-i``)
         - Forward ``ANTHROPIC_API_KEY``
         - Self-heal if the runtime died

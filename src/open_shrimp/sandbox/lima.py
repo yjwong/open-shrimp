@@ -18,9 +18,18 @@ import logging
 import shlex
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from open_shrimp.config import SandboxConfig
-from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime, WrappedCLI
+from open_shrimp.sandbox.agent_runtime import (
+    AgentHandle,
+    AgentRuntime,
+    GuestMount,
+    ServedEndpoint,
+    WrappedCLI,
+    run_served_endpoint,
+    terminate_served_proc,
+)
 from open_shrimp.sandbox.base import (
     VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
     VNC_QUIRK_RFB_DROPS_SET_ENCODINGS,
@@ -33,6 +42,7 @@ from open_shrimp.sandbox.port_forward import (
     allocate_host_port,
     open_ssh_tunnel,
 )
+from open_shrimp.sandbox.skill_paths import SANDBOX_HOME
 from open_shrimp.sandbox.lima_helpers import (
     _lima_env,
     _log,
@@ -109,6 +119,7 @@ class LimaSandbox:
         instance_prefix: str = "openshrimp",
         computer_use: bool = False,
         guest_os: str = "linux",
+        runtime: AgentRuntime | None = None,
     ) -> None:
         self._context_name = context_name
         self._config = config
@@ -118,6 +129,16 @@ class LimaSandbox:
         self._instance_prefix = instance_prefix
         self._computer_use = computer_use
         self._guest_os = guest_os
+
+        # Served-endpoint launch's extra home mounts are added to the
+        # generated Lima YAML so the injected provider ``auth.json`` and the
+        # managed plugin config reach the served process.  The wrapped-CLI
+        # launch contributes no extra mounts.
+        launch = runtime.launch if runtime else None
+        if isinstance(launch, ServedEndpoint):
+            self._served_home_mounts: tuple[GuestMount, ...] = launch.home_mounts
+        else:
+            self._served_home_mounts = ()
 
         self._sdir = state_dir_for(context_name)
         self._inst_name = _instance_name(context_name, instance_prefix)
@@ -129,6 +150,11 @@ class LimaSandbox:
         self._ssh_tunnels: list[subprocess.Popen] = []
 
         self._port_forwards = PortForwardRegistry()
+
+        # Served-endpoint state.  ``_served_proc`` is read by the
+        # served-endpoint client's liveness check via the endpoint's ``owner``.
+        self._served_proc: subprocess.Popen[str] | None = None
+        self._served_endpoint: Any = None
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -166,6 +192,7 @@ class LimaSandbox:
             self._computer_use,
             context_name=self._context_name,
             guest_os=self._guest_os,
+            served_home_mounts=self._served_home_mounts,
         )
         saved_fp = load_config_fingerprint(sdir)
         if saved_fp is not None and saved_fp != desired_fp:
@@ -208,6 +235,7 @@ class LimaSandbox:
             self._computer_use,
             context_name=self._context_name,
             guest_os=self._guest_os,
+            served_home_mounts=self._served_home_mounts,
         )
 
         # Create the instance (this downloads the image + boots for cloud-init).
@@ -323,9 +351,73 @@ class LimaSandbox:
         if isinstance(runtime.launch, WrappedCLI):
             cli_path, cleanup_paths = self.build_cli_wrapper()
             return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
+        if isinstance(runtime.launch, ServedEndpoint):
+            return self._start_served_endpoint(runtime, runtime.launch)
         raise NotImplementedError(
             f"Unsupported launch strategy: {runtime.launch!r}"
         )
+
+    def _start_served_endpoint(
+        self, runtime: AgentRuntime, launch: ServedEndpoint,
+    ) -> AgentHandle:
+        """Run the serve argv via ``limactl shell`` and reach its port.
+
+        The runtime supplies the serve argv + env + inject hook; this sandbox
+        owns only the ``limactl shell`` exec and hands the tunnel to
+        :meth:`reach` (an ``ssh -L`` forward).  The shared launch body lives in
+        :func:`run_served_endpoint`.
+
+        Guest-image precondition: this launch does **not** provision the VM
+        image.  The ``opencode`` binary must already be on the guest ``PATH``
+        (Lima template / ``provision`` script — operator's responsibility,
+        documented in CLAUDE.md → Backends).  The per-context ``opencode-home``
+        (→ ``{SANDBOX_HOME}/.local/share/opencode``) and ``openshrimp-data`` (→
+        ``{SANDBOX_HOME}/.local/share/openshrimp``) host dirs are declared as
+        virtiofs mounts in the generated Lima YAML (see ``_build_mounts``), and
+        ``runtime.inject`` syncs the provider ``auth.json`` + managed plugin
+        config into them, so they reach the served process (which runs with
+        ``HOME={SANDBOX_HOME}``).  When the binary is absent, the serve process
+        exits early and readiness wait raises.
+        """
+        if self._served_proc is not None and self._served_proc.poll() is None:
+            if self._served_endpoint is not None:
+                return AgentHandle(endpoint=self._served_endpoint)
+
+        if limactl_instance_status(self._limactl, self._inst_name) != "Running":
+            raise RuntimeError("Cannot start served endpoint: Lima VM is not running")
+
+        def spawn(
+            serve_argv: list[str], env: dict[str, str],
+        ) -> subprocess.Popen[str]:
+            env_prefix = " ".join(
+                f"{key}={shlex.quote(value)}" for key, value in env.items()
+            )
+            remote_cmd = (
+                f"cd {shlex.quote(self._project_dir)} && "
+                f"{env_prefix} {shlex.join(serve_argv)}"
+            )
+            return subprocess.Popen(
+                [
+                    self._limactl, "shell", self._inst_name,
+                    "--", "bash", "-lc", remote_cmd,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=self._env,
+            )
+
+        proc, endpoint = run_served_endpoint(
+            runtime,
+            launch,
+            spawn=spawn,
+            reach=self.reach,
+            owner=self,
+            log_label=f"Lima context '{self._context_name}'",
+        )
+        self._served_proc = proc
+        self._served_endpoint = endpoint
+        return AgentHandle(endpoint=endpoint)
 
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         path = _build_cli_wrapper(
@@ -350,6 +442,12 @@ class LimaSandbox:
 
     def stop(self) -> None:
         """Stop the Lima instance and any SSH tunnels."""
+        # Tear down any served process (the ssh -L tunnel is reaped below with
+        # the rest of the port forwards).
+        terminate_served_proc(self._served_proc)
+        self._served_proc = None
+        self._served_endpoint = None
+
         # Reap forward subprocesses before the VM goes away.
         self._port_forwards.cleanup()
         for proc in self._ssh_tunnels:
