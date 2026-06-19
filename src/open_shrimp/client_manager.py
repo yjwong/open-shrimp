@@ -284,7 +284,7 @@ def set_default_backend(backend: Backend) -> None:
     _default_backend = backend
 
 
-def _resolve_backend(backend: Backend | None) -> Backend:
+def resolve_backend(backend: Backend | None) -> Backend:
     """Return *backend* if given, else the process default (lazily resolved)."""
     if backend is not None:
         return backend
@@ -372,7 +372,7 @@ async def get_or_create_session(
     Returns:
         An ``AgentSession`` with a connected client ready for ``query()``.
     """
-    backend = _resolve_backend(backend)
+    backend = resolve_backend(backend)
     existing = _active_sessions.get(scope)
     if existing is not None:
         if existing.context_name == context_name:
