@@ -853,84 +853,6 @@ async def _reconnect_after_dir_change(
             manager.invalidate_sandbox(ctx_name)
 
 
-def _list_sessions_for_context(
-    ctx_name: str,
-    ctx: ContextConfig,
-    sandbox_managers: "dict[str, Any] | None" = None,
-    **kwargs: Any,
-) -> "list[Any]":
-    """Call ``list_sessions`` respecting sandboxed session storage.
-
-    For sandboxed contexts the session ``.jsonl`` files live under the
-    per-context claude-home directory (mapped as ``~/.claude`` inside the
-    sandbox), not the host's ``~/.claude``.  We scan that directory
-    directly using the SDK's internal helpers to avoid mutating global
-    process state (``CLAUDE_CONFIG_DIR``).
-
-    Both paths re-pack their rows into ``backend.SessionInfo`` (the shared
-    contract type) via the ``claude_sdk`` adapter, so callers consume the
-    backend-neutral shape regardless of which scan ran.  The non-sandboxed
-    default flows through ``Backend.list_sessions``; the sandboxed scan keeps
-    its SDK ``_internal.sessions`` poke here as an SDK-adapter detail.
-    """
-    from claude_agent_sdk import list_sessions
-    from claude_agent_sdk._internal.sessions import (
-        MAX_SANITIZED_LENGTH,
-        _apply_sort_limit_offset,
-        _canonicalize_path,
-        _read_sessions_from_dir,
-        _sanitize_path,
-    )
-
-    from open_shrimp.backend.claude_sdk.backend import _to_session_info
-    from open_shrimp.sandbox.agent_runtime import claude_runtime
-
-    # Resolve the host-side agent home directory for sandboxed contexts and
-    # source the session-corpus assumptions from the runtime's HomeMount
-    # rather than hardcoding them: where the corpus lives (``projects`` under
-    # the home dir) and whether the home dir holds it at all
-    # (``holds_session_state``).  For Claude this is unchanged behavior, now
-    # declared rather than assumed; a future agent can swap the runtime.
-    home_mount = None
-    if ctx.sandbox is not None and ctx.sandbox.enabled and sandbox_managers:
-        mgr = sandbox_managers.get(ctx.sandbox.backend)
-        if mgr is not None:
-            home_mount = claude_runtime(mgr.agent_home_dir(ctx_name)).home_mount
-
-    if home_mount is not None and home_mount.holds_session_state:
-        projects_dir = home_mount.host_dir / "projects"
-        canonical = _canonicalize_path(ctx.directory)
-        sanitized = _sanitize_path(canonical)
-        candidate = projects_dir / sanitized
-        project_dir = None
-        if candidate.is_dir():
-            project_dir = candidate
-        elif len(sanitized) > MAX_SANITIZED_LENGTH:
-            # Prefix scan for long paths (hash mismatch tolerance).
-            prefix = sanitized[:MAX_SANITIZED_LENGTH]
-            try:
-                for entry in projects_dir.iterdir():
-                    if entry.is_dir() and entry.name.startswith(prefix + "-"):
-                        project_dir = entry
-                        break
-            except OSError:
-                pass
-
-        if project_dir is None:
-            return []
-        sessions = _read_sessions_from_dir(project_dir, canonical)
-        rows = _apply_sort_limit_offset(
-            sessions, kwargs.get("limit"), kwargs.get("offset", 0),
-        )
-        return [_to_session_info(r) for r in rows]
-
-    # Non-sandboxed: the SDK default scan against the Claude runtime's host
-    # home mount (``~/.claude/projects``), routed through the ``claude_sdk``
-    # adapter's re-pack so callers receive ``backend.SessionInfo`` rows.
-    rows = list_sessions(directory=ctx.directory, **kwargs)
-    return [_to_session_info(r) for r in rows]
-
-
 # ── /resume ──
 
 
@@ -961,19 +883,26 @@ async def _build_resume_page(
     scope: ChatScope,
     page: int,
     sandbox_managers: "dict[str, Any] | None" = None,
+    backend: Any = None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Build a single page of the resume session list.
 
     Returns ``(text, keyboard)`` where *keyboard* is ``None`` when there are
     no sessions at all.
     """
+    from open_shrimp.client_manager import resolve_backend
+
+    backend = resolve_backend(backend)
     per_page = _RESUME_LIST_LIMIT
     offset = page * per_page
     # Fetch one extra to detect whether a next page exists.
-    sessions = await asyncio.to_thread(
-        _list_sessions_for_context, ctx_name, ctx,
+    sessions = await backend.list_sessions(
+        ctx.directory,
+        limit=per_page + 1,
+        offset=offset,
+        ctx=ctx,
+        ctx_name=ctx_name,
         sandbox_managers=sandbox_managers,
-        limit=per_page + 1, offset=offset,
     )
 
     if not sessions:
@@ -986,6 +915,7 @@ async def _build_resume_page(
         return await _build_resume_page(
             ctx_name, ctx, db, scope, page - 1,
             sandbox_managers=sandbox_managers,
+            backend=backend,
         )
 
     has_next = len(sessions) > per_page
@@ -1099,6 +1029,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     config: Config = context.bot_data["config"]
     db: aiosqlite.Connection = context.bot_data["db"]
     sandbox_managers = context.bot_data.get("sandbox_managers")
+    backend = context.bot_data.get("backend")
     message = update.effective_message
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
@@ -1109,10 +1040,14 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     args = message.text.split() if message.text else []
 
     if len(args) >= 2:
+        from open_shrimp.client_manager import resolve_backend
+
         # Direct resume by session ID (or prefix)
         target = args[1]
-        sessions = await asyncio.to_thread(
-            _list_sessions_for_context, ctx_name, ctx,
+        sessions = await resolve_backend(backend).list_sessions(
+            ctx.directory,
+            ctx=ctx,
+            ctx_name=ctx_name,
             sandbox_managers=sandbox_managers,
         )
         match = None
@@ -1142,6 +1077,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text, keyboard = await _build_resume_page(
         ctx_name, ctx, db, scope, page=0,
         sandbox_managers=sandbox_managers,
+        backend=backend,
     )
 
     if keyboard is None:
@@ -1164,6 +1100,7 @@ async def handle_resume_callback(
 
     db: aiosqlite.Connection = context.bot_data["db"]
     sandbox_managers = context.bot_data.get("sandbox_managers")
+    backend = context.bot_data.get("backend")
 
     # Handle pagination
     if data.startswith("resume_page:"):
@@ -1187,6 +1124,7 @@ async def handle_resume_callback(
         text, keyboard = await _build_resume_page(
             ctx_name_req, ctx, db, scope, page,
             sandbox_managers=sandbox_managers,
+            backend=backend,
         )
         await query.answer()
         try:

@@ -83,10 +83,73 @@ class ClaudeSdkBackend:
         """Return the SDK's sessions for ``directory`` as ``SessionInfo`` rows.
 
         The SDK's ``SDKSessionInfo`` is field-for-field ``SessionInfo``, so
-        this is a shallow re-pack.  The sandboxed-directory scan and the SDK
-        ``_internal.sessions`` helpers stay in ``handlers/commands.py``'s
-        ``_list_sessions_for_context``; this method is the non-sandboxed path.
+        this is a shallow re-pack.
+
+        Two paths:
+
+        * **Non-sandboxed (default):** ``claude_agent_sdk.list_sessions`` scans
+          the host ``~/.claude/projects``.
+        * **Sandboxed:** the session corpus lives under the per-context
+          claude-home directory (mapped as ``~/.claude`` inside the sandbox),
+          not the host's ``~/.claude``.  We scan that directory directly using
+          the SDK's ``_internal.sessions`` helpers to avoid mutating global
+          process state (``CLAUDE_CONFIG_DIR``).  The caller routes us into
+          this branch by passing ``ctx_name`` + ``sandbox_managers`` (plus the
+          ``ContextConfig`` ``ctx`` so we can detect sandboxing without a
+          second import in the call site).
         """
+        ctx = kwargs.pop("ctx", None)
+        ctx_name = kwargs.pop("ctx_name", None)
+        sandbox_managers = kwargs.pop("sandbox_managers", None)
+        offset = kwargs.pop("offset", 0)
+
+        home_mount = None
+        if (
+            ctx is not None
+            and ctx_name is not None
+            and sandbox_managers
+            and ctx.sandbox is not None
+            and ctx.sandbox.enabled
+        ):
+            from open_shrimp.sandbox.agent_runtime import claude_runtime
+
+            mgr = sandbox_managers.get(ctx.sandbox.backend)
+            if mgr is not None:
+                home_mount = claude_runtime(mgr.agent_home_dir(ctx_name)).home_mount
+
+        if home_mount is not None and home_mount.holds_session_state:
+            from claude_agent_sdk._internal.sessions import (
+                MAX_SANITIZED_LENGTH,
+                _apply_sort_limit_offset,
+                _canonicalize_path,
+                _read_sessions_from_dir,
+                _sanitize_path,
+            )
+
+            projects_dir = home_mount.host_dir / "projects"
+            canonical = _canonicalize_path(str(directory))
+            sanitized = _sanitize_path(canonical)
+            candidate = projects_dir / sanitized
+            project_dir = None
+            if candidate.is_dir():
+                project_dir = candidate
+            elif len(sanitized) > MAX_SANITIZED_LENGTH:
+                # Prefix scan for long paths (hash mismatch tolerance).
+                prefix = sanitized[:MAX_SANITIZED_LENGTH]
+                try:
+                    for entry in projects_dir.iterdir():
+                        if entry.is_dir() and entry.name.startswith(prefix + "-"):
+                            project_dir = entry
+                            break
+                except OSError:
+                    pass
+
+            if project_dir is None:
+                return []
+            sessions = _read_sessions_from_dir(project_dir, canonical)
+            rows = _apply_sort_limit_offset(sessions, limit, offset)
+            return [_to_session_info(r) for r in rows]
+
         from claude_agent_sdk import list_sessions
 
         rows = list_sessions(directory=directory, limit=limit, **kwargs)

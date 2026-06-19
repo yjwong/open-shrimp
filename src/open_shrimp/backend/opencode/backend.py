@@ -9,13 +9,12 @@
 * ``make_can_use_tool`` delegates to ``hooks.make_can_use_tool``; the neutral
   permission results it returns are consumed directly by the OpenCode
   ``PermissionBridge``.
-* ``list_sessions`` lists over HTTP via ``GET /session`` and returns
-  ``backend.SessionInfo`` rows.  This is the non-sandboxed path (against the
-  host-local ``opencode serve``); the sandboxed-resume listing — which must
-  boot the sandbox and query its server — lives in
-  ``handlers/commands.py:_list_sessions_for_context``.  Callers that already
-  hold a sandbox-provided endpoint may pass ``base_url`` / ``auth_header``
-  through ``**kwargs``.
+* ``list_sessions`` returns ``backend.SessionInfo`` rows via one of three
+  paths: HTTP against a caller-supplied endpoint (``base_url`` +
+  ``auth_header``), a direct read of OpenCode's on-disk SQLite database
+  for sandboxed contexts (avoiding the cost of booting the sandbox just
+  to enumerate sessions), or HTTP against the host-local ``opencode
+  serve`` as the default.
 """
 
 from __future__ import annotations
@@ -104,18 +103,61 @@ class OpenCodeBackend:
     ) -> list[SessionInfo]:
         """List OpenCode sessions for ``directory`` as ``SessionInfo`` rows.
 
-        Lists over HTTP (``GET /session``) against the running server.  With
-        no ``base_url`` / ``auth_header`` in ``kwargs`` this targets the
-        host-local ``opencode serve`` (the non-sandboxed default).  A caller
-        that already holds a sandbox-provided endpoint passes both through
-        ``kwargs`` to list against that server instead.
+        Three paths, in priority order:
+
+        1. **Caller-supplied endpoint** (``base_url`` + ``auth_header`` in
+           ``kwargs``) — list over HTTP against that server.
+        2. **Sandboxed context** (``ctx`` + ``ctx_name`` + ``sandbox_managers``
+           in ``kwargs``, with ``ctx.sandbox.enabled``) — read OpenCode's
+           SQLite database directly from the sandbox-mapped host home dir.
+           Avoids the multi-second VM-boot cost of standing the sandbox up
+           just to query the running server.
+        3. **Non-sandboxed default** — HTTP to host-local ``opencode serve``.
+
+        ``offset`` is accepted in ``kwargs`` for caller uniformity but
+        ignored: OpenCode's HTTP list silently drops it server-side, and
+        the SQLite path uses ``LIMIT`` without it.
         """
         from open_shrimp.backend.opencode.sessions import (
             list_sessions as _list_sessions,
+            list_sessions_from_sqlite,
         )
 
         base_url = kwargs.get("base_url")
         auth_header = kwargs.get("auth_header")
+        if base_url is not None or auth_header is not None:
+            return await _list_sessions(
+                directory,
+                limit=limit,
+                base_url=base_url,
+                auth_header=auth_header,
+            )
+
+        ctx = kwargs.get("ctx")
+        ctx_name = kwargs.get("ctx_name")
+        sandbox_managers = kwargs.get("sandbox_managers")
+        if (
+            ctx is not None
+            and ctx_name is not None
+            and sandbox_managers
+            and ctx.sandbox is not None
+            and ctx.sandbox.enabled
+            and ctx.sandbox.backend in sandbox_managers
+        ):
+            # The OpenCode runtime maps the host opencode-home (the same dir
+            # returned here) to the guest's ``$XDG_DATA_HOME/opencode`` — the
+            # directory the in-guest ``opencode serve`` writes its SQLite DB
+            # to.  See ``sandbox/agent_runtime.py:opencode_runtime``.
+            from open_shrimp.sandbox.opencode_runtime import (
+                get_opencode_home_dir,
+            )
+
+            return await list_sessions_from_sqlite(
+                get_opencode_home_dir(ctx_name),
+                directory,
+                limit=limit,
+            )
+
         return await _list_sessions(
             directory,
             limit=limit,
