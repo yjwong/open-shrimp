@@ -43,7 +43,7 @@ def test_ensure_image_builds_when_missing(tmp_path):
     with (
         patch("open_shrimp.sandbox.docker_helpers.subprocess.run", mock_run),
         patch("open_shrimp.sandbox.docker_helpers.subprocess.Popen", mock_popen),
-        patch("open_shrimp.claude_binary.find_claude_binary", return_value=str(fake_binary)),
+        patch("open_shrimp.backend.claude_sdk.binary.find_claude_binary", return_value=str(fake_binary)),
     ):
         ensure_image(bundle=claude_image_bundle())
 
@@ -75,7 +75,7 @@ def test_ensure_image_raises_on_build_failure(tmp_path):
     with (
         patch("open_shrimp.sandbox.docker_helpers.subprocess.run", mock_run),
         patch("open_shrimp.sandbox.docker_helpers.subprocess.Popen", mock_popen),
-        patch("open_shrimp.claude_binary.find_claude_binary", return_value=str(fake_binary)),
+        patch("open_shrimp.backend.claude_sdk.binary.find_claude_binary", return_value=str(fake_binary)),
     ):
         with pytest.raises(RuntimeError, match="Failed to build"):
             ensure_image(bundle=claude_image_bundle())

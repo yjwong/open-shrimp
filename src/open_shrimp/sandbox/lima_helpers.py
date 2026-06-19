@@ -909,21 +909,11 @@ def limactl_shell_check(limactl: str, name: str) -> bool:
 
 def _get_host_claude_version() -> str | None:
     """Get the Claude CLI version from the host binary."""
-    claude = shutil.which("claude")
-    if claude is None:
-        # Try the bundled binary.
-        try:
-            import claude_agent_sdk
+    from open_shrimp.backend.claude_sdk.binary import find_claude_binary
 
-            bundled = (
-                Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
-            )
-            if bundled.exists():
-                claude = str(bundled)
-        except (ImportError, AttributeError):
-            pass
-
-    if claude is None:
+    try:
+        claude = find_claude_binary()
+    except RuntimeError:
         return None
 
     try:

@@ -222,7 +222,7 @@ def claude_runtime(home_dir: Path, *, guest_dir: str = "/home/claude/.claude") -
     if api_key:
         env["ANTHROPIC_API_KEY"] = api_key
 
-    from open_shrimp.claude_binary import find_claude_binary
+    from open_shrimp.backend.claude_sdk.binary import find_claude_binary
 
     return AgentRuntime(
         name="claude",
@@ -275,9 +275,10 @@ def opencode_runtime(
     * ``launch`` — :class:`ServedEndpoint` running ``opencode serve`` on
       :data:`OPENCODE_GUEST_PORT`.
     """
-    # Function-level import: docker_helpers pulls in subprocess + claude_binary
-    # at module load, so importing it here keeps this module import-light (no
-    # heavy/circular import from the sandbox package's eager surface).
+    # Function-level import: docker_helpers pulls in subprocess +
+    # backend.claude_sdk.binary at module load, so importing it here keeps this
+    # module import-light (no heavy/circular import from the sandbox package's
+    # eager surface).
     from open_shrimp.backend.opencode.process import OpenCodeEndpoint
     from open_shrimp.sandbox.opencode_plugins import (
         ensure_opencode_plugin_config,

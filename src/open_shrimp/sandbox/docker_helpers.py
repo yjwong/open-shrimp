@@ -113,7 +113,7 @@ def claude_image_bundle() -> ImageBundle:
     receive a bundle from the runtime and never invoke this.  Resolved
     lazily so this module's import stays light (no SDK imports at load).
     """
-    from open_shrimp.claude_binary import find_claude_binary
+    from open_shrimp.backend.claude_sdk.binary import find_claude_binary
 
     return ImageBundle(
         tag_suffix="claude",
