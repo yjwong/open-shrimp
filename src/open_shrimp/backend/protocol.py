@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from open_shrimp.backend import types as bt
 from open_shrimp.backend.sessions import SessionInfo
+from open_shrimp.backend.usage import UsageReport
 from open_shrimp.mcp_proxy.types import (
     HttpServerConfig,
     OAuthCredential,
@@ -317,6 +318,20 @@ class Backend(Protocol):
         """
         ...
 
+    async def usage(self) -> UsageReport | None:
+        """Operator quota / spend snapshot, or ``None`` when unavailable.
+
+        Backends that declare ``"usage"`` in :meth:`command_capabilities`
+        must implement this. ``None`` is the runtime "couldn't fetch"
+        path (creds missing, endpoint unreachable, token expired) —
+        distinct from "doesn't support usage at all", which is the
+        capability gate.
+
+        Backends own their own caching; the handler calls this once per
+        ``/usage`` invocation and renders whatever comes back.
+        """
+        ...
+
 
 __all__ = [
     "AuthCopy",
@@ -327,4 +342,5 @@ __all__ = [
     "MCPConfigProvider",
     "MCPOAuthProvider",
     "ToolFactory",
+    "UsageReport",
 ]

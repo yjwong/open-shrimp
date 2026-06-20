@@ -27,6 +27,7 @@ from open_shrimp.backend.protocol import (
 )
 from open_shrimp.backend.sessions import SessionInfo
 from open_shrimp.backend.tools import serve_tools_over_mcp_http
+from open_shrimp.backend.usage import ExtraUsage, UsageReport, UsageTier
 from open_shrimp.backend.types import (
     AssistantMessage,
     ContentBlock,
@@ -58,6 +59,7 @@ __all__ = [
     "CLIConnectionError",
     "ContentBlock",
     "DEFAULT_BACKEND",
+    "ExtraUsage",
     "get_backend",
     "known_backends",
     "Message",
@@ -79,5 +81,7 @@ __all__ = [
     "ToolPermissionContext",
     "ToolResultBlock",
     "ToolUseBlock",
+    "UsageReport",
+    "UsageTier",
     "UserMessage",
 ]

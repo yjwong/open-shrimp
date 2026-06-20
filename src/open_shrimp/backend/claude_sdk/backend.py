@@ -28,6 +28,7 @@ from open_shrimp.backend.protocol import (
 )
 from open_shrimp.backend.sessions import SessionInfo
 from open_shrimp.backend.tools import serve_tools_over_mcp_http
+from open_shrimp.backend.usage import UsageReport
 
 if TYPE_CHECKING:
     from open_shrimp.sandbox.agent_runtime import AgentRuntime
@@ -206,6 +207,11 @@ class ClaudeSdkBackend:
 
             self._mcp_oauth_provider = ClaudeMcpOAuthProvider()
         return self._mcp_oauth_provider
+
+    async def usage(self) -> UsageReport | None:
+        from open_shrimp.backend.claude_sdk.usage import fetch
+
+        return await fetch()
 
 
 def _to_session_info(row: Any) -> SessionInfo:

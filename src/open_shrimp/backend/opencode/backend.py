@@ -35,6 +35,7 @@ from open_shrimp.backend.protocol import (
 )
 from open_shrimp.backend.sessions import SessionInfo
 from open_shrimp.backend.tools import serve_tools_over_mcp_http
+from open_shrimp.backend.usage import UsageReport
 
 if TYPE_CHECKING:
     from open_shrimp.sandbox.agent_runtime import AgentRuntime
@@ -214,6 +215,10 @@ class OpenCodeBackend:
 
             self._mcp_oauth_provider = OpenCodeMcpOAuthProvider()
         return self._mcp_oauth_provider
+
+    async def usage(self) -> UsageReport | None:
+        """No usage notion yet; flips on with the auth Mini-App."""
+        return None
 
 
 __all__ = ["OpenCodeBackend"]

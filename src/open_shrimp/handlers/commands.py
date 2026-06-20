@@ -5,11 +5,9 @@
 from __future__ import annotations
 
 import asyncio
-import json as _json
 import logging
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -1737,141 +1735,52 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ── /usage ──
 
-# Cache: (timestamp, response_dict)
-_usage_cache: tuple[float, dict[str, Any]] | None = None
-_USAGE_CACHE_TTL = 60  # seconds
-
-
-async def _fetch_usage() -> dict[str, Any] | None:
-    """Fetch usage data from the Anthropic OAuth usage endpoint.
-
-    Returns the parsed JSON response, or None if unavailable.
-    Uses a 60-second cache to avoid hitting the rate limit.
-    """
-    global _usage_cache
-    now = time.monotonic()
-    if _usage_cache and now - _usage_cache[0] < _USAGE_CACHE_TTL:
-        return _usage_cache[1]
-
-    credentials_path = Path.home() / ".claude" / ".credentials.json"
-    if not credentials_path.exists():
-        return None
-
-    try:
-        creds = _json.loads(credentials_path.read_text(encoding="utf-8"))
-        oauth = creds["claudeAiOauth"]
-        token = oauth["accessToken"]
-        # Skip API call if token is expired (with 5-minute buffer)
-        expires_at = oauth.get("expiresAt")
-        if expires_at is not None:
-            buffer_ms = 5 * 60 * 1000
-            if (time.time() * 1000 + buffer_ms) >= expires_at:
-                return None
-    except (KeyError, _json.JSONDecodeError, OSError):
-        return None
-
-    import httpx
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://api.anthropic.com/api/oauth/usage",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "anthropic-beta": "oauth-2025-04-20",
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            _usage_cache = (now, data)
-            return data
-    except (httpx.HTTPError, _json.JSONDecodeError):
-        return None
-
-
-def _format_tier(name: str, tier: dict[str, Any] | None) -> str | None:
-    """Format a single usage tier line. Returns None if tier is absent."""
-    if not tier or tier.get("utilization") is None:
-        return None
-    util = tier["utilization"]
-    used = min(100, util)
-    bar = _usage_bar(used)
-    line = f"*{_escape_mdv2(name)}:* {bar} {_escape_mdv2(f'{used:.0f}% used')}"
-    resets_at = tier.get("resets_at")
-    if resets_at:
-        try:
-            reset_dt = datetime.fromisoformat(resets_at)
-            delta = reset_dt - datetime.now(timezone.utc)
-            total_seconds = int(delta.total_seconds())
-            if total_seconds > 0:
-                hours, remainder = divmod(total_seconds, 3600)
-                minutes = remainder // 60
-                if hours > 0:
-                    line += _escape_mdv2(f" (resets in {hours}h{minutes}m)")
-                else:
-                    line += _escape_mdv2(f" (resets in {minutes}m)")
-        except (ValueError, TypeError):
-            pass
-    return line
-
-
-def _usage_bar(used: float) -> str:
-    """Build a small text-based usage bar (10 segments)."""
-    filled = round(used / 10)
-    return _escape_mdv2("[" + "█" * filled + "░" * (10 - filled) + "]")
-
 
 async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /usage command: show Claude quota/usage stats."""
+    """Handle /usage command: show operator quota/usage stats.
+
+    Queries every configured backend that declares the ``"usage"``
+    capability and renders a union of their reports.  A single backend
+    with data produces today's flat output; multiple backends produce
+    one section per backend.
+    """
+    from open_shrimp.backend.usage import UsageReport
+    from open_shrimp.handlers.usage_render import render_usage_reports
+
     config: Config = context.bot_data["config"]
     message = update.effective_message
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    scope = chat_scope_from_message(message)
-    backend = get_backend_for_scope(context.bot_data, scope)
-    if backend is not None and "usage" not in backend.command_capabilities():
+    backends = context.bot_data.get("backends") or []
+    capable = [b for b in backends if "usage" in b.command_capabilities()]
+    if not capable:
+        # Mirrors the legacy single-backend "not available on <name>" message,
+        # generalised over the configured set (empty list → "this install").
+        if backends:
+            names = ", ".join(f"`{_escape_mdv2(b.name)}`" for b in backends)
+        else:
+            names = "this install"
         await message.reply_text(
-            f"/usage is not available on the `{_escape_mdv2(backend.name)}` backend\\.",
+            f"/usage is not available on {names}\\.",
             parse_mode="MarkdownV2",
         )
         return
 
-    data = await _fetch_usage()
-    if data is None:
+    reports: list[tuple[str, UsageReport]] = []
+    for backend in capable:
+        report = await backend.usage()
+        if report is not None and (report.tiers or report.extra):
+            reports.append((backend.name, report))
+
+    if not reports:
         await message.reply_text(
             "Usage data unavailable\\. OAuth credentials not found or endpoint unreachable\\.",
             parse_mode="MarkdownV2",
         )
         return
 
-    lines: list[str] = []
-    for label, key in [
-        ("5-hour session", "five_hour"),
-        ("7-day overall", "seven_day"),
-        ("7-day Sonnet", "seven_day_sonnet"),
-    ]:
-        line = _format_tier(label, data.get(key))
-        if line:
-            lines.append(line)
-
-    # Extra usage (overuse billing)
-    extra = data.get("extra_usage")
-    if extra and extra.get("is_enabled"):
-        used = (extra.get("used_credits") or 0) / 100
-        limit = (extra.get("monthly_limit") or 0) / 100
-        if limit > 0:
-            pct = min(100, used / limit * 100)
-            lines.append(
-                f"*Extra usage:* {_escape_mdv2(f'${used:.2f} / ${limit:.2f} ({pct:.0f}%)')}"
-            )
-
-    if not lines:
-        await message.reply_text("No usage data available\\.", parse_mode="MarkdownV2")
-        return
-
-    text = "\n".join(lines)
+    text = render_usage_reports(reports)
     await message.reply_text(text, parse_mode="MarkdownV2")
 
 
