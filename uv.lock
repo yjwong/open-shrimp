@@ -335,6 +335,15 @@ wheels = [
 ]
 
 [[package]]
+name = "json5"
+version = "0.15.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/7d/05c46a96a78147ae3bf99c2f4169ce144a70220b8d6fcd56f6ec368b8ce9/json5-0.15.0.tar.gz", hash = "sha256:7424d1f1eb1d56da6e3d70643f53619862b4ce81440bdb8ecfd6f875e5ba4a71", size = 53278, upload-time = "2026-06-19T20:08:27.716Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/be/59527c99478aade6bb33a68d72e6e18dd4e6ff6eacfc7d01bdb15bc76912/json5-0.15.0-py3-none-any.whl", hash = "sha256:56636a30c0e8a4665fe2179c0212f32eae3796dea89ea6f649b9436ecdb39618", size = 36570, upload-time = "2026-06-19T20:08:26.748Z" },
+]
+
+[[package]]
 name = "jsonschema"
 version = "4.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -407,6 +416,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "claude-agent-sdk" },
+    { name = "json5" },
     { name = "mistune" },
     { name = "platformdirs" },
     { name = "python-telegram-bot", extra = ["job-queue"] },
@@ -440,6 +450,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite" },
     { name = "claude-agent-sdk" },
+    { name = "json5", specifier = ">=0.9" },
     { name = "libvirt-python", marker = "extra == 'libvirt'", specifier = ">=10.0" },
     { name = "mistune", specifier = ">=3.0,<4.0" },
     { name = "platformdirs", specifier = ">=4.0" },

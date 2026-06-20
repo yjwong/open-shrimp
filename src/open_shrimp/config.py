@@ -82,6 +82,7 @@ class ContextConfig:
     locked_for_chats: list[int] = field(default_factory=list)
     container: ContainerConfig | None = None
     sandbox: SandboxConfig | None = None
+    mcp: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -411,6 +412,12 @@ def _parse(raw: dict) -> Config:
                     computer_use=sandbox.computer_use,
                 )
 
+        mcp_raw = ctx.get("mcp", {})
+        if not isinstance(mcp_raw, dict):
+            raise ValueError(
+                f"Context '{name}': mcp must be a mapping"
+            )
+
         contexts[name] = ContextConfig(
             directory=ctx["directory"],
             description=ctx["description"],
@@ -422,6 +429,7 @@ def _parse(raw: dict) -> Config:
             locked_for_chats=ctx.get("locked_for_chats", []),
             container=container,
             sandbox=sandbox,
+            mcp=mcp_raw,
         )
 
     # Parse optional review config.
@@ -543,6 +551,9 @@ def config_to_dict(config: Config) -> dict[str, Any]:
             if ctx.container.computer_use:
                 container_dict["computer_use"] = True
             ctx_dict["container"] = container_dict
+
+        if ctx.mcp:
+            ctx_dict["mcp"] = ctx.mcp
 
         contexts[name] = ctx_dict
 

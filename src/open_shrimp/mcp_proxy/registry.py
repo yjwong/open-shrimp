@@ -11,7 +11,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from open_shrimp.mcp_proxy.config_reader import (
+from open_shrimp.mcp_proxy.types import (
     HttpServerConfig,
     StdioServerConfig,
 )

@@ -59,9 +59,16 @@ class FakeSandbox:
         self.clicked = (x, y, button)
 
 
+class _StubOAuthProvider:
+    def get(self, server_name, server_url):
+        return None
+
+
 async def _client(registry: ProxyRegistry):
     http_client = httpx.AsyncClient()
-    app = _create_proxy_app(registry, StdioManager(), http_client)
+    app = _create_proxy_app(
+        registry, StdioManager(), http_client, _StubOAuthProvider()
+    )
     transport = httpx.ASGITransport(app=app)
     return (
         httpx.AsyncClient(transport=transport, base_url="http://testserver"),
@@ -454,7 +461,7 @@ async def test_initialized_notification_returns_202() -> None:
 
 async def test_proxy_lifecycle_serves_tools_over_loopback() -> None:
     """The always-on listener serves tools/list over the bound 127.0.0.1 port."""
-    proxy = McpProxy()
+    proxy = McpProxy(_StubOAuthProvider())
     await proxy.start()
     try:
         bot = FakeBot()

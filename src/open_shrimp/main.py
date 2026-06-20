@@ -186,9 +186,14 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     # answering messages even if the local tool listener can't bind.  The
     # session layer treats ``mcp_proxy is None`` as "degraded; omit the
     # OpenShrimp tools and warn the user once".
+    #
+    # Resolve the backend here (rather than only in ``run_bot``) so its
+    # OAuth-source provider can be wired into the proxy at construction.
+    from open_shrimp.backend import get_backend
     from open_shrimp.mcp_proxy import McpProxy
 
-    mcp_proxy = McpProxy()
+    backend = get_backend(config)
+    mcp_proxy = McpProxy(backend.mcp_oauth_source())
     try:
         await mcp_proxy.start()
     except Exception:

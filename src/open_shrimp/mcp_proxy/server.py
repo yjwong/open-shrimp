@@ -8,9 +8,8 @@ A lightweight Starlette app that exposes two routes:
 * ``ANY /http/{context}/{server}`` — full reverse proxy for HTTP/SSE
   MCP servers (e.g. ``mcp.figma.com``).  Streams request and response
   bodies, propagates ``Mcp-Session-Id`` and SSE event streams, and
-  injects the host's OAuth bearer token from
-  ``~/.claude/.credentials.json`` so credentials never enter the
-  sandbox.
+  injects an OAuth bearer token resolved by the backend-supplied
+  ``MCPOAuthProvider`` so credentials never enter the sandbox.
 
 Runs on a separate listener from the main review/config Starlette app
 to minimise attack surface.
@@ -21,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import uvicorn
@@ -30,18 +29,21 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from open_shrimp.mcp_proxy.config_reader import (
-    HttpServerConfig,
-    StdioServerConfig,
-)
-from open_shrimp.mcp_proxy.credentials import get_oauth_credential, is_expired
 from open_shrimp.mcp_proxy.registry import (
     ContextRegistration,
     ProxyRegistry,
     ToolScopeRegistration,
 )
 from open_shrimp.mcp_proxy.stdio_manager import StdioManager
+from open_shrimp.mcp_proxy.types import (
+    HttpServerConfig,
+    StdioServerConfig,
+    is_expired,
+)
 from open_shrimp.tools import OpenShrimpTool
+
+if TYPE_CHECKING:
+    from open_shrimp.backend.protocol import MCPOAuthProvider
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,7 @@ def _create_proxy_app(
     registry: ProxyRegistry,
     stdio_manager: StdioManager,
     http_client: httpx.AsyncClient,
+    oauth_provider: "MCPOAuthProvider",
 ) -> Starlette:
     """Build the Starlette ASGI app with the proxy routes."""
 
@@ -159,7 +162,14 @@ def _create_proxy_app(
                 status_code=404,
             )
 
-        return await _forward_http(request, reg.context_name, server_name, config, http_client)
+        return await _forward_http(
+            request,
+            reg.context_name,
+            server_name,
+            config,
+            http_client,
+            oauth_provider,
+        )
 
     async def tools_endpoint(request: Request) -> Response:
         scope_token: str = request.path_params["scope_token"]
@@ -294,9 +304,10 @@ async def _forward_http(
     server_name: str,
     config: HttpServerConfig,
     http_client: httpx.AsyncClient,
+    oauth_provider: "MCPOAuthProvider",
 ) -> Response:
     """Reverse-proxy *request* to *config.url* with OAuth injected."""
-    cred = get_oauth_credential(server_name, config.url)
+    cred = oauth_provider.get(server_name, config.url)
     if cred is None:
         return JSONResponse(
             {"error": f"no OAuth credential on host for '{server_name}' "
@@ -370,9 +381,10 @@ async def _forward_http(
 class McpProxy:
     """Manages the MCP proxy HTTP server and backing stdio processes."""
 
-    def __init__(self) -> None:
+    def __init__(self, oauth_provider: "MCPOAuthProvider") -> None:
         self._registry = ProxyRegistry()
         self._stdio_manager = StdioManager()
+        self._oauth_provider = oauth_provider
         self._port: int | None = None
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
@@ -457,7 +469,10 @@ class McpProxy:
         )
 
         app = _create_proxy_app(
-            self._registry, self._stdio_manager, self._http_client
+            self._registry,
+            self._stdio_manager,
+            self._http_client,
+            self._oauth_provider,
         )
         config = uvicorn.Config(
             app,

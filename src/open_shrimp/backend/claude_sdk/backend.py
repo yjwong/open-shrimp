@@ -22,6 +22,8 @@ from open_shrimp.backend.protocol import (
     AuthCopy,
     BackendOptions,
     CanUseTool,
+    MCPConfigProvider,
+    MCPOAuthProvider,
     ToolFactory,
 )
 from open_shrimp.backend.sessions import SessionInfo
@@ -52,6 +54,9 @@ class ClaudeSdkBackend:
 
         apply_sdk_patches()
         install_suggestion_patches()
+
+        self._mcp_config_provider: MCPConfigProvider | None = None
+        self._mcp_oauth_provider: MCPOAuthProvider | None = None
 
     def make_client(self, options: BackendOptions) -> ClaudeSdkClient:
         return ClaudeSdkClient(options)
@@ -183,6 +188,24 @@ class ClaudeSdkBackend:
             login_mini_app_body="Re-authenticate Claude Code OAuth",
             auth_error_hint="Run /login to re-authenticate Claude Code.",
         )
+
+    def mcp_config_source(self) -> MCPConfigProvider:
+        if self._mcp_config_provider is None:
+            from open_shrimp.backend.claude_sdk.mcp_config import (
+                ClaudeMcpConfigProvider,
+            )
+
+            self._mcp_config_provider = ClaudeMcpConfigProvider()
+        return self._mcp_config_provider
+
+    def mcp_oauth_source(self) -> MCPOAuthProvider:
+        if self._mcp_oauth_provider is None:
+            from open_shrimp.backend.claude_sdk.mcp_config import (
+                ClaudeMcpOAuthProvider,
+            )
+
+            self._mcp_oauth_provider = ClaudeMcpOAuthProvider()
+        return self._mcp_oauth_provider
 
 
 def _to_session_info(row: Any) -> SessionInfo:

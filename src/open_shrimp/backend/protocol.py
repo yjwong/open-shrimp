@@ -19,12 +19,18 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from open_shrimp.backend import types as bt
 from open_shrimp.backend.sessions import SessionInfo
+from open_shrimp.mcp_proxy.types import (
+    HttpServerConfig,
+    OAuthCredential,
+    StdioServerConfig,
+)
 
 if TYPE_CHECKING:
     # Import-light: the launch profile type lives in the sandbox package and is
     # only referenced in an annotation, so it stays behind TYPE_CHECKING to keep
     # this protocol module free of sandbox imports (no import cycle at runtime).
     from open_shrimp.backend.policy import BackendPolicy
+    from open_shrimp.config import ContextConfig
     from open_shrimp.sandbox.agent_runtime import AgentRuntime
 
 # The callback the backend invokes before running a non-auto-approved tool.
@@ -163,6 +169,42 @@ class BackendClient(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# MCP provider seams — keep ``mcp_proxy/`` runtime-agnostic
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class MCPConfigProvider(Protocol):
+    """Read MCP server declarations applicable to a context.
+
+    The shape and storage of these declarations differs per backend
+    (``~/.claude.json`` user+local merge vs. ``opencode.json`` plus
+    a per-context overlay).  The proxy consumes the normalised result.
+    """
+
+    def stdio_servers(
+        self, context: "ContextConfig"
+    ) -> dict[str, StdioServerConfig]: ...
+
+    def http_servers(
+        self, context: "ContextConfig"
+    ) -> dict[str, HttpServerConfig]: ...
+
+
+@runtime_checkable
+class MCPOAuthProvider(Protocol):
+    """Resolve the OAuth credential for one HTTP MCP server.
+
+    Returns ``None`` when no credential is on file; the proxy then
+    surfaces a 401 with a backend-appropriate re-auth hint.
+    """
+
+    def get(
+        self, server_name: str, server_url: str
+    ) -> OAuthCredential | None: ...
+
+
+# ---------------------------------------------------------------------------
 # The backend protocol — the factory surface
 # ---------------------------------------------------------------------------
 
@@ -259,6 +301,22 @@ class Backend(Protocol):
         """
         ...
 
+    def mcp_config_source(self) -> "MCPConfigProvider":
+        """The MCP server-list reader for this backend.
+
+        Returns the same instance every call so the underlying caches
+        (file mtime, parsed config) survive between requests.
+        """
+        ...
+
+    def mcp_oauth_source(self) -> "MCPOAuthProvider":
+        """The MCP OAuth-credential reader for this backend.
+
+        Returns the same instance every call so any TTL or mtime
+        caches survive between requests.
+        """
+        ...
+
 
 __all__ = [
     "AuthCopy",
@@ -266,5 +324,7 @@ __all__ = [
     "BackendClient",
     "BackendOptions",
     "CanUseTool",
+    "MCPConfigProvider",
+    "MCPOAuthProvider",
     "ToolFactory",
 ]

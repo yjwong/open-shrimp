@@ -612,15 +612,9 @@ async def get_or_create_session(
         # (spawned on the host) and HTTP/SSE MCP servers (reverse-
         # proxied so OAuth tokens stay on the host).
         if is_containerized and mcp_proxy is not None and sandbox is not None:
-            from open_shrimp.mcp_proxy.config_reader import (
-                get_http_mcp_servers_for_directory,
-                get_mcp_servers_for_directory,
-            )
-
-            stdio_servers = get_mcp_servers_for_directory(context.directory)
-            http_servers = get_http_mcp_servers_for_directory(
-                context.directory
-            )
+            mcp_source = backend.mcp_config_source()
+            stdio_servers = mcp_source.stdio_servers(context)
+            http_servers = mcp_source.http_servers(context)
             if stdio_servers or http_servers:
                 token = mcp_proxy.register_context(
                     context_name,

@@ -29,6 +29,8 @@ from open_shrimp.backend.protocol import (
     AuthCopy,
     BackendOptions,
     CanUseTool,
+    MCPConfigProvider,
+    MCPOAuthProvider,
     ToolFactory,
 )
 from open_shrimp.backend.sessions import SessionInfo
@@ -44,6 +46,10 @@ class OpenCodeBackend:
     name = "opencode"
 
     policy: OpenCodePolicy = OpenCodePolicy()
+
+    def __init__(self) -> None:
+        self._mcp_config_provider: MCPConfigProvider | None = None
+        self._mcp_oauth_provider: MCPOAuthProvider | None = None
 
     def make_client(self, options: BackendOptions) -> OpenCodeClient:
         return OpenCodeClient(options)
@@ -190,6 +196,24 @@ class OpenCodeBackend:
             login_mini_app_body="Re-authenticate provider",
             auth_error_hint=None,
         )
+
+    def mcp_config_source(self) -> MCPConfigProvider:
+        if self._mcp_config_provider is None:
+            from open_shrimp.backend.opencode.mcp_config import (
+                OpenCodeMcpConfigProvider,
+            )
+
+            self._mcp_config_provider = OpenCodeMcpConfigProvider()
+        return self._mcp_config_provider
+
+    def mcp_oauth_source(self) -> MCPOAuthProvider:
+        if self._mcp_oauth_provider is None:
+            from open_shrimp.backend.opencode.mcp_config import (
+                OpenCodeMcpOAuthProvider,
+            )
+
+            self._mcp_oauth_provider = OpenCodeMcpOAuthProvider()
+        return self._mcp_oauth_provider
 
 
 __all__ = ["OpenCodeBackend"]

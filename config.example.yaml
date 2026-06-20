@@ -80,6 +80,16 @@ contexts:
     #   # disk_size: 20             # VM disk in GB (default: 20)
     #   # provision: |              # Shell script run on first boot
     #   #   apt-get install -y nodejs npm
+    # mcp:                          # Per-context MCP server overlay (opencode only).
+    #                               # Honoured by `backend: opencode`; ignored by the
+    #                               # claude backend, which reads MCP servers from
+    #                               # `~/.claude.json` (user-scope + per-project).
+    #   my-stdio-tool:
+    #     type: stdio
+    #     command: my-tool
+    #     args: ["--flag"]
+    #     env:
+    #       FOO: bar
 
 default_context: default
 
