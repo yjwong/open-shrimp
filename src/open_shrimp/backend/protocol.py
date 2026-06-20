@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     # Import-light: the launch profile type lives in the sandbox package and is
     # only referenced in an annotation, so it stays behind TYPE_CHECKING to keep
     # this protocol module free of sandbox imports (no import cycle at runtime).
+    from open_shrimp.backend.policy import BackendPolicy
     from open_shrimp.sandbox.agent_runtime import AgentRuntime
 
 # The callback the backend invokes before running a non-auto-approved tool.
@@ -156,6 +157,12 @@ class Backend(Protocol):
     """
 
     name: str
+
+    #: Per-backend tool taxonomy and rendering.  Answers tool-shape
+    #: questions (path-scoped? mutating? how to summarise?) in the
+    #: backend's native vocabulary so the orchestration code never
+    #: branches on tool name.
+    policy: "BackendPolicy"
 
     def make_client(self, options: BackendOptions) -> BackendClient:
         """Construct (do **not** connect) a client for one ChatScope."""

@@ -419,6 +419,7 @@ async def get_or_create_session(
         is_containerized=is_sandboxed(context),
         get_session_approved_dirs=_make_session_dirs_proxy(callback_context),
         request_host_bash_approval=_make_host_bash_approval_proxy(callback_context),
+        policy=backend.policy,
     )
 
     _last_stderr: list[str] = [""]
@@ -451,6 +452,13 @@ async def get_or_create_session(
     # agent would attempt calls that surface as "unknown tool" errors
     # mid-conversation.
     allowed_tools = list(context.allowed_tools or [])
+    # Seed the backend's session-start auto-approve list (the backend's
+    # native vocabulary for tools whose interactive default is auto-allow
+    # and which have no user-facing approval value in OpenShrimp's flow:
+    # async task management, mode transitions, MCP discovery).  These
+    # flow through the backend's interactive default and never reach
+    # ``can_use_tool``.
+    allowed_tools.extend(backend.policy.auto_approved_at_session_start())
     if mcp_proxy is not None:
         allowed_tools.append("mcp__openshrimp__send_file")
         if scope.thread_id is not None:

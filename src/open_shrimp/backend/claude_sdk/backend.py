@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from open_shrimp.backend.claude_sdk.client import ClaudeSdkClient
+from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
 from open_shrimp.backend.protocol import (
     BackendOptions,
     CanUseTool,
@@ -33,6 +34,8 @@ class ClaudeSdkBackend:
     """The Claude Agent SDK backend.  ``name == "claude_sdk"``."""
 
     name = "claude_sdk"
+
+    policy: ClaudeSdkPolicy = ClaudeSdkPolicy()
 
     def __init__(self) -> None:
         # SDK monkey-patches are applied here so they only run when this

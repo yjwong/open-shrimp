@@ -41,6 +41,13 @@ class OpenCodeBackend:
 
     name = "opencode"
 
+    @property
+    def policy(self) -> Any:
+        """Per-backend tool taxonomy — not yet implemented for OpenCode."""
+        raise NotImplementedError(
+            "OpenCode policy is not implemented.",
+        )
+
     def make_client(self, options: BackendOptions) -> OpenCodeClient:
         return OpenCodeClient(options)
 

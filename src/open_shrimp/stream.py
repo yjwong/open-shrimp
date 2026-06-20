@@ -14,7 +14,10 @@ import random
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from open_shrimp.backend.policy import BackendPolicy
 
 from open_shrimp.backend.types import (
     AssistantMessage,
@@ -87,9 +90,6 @@ DRAFT_INTERVAL_SECONDS = 0.5
 BASH_OUTPUT_MAX_LINES = 50
 # Maximum characters of Bash output to display.
 BASH_OUTPUT_MAX_CHARS = 1500
-# Tools whose blockquote notifications are suppressed because their output
-# is shown directly (Bash output as code block, Write via edit notification).
-_SUPPRESS_NOTIFICATION_TOOLS: set[str] = {"Bash", "Edit", "Write"}
 
 # Stored Bash outputs for on-demand reveal via inline keyboard button.
 # Keyed by a unique callback ID, value is the formatted GFM output string.
@@ -451,60 +451,22 @@ def _relative_path(path: str, cwd: str | None) -> str:
     return rel
 
 
+def _resolve_policy(
+    policy: "BackendPolicy | None",
+) -> "BackendPolicy":
+    if policy is not None:
+        return policy
+    from open_shrimp.client_manager import resolve_backend
+
+    return resolve_backend(None).policy
+
+
 def extract_tool_summary(
     tool_name: str, tool_input: dict[str, Any], cwd: str | None = None,
+    policy: "BackendPolicy | None" = None,
 ) -> str:
     """Extract a brief summary from tool input for notifications."""
-    if tool_name == "Read":
-        return _relative_path(tool_input.get("file_path", ""), cwd)
-    if tool_name == "Glob":
-        return tool_input.get("pattern", "")
-    if tool_name == "Grep":
-        pattern = tool_input.get("pattern", "")
-        path = tool_input.get("path", "")
-        if path:
-            return f"{pattern} in {_relative_path(path, cwd)}"
-        return pattern
-    if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        return cmd[:80] + ("..." if len(cmd) > 80 else "")
-    if tool_name == "Write" or tool_name == "Edit":
-        return _relative_path(tool_input.get("file_path", ""), cwd)
-    if tool_name == "LSP":
-        return tool_input.get("command", "")
-    if tool_name == "Agent":
-        desc = tool_input.get("description", "")
-        subagent = tool_input.get("subagent_type", "")
-        label = f"({subagent}) " if subagent else ""
-        return f"{label}{desc}" if desc else subagent
-    if tool_name == "AskUserQuestion":
-        questions = tool_input.get("questions", [])
-        if questions:
-            return questions[0].get("header", questions[0].get("question", ""))[:60]
-        return "asking user"
-    if tool_name == "TodoWrite":
-        todos = tool_input.get("todos", [])
-        if not todos:
-            return "clear all"
-        completed = sum(
-            1 for t in todos
-            if isinstance(t, dict) and t.get("status") == "completed"
-        )
-        total = len(todos)
-        return f"{completed}/{total} done"
-    if tool_name == "mcp__openshrimp__send_file":
-        path = tool_input.get("file_path", "")
-        basename = os.path.basename(path) if path else ""
-        caption = tool_input.get("caption", "")
-        if caption:
-            return f"{basename} — {caption[:40]}"
-        return basename
-    # Generic: show first key's value
-    for key, val in tool_input.items():
-        if isinstance(val, str):
-            s = val[:60]
-            return s + ("..." if len(val) > 60 else "")
-    return ""
+    return _resolve_policy(policy).summarize(tool_name, tool_input, cwd)
 
 
 def _extract_bash_output_text(
@@ -766,6 +728,7 @@ async def stream_response(
     on_todo_update: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     terminal_base_url: str | None = None,
     scope: ChatScope | None = None,
+    policy: "BackendPolicy | None" = None,
 ) -> StreamResult:
     """Stream Agent SDK events to Telegram as draft messages.
 
@@ -793,6 +756,7 @@ async def stream_response(
     auto_set = set(allowed_tools or [])
     result = StreamResult()
     draft_task: asyncio.Task[None] | None = None
+    p = _resolve_policy(policy)
 
     async def periodic_flush() -> None:
         """Periodically flush dirty drafts."""
@@ -861,18 +825,19 @@ async def stream_response(
 
                         # Add tool invocation as an inline notification,
                         # but suppress tools whose output is shown directly.
-                        if block.name not in _SUPPRESS_NOTIFICATION_TOOLS:
+                        if not p.suppress_notification(block.name):
                             add_tool_notification(
                                 state,
                                 tool_name=block.name,
                                 tool_input=block.input,
                                 auto=block.name in auto_set,
                                 cwd=cwd,
+                                policy=p,
                             )
 
-                        # TodoWrite: update the pinned message with the
-                        # current task list.
-                        if block.name == "TodoWrite" and on_todo_update is not None:
+                        # TodoWrite-equivalent: update the pinned message
+                        # with the current task list.
+                        if p.is_todo_write(block.name) and on_todo_update is not None:
                             todos = block.input.get("todos", [])
                             try:
                                 await on_todo_update(todos)
@@ -884,31 +849,30 @@ async def stream_response(
 
             elif isinstance(event, UserMessage):
                 # UserMessage carries tool results (ToolResultBlock).
-                # For Bash, send a collapsible message with a "Show output"
-                # button instead of embedding the output inline.
+                # For Bash-like tools, send a collapsible message with a
+                # "Show output" button instead of embedding the output
+                # inline.
                 if isinstance(event.content, list):
                     for block in event.content:
                         if isinstance(block, ToolResultBlock):
                             tool_info = state.tool_use_map.get(
-                                block.tool_use_id
+                                block.tool_use_id,
                             )
-                            if tool_info and tool_info[0] == "Bash":
-                                tool_input = tool_info[1]
+                            if not tool_info:
+                                continue
+                            name = tool_info[0]
+                            if p.is_host_bash(name):
+                                icon, label = p.host_bash_render()
                                 await _send_bash_button(
-                                    bot, state, tool_input,
+                                    bot, state, tool_info[1],
                                     block.content,
+                                    icon=icon,
+                                    label=label,
                                 )
-                            elif (
-                                tool_info
-                                and tool_info[0]
-                                == "mcp__openshrimp__host_bash"
-                            ):
-                                tool_input = tool_info[1]
+                            elif p.is_bash_like(name):
                                 await _send_bash_button(
-                                    bot, state, tool_input,
+                                    bot, state, tool_info[1],
                                     block.content,
-                                    icon="🔓",
-                                    label="host_bash",
                                 )
 
             elif isinstance(event, StreamEvent):
@@ -1306,9 +1270,10 @@ def add_tool_notification(
     tool_input: dict[str, Any],
     auto: bool,
     cwd: str | None = None,
+    policy: "BackendPolicy | None" = None,
 ) -> None:
     """Add a tool call notification inline as a GFM blockquote."""
-    summary = extract_tool_summary(tool_name, tool_input, cwd=cwd)
+    summary = extract_tool_summary(tool_name, tool_input, cwd=cwd, policy=policy)
     suffix = " (auto)" if auto else ""
     line = f"> {tool_name}: {summary}{suffix}"
 
