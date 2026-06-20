@@ -113,6 +113,26 @@ class BackendPolicy(Protocol):
         Monitor equivalent)."""
         ...
 
+    def multi_file_mutating(self, tool_name: str) -> bool:
+        """True for mutating tools that carry their own multi-file envelope
+        (OpenCode: ``apply_patch``).  Such tools cannot be modelled by the
+        single-path ``extract_path`` interface; the orchestration gives
+        them their own branch.  SDK returns ``False`` for every tool."""
+        ...
+
+    def multi_file_paths_within(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        cwd: str,
+        directories: list[str],
+    ) -> bool:
+        """For multi-file-mutating tools: True iff every path the tool
+        will touch resolves inside one of ``directories``.  Empty / no
+        paths returns ``False`` — refuse to blanket-allow when the
+        envelope yielded nothing parseable."""
+        ...
+
     def auto_approved_at_session_start(self) -> list[str]:
         """Tool names to seed into the backend's session-start
         auto-approve list (SDK: ``allowedTools``).

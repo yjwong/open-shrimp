@@ -28,10 +28,6 @@ from typing import Any
 
 import httpx
 
-from open_shrimp.backend.opencode.tool_names import (
-    CATEGORY_TO_HOOKS,
-    opencode_to_hooks,
-)
 from open_shrimp.backend.types import (
     PermissionResult,
     PermissionResultAllow,
@@ -235,13 +231,17 @@ class PermissionBridge:
         session_id: str,
         metadata: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
-        """Return (hooks_tool_name, tool_input) for a permission.asked event.
+        """Return (native tool_name, tool_input) for a permission.asked event.
 
         Disambiguation order:
         1. The in-flight ToolPart cache (populated from
            ``message.part.updated``).
         2. ``GET /session/{sid}/message/{mid}`` fetch on cache miss.
-        3. Static category → hooks-name fallback, with metadata as input.
+        3. The category itself as a fallback (OpenCode's permission
+           categories — ``bash``, ``read``, ``edit``, ``webfetch``,
+           ``webwrite``, ``todowrite`` — already match the native tool
+           names, so passing the category through is harmless; the
+           OpenCode policy handles them directly).
         """
         tool_part = self._tool_parts.get(call_id)
         if call_id and (tool_part is None or not tool_part[1]):
@@ -262,9 +262,9 @@ class PermissionBridge:
 
         if tool_part is not None:
             opencode_name, tool_input, _ = tool_part
-            return opencode_to_hooks(opencode_name), tool_input
+            return opencode_name, tool_input
 
-        return CATEGORY_TO_HOOKS.get(category, category), dict(metadata)
+        return category, dict(metadata)
 
     async def _fetch_tool_part(
         self,

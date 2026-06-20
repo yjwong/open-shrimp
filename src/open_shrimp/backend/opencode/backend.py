@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from open_shrimp.backend.opencode.client import OpenCodeClient
+from open_shrimp.backend.opencode.policy import OpenCodePolicy
 from open_shrimp.backend.protocol import (
     BackendOptions,
     CanUseTool,
@@ -41,12 +42,7 @@ class OpenCodeBackend:
 
     name = "opencode"
 
-    @property
-    def policy(self) -> Any:
-        """Per-backend tool taxonomy — not yet implemented for OpenCode."""
-        raise NotImplementedError(
-            "OpenCode policy is not implemented.",
-        )
+    policy: OpenCodePolicy = OpenCodePolicy()
 
     def make_client(self, options: BackendOptions) -> OpenCodeClient:
         return OpenCodeClient(options)

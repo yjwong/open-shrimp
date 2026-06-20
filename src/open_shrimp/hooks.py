@@ -103,22 +103,26 @@ def matches_approval_rule(
     rule: ApprovalRule,
     tool_name: str,
     tool_input: dict[str, Any],
+    policy: "BackendPolicy | None" = None,
 ) -> bool:
     """Return True if *rule* matches the given tool invocation.
 
-    For Bash pattern rules (e.g. ``git *``), compound commands are
+    For Bash-like pattern rules (e.g. ``git *``), compound commands are
     **not** matched — prefix/wildcard allow rules skip compound
     commands to prevent ``git *`` from auto-approving
     ``git status && rm -rf /``.  Blanket rules (``pattern is None``)
     still match compound commands.
+
+    ``policy`` decides which tools get bash-pattern semantics (SDK:
+    ``Bash``; OpenCode: ``bash``).  Resolved lazily when omitted.
     """
     if rule.tool_name != tool_name:
         return False
     if rule.pattern is None:
         return True
-    # For Bash, match the pattern against the full command string, but
-    # skip compound commands for safety.
-    if tool_name == "Bash":
+    # For Bash-like tools, match the pattern against the full command
+    # string but skip compound commands for safety.
+    if _resolve_policy(policy).is_bash_like(tool_name):
         command = tool_input.get("command", "")
         from open_shrimp.bash_parse import is_compound_command
         if is_compound_command(command):
@@ -417,9 +421,12 @@ def make_can_use_tool(
 
         # Accept-all-edits mode: also auto-approve common safe Bash
         # commands (mkdir, touch, rm, mv, cp, sed, etc.) that complement
-        # file editing.
+        # file editing.  Routed through ``is_bash_like`` so the same
+        # branch covers the SDK's ``Bash`` and OpenCode's ``bash`` —
+        # ``is_safe_for_accept_edits_bash`` returns False on OpenCode
+        # which has no equivalent allowlist semantic.
         if (
-            tool_name == "Bash"
+            p.is_bash_like(tool_name)
             and is_edit_auto_approved
             and is_edit_auto_approved()
             and p.is_safe_for_accept_edits_bash(
@@ -440,6 +447,44 @@ def make_can_use_tool(
                 "Auto-approved %s in containerized context", tool_name
             )
             return PermissionResultAllow()
+
+        # Multi-file mutating tools (OpenCode: apply_patch) carry their
+        # own envelope and don't fit ``_PATH_SCOPED_TOOLS``.  Same
+        # boundary rules as Edit/Write: containerized auto-approve,
+        # accept-all-edits auto-approve when every targeted path
+        # resolves inside ``static_approved_dirs``.
+        if p.multi_file_mutating(tool_name):
+            if is_containerized:
+                if notify_auto_approved_edit:
+                    try:
+                        await notify_auto_approved_edit(tool_name, tool_input)
+                    except Exception:
+                        logger.exception(
+                            "Failed to send auto-approved edit notification"
+                        )
+                logger.info(
+                    "Auto-approved %s in containerized context", tool_name,
+                )
+                return PermissionResultAllow()
+            if (
+                is_edit_auto_approved
+                and is_edit_auto_approved()
+                and p.multi_file_paths_within(
+                    tool_name, tool_input, cwd, static_approved_dirs,
+                )
+            ):
+                if notify_auto_approved_edit:
+                    try:
+                        await notify_auto_approved_edit(tool_name, tool_input)
+                    except Exception:
+                        logger.exception(
+                            "Failed to send auto-approved edit notification"
+                        )
+                logger.info(
+                    "Auto-approved %s (accept-all-edits): all paths within "
+                    "approved dirs", tool_name,
+                )
+                return PermissionResultAllow()
 
         # Per-tool session-scoped auto-approval (e.g. "Accept all git").
         # Skipped for path-scoped tools whose target was out-of-scope.

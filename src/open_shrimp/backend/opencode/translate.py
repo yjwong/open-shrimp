@@ -39,7 +39,6 @@ import httpx
 from open_shrimp.backend.errors import CLIConnectionError, ProcessError
 from open_shrimp.backend.opencode.permission import PermissionBridge
 from open_shrimp.backend.opencode.sse import EventQueue, EventQueueClosed
-from open_shrimp.backend.opencode.tool_names import opencode_to_hooks
 from open_shrimp.backend.types import (
     AssistantMessage,
     Message,
@@ -456,7 +455,9 @@ def _toolpart_messages(
                 content=[
                     ToolUseBlock(
                         id=call_id,
-                        name=opencode_to_hooks(part.get("tool") or ""),
+                        # Native OpenCode tool name flows through; the
+                        # OpenCode policy module owns the vocabulary.
+                        name=str(part.get("tool") or ""),
                         input=raw_input,
                     )
                 ]
