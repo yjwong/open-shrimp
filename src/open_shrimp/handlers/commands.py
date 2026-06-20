@@ -48,6 +48,7 @@ from open_shrimp.handlers.utils import (
     _is_authorized,
     _update_pinned_status,
     chat_scope_from_message,
+    get_backend_for_scope,
 )
 
 logger = logging.getLogger(__name__)
@@ -1336,7 +1337,7 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /login -- open the login Mini App to re-authenticate Claude Code OAuth."""
+    """Handle /login -- open the login Mini App to re-authenticate."""
     if not update.effective_user or not update.message:
         return
 
@@ -1349,6 +1350,19 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
         return
 
+    scope = chat_scope_from_message(update.message)
+    backend = get_backend_for_scope(context.bot_data, scope)
+    if backend is not None and "login" not in backend.command_capabilities():
+        await update.message.reply_text(
+            f"/login is not available on the `{_escape_mdv2(backend.name)}` backend\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    body = "Re-authenticate"
+    if backend is not None:
+        body = backend.auth_copy().login_mini_app_body or body
+
     # Build the Mini App URL.
     if config.review.public_url:
         base_url = config.review.public_url.rstrip("/")
@@ -1356,7 +1370,6 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         base_url = f"https://{config.review.host}:{config.review.port}"
 
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    scope = chat_scope_from_message(update.message)
     login_url = f"{base_url}/terminal/?mode=login"
     keyboard = InlineKeyboardMarkup([
         [make_web_app_button(
@@ -1370,7 +1383,7 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ])
 
     await update.message.reply_text(
-        "Re\\-authenticate Claude Code OAuth",
+        _escape_mdv2(body),
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
     )
@@ -1395,6 +1408,13 @@ async def mcp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     scope = chat_scope_from_message(message)
+    backend = get_backend_for_scope(context.bot_data, scope)
+    if backend is not None and "mcp" not in backend.command_capabilities():
+        await message.reply_text(
+            f"/mcp is not available on the `{_escape_mdv2(backend.name)}` backend\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
 
     session = get_session(scope)
     if session is None:
@@ -1807,6 +1827,15 @@ async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     config: Config = context.bot_data["config"]
     message = update.effective_message
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    scope = chat_scope_from_message(message)
+    backend = get_backend_for_scope(context.bot_data, scope)
+    if backend is not None and "usage" not in backend.command_capabilities():
+        await message.reply_text(
+            f"/usage is not available on the `{_escape_mdv2(backend.name)}` backend\\.",
+            parse_mode="MarkdownV2",
+        )
         return
 
     data = await _fetch_usage()

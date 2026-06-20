@@ -33,6 +33,18 @@ def chat_scope_from_message(message: Message) -> ChatScope:
     return ChatScope(chat_id=message.chat_id, thread_id=thread_id)
 
 
+def get_backend_for_scope(bot_data: dict[str, Any], scope: ChatScope) -> Any | None:
+    """Resolve the active backend for a ``ChatScope``.
+
+    The scope argument lets per-context backend resolution plug in here
+    rather than at every call site.  Returns ``None`` when no backend
+    has been installed (e.g. callers that build the app without
+    ``run_bot``).
+    """
+    del scope  # reserved for per-context lookup
+    return bot_data.get("backend")
+
+
 def _escape_mdv2(text: str) -> str:
     """Escape MarkdownV2 special characters in plain text."""
     for ch in r"_*[]()~`>#+-=|{}.!":

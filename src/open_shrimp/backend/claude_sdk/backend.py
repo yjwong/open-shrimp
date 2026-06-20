@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from open_shrimp.backend.claude_sdk.client import ClaudeSdkClient
 from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
 from open_shrimp.backend.protocol import (
+    AuthCopy,
     BackendOptions,
     CanUseTool,
     ToolFactory,
@@ -172,6 +173,16 @@ class ClaudeSdkBackend:
 
         rows = list_sessions(directory=directory, limit=limit, **kwargs)
         return [_to_session_info(r) for r in rows]
+
+    def command_capabilities(self) -> set[str]:
+        return {"login", "usage", "mcp"}
+
+    def auth_copy(self) -> AuthCopy:
+        return AuthCopy(
+            login_command_description="Re-authenticate Claude Code OAuth",
+            login_mini_app_body="Re-authenticate Claude Code OAuth",
+            auth_error_hint="Run /login to re-authenticate Claude Code.",
+        )
 
 
 def _to_session_info(row: Any) -> SessionInfo:

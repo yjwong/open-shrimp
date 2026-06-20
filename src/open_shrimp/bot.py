@@ -200,8 +200,35 @@ async def _watch_config(config_path: str, bot_data: dict) -> None:
 # ── Application setup ──
 
 
-def build_application(config: Config, db: aiosqlite.Connection) -> Application:
-    """Build and configure the Telegram application."""
+#: Handlers for the per-backend opt-in commands.  Registered only when
+#: at least one configured backend declares the capability — kept here
+#: as a flat map so the registration loop stays one line.
+_OPT_IN_COMMAND_HANDLERS = {
+    "login": login_handler,
+    "mcp": mcp_handler,
+    "usage": usage_handler,
+}
+
+
+def _union_capabilities(backends: "list[Any]") -> set[str]:
+    """Union the opt-in command set across every configured backend."""
+    caps: set[str] = set()
+    for backend in backends:
+        caps |= backend.command_capabilities()
+    return caps
+
+
+def build_application(
+    config: Config,
+    db: aiosqlite.Connection,
+    backends: "list[Any] | None" = None,
+) -> Application:
+    """Build and configure the Telegram application.
+
+    ``backends`` is the list of configured backends whose command
+    capabilities drive ``/login``, ``/usage``, ``/mcp`` registration.
+    When ``None``, every opt-in handler is registered unconditionally.
+    """
     app = (
         Application.builder()
         .token(config.telegram.token)
@@ -223,14 +250,20 @@ def build_application(config: Config, db: aiosqlite.Connection) -> Application:
     app.add_handler(CommandHandler("effort", effort_handler))
     app.add_handler(CommandHandler("add_dir", add_dir_handler))
     app.add_handler(CommandHandler("review", review_handler))
-    app.add_handler(CommandHandler("mcp", mcp_handler))
     app.add_handler(CommandHandler("schedule", schedule_handler))
     app.add_handler(CommandHandler("tasks", tasks_handler))
-    app.add_handler(CommandHandler("usage", usage_handler))
     app.add_handler(CommandHandler("vnc", vnc_handler))
-    app.add_handler(CommandHandler("login", login_handler))
     app.add_handler(CommandHandler("config", config_handler))
     app.add_handler(CommandHandler("restart", restart_handler))
+
+    if backends is None:
+        caps = set(_OPT_IN_COMMAND_HANDLERS)
+    else:
+        caps = _union_capabilities(backends)
+    for name in sorted(caps):
+        handler = _OPT_IN_COMMAND_HANDLERS.get(name)
+        if handler is not None:
+            app.add_handler(CommandHandler(name, handler))
 
     # Callback query handler for tool approval buttons
     app.add_handler(CallbackQueryHandler(callback_query_handler))
@@ -256,20 +289,23 @@ async def run_bot(
     mcp_proxy: "Any | None" = None,
 ) -> None:
     """Start the bot with long polling."""
-    app = build_application(config, db)
-    app.bot_data["config_path"] = config_path
-    app.bot_data["mcp_proxy"] = mcp_proxy
-
     # Resolve the agent backend once at startup (like SandboxManager / the MCP
     # proxy) and install it as the process default so the client manager and
     # session-handling paths use it.  Stored in bot_data so handlers thread it
-    # through ``get_or_create_session``.
+    # through ``get_or_create_session``.  Resolved before ``build_application``
+    # so command registration is capability-driven.
     from open_shrimp.backend import get_backend
     from open_shrimp.client_manager import set_default_backend
 
     backend = get_backend(config)
+    backends = [backend]
     set_default_backend(backend)
+
+    app = build_application(config, db, backends=backends)
+    app.bot_data["config_path"] = config_path
+    app.bot_data["mcp_proxy"] = mcp_proxy
     app.bot_data["backend"] = backend
+    app.bot_data["backends"] = backends
     logger.info("Using agent backend: %s", backend.name)
 
     logger.info("Starting bot with long polling")
@@ -292,6 +328,7 @@ async def run_bot(
 
     register_dispatch(_dispatch)
 
+    caps = _union_capabilities(backends)
     common_commands = [
         BotCommand("context", "List or switch contexts"),
         BotCommand("clear", "Start a fresh session"),
@@ -299,24 +336,40 @@ async def run_bot(
         BotCommand("cancel", "Abort running Claude invocation"),
         BotCommand("resume", "List and resume a previous session"),
         BotCommand("review", "Review and stage git changes"),
-        BotCommand("mcp", "List and manage MCP servers"),
         BotCommand("schedule", "List scheduled tasks"),
         BotCommand("tasks", "List or stop background tasks"),
-        BotCommand("usage", "Show Claude quota and usage stats"),
         BotCommand("vnc", "View computer-use desktop"),
     ]
+    if "mcp" in caps:
+        common_commands.append(BotCommand("mcp", "List and manage MCP servers"))
+    if "usage" in caps:
+        common_commands.append(
+            BotCommand("usage", "Show Claude quota and usage stats")
+        )
     await app.bot.set_my_commands(common_commands)
+
     # Private-chat-only commands: these expose sensitive info or mutate
     # global state and should not be visible/usable in group chats.
+    private_commands = list(common_commands) + [
+        BotCommand("model", "Show or override the model for this chat"),
+        BotCommand("effort", "Show or override the thinking effort level"),
+        BotCommand("add_dir", "Add a working directory to the context"),
+        BotCommand("config", "Edit bot configuration"),
+        BotCommand("restart", "Restart the bot process"),
+    ]
+    if "login" in caps:
+        login_desc = next(
+            (
+                b.auth_copy().login_command_description
+                for b in backends
+                if "login" in b.command_capabilities()
+                and b.auth_copy().login_command_description
+            ),
+            "Re-authenticate",
+        )
+        private_commands.append(BotCommand("login", login_desc))
     await app.bot.set_my_commands(
-        common_commands + [
-            BotCommand("model", "Show or override the model for this chat"),
-            BotCommand("effort", "Show or override the thinking effort level"),
-            BotCommand("add_dir", "Add a working directory to the context"),
-            BotCommand("login", "Re-authenticate Claude Code OAuth"),
-            BotCommand("config", "Edit bot configuration"),
-            BotCommand("restart", "Restart the bot process"),
-        ],
+        private_commands,
         scope=BotCommandScopeAllPrivateChats(),
     )
     await app.start()

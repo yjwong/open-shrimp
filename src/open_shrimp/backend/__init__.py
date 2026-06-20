@@ -18,6 +18,7 @@ from open_shrimp.backend.factory import (
     known_backends,
 )
 from open_shrimp.backend.protocol import (
+    AuthCopy,
     Backend,
     BackendClient,
     BackendOptions,
@@ -49,6 +50,7 @@ from open_shrimp.backend.types import (
 
 __all__ = [
     "AssistantMessage",
+    "AuthCopy",
     "Backend",
     "BackendClient",
     "BackendOptions",

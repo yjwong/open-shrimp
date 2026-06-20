@@ -45,6 +45,24 @@ ToolFactory = Callable[[], list[Any]]
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class AuthCopy:
+    """Backend-supplied strings for auth-related UI surfaces.
+
+    A single declaration site for the bot's auth copy: the ``/login``
+    command description in the Telegram menu, the Mini-App body, and
+    the auth-error hint surfaced when an agent reports an auth failure
+    mid-stream.
+
+    A ``None`` field means "skip the corresponding site entirely" —
+    distinct from an empty string, which would still be rendered.
+    """
+
+    login_command_description: str | None = None
+    login_mini_app_body: str | None = None
+    auth_error_hint: str | None = None
+
+
 @dataclass
 class BackendOptions:
     """The honoured intersection of every backend's option set.
@@ -219,8 +237,31 @@ class Backend(Protocol):
         """For /resume.  SDK: ``claude_agent_sdk.list_sessions``."""
         ...
 
+    def command_capabilities(self) -> set[str]:
+        """The bot-command names this backend implements end-to-end.
+
+        Commands every backend always supports (``/context``, ``/clear``,
+        ``/status``, …) are registered unconditionally; this set only
+        covers the surface a backend can genuinely opt out of.
+
+        A flat ``set[str]`` rather than a typed flags struct so adding a
+        new backend-specific command is a one-line declaration on one
+        backend, not a protocol change.
+        """
+        ...
+
+    def auth_copy(self) -> "AuthCopy":
+        """Backend-supplied strings for auth-related UI surfaces.
+
+        See :class:`AuthCopy` for field semantics.  ``None`` on any
+        field means "skip the corresponding site entirely" — distinct
+        from an empty string.
+        """
+        ...
+
 
 __all__ = [
+    "AuthCopy",
     "Backend",
     "BackendClient",
     "BackendOptions",

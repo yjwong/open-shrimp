@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from open_shrimp.backend.opencode.client import OpenCodeClient
 from open_shrimp.backend.opencode.policy import OpenCodePolicy
 from open_shrimp.backend.protocol import (
+    AuthCopy,
     BackendOptions,
     CanUseTool,
     ToolFactory,
@@ -166,6 +167,28 @@ class OpenCodeBackend:
             limit=limit,
             base_url=base_url,
             auth_header=auth_header,
+        )
+
+    def command_capabilities(self) -> set[str]:
+        """OpenCode implements none of the opt-in commands.
+
+        The OpenCode-side equivalents (auth Mini-App, MCP management)
+        ship separately and flip their capabilities on then.
+        """
+        return set()
+
+    def auth_copy(self) -> AuthCopy:
+        """Skip every auth-copy site that doesn't apply to OpenCode.
+
+        The Mini-App and command-description strings stay non-empty so
+        a future OpenCode-side login flow can flip the capability on
+        without re-touching this file.  ``auth_error_hint`` is ``None``
+        because the Claude-shaped ``/login`` hint would mislead.
+        """
+        return AuthCopy(
+            login_command_description="Re-authenticate provider",
+            login_mini_app_body="Re-authenticate provider",
+            auth_error_hint=None,
         )
 
 

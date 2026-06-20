@@ -277,11 +277,6 @@ def main() -> None:
 
         sys.exit(asyncio.run(run_update_cli()))
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        logger.warning(
-            "ANTHROPIC_API_KEY not set — will use Claude Code OAuth if available"
-        )
-
     # Offer guided setup when config is missing and running interactively.
     config_path = Path(args.config)
     if not config_path.exists():
