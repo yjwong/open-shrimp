@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from open_shrimp.backend import get_backend
+from open_shrimp.backend import get_backend, get_backend_by_name
 from open_shrimp.backend.protocol import Backend, BackendClient, BackendOptions
 from open_shrimp.backend.types import ResultMessage, SystemMessage
 
@@ -90,14 +90,15 @@ class AgentSession:
     mcp_proxy: Any | None = None
     wrapper_cleanup_paths: list[str] = field(default_factory=list)
     last_activity: float = field(default_factory=time.monotonic)
+    # Pinned at creation so a config edit mid-turn doesn't shift the policy.
+    backend: Backend | None = None
 
 
 _active_sessions: dict[ChatScope, AgentSession] = {}
 
-# Process-wide default backend.  Resolved once at startup (``main.py`` →
-# ``run_bot`` → bot_data), but kept here as a lazy fallback so callers that
-# don't thread a backend through (mirroring the optional ``sandbox_manager`` /
-# ``mcp_proxy`` kwargs) still get the configured default.
+# The configured top-level backend; ``None`` until ``run_bot`` calls
+# ``set_default_backend``.  Pre-startup callers (tests, scope-less paths)
+# fall back to ``get_backend({})`` which honours the registry default.
 _default_backend: Backend | None = None
 
 
@@ -107,14 +108,31 @@ def set_default_backend(backend: Backend) -> None:
     _default_backend = backend
 
 
-def resolve_backend(backend: Backend | None) -> Backend:
-    """Return *backend* if given, else the process default (lazily resolved)."""
+def resolve_backend(
+    backend: "Backend | None" = None,
+    *,
+    scope: "ChatScope | None" = None,
+    context: "ContextConfig | None" = None,
+) -> Backend:
+    """Resolve which backend should serve a given call site.
+
+    Resolution order:
+    * ``backend`` (explicit override): returned as-is.
+    * ``context``: the backend named by ``context.backend``, or the top-level
+      default when the context has no override.
+    * ``scope``: the live session's pinned backend, or the top-level default
+      when no live session exists yet.
+    * Otherwise: the top-level default.
+    """
     if backend is not None:
         return backend
-    global _default_backend
-    if _default_backend is None:
-        _default_backend = get_backend({})
-    return _default_backend
+    if context is not None and context.backend is not None:
+        return get_backend_by_name(context.backend)
+    if scope is not None:
+        existing = _active_sessions.get(scope)
+        if existing is not None and existing.backend is not None:
+            return existing.backend
+    return _default_backend or get_backend({})
 
 # Idle session timeout: sessions with no activity for this long are closed.
 _IDLE_TIMEOUT: float = 30 * 60  # 30 minutes
@@ -195,10 +213,12 @@ async def get_or_create_session(
     Returns:
         An ``AgentSession`` with a connected client ready for ``query()``.
     """
-    backend = resolve_backend(backend)
+    backend = resolve_backend(backend, context=context)
     existing = _active_sessions.get(scope)
     if existing is not None:
-        if existing.context_name == context_name:
+        same_context = existing.context_name == context_name
+        same_backend = existing.backend is backend
+        if same_context and same_backend:
             if existing.client.is_alive():
                 existing.callback_context.request_approval = callback_context.request_approval
                 existing.callback_context.handle_user_questions = callback_context.handle_user_questions
@@ -222,7 +242,7 @@ async def get_or_create_session(
                     context_name,
                 )
                 await close_session(scope)
-        else:
+        elif not same_context:
             logger.info(
                 "Context changed for scope %s (%s -> %s), closing old client",
                 scope,
@@ -230,6 +250,18 @@ async def get_or_create_session(
                 context_name,
             )
             await close_session(scope)
+        else:
+            # Session IDs are backend-scoped; drop the resume id on rebuild.
+            logger.info(
+                "Backend changed for scope %s context %s (%s -> %s), "
+                "closing old client",
+                scope,
+                context_name,
+                existing.backend.name if existing.backend else "?",
+                backend.name,
+            )
+            await close_session(scope)
+            session_id = None
 
     can_use_tool = backend.make_can_use_tool(
         request_approval=_make_approval_proxy(callback_context),
@@ -704,6 +736,7 @@ async def get_or_create_session(
         # scope must be unregistered on close regardless of containerisation.
         mcp_proxy=mcp_proxy,
         wrapper_cleanup_paths=wrapper_cleanup_paths,
+        backend=backend,
     )
 
     # Register this sandbox for host-side credential syncing.  The watcher
@@ -755,6 +788,9 @@ async def reconnect_session(
 
     session_id = old_session.session_id
     callback_context = old_session.callback_context
+    # Never cross backends on reconnect; explicit ``backend`` still wins.
+    if backend is None:
+        backend = old_session.backend
 
     # Tear down the dead client (ignore errors — it's already dead).
     await close_session(scope)

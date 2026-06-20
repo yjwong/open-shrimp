@@ -90,6 +90,9 @@ contexts:
     #     args: ["--flag"]
     #     env:
     #       FOO: bar
+    # backend: opencode             # Override the top-level `backend:` for this
+    #                               # context only.  Same values as the top-level key
+    #                               # (claude_sdk / opencode).  Omit to inherit.
 
 default_context: default
 

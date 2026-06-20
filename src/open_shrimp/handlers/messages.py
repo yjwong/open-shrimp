@@ -753,6 +753,7 @@ async def _start_agent_task(
 
             policy = resolve_backend(
                 context.bot_data.get("backend"),
+                context=ctx_config,
             ).policy
             persistent_rules = await policy.load_persistent_rules(
                 directory=ctx_config.directory,

@@ -36,12 +36,18 @@ def chat_scope_from_message(message: Message) -> ChatScope:
 def get_backend_for_scope(bot_data: dict[str, Any], scope: ChatScope) -> Any | None:
     """Resolve the active backend for a ``ChatScope``.
 
-    The scope argument lets per-context backend resolution plug in here
-    rather than at every call site.  Returns ``None`` when no backend
-    has been installed (e.g. callers that build the app without
-    ``run_bot``).
+    Per-context overrides take precedence: if the scope has a live agent
+    session, that session's pinned backend is returned (so the capability
+    gate for ``/login``, ``/mcp``, ``/usage`` matches what is actually
+    serving the turn).  Otherwise falls back to the process-wide default
+    installed by ``run_bot``.  Returns ``None`` when no backend has been
+    installed at all.
     """
-    del scope  # reserved for per-context lookup
+    from open_shrimp.client_manager import get_session
+
+    existing = get_session(scope)
+    if existing is not None and existing.backend is not None:
+        return existing.backend
     return bot_data.get("backend")
 
 

@@ -21,7 +21,7 @@ from open_shrimp.client_manager import (
     close_session,
     get_session,
 )
-from open_shrimp.config import Config, ContextConfig
+from open_shrimp.config import Config, ContextConfig, effective_backend
 from open_shrimp.db import ChatScope, delete_session, get_session_id, set_session_id
 from open_shrimp.handlers.state import (
     _MCP_STATUS_EMOJI,
@@ -386,6 +386,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lines = [
         f"*Context:* `{ctx_name}`",
         f"*Directory:* `{ctx.directory}`",
+        f"*Backend:* `{effective_backend(ctx, config)}`",
         f"*Model:* `{ctx.model or 'CLI default'}`" + (" (override)" if scope in _model_overrides else ""),
         f"*Effort:* `{ctx.effort or 'default'}`" + (" (override)" if scope in _effort_overrides else ""),
         f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
@@ -891,7 +892,7 @@ async def _build_resume_page(
     """
     from open_shrimp.client_manager import resolve_backend
 
-    backend = resolve_backend(backend)
+    backend = resolve_backend(backend, context=ctx)
     per_page = _RESUME_LIST_LIMIT
     offset = page * per_page
     # Fetch one extra to detect whether a next page exists.
@@ -1041,9 +1042,9 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if len(args) >= 2:
         from open_shrimp.client_manager import resolve_backend
 
-        # Direct resume by session ID (or prefix)
+        # Direct resume by session ID (or prefix).
         target = args[1]
-        sessions = await resolve_backend(backend).list_sessions(
+        sessions = await resolve_backend(backend, context=ctx).list_sessions(
             ctx.directory,
             ctx=ctx,
             ctx_name=ctx_name,

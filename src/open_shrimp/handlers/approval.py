@@ -37,12 +37,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _resolve_policy(policy: "BackendPolicy | None") -> "BackendPolicy":
+def _resolve_policy(
+    policy: "BackendPolicy | None",
+    scope: ChatScope | None = None,
+) -> "BackendPolicy":
     if policy is not None:
         return policy
     from open_shrimp.client_manager import resolve_backend
 
-    return resolve_backend(None).policy
+    return resolve_backend(scope=scope).policy
 
 
 # ---------------------------------------------------------------------------
@@ -58,9 +61,10 @@ async def _send_auto_approved_diff(
     cwd: str | None = None,
     thread_id: int | None = None,
     policy: "BackendPolicy | None" = None,
+    scope: ChatScope | None = None,
 ) -> None:
     """Send a read-only diff message for an auto-approved edit."""
-    p = _resolve_policy(policy)
+    p = _resolve_policy(policy, scope=scope)
     text = p.format_auto_approved_diff(tool_name, tool_input, cwd)
     text += "\n✅ _Auto\\-approved_"
 
@@ -106,7 +110,7 @@ async def _send_approval_keyboard(
     auto-approve.  ``scope`` and ``context_name`` are required to scope
     that approval state.
     """
-    p = _resolve_policy(policy)
+    p = _resolve_policy(policy, scope=scope)
     text = p.format_approval_text(tool_name, tool_input, cwd)
 
     approve_data = f"approve:{tool_use_id}"
@@ -456,11 +460,12 @@ async def _auto_resolve_pending_approvals(
     chat_id: int,
     approved_dir: str | None = None,
     policy: "BackendPolicy | None" = None,
+    scope: ChatScope | None = None,
 ) -> None:
     """Resolve all pending approval futures that match a newly created rule."""
     from open_shrimp.hooks import matches_approval_rule, tool_path_within_dir
 
-    p = _resolve_policy(policy)
+    p = _resolve_policy(policy, scope=scope)
 
     for tool_use_id, meta in list(_approval_metadata.items()):
         if meta.get("chat_id") != chat_id:
@@ -532,7 +537,13 @@ async def handle_approval_callback(
     from open_shrimp.handlers.utils import _get_context, chat_scope_from_message
     from open_shrimp.stream import _bash_output_store
 
-    p = _resolve_policy(None)
+    # Scope the policy lookup to the chat that owns this callback: each
+    # per-context backend may render different keyboards / match different
+    # bash patterns.
+    callback_scope = (
+        chat_scope_from_message(query.message) if query.message else None
+    )
+    p = _resolve_policy(None, scope=callback_scope)
 
     # Handle "Show prompt" expansion for Agent-like tools.
     if data.startswith("show_prompt:"):
@@ -636,7 +647,7 @@ async def handle_approval_callback(
         if chat_id is not None:
             await _auto_resolve_pending_approvals(
                 query.get_bot(), rule=None, is_edit_rule=True, chat_id=chat_id,
-                policy=p,
+                policy=p, scope=callback_scope,
             )
         return True
 
@@ -703,7 +714,7 @@ async def handle_approval_callback(
         if chat_id is not None and prefix:
             await _auto_resolve_pending_approvals(
                 query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
-                policy=p,
+                policy=p, scope=callback_scope,
             )
         return True
 
@@ -776,6 +787,7 @@ async def handle_approval_callback(
                 chat_id=chat_id,
                 approved_dir=directory,
                 policy=p,
+                scope=callback_scope,
             )
         return True
 
@@ -832,7 +844,7 @@ async def handle_approval_callback(
         if chat_id is not None and accepted_tool_name:
             await _auto_resolve_pending_approvals(
                 query.get_bot(), rule=rule, is_edit_rule=False, chat_id=chat_id,
-                policy=p,
+                policy=p, scope=callback_scope,
             )
         return True
 

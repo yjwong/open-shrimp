@@ -83,6 +83,17 @@ class ContextConfig:
     container: ContainerConfig | None = None
     sandbox: SandboxConfig | None = None
     mcp: dict[str, Any] = field(default_factory=dict)
+    # Optional per-context backend override.  ``None`` inherits the top-level
+    # ``backend:`` key (which itself defaults to ``claude_sdk``).
+    backend: str | None = None
+
+
+def effective_backend(ctx: ContextConfig, config: "Config") -> str:
+    """Return the backend name that should serve *ctx*.
+
+    Falls back to the top-level ``backend:`` when the context omits its own.
+    """
+    return ctx.backend or config.backend
 
 
 @dataclass
@@ -289,24 +300,41 @@ def _validate_raw(raw: dict) -> None:
 
     # Optional top-level backend: validate against the registry so a typo
     # fails fast at startup rather than at first message.
+    from open_shrimp.backend import DEFAULT_BACKEND, known_backends
+
     backend = raw.get("backend")
     if backend is not None:
-        from open_shrimp.backend import known_backends
-
         if not isinstance(backend, str) or backend not in known_backends():
             raise ValueError(
                 f"backend must be one of {known_backends()}, got: {backend!r}"
             )
 
-    # OpenCode-specific startup validation.  OpenCode addresses models as
-    # ``provider/model`` (it has no implicit default provider), so every
-    # context must carry a provider-qualified ``model:``.  Fail fast at
-    # startup rather than at the first turn (where ``to_opencode`` would
-    # otherwise raise).  Also surface a missing ``opencode`` binary early.
-    if backend == "opencode":
+    # Per-context backend overrides.  Each context's optional ``backend:``
+    # mirrors the top-level key; absent / null inherits the default.
+    for name, ctx in contexts.items():
+        ctx_backend = ctx.get("backend")
+        if ctx_backend is None:
+            continue
+        if not isinstance(ctx_backend, str) or ctx_backend not in known_backends():
+            raise ValueError(
+                f"Context '{name}': backend must be one of "
+                f"{known_backends()}, got: {ctx_backend!r}"
+            )
+
+    # OpenCode-specific startup validation, run per context whose effective
+    # backend is ``opencode`` (top-level default + any per-context override).
+    # OpenCode addresses models as ``provider/model`` and the computer-use
+    # image carries no ``opencode`` binary — fail fast at startup instead of
+    # at the first turn.
+    default_backend = backend or DEFAULT_BACKEND
+    opencode_contexts = [
+        (name, ctx) for name, ctx in contexts.items()
+        if (ctx.get("backend") or default_backend) == "opencode"
+    ]
+    if opencode_contexts:
         from open_shrimp.backend.opencode.options import split_provider_model
 
-        for name, ctx in contexts.items():
+        for name, ctx in opencode_contexts:
             model = ctx.get("model")
             try:
                 split_provider_model(model)
@@ -316,13 +344,6 @@ def _validate_raw(raw: dict) -> None:
                     f"provider-qualified model (e.g. 'openai/gpt-5.5'): {exc}"
                 ) from exc
 
-            # ``computer_use`` is not supported with the OpenCode backend: the
-            # computer-use image is Claude-based (built from
-            # ``Dockerfile.computer-use``) and carries no ``opencode`` binary,
-            # while the run path still launches ``opencode serve`` — an opaque
-            # first-turn failure.  Fail fast at startup instead.  The flag may
-            # live under the modern ``sandbox:`` key or the legacy
-            # ``container:`` alias.
             sandbox_raw = ctx.get("sandbox") or {}
             container_raw = ctx.get("container") or {}
             if sandbox_raw.get("computer_use") or container_raw.get("computer_use"):
@@ -332,6 +353,7 @@ def _validate_raw(raw: dict) -> None:
                     f"Claude-based and carries no opencode binary)."
                 )
 
+        # Check the opencode binary exactly once across all opencode contexts.
         from open_shrimp.sandbox.opencode_runtime import _find_opencode_binary
 
         try:
@@ -430,6 +452,7 @@ def _parse(raw: dict) -> Config:
             container=container,
             sandbox=sandbox,
             mcp=mcp_raw,
+            backend=ctx.get("backend"),
         )
 
     # Parse optional review config.
@@ -554,6 +577,9 @@ def config_to_dict(config: Config) -> dict[str, Any]:
 
         if ctx.mcp:
             ctx_dict["mcp"] = ctx.mcp
+
+        if ctx.backend is not None:
+            ctx_dict["backend"] = ctx.backend
 
         contexts[name] = ctx_dict
 

@@ -503,7 +503,7 @@ async def _run_scheduled_prompt(
         },
     )
 
-    client = resolve_backend(None).make_client(options)
+    client = resolve_backend(context=ctx_config).make_client(options)
     try:
         await client.connect()
         await client.query(task.prompt)

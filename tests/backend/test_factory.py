@@ -63,3 +63,31 @@ def test_make_tool_server_selects_shared_bridge_installer():
     b = ClaudeSdkBackend()
     installer = b.make_tool_server(lambda: [])
     assert installer is serve_tools_over_mcp_http
+
+
+# ── get_backend_by_name: memoisation across distinct names ──
+
+
+def test_get_backend_by_name_memoises():
+    """A second call for the same name returns the cached instance."""
+    from open_shrimp.backend import get_backend_by_name
+
+    a = get_backend_by_name("claude_sdk")
+    b = get_backend_by_name("claude_sdk")
+    assert a is b
+
+
+def test_get_backend_by_name_unknown_raises():
+    from open_shrimp.backend import get_backend_by_name
+
+    with pytest.raises(ValueError, match="Unknown backend 'nope'"):
+        get_backend_by_name("nope")
+
+
+def test_get_backend_uses_same_cache_as_by_name():
+    """The convenience wrapper hits the same memo as ``get_backend_by_name``."""
+    from open_shrimp.backend import get_backend, get_backend_by_name
+
+    direct = get_backend_by_name("claude_sdk")
+    via_config = get_backend({"backend": "claude_sdk"})
+    assert direct is via_config

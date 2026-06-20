@@ -289,17 +289,23 @@ async def run_bot(
     mcp_proxy: "Any | None" = None,
 ) -> None:
     """Start the bot with long polling."""
-    # Resolve the agent backend once at startup (like SandboxManager / the MCP
-    # proxy) and install it as the process default so the client manager and
-    # session-handling paths use it.  Stored in bot_data so handlers thread it
-    # through ``get_or_create_session``.  Resolved before ``build_application``
-    # so command registration is capability-driven.
-    from open_shrimp.backend import get_backend
+    # Resolve the agent backend once at startup and install it as the process
+    # default; warm every per-context override so construction errors surface
+    # here and command registration unions their capabilities.
+    from open_shrimp.backend import get_backend, get_backend_by_name
     from open_shrimp.client_manager import set_default_backend
 
     backend = get_backend(config)
-    backends = [backend]
     set_default_backend(backend)
+
+    backends_by_name: dict[str, Any] = {backend.name: backend}
+    for ctx in config.contexts.values():
+        if ctx.backend and ctx.backend not in backends_by_name:
+            backends_by_name[ctx.backend] = get_backend_by_name(ctx.backend)
+    backends = list(backends_by_name.values())
+    logger.info(
+        "backends in use: %s", ", ".join(sorted(backends_by_name)),
+    )
 
     app = build_application(config, db, backends=backends)
     app.bot_data["config_path"] = config_path

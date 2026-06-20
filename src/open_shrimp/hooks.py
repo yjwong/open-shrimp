@@ -182,7 +182,7 @@ def _resolve_policy(policy: "BackendPolicy | None") -> "BackendPolicy":
         return policy
     from open_shrimp.client_manager import resolve_backend
 
-    return resolve_backend(None).policy
+    return resolve_backend().policy
 
 
 # ---------------------------------------------------------------------------

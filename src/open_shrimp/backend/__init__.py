@@ -15,6 +15,7 @@ from open_shrimp.backend.errors import CLIConnectionError, ProcessError
 from open_shrimp.backend.factory import (
     DEFAULT_BACKEND,
     get_backend,
+    get_backend_by_name,
     known_backends,
 )
 from open_shrimp.backend.protocol import (
@@ -61,6 +62,7 @@ __all__ = [
     "DEFAULT_BACKEND",
     "ExtraUsage",
     "get_backend",
+    "get_backend_by_name",
     "known_backends",
     "Message",
     "PermissionResult",

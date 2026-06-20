@@ -453,12 +453,13 @@ def _relative_path(path: str, cwd: str | None) -> str:
 
 def _resolve_policy(
     policy: "BackendPolicy | None",
+    scope: "ChatScope | None" = None,
 ) -> "BackendPolicy":
     if policy is not None:
         return policy
     from open_shrimp.client_manager import resolve_backend
 
-    return resolve_backend(None).policy
+    return resolve_backend(scope=scope).policy
 
 
 def extract_tool_summary(
@@ -756,7 +757,7 @@ async def stream_response(
     auto_set = set(allowed_tools or [])
     result = StreamResult()
     draft_task: asyncio.Task[None] | None = None
-    p = _resolve_policy(policy)
+    p = _resolve_policy(policy, scope=scope)
 
     async def periodic_flush() -> None:
         """Periodically flush dirty drafts."""
