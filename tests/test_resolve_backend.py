@@ -3,9 +3,12 @@
 The signature is ``resolve_backend(backend=None, *, scope=None, context=None)``.
 Verify each priority arm:
 
-* explicit ``backend`` wins;
-* ``context`` (with or without an override) picks the named backend, falling
-  back to the top-level default;
+* ``context.backend`` (declarative per-context override) wins over a
+  caller-supplied default — handlers thread ``bot_data["backend"]`` in
+  as ``backend=``, and that must not silently shadow the YAML's
+  per-context ``backend:`` key;
+* with no per-context override, the explicit ``backend`` arg is honoured
+  (used by session-pinned reconnect paths);
 * ``scope`` reads the live session's pinned backend;
 * no args -> top-level default.
 """
@@ -58,11 +61,32 @@ def _install_stub_backends(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return stubs
 
 
-def test_explicit_backend_short_circuits(monkeypatch: pytest.MonkeyPatch):
+def test_context_override_beats_explicit_backend(monkeypatch: pytest.MonkeyPatch):
+    """Per-context ``backend:`` wins over a caller-supplied default.
+
+    Handlers pass the process-default backend (from ``bot_data["backend"]``)
+    as ``backend=`` on every dispatch.  That must NOT shadow a context
+    that declared ``backend: opencode`` in YAML — otherwise per-context
+    backend selection is dead on every code path that goes through a
+    handler.
+    """
     stubs = _install_stub_backends(monkeypatch)
     ctx = _StubContext(backend="opencode")
-    # Even though context says opencode, the explicit override wins.
-    assert cm.resolve_backend(stubs["claude_sdk"], context=ctx) is stubs["claude_sdk"]
+    assert cm.resolve_backend(stubs["claude_sdk"], context=ctx) is stubs["opencode"]
+
+
+def test_explicit_backend_honoured_without_context_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With no per-context override, a caller-supplied backend wins.
+
+    This is the session-pinned reconnect path: the old session's backend
+    is threaded through as ``backend=`` so the rebuild uses the same
+    backend the session was created with.
+    """
+    stubs = _install_stub_backends(monkeypatch)
+    ctx = _StubContext(backend=None)
+    assert cm.resolve_backend(stubs["opencode"], context=ctx) is stubs["opencode"]
 
 
 def test_context_with_override_picks_named_backend(

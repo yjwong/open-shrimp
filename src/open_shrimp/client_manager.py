@@ -117,17 +117,18 @@ def resolve_backend(
     """Resolve which backend should serve a given call site.
 
     Resolution order:
-    * ``backend`` (explicit override): returned as-is.
-    * ``context``: the backend named by ``context.backend``, or the top-level
-      default when the context has no override.
-    * ``scope``: the live session's pinned backend, or the top-level default
-      when no live session exists yet.
+    * ``context``: the backend named by ``context.backend`` — declarative
+      per-context override wins over any caller-supplied default. A session
+      pinned to a different backend will be rebuilt downstream.
+    * ``backend``: explicit caller-supplied backend (e.g., a session-pinned
+      one threaded through a reconnect path).
+    * ``scope``: the live session's pinned backend.
     * Otherwise: the top-level default.
     """
-    if backend is not None:
-        return backend
     if context is not None and context.backend is not None:
         return get_backend_by_name(context.backend)
+    if backend is not None:
+        return backend
     if scope is not None:
         existing = _active_sessions.get(scope)
         if existing is not None and existing.backend is not None:
