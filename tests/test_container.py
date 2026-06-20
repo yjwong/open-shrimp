@@ -3,9 +3,9 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
+from open_shrimp.backend.claude_sdk.sandbox_bundle import claude_image_bundle
 from open_shrimp.sandbox.docker_helpers import (
     CONTAINER_IMAGE,
-    claude_image_bundle,
     ensure_image,
 )
 

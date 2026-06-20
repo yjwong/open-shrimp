@@ -46,9 +46,7 @@ from open_shrimp.sandbox.skill_paths import SANDBOX_HOME
 from open_shrimp.sandbox.lima_helpers import (
     _lima_env,
     _log,
-    _read_credentials_json,
     build_cli_wrapper as _build_cli_wrapper,
-    ensure_claude_cli_in_vm,
     generate_lima_yaml,
     instance_name as _instance_name,
     lima_config_fingerprint,
@@ -134,6 +132,7 @@ class LimaSandbox:
         # generated Lima YAML so the injected provider ``auth.json`` and the
         # managed plugin config reach the served process.  The wrapped-CLI
         # launch contributes no extra mounts.
+        self._runtime = runtime
         launch = runtime.launch if runtime else None
         if isinstance(launch, ServedEndpoint):
             self._served_home_mounts: tuple[GuestMount, ...] = launch.home_mounts
@@ -335,17 +334,16 @@ class LimaSandbox:
                 self._ensure_ssh_tunnels()
 
     def provision_workspace(self) -> None:
-        """Ensure Claude CLI is installed in the VM and credentials are copied."""
-        ensure_claude_cli_in_vm(
-            self._limactl, self._inst_name, guest_os=self._guest_os,
-        )
+        """Install the bundle's CLI binary and copy credentials into the VM."""
+        if self._runtime is None:
+            return
 
-        # Copy credentials to host-side shared directory.
-        creds = _read_credentials_json()
-        if creds:
-            dest = self._claude_home_dir / ".credentials.json"
-            dest.write_text(creds, encoding="utf-8")
-            logger.info("Wrote credentials to %s", dest)
+        bundle = self._runtime.image_bundle
+        if bundle is not None and bundle.lima_install is not None:
+            bundle.lima_install(self._limactl, self._inst_name, self._guest_os)
+
+        if self._runtime.provision_credentials is not None:
+            self._runtime.provision_credentials(self._claude_home_dir)
 
     def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
         if isinstance(runtime.launch, WrappedCLI):

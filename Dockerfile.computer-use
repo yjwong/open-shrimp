@@ -1,14 +1,34 @@
 # Container image for computer use (GUI interaction) contexts.
 #
-# Extends the base openshrimp-claude image with a headless Wayland
-# compositor (labwc), input injection (wlrctl), screenshot capture
-# (grim), VNC server (wayvnc), a web browser (Chromium via Playwright),
-# and Playwright MCP for structured browser automation.
+# Extends a base image (Claude or OpenCode) with a headless Wayland
+# compositor (labwc), input injection (wlrctl), screenshot capture (grim),
+# VNC server (wayvnc), a web browser (Chromium via Playwright), and
+# Playwright MCP for structured browser automation.
 #
-# Build:
-#   docker build -f Dockerfile.computer-use -t openshrimp-computer-use:latest .
+# Build (Claude flavour):
+#   docker build -f Dockerfile.computer-use \
+#       --build-arg BASE_IMAGE=openshrimp-claude:latest \
+#       --build-arg INSTALL_CLAUDE_CODE=true \
+#       --build-arg GUEST_HOME=/home/claude \
+#       -t openshrimp-computer-use:latest .
+#
+# Build (OpenCode flavour):
+#   docker build -f Dockerfile.computer-use \
+#       --build-arg BASE_IMAGE=openshrimp-opencode:latest \
+#       --build-arg INSTALL_CLAUDE_CODE=false \
+#       --build-arg GUEST_HOME=/home/openshrimp \
+#       -t openshrimp-opencode-computer-use:latest .
 
-FROM openshrimp-claude:latest
+ARG BASE_IMAGE=openshrimp-claude:latest
+ARG INSTALL_CLAUDE_CODE=true
+ARG GUEST_HOME=/home/claude
+
+FROM ${BASE_IMAGE}
+
+# Re-declare ARGs after FROM so they're available in RUN/COPY layers.
+ARG INSTALL_CLAUDE_CODE
+ARG GUEST_HOME
+ENV GUEST_HOME=${GUEST_HOME}
 
 # Wayland compositor + tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -61,12 +81,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /tmp/build
 
 # Pre-create directories for labwc config and screenshots.
-RUN mkdir -p /home/claude/.config/labwc /tmp/screenshots \
-    && chmod -R 777 /home/claude/.config /tmp/screenshots
+RUN mkdir -p ${GUEST_HOME}/.config/labwc /tmp/screenshots \
+    && chmod -R 777 ${GUEST_HOME}/.config /tmp/screenshots
 
 # Copy labwc configuration.
-COPY computer-use/rc.xml /home/claude/.config/labwc/rc.xml
-COPY computer-use/autostart /home/claude/.config/labwc/autostart
+COPY computer-use/rc.xml ${GUEST_HOME}/.config/labwc/rc.xml
+COPY computer-use/autostart ${GUEST_HOME}/.config/labwc/autostart
 
 # Copy entrypoint script.
 COPY computer-use/entrypoint.sh /usr/local/bin/computer-use-entrypoint.sh
@@ -78,19 +98,25 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # Pre-install Playwright MCP and its Chromium browser so the CLI
-# doesn't need to download anything at runtime.
-RUN npm install -g --cache /tmp/npm-cache @anthropic-ai/claude-code@latest @playwright/mcp \
+# doesn't need to download anything at runtime.  Claude Code is
+# conditionally installed for the Claude flavour.
+RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then \
+        npm install -g --cache /tmp/npm-cache \
+            @anthropic-ai/claude-code@latest @playwright/mcp ; \
+    else \
+        npm install -g --cache /tmp/npm-cache @playwright/mcp ; \
+    fi \
     && npx playwright install --with-deps chromium \
     && rm -rf /tmp/npm-cache \
-    && chmod -R 777 /home/claude/.cache \
-    && rm -rf /home/claude/.npm && mkdir -p /home/claude/.npm && chmod 777 /home/claude/.npm
+    && chmod -R 777 ${GUEST_HOME}/.cache \
+    && rm -rf ${GUEST_HOME}/.npm && mkdir -p ${GUEST_HOME}/.npm && chmod 777 ${GUEST_HOME}/.npm
 
 # Chromium profile: skip first-run UI and disable crash reporter.
-# Playwright installs Chromium under /home/claude/.cache/ms-playwright/.
-RUN CHROMIUM_DIR=$(find /home/claude/.cache/ms-playwright -maxdepth 2 -name 'chromium*' -type d | head -1) \
-    && mkdir -p /home/claude/.config/chromium/Default \
+# Playwright installs Chromium under ${GUEST_HOME}/.cache/ms-playwright/.
+RUN CHROMIUM_DIR=$(find ${GUEST_HOME}/.cache/ms-playwright -maxdepth 2 -name 'chromium*' -type d | head -1) \
+    && mkdir -p ${GUEST_HOME}/.config/chromium/Default \
     && printf '{\n  "browser": { "check_default_browser": false },\n  "profile": { "default_content_setting_values": {} }\n}\n' \
-    > /home/claude/.config/chromium/Default/Preferences \
+    > ${GUEST_HOME}/.config/chromium/Default/Preferences \
     && printf '%s\n' '{"countrycode_at_install":"","default_browser_infobar_last_declined":"","default_browser_set_once":"","metrics":{"reporting_enabled":false},"session":{"restore_on_startup":4}}' \
-    > /home/claude/.config/chromium/'Local State' \
-    && chmod -R 777 /home/claude/.config/chromium
+    > "${GUEST_HOME}/.config/chromium/Local State" \
+    && chmod -R 777 ${GUEST_HOME}/.config/chromium

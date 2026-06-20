@@ -8,7 +8,9 @@ and dispatches on its :attr:`AgentRuntime.launch` strategy.
 
 This module is intentionally import-light: it must not pull in any agent SDK or
 backend at module load.  It describes data and hooks plus a small amount of
-launch plumbing shared by every sandbox.
+launch plumbing shared by every sandbox.  Per-agent constants, bundle
+constructors, and runtime factories live under
+``open_shrimp.backend.<agent>/``; the sandbox layer never names an agent.
 
 Two launch strategies exist.  :class:`WrappedCLI` — the runtime tells the
 sandbox "launch me by generating a wrapped-CLI script; you know how", and the
@@ -136,7 +138,8 @@ class ImageBundle:
     touches one constructor in the runtime module.
 
     Docker uses every field; the VM backends consult ``tag_suffix`` only as an
-    opaque key (their guest binary is the operator's precondition).
+    opaque key (their guest binary is the operator's precondition unless
+    ``guest_installer`` is set).
 
     ``tag_suffix`` is the per-bundle slug appended after the instance prefix to
     form the image tag (e.g. ``openshrimp-<instance>-<suffix>:latest``).
@@ -148,6 +151,24 @@ class ImageBundle:
     container's ``HOME``.  ``dind_user`` is the username the DinD entrypoint's
     passwd rewrite registers — defaults to ``"claude"`` for the wrapped-CLI
     image; the served image overrides it to match its own ``HOME``.
+
+    ``computer_use_image`` is the optional layered "computer-use" image tag
+    built on top of the base bundle.  ``None`` → this runtime has no
+    computer-use variant.
+
+    ``computer_use_build_args`` is the extra build args injected into the
+    layered computer-use build.  The sandbox helper forwards these as
+    ``--build-arg`` flags, so agent-specific build knobs (e.g.
+    ``INSTALL_CLAUDE_CODE``) live next to the bundle constructor rather than
+    the sandbox layer.
+
+    ``libvirt_install`` and ``lima_install`` are optional in-guest installers
+    for the VM sandboxes.  When set, the matching sandbox's
+    ``provision_workspace`` calls them; otherwise the guest binary is the
+    operator's precondition.  Each signature is backend-shaped: libvirt
+    passes SSH credentials, Lima passes the ``limactl`` instance handle.
+    Bodies live in the per-backend module under
+    ``open_shrimp.backend.<agent>/``.
     """
 
     tag_suffix: str
@@ -157,6 +178,10 @@ class ImageBundle:
     build_arg: tuple[str, str]
     guest_home: str
     dind_user: str = "claude"
+    computer_use_image: str | None = None
+    computer_use_build_args: tuple[tuple[str, str], ...] = ()
+    libvirt_install: Callable[[Path, int, str], None] | None = None
+    lima_install: Callable[[str, str, str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +233,14 @@ class AgentRuntime:
     ``re_inject_on_dispatch=True`` and leaves the watcher hook at default; a
     runtime whose host-side store is *not* re-read per session populates the
     watcher hook and leaves ``re_inject_on_dispatch=False``.
+
+    ``provision_credentials`` is an optional host→guest credential-provisioning
+    hook called from VM sandboxes' ``provision_workspace`` after the
+    ``guest_installer``.  Set when the runtime has a host-side credential file
+    that VM sandboxes need to copy into the virtiofs-shared agent home (e.g.
+    Claude's ``~/.claude/.credentials.json``).  ``None`` → no host-side
+    credentials to copy (OpenCode's ``auth.json`` is covered by
+    ``runtime.inject`` via the served-endpoint home mount).
     """
 
     name: str
@@ -234,6 +267,8 @@ class AgentRuntime:
         default=_no_write_cred_target,
     )
 
+    provision_credentials: Callable[[Path], None] | None = None
+
 
 @dataclass(frozen=True)
 class AgentHandle:
@@ -248,203 +283,6 @@ class AgentHandle:
     cli_path: str | None = None
     cleanup_paths: list[str] = field(default_factory=list)
     endpoint: Any = None
-
-
-def claude_runtime(home_dir: Path, *, guest_dir: str = "/home/claude/.claude") -> AgentRuntime:
-    """Build the Claude :class:`AgentRuntime`.
-
-    ``home_dir`` is the host-side agent home from
-    :meth:`SandboxManager.agent_home_dir`.  For Claude the resumable session
-    corpus lives under ``home_dir/projects`` (``holds_session_state=True``).
-
-    The ``inject`` hook copies the host ``~/.claude/.credentials.json`` into the
-    home dir — the same copy-in the backends perform inline today.  It is
-    declared here as the agent's contribution; the backends and the cred-sync
-    watcher remain the live path, so this hook is a no-op-safe convenience the
-    served-endpoint work can repurpose.  ``env`` declares the
-    ``ANTHROPIC_API_KEY`` forwarding contract; the wrappers do the actual
-    forwarding.
-    """
-    import os
-
-    def inject(target_home: Path) -> None:
-        host_credentials = Path.home() / ".claude" / ".credentials.json"
-        if host_credentials.exists():
-            import shutil
-
-            target_home.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(
-                str(host_credentials),
-                str(target_home / ".credentials.json"),
-            )
-
-    env: dict[str, str] = {}
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        env["ANTHROPIC_API_KEY"] = api_key
-
-    from open_shrimp.backend.claude_sdk.binary import find_claude_binary
-    from open_shrimp.backend.claude_sdk.cred_watcher import (
-        host_credentials_available,
-        watch_host_credentials,
-        write_target,
-    )
-
-    return AgentRuntime(
-        name="claude",
-        home_mount=HomeMount(
-            host_dir=home_dir,
-            guest_dir=guest_dir,
-            holds_session_state=True,
-        ),
-        inject=inject,
-        env=env,
-        launch=WrappedCLI(),
-        image_bundle=ImageBundle(
-            tag_suffix="claude",
-            bundled_dockerfile="Dockerfile.claude",
-            binary_finder=find_claude_binary,
-            context_binary_name="claude",
-            build_arg=("CLAUDE_CLI", "claude"),
-            guest_home="/home/claude",
-            dind_user="claude",
-        ),
-        # Claude refreshes OAuth tokens independently of dispatches; a
-        # sandboxed process holding a stale file silently 401s.  The watcher
-        # fans host-side refreshes out to every registered sandbox home.
-        watch_host_credentials=watch_host_credentials,
-        host_credentials_available=host_credentials_available,
-        write_cred_target=write_target,
-    )
-
-
-def opencode_runtime(
-    home_dir: Path, *, context_name: str, provider_id: str | None
-) -> AgentRuntime:
-    """Build the OpenCode :class:`AgentRuntime` (the served-endpoint flavour).
-
-    The OpenCode home and the managed-plugin data dir are derived from
-    ``context_name`` via the *same* per-context host dirs the sandbox actually
-    bind-mounts (``get_opencode_home_dir`` / ``get_openshrimp_data_dir`` in
-    ``opencode_runtime``) — so the injected ``auth.json`` and plugin config
-    land where the guest sees them.  ``home_dir`` is accepted for signature
-    symmetry with :func:`claude_runtime` but is not used.
-
-    Contributions:
-
-    * ``home_mount`` — the OpenCode data home (``get_opencode_home_dir``),
-      mapped to ``{SANDBOX_HOME}/.local/share/opencode`` in the guest; it holds
-      the resumable session corpus (``holds_session_state=True``).
-    * ``inject`` — sync the provider-filtered host ``auth.json`` into the
-      home dir (``_sync_opencode_auth`` writes ``auth.json`` *directly* into
-      the dir it is given, so it is handed the mounted opencode-home), and
-      prepare the managed plugin config under the per-context openshrimp-data
-      dir the guest sources ``OPENCODE_CONFIG`` from.
-    * ``env`` — ``OPENCODE_CONFIG`` (managed plugin config path, in the guest)
-      and ``OPENCODE_SERVER_PASSWORD`` (the served-endpoint Basic-auth secret).
-      The live password is minted by the sandbox's served body per launch;
-      this declares the contract.
-    * ``launch`` — :class:`ServedEndpoint` running ``opencode serve`` on
-      :data:`OPENCODE_GUEST_PORT`.
-    """
-    # Function-level import: docker_helpers pulls in subprocess +
-    # backend.claude_sdk.binary at module load, so importing it here keeps this
-    # module import-light (no heavy/circular import from the sandbox package's
-    # eager surface).
-    from open_shrimp.backend.opencode.process import OpenCodeEndpoint
-    from open_shrimp.sandbox.opencode_plugins import (
-        ensure_opencode_plugin_config,
-    )
-    from open_shrimp.sandbox.opencode_runtime import (
-        OPENCODE_GUEST_PORT,
-        _drain_opencode_output,
-        _find_opencode_binary,
-        _sync_opencode_auth,
-        _wait_for_opencode_ready,
-        get_opencode_home_dir,
-        get_openshrimp_data_dir,
-    )
-    from open_shrimp.sandbox.skill_paths import SANDBOX_HOME
-
-    opencode_home = get_opencode_home_dir(context_name)
-    openshrimp_data = get_openshrimp_data_dir(context_name)
-    guest_home = f"{SANDBOX_HOME}/.local/share/opencode"
-    guest_config = (
-        f"{SANDBOX_HOME}/.local/share/openshrimp/"
-        "managed-opencode/plugin-config.json"
-    )
-
-    def inject(target_home: Path) -> None:
-        # ``target_home`` is the OpenCode data home (host_dir below).
-        _sync_opencode_auth(provider_id, target_home)
-        try:
-            ensure_opencode_plugin_config(openshrimp_data)
-        except Exception:
-            logger.warning(
-                "Failed to prepare OpenShrimp OpenCode plugin config",
-                exc_info=True,
-            )
-
-    def make_endpoint(base_url: str, auth_header: str, owner: object) -> Any:
-        return OpenCodeEndpoint(
-            base_url=base_url, auth_header=auth_header, owner=owner,
-        )
-
-    def drain_output(proc: "subprocess.Popen[str]") -> None:
-        _drain_opencode_output(proc, None)
-
-    serve_argv = [
-        "opencode",
-        "serve",
-        "--hostname",
-        "0.0.0.0",
-        "--port",
-        str(OPENCODE_GUEST_PORT),
-        "--print-logs",
-    ]
-
-    return AgentRuntime(
-        name="opencode",
-        home_mount=HomeMount(
-            host_dir=opencode_home,
-            guest_dir=guest_home,
-            holds_session_state=True,
-        ),
-        inject=inject,
-        env={"OPENCODE_CONFIG": guest_config},
-        launch=ServedEndpoint(
-            serve_argv=serve_argv,
-            guest_port=OPENCODE_GUEST_PORT,
-            home_mounts=(
-                GuestMount(
-                    host_dir=opencode_home,
-                    guest_mount_point=f"{SANDBOX_HOME}/.local/share/opencode",
-                ),
-                GuestMount(
-                    host_dir=openshrimp_data,
-                    guest_mount_point=f"{SANDBOX_HOME}/.local/share/openshrimp",
-                ),
-            ),
-            auth_username="opencode",
-            password_env_var="OPENCODE_SERVER_PASSWORD",
-            make_endpoint=make_endpoint,
-            wait_ready=_wait_for_opencode_ready,
-            drain_output=drain_output,
-        ),
-        image_bundle=ImageBundle(
-            tag_suffix="opencode",
-            bundled_dockerfile="Dockerfile.opencode",
-            binary_finder=_find_opencode_binary,
-            context_binary_name="opencode",
-            build_arg=("OPENCODE_BIN", "opencode"),
-            guest_home=SANDBOX_HOME,
-            dind_user="openshrimp",
-        ),
-        # For OAuth-backed providers ``auth.json`` is rewritten on refresh,
-        # but ``opencode serve`` re-reads it per request, so a per-dispatch
-        # re-inject is sufficient — no long-lived watcher needed.
-        re_inject_on_dispatch=True,
-    )
 
 
 def run_served_endpoint(

@@ -166,6 +166,7 @@ class LibvirtSandbox:
         # the served process.  The wrapped-CLI launch contributes none.  The
         # mount SOURCE must match the inject TARGET (the runtime's host_dir)
         # or the guest never sees the synced files.
+        self._runtime = runtime
         launch = runtime.launch if runtime else None
         if isinstance(launch, ServedEndpoint):
             self._served_home_mounts: tuple[GuestMount, ...] = launch.home_mounts
@@ -550,62 +551,22 @@ class LibvirtSandbox:
             )
 
     def provision_workspace(self) -> None:
-        """Provision the workspace: ensure Claude CLI is installed in the VM."""
+        """Install the bundle's CLI binary and copy credentials into the VM."""
         assert self._ssh_port is not None
-        ssh_key = self._sdir / "ssh_key"
+        if self._runtime is None:
+            return
 
-        from open_shrimp.backend.claude_sdk.binary import find_claude_binary
-        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
-
-        cli_binary = find_claude_binary()
-        ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
-        scp_opts = [
-            "-i", str(ssh_key),
-            "-P", str(self._ssh_port),
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-        ]
-
-        # Check if claude is already available in the VM.
-        result = subprocess.run(
-            ["ssh", *ssh_opts, "claude@localhost", "which", "claude"],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            # SCP the Claude CLI binary into the VM.
-            logger.info("Installing Claude CLI into VM %s...", self._dom_name)
-            subprocess.run(
-                [
-                    "scp", *scp_opts,
-                    str(cli_binary),
-                    "claude@localhost:/tmp/claude",
-                ],
-                check=True,
-                capture_output=True,
+        # Cloud-init creates a single ``claude`` user in the guest with
+        # NOPASSWD sudo (see ``_build_cloud_init_user_data``); both the
+        # Claude and OpenCode installers SSH in as that user.
+        bundle = self._runtime.image_bundle
+        if bundle is not None and bundle.libvirt_install is not None:
+            bundle.libvirt_install(
+                self._sdir / "ssh_key", self._ssh_port, "claude",
             )
-            # Move to /usr/local/bin (needs sudo).
-            subprocess.run(
-                [
-                    "ssh", *ssh_opts,
-                    "claude@localhost",
-                    "--",
-                    "sudo mv /tmp/claude /usr/local/bin/claude && sudo chmod +x /usr/local/bin/claude",
-                ],
-                check=True,
-                capture_output=True,
-            )
-            logger.info("Claude CLI installed in VM %s", self._dom_name)
 
-        # Copy credentials into the host-side claude-home directory.
-        # This directory is shared into the VM as /home/claude/.claude
-        # via virtiofs/9p, so the CLI picks them up automatically.
-        host_credentials = Path.home() / ".claude" / ".credentials.json"
-        if host_credentials.exists():
-            import shutil
-            dest = self._claude_home_dir / ".credentials.json"
-            shutil.copy2(str(host_credentials), str(dest))
-            logger.info("Copied credentials to %s", dest)
+        if self._runtime.provision_credentials is not None:
+            self._runtime.provision_credentials(self._claude_home_dir)
 
     def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
         if isinstance(runtime.launch, WrappedCLI):

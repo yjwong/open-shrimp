@@ -5,10 +5,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from open_shrimp.backend.claude_sdk.runtime import claude_runtime
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     WrappedCLI,
-    claude_runtime,
 )
 from open_shrimp.sandbox.docker import DockerSandbox
 from open_shrimp.sandbox.libvirt import LibvirtSandbox

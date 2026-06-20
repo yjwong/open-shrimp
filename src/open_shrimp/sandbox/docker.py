@@ -29,9 +29,9 @@ import open_shrimp.sandbox.docker_helpers as _dh
 from open_shrimp.sandbox.docker_helpers import (
     build_cli_wrapper as _build_cli_wrapper,
     container_name as _container_name_fn,
-    ensure_computer_use_image as _ensure_computer_use_image,
     ensure_container_running as _ensure_container_running,
     ensure_image as _ensure_image,
+    ensure_layered_computer_use_image as _ensure_layered_computer_use_image,
     get_screenshots_dir as _get_screenshots_dir,
     get_text_input_active as _get_text_input_active,
     get_text_input_state_path as _get_text_input_state_path,
@@ -85,16 +85,20 @@ class DockerSandbox:
             self._served_home_mounts = ()
             self._served_guest_port = None
 
-        # The live base tag is resolved from the ``_dh`` module constants
-        # (so the instance prefix is honoured); the bundle's ``tag_suffix``
-        # selects which constant.  Custom Dockerfile and computer-use take
-        # precedence over the bundle-selected base.
+        # Custom Dockerfile and computer-use take precedence over the
+        # bundle's base tag.
         if custom_dockerfile:
             base = _dh._base_image_for(self._bundle)
             repo = base.rsplit(":", 1)[0]
             self._image_name = f"{repo}:{context_name}"
         elif computer_use:
-            self._image_name = _dh.COMPUTER_USE_IMAGE
+            image = self._bundle.computer_use_image
+            if image is None:
+                raise ValueError(
+                    f"Runtime bundle {self._bundle.tag_suffix!r} has no "
+                    f"computer-use image",
+                )
+            self._image_name = image
         else:
             self._image_name = _dh._base_image_for(self._bundle)
 
@@ -126,18 +130,19 @@ class DockerSandbox:
 
     def ensure_environment(self, *, log_file: Path | None = None) -> None:
         if self._computer_use and self._custom_dockerfile:
-            _ensure_computer_use_image(log_file=log_file)
+            _ensure_layered_computer_use_image(
+                self._bundle, log_file=log_file,
+            )
             _ensure_image(
                 bundle=self._bundle,
                 image_name=self._image_name,
                 dockerfile=self._custom_dockerfile,
-                base_image=_dh.COMPUTER_USE_IMAGE,
+                base_image=self._bundle.computer_use_image,
                 log_file=log_file,
             )
         elif self._computer_use:
-            _ensure_computer_use_image(
-                image_name=self._image_name,
-                log_file=log_file,
+            _ensure_layered_computer_use_image(
+                self._bundle, log_file=log_file,
             )
         else:
             _ensure_image(

@@ -69,11 +69,10 @@ class OpenCodeBackend:
         the per-context host dirs the sandbox actually bind-mounts.
         """
         from open_shrimp.backend.opencode.options import split_provider_model
-        from open_shrimp.sandbox.agent_runtime import opencode_runtime
+        from open_shrimp.backend.opencode.runtime import opencode_runtime
 
         provider_id = split_provider_model(model)[0]
         return opencode_runtime(
-            home_dir,
             context_name=context_name,
             provider_id=provider_id,
         )
@@ -158,7 +157,7 @@ class OpenCodeBackend:
             # The OpenCode runtime maps the host opencode-home (the same dir
             # returned here) to the guest's ``$XDG_DATA_HOME/opencode`` — the
             # directory the in-guest ``opencode serve`` writes its SQLite DB
-            # to.  See ``sandbox/agent_runtime.py:opencode_runtime``.
+            # to.  See ``backend/opencode/runtime.py:opencode_runtime``.
             from open_shrimp.sandbox.opencode_runtime import (
                 get_opencode_home_dir,
             )

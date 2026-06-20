@@ -33,12 +33,12 @@ class OpenCodeEndpoint:
 
 
 def _find_binary() -> str:
-    # Single resolution policy lives in the sandbox runtime layer (which owns
-    # binary discovery for serving); re-raise as the backend's error type.
-    from open_shrimp.sandbox.opencode_runtime import _find_opencode_binary
+    # Single resolution policy lives in the backend's binary module; re-raise
+    # as the backend's error type for the served-process spawn path.
+    from open_shrimp.backend.opencode.binary import find_opencode_binary
 
     try:
-        return _find_opencode_binary()
+        return find_opencode_binary()
     except RuntimeError as exc:
         raise OpenCodeNotFoundError(
             "Could not find the `opencode` binary. Set OPENCODE_BIN or install "

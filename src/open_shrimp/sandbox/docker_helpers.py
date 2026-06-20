@@ -88,8 +88,9 @@ _IMAGE_PREFIX = "openshrimp"
 # ``set_image_prefix``.
 CONTAINER_IMAGE = f"{_IMAGE_PREFIX}-claude:latest"
 
-# Docker image name for computer-use (GUI) contexts.
+# Docker image names for computer-use (GUI) contexts — one tag per bundle.
 COMPUTER_USE_IMAGE = f"{_IMAGE_PREFIX}-computer-use:latest"
+OPENCODE_COMPUTER_USE_IMAGE = f"{_IMAGE_PREFIX}-opencode-computer-use:latest"
 
 
 def set_image_prefix(prefix: str) -> None:
@@ -100,30 +101,11 @@ def set_image_prefix(prefix: str) -> None:
     tag is derived from this prefix + the bundle's ``tag_suffix``.
     """
     global _IMAGE_PREFIX, CONTAINER_IMAGE, COMPUTER_USE_IMAGE
+    global OPENCODE_COMPUTER_USE_IMAGE
     _IMAGE_PREFIX = prefix
     CONTAINER_IMAGE = f"{prefix}-claude:latest"
     COMPUTER_USE_IMAGE = f"{prefix}-computer-use:latest"
-
-
-def claude_image_bundle() -> ImageBundle:
-    """Construct the wrapped-CLI (Claude) :class:`ImageBundle`.
-
-    The computer-use image build, the PTY+JSONL spike, and tests call this
-    explicitly when they need the Claude base image; production sandboxes
-    receive a bundle from the runtime and never invoke this.  Resolved
-    lazily so this module's import stays light (no SDK imports at load).
-    """
-    from open_shrimp.backend.claude_sdk.binary import find_claude_binary
-
-    return ImageBundle(
-        tag_suffix="claude",
-        bundled_dockerfile="Dockerfile.claude",
-        binary_finder=find_claude_binary,
-        context_binary_name="claude",
-        build_arg=("CLAUDE_CLI", "claude"),
-        guest_home="/home/claude",
-        dind_user="claude",
-    )
+    OPENCODE_COMPUTER_USE_IMAGE = f"{prefix}-opencode-computer-use:latest"
 
 
 def _base_image_for(bundle: ImageBundle) -> str:
@@ -309,30 +291,40 @@ def ensure_image(
     logger.info("Successfully built container image %s", image_name)
 
 
-def ensure_computer_use_image(
-    image_name: str = COMPUTER_USE_IMAGE,
+def ensure_layered_computer_use_image(
+    bundle: ImageBundle,
+    *,
     log_file: Path | None = None,
 ) -> None:
-    """Ensure the computer-use container image exists, building if necessary.
+    """Ensure *bundle*'s layered computer-use image exists, building if needed.
 
-    Builds the base ``openshrimp-claude`` image first (if needed), then
-    layers ``Dockerfile.computer-use`` on top with labwc, wlrctl, grim,
-    wayvnc, and Chromium.
+    Builds the bundle's base image first (if missing), then layers
+    ``Dockerfile.computer-use`` on top with the bundle's
+    ``computer_use_build_args`` (e.g. ``INSTALL_CLAUDE_CODE``,
+    ``GUEST_HOME``) forwarded as ``--build-arg`` flags.  Fully
+    bundle-driven — no agent-name comparisons.
     """
+    if bundle.computer_use_image is None:
+        raise ValueError(
+            f"Bundle {bundle.tag_suffix!r} has no computer_use_image; "
+            f"cannot build a layered computer-use image."
+        )
+    image_name = bundle.computer_use_image
+    base_image = _base_image_for(bundle)
+
     image_exists = subprocess.run(
         ["docker", "image", "inspect", image_name],
         capture_output=True,
     ).returncode == 0
 
-    # Check if the base image is newer than the computer-use image.
     needs_rebuild = False
     if image_exists:
-        base_ts = _image_created_ts(CONTAINER_IMAGE)
+        base_ts = _image_created_ts(base_image)
         derived_ts = _image_created_ts(image_name)
         if base_ts and derived_ts and base_ts > derived_ts:
             logger.info(
                 "Base image %s (%s) is newer than %s (%s), rebuilding",
-                CONTAINER_IMAGE, base_ts, image_name, derived_ts,
+                base_image, base_ts, image_name, derived_ts,
             )
             needs_rebuild = True
 
@@ -340,12 +332,10 @@ def ensure_computer_use_image(
         logger.info("Computer-use image %s already exists", image_name)
         return
 
-    # Ensure the Claude base image exists first; computer-use layers on top
-    # of it.  The bundle is constructed explicitly so this call site is not
-    # relying on a silent default in ``ensure_image``.
+    # Ensure the bundle's base image exists before layering on top.
     ensure_image(
-        bundle=claude_image_bundle(),
-        image_name=CONTAINER_IMAGE,
+        bundle=bundle,
+        image_name=base_image,
         dockerfile=None,
         log_file=log_file,
     )
@@ -354,6 +344,11 @@ def ensure_computer_use_image(
         logger.info("Rebuilding computer-use image %s...", image_name)
     else:
         logger.info("Computer-use image %s not found, building...", image_name)
+
+    extra_args: list[str] = ["--build-arg", f"BASE_IMAGE={base_image}"]
+    extra_args.extend(["--build-arg", f"GUEST_HOME={bundle.guest_home}"])
+    for arg_name, arg_value in bundle.computer_use_build_args:
+        extra_args.extend(["--build-arg", f"{arg_name}={arg_value}"])
 
     repo_root = Path(__file__).resolve().parent.parent.parent.parent
     repo_dockerfile = repo_root / "Dockerfile.computer-use"
@@ -365,6 +360,7 @@ def ensure_computer_use_image(
             image_name=image_name,
             build_dir=str(repo_root),
             dockerfile_name="Dockerfile.computer-use",
+            extra_build_args=extra_args,
             log_file=log_file,
         )
     else:
@@ -375,7 +371,6 @@ def ensure_computer_use_image(
             build_path = Path(build_dir)
             pkg = _pkg_files("open_shrimp")
 
-            # Copy Dockerfile.
             dockerfile_text = pkg.joinpath(
                 "Dockerfile.computer-use"
             ).read_text(encoding="utf-8")
@@ -383,17 +378,19 @@ def ensure_computer_use_image(
                 dockerfile_text, encoding="utf-8",
             )
 
-            # Copy computer-use assets.
             cu_dir = build_path / "computer-use"
             cu_dir.mkdir()
             for asset_name in ("entrypoint.sh", "rc.xml", "autostart"):
                 asset = pkg.joinpath("computer-use", asset_name)
-                (cu_dir / asset_name).write_text(asset.read_text(encoding="utf-8"), encoding="utf-8")
+                (cu_dir / asset_name).write_text(
+                    asset.read_text(encoding="utf-8"), encoding="utf-8",
+                )
 
             _docker_build(
                 image_name=image_name,
                 build_dir=str(build_path),
                 dockerfile_name="Dockerfile.computer-use",
+                extra_build_args=extra_args,
                 log_file=log_file,
             )
 

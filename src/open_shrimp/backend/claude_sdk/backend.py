@@ -74,7 +74,7 @@ class ClaudeSdkBackend:
         ``context_name`` and ``model`` are unused — the wrapped-CLI runtime
         needs only the host-side home dir.
         """
-        from open_shrimp.sandbox.agent_runtime import claude_runtime
+        from open_shrimp.backend.claude_sdk.runtime import claude_runtime
 
         return claude_runtime(home_dir)
 
@@ -136,7 +136,7 @@ class ClaudeSdkBackend:
             and ctx.sandbox is not None
             and ctx.sandbox.enabled
         ):
-            from open_shrimp.sandbox.agent_runtime import claude_runtime
+            from open_shrimp.backend.claude_sdk.runtime import claude_runtime
 
             mgr = sandbox_managers.get(ctx.sandbox.backend)
             if mgr is not None:

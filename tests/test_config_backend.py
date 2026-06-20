@@ -120,9 +120,9 @@ def test_default_context_backend_omitted_from_serialized_dict():
 @pytest.fixture
 def _stub_opencode_binary(monkeypatch: pytest.MonkeyPatch):
     """Stub the opencode binary discovery so validation can reach the rest."""
-    import open_shrimp.sandbox.opencode_runtime as runtime
+    import open_shrimp.backend.opencode.binary as binary
 
-    monkeypatch.setattr(runtime, "_find_opencode_binary", lambda: "/fake/opencode")
+    monkeypatch.setattr(binary, "find_opencode_binary", lambda: "/fake/opencode")
 
 
 def _opencode_raw(**ctx_extra):
@@ -183,20 +183,20 @@ def test_opencode_top_level_still_validates_each_context(_stub_opencode_binary):
         _validate_raw(raw)
 
 
-def test_opencode_per_context_rejects_computer_use(_stub_opencode_binary):
+def test_opencode_per_context_allows_computer_use(_stub_opencode_binary):
+    """OpenCode + computer_use validates: the layered image carries opencode."""
     raw = _opencode_raw(
         backend="opencode",
         model="openai/gpt-5.5",
         sandbox={"backend": "docker", "computer_use": True},
     )
-    with pytest.raises(ValueError, match="computer_use is not supported"):
-        _validate_raw(raw)
+    _validate_raw(raw)  # no raise
 
 
 def test_claude_context_allows_computer_use_when_other_context_is_opencode(
     _stub_opencode_binary,
 ):
-    """The computer_use ban only fires for opencode-backed contexts."""
+    """Both Claude- and OpenCode-backed contexts may enable computer_use."""
     raw = _base_raw()
     raw["contexts"]["claude_with_gui"] = {
         "directory": "/tmp/c",

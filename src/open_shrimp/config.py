@@ -344,20 +344,11 @@ def _validate_raw(raw: dict) -> None:
                     f"provider-qualified model (e.g. 'openai/gpt-5.5'): {exc}"
                 ) from exc
 
-            sandbox_raw = ctx.get("sandbox") or {}
-            container_raw = ctx.get("container") or {}
-            if sandbox_raw.get("computer_use") or container_raw.get("computer_use"):
-                raise ValueError(
-                    f"Context '{name}': computer_use is not supported with "
-                    f"backend 'opencode' (the computer-use image is "
-                    f"Claude-based and carries no opencode binary)."
-                )
-
         # Check the opencode binary exactly once across all opencode contexts.
-        from open_shrimp.sandbox.opencode_runtime import _find_opencode_binary
+        from open_shrimp.backend.opencode.binary import find_opencode_binary
 
         try:
-            _find_opencode_binary()
+            find_opencode_binary()
         except RuntimeError as exc:
             raise ValueError(
                 f"backend 'opencode' selected but the opencode binary could "

@@ -1338,6 +1338,65 @@ def _ssh_common_opts(ssh_key: Path, ssh_port: int) -> list[str]:
     ]
 
 
+def _scp_common_opts(ssh_key: Path, ssh_port: int) -> list[str]:
+    """Return common SCP options (scp uses ``-P`` for port; ssh uses ``-p``)."""
+    return [
+        "-i", str(ssh_key),
+        "-P", str(ssh_port),
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
+    ]
+
+
+def install_cli_via_ssh(
+    binary_name: str,
+    host_binary_path: str,
+    *,
+    ssh_key: Path,
+    ssh_port: int,
+    ssh_user: str,
+) -> None:
+    """Install *binary_name* into ``/usr/local/bin`` of a libvirt VM.
+
+    Probes via SSH (skips if the binary is already on ``PATH``), SCPs
+    *host_binary_path* into ``/tmp``, then ``sudo mv``s + chmods it.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    ssh_opts = _ssh_common_opts(ssh_key, ssh_port)
+    scp_opts = _scp_common_opts(ssh_key, ssh_port)
+    remote = f"{ssh_user}@localhost"
+
+    result = subprocess.run(
+        ["ssh", *ssh_opts, remote, "which", binary_name],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return
+
+    _logger.info(
+        "Installing %s into VM (ssh port %d)...", binary_name, ssh_port,
+    )
+    tmp_path = f"/tmp/{binary_name}"
+    final_path = f"/usr/local/bin/{binary_name}"
+    subprocess.run(
+        ["scp", *scp_opts, host_binary_path, f"{remote}:{tmp_path}"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "ssh", *ssh_opts, remote, "--",
+            f"sudo mv {tmp_path} {final_path} && sudo chmod +x {final_path}",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    _logger.info("%s installed in VM (ssh port %d)", binary_name, ssh_port)
+
+
 # ---------------------------------------------------------------------------
 # CLI wrapper script
 # ---------------------------------------------------------------------------

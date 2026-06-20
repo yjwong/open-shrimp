@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
+from typing import Callable
 
 import yaml
 from open_shrimp.config import SandboxConfig
@@ -121,14 +122,6 @@ _CLOUD_IMAGES: dict[str, str] = {
         "ubuntu-24.04-server-cloudimg-amd64.img"
     ),
 }
-
-# Claude CLI binary download (GCS distribution).
-_CLAUDE_CLI_GCS_BASE = (
-    "https://storage.googleapis.com/"
-    "claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/"
-    "claude-code-releases"
-)
-
 
 # ---------------------------------------------------------------------------
 # Lima binary management (following tunnel.py pattern)
@@ -902,105 +895,75 @@ def limactl_shell_check(limactl: str, name: str) -> bool:
     return result.returncode == 0
 
 
+
+
 # ---------------------------------------------------------------------------
-# Claude CLI binary provisioning for Linux guest
+# Per-backend CLI binary provisioning for Linux guests
 # ---------------------------------------------------------------------------
 
 
-def _get_host_claude_version() -> str | None:
-    """Get the Claude CLI version from the host binary."""
-    from open_shrimp.backend.claude_sdk.binary import find_claude_binary
-
-    try:
-        claude = find_claude_binary()
-    except RuntimeError:
-        return None
-
-    try:
-        result = subprocess.run(
-            [claude, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            # Output format: "2.1.87 (Claude Code)" or just "2.1.87"
-            version = result.stdout.strip().split()[0]
-            return version
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-    return None
-
-
-def ensure_claude_cli_in_vm(
+def install_cli_in_linux_vm(
     limactl: str,
     inst_name: str,
+    binary_name: str,
     *,
-    guest_os: str = "linux",
+    url_for: Callable[[str, str], str],
+    version_resolver: Callable[[], str],
+    install_cmd_for: Callable[[str], str],
+    timeout: int = 300,
 ) -> None:
-    """Ensure the Claude CLI binary is installed inside the Lima VM.
+    """Install a binary into ``/usr/local/bin/<binary_name>`` inside a Linux Lima VM.
 
-    For Linux guests, downloads the Linux binary directly inside the VM
-    using the GCS distribution URL.  For macOS guests, copies the host
-    binary directly (same OS and architecture).
+    Combines the "already installed" probe with ``uname -m`` into one
+    ``limactl shell`` round-trip, resolves the download URL via *url_for*
+    (``url_for(version, arch_str)`` → ``str``; *arch_str* is ``"x64"`` or
+    ``"arm64"``), and runs the install command produced by *install_cmd_for*
+    (``install_cmd_for(download_url)`` → ``str`` — a single bash command).
+
+    *version_resolver* is only called when an install is actually needed.
     """
-    if guest_os == "macos":
-        from open_shrimp.sandbox.lima_macos_helpers import ensure_claude_cli_in_vm_macos
-        return ensure_claude_cli_in_vm_macos(limactl, inst_name)
-
-    # Check if claude is already available.
-    result = _run_limactl(
+    probe = _run_limactl(
         limactl,
-        ["shell", inst_name, "--", "which", "claude"],
+        [
+            "shell", inst_name, "--", "bash", "-c",
+            f"command -v {shlex.quote(binary_name)}; uname -m",
+        ],
         check=False,
         timeout=10,
     )
-    if result.returncode == 0:
-        logger.info("Claude CLI already installed in VM %s", inst_name)
+    lines = probe.stdout.strip().splitlines()
+    # ``command -v`` prints the path (then a blank line if missing); the
+    # final line is always ``uname -m``.  We need the last line for arch.
+    if not lines:
+        raise RuntimeError(
+            f"Failed to probe Lima VM {inst_name} for {binary_name}"
+        )
+    guest_arch = lines[-1].strip()
+    have_binary = len(lines) >= 2 and bool(lines[0].strip())
+    if have_binary:
+        logger.info("%s already installed in VM %s", binary_name, inst_name)
         return
 
-    # Determine version from host.
-    version = _get_host_claude_version()
-    if version is None:
-        raise RuntimeError(
-            "Cannot determine Claude CLI version from host. "
-            "Ensure 'claude' is installed and on your PATH."
-        )
-
-    # Determine guest architecture.
-    arch_result = _run_limactl(
-        limactl,
-        ["shell", inst_name, "--", "uname", "-m"],
-        check=True,
-        timeout=10,
-    )
-    guest_arch = arch_result.stdout.strip()
     if guest_arch == "aarch64":
-        platform_str = "linux-arm64"
+        arch_str = "arm64"
     elif guest_arch == "x86_64":
-        platform_str = "linux-x64"
+        arch_str = "x64"
     else:
         raise RuntimeError(f"Unsupported guest architecture: {guest_arch}")
 
-    download_url = f"{_CLAUDE_CLI_GCS_BASE}/{version}/{platform_str}/claude"
+    version = version_resolver()
+    download_url = url_for(version, arch_str)
     logger.info(
-        "Downloading Claude CLI %s (%s) into VM %s...",
-        version, platform_str, inst_name,
-    )
-
-    # Download and install inside the VM.
-    install_cmd = (
-        f"curl -fsSL {shlex.quote(download_url)} -o /tmp/claude "
-        f"&& sudo mv /tmp/claude /usr/local/bin/claude "
-        f"&& sudo chmod +x /usr/local/bin/claude"
+        "Downloading %s %s (linux-%s) into VM %s...",
+        binary_name, version, arch_str, inst_name,
     )
     _run_limactl(
         limactl,
-        ["shell", inst_name, "--", "bash", "-c", install_cmd],
+        ["shell", inst_name, "--", "bash", "-c", install_cmd_for(download_url)],
         check=True,
-        timeout=120,
+        timeout=timeout,
     )
-    logger.info("Claude CLI %s installed in VM %s", version, inst_name)
+    logger.info("%s %s installed in VM %s", binary_name, version, inst_name)
 
 
 # ---------------------------------------------------------------------------

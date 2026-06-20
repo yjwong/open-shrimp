@@ -1,7 +1,11 @@
-"""OpenCode runtime helpers — every piece of OpenCode-specific sandbox
-plumbing lives here so the backend-neutral sandbox layer never knows about
-OpenCode.  The Docker, libvirt, and lima backends consume only the
-``ServedEndpoint`` hooks the :func:`opencode_runtime` constructor wires up.
+"""OpenCode served-endpoint helpers consumed by the OpenCode runtime factory.
+
+These helpers describe per-context host-side state (the data-home and the
+plugin-config dir), the host→guest auth-file sync used by the runtime's
+``inject`` hook, and the ``opencode serve`` readiness/drain bodies wired
+into :class:`~open_shrimp.sandbox.agent_runtime.ServedEndpoint`.  The
+sandbox layer consumes only the served-endpoint hooks the runtime
+constructor wires up.
 
 Public surface:
 - ``OPENCODE_GUEST_PORT`` — fixed in-guest port for sandbox-owned servers.
@@ -10,7 +14,6 @@ Public surface:
 - ``_sync_opencode_auth`` — inject provider-filtered host auth into the sandbox.
 - ``_wait_for_opencode_ready`` — block until ``opencode serve`` is listening.
 - ``_drain_opencode_output`` — background drain of serve stdout to a log.
-- ``_find_opencode_binary`` — locate the ``opencode`` CLI on the host.
 """
 
 from __future__ import annotations
@@ -19,7 +22,6 @@ import json
 import logging
 import os
 import select
-import shutil
 import stat
 import subprocess
 import time
@@ -154,17 +156,3 @@ def _drain_opencode_output(
             _append_log(log_file, stripped)
 
 
-def _find_opencode_binary() -> str:
-    env_bin = os.environ.get("OPENCODE_BIN")
-    if env_bin and Path(env_bin).is_file():
-        return env_bin
-    home_bin = Path.home() / ".opencode" / "bin" / "opencode"
-    if home_bin.is_file():
-        return str(home_bin)
-    which = shutil.which("opencode")
-    if which:
-        return which
-    raise RuntimeError(
-        "Could not find the `opencode` binary for the sandbox image. "
-        "Set OPENCODE_BIN or install it at ~/.opencode/bin/opencode."
-    )

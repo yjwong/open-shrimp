@@ -11,20 +11,25 @@ set -eu
 MY_UID=$(id -u)
 MY_GID=$(id -g)
 
+# Guest home directory — set by the Dockerfile via ENV; the ``:-`` default
+# keeps existing Claude images working when run with no env override.
+GUEST_HOME="${GUEST_HOME:-/home/claude}"
+
 # --- Optional: Docker-in-Docker setup ---
 if [ "${ENABLE_DIND:-0}" = "1" ]; then
     # Ensure the current uid exists in /etc/passwd — rootless Docker's
     # newuidmap/newgidmap require a valid passwd entry.
+    GUEST_USER=$(basename "$GUEST_HOME")
     if ! getent passwd "$MY_UID" > /dev/null 2>&1; then
-        echo "claude:x:${MY_UID}:${MY_GID}::/home/claude:/bin/bash" >> /etc/passwd
+        echo "${GUEST_USER}:x:${MY_UID}:${MY_GID}::${GUEST_HOME}:/bin/bash" >> /etc/passwd
     fi
     if ! getent group "$MY_GID" > /dev/null 2>&1; then
-        echo "claude:x:${MY_GID}:" >> /etc/group
+        echo "${GUEST_USER}:x:${MY_GID}:" >> /etc/group
     fi
 
     # Register subordinate uid/gid ranges for the current (non-root) user.
-    echo "claude:100000:65536" > /etc/subuid
-    echo "claude:100000:65536" > /etc/subgid
+    echo "${GUEST_USER}:100000:65536" > /etc/subuid
+    echo "${GUEST_USER}:100000:65536" > /etc/subgid
 
     # Ensure XDG_RUNTIME_DIR exists before starting dockerd-rootless.sh,
     # which checks for a writable runtime dir on startup.
@@ -165,7 +170,7 @@ echo "wayvnc started on port 5900"
 
 # Launch Chromium (installed by Playwright) with Wayland native mode and
 # a CDP debugging port so Playwright MCP can attach to it.
-CHROMIUM_BIN=$(find /home/claude/.cache/ms-playwright -name 'chromium' -o -name 'chrome' 2>/dev/null | grep -E '/(chromium|chrome)$' | head -1)
+CHROMIUM_BIN=$(find "${GUEST_HOME}/.cache/ms-playwright" -name 'chromium' -o -name 'chrome' 2>/dev/null | grep -E '/(chromium|chrome)$' | head -1)
 if [ -z "$CHROMIUM_BIN" ]; then
     echo "WARNING: Chromium binary not found in Playwright cache" >&2
 else
@@ -176,7 +181,7 @@ else
         --disable-dev-shm-usage \
         --disable-background-networking \
         --ozone-platform=wayland \
-        --user-data-dir=/home/claude/.config/chromium \
+        --user-data-dir="${GUEST_HOME}/.config/chromium" \
         --remote-debugging-port=9222 &
     echo "Chromium started with CDP on port 9222"
 fi
