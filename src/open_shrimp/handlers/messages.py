@@ -418,6 +418,29 @@ async def _handle_media_group_message(
 # ---------------------------------------------------------------------------
 
 
+def _reinject_runtime_credentials(session: Any) -> None:
+    """Re-run the runtime's ``inject`` hook against the active sandbox home.
+
+    No-op when the runtime declares ``re_inject_on_dispatch=False`` (the
+    default) — only runtimes whose host-side credential store is re-read per
+    request (OpenCode's ``auth.json``) opt into this shape.  Runtimes that
+    rely on a long-lived host-side watcher (Claude OAuth) keep their refresh
+    machinery in :mod:`open_shrimp.sandbox.agent_runtime_watcher`.
+
+    Best-effort: a failing inject must not block the dispatch.
+    """
+    runtime = getattr(session, "runtime", None)
+    if runtime is None or not runtime.re_inject_on_dispatch:
+        return
+    try:
+        runtime.inject(runtime.home_mount.host_dir)
+    except Exception:
+        logger.debug(
+            "Per-dispatch credential re-inject failed for runtime %s",
+            runtime.name, exc_info=True,
+        )
+
+
 async def _dispatch_to_agent(
     prompt: str,
     attachments: list[FileAttachment],
@@ -574,6 +597,8 @@ async def _inject_message(
     # Track attachment paths for cleanup in _run()'s finally block.
     if attachment_paths:
         _injected_attachment_paths.setdefault(scope, []).extend(attachment_paths)
+
+    _reinject_runtime_credentials(session)
 
     try:
         await session.client.query(actual_prompt)
@@ -806,6 +831,7 @@ async def _start_agent_task(
                 actual_prompt = prompt
 
             # Send the primary query.
+            _reinject_runtime_credentials(session)
             await session.client.query(actual_prompt)
 
             # Mark session as injectable so concurrent messages are
@@ -832,6 +858,7 @@ async def _start_agent_task(
                     queued_actual = queued_prompt
                 all_attachment_paths.extend(queued_paths)
                 try:
+                    _reinject_runtime_credentials(session)
                     await session.client.query(queued_actual)
                     logger.info(
                         "Injected setup-queued message for scope %s: %s",

@@ -20,10 +20,7 @@ client.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import sys
-import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -50,191 +47,15 @@ from open_shrimp.hooks import (
 from open_shrimp.sandbox import Sandbox, SandboxManager
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
+    AgentRuntime,
+)
+from open_shrimp.sandbox.agent_runtime_watcher import (
+    register_sandbox as register_cred_sandbox,
+    unregister_sandbox as unregister_cred_sandbox,
 )
 from open_shrimp.tools import OpenShrimpTool, create_openshrimp_tools
 
 logger = logging.getLogger(__name__)
-
-# Host-side credentials file that needs to be synced into sandboxes.
-# (Linux/Windows; macOS uses Keychain — see ``_watch_credentials_macos``.)
-_HOST_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
-
-# macOS login Keychain DB path.  Mtime is bumped on every Keychain mutation,
-# so FSEvents on the parent directory wake us up on token refresh.
-_MACOS_KEYCHAIN_DIR = Path.home() / "Library" / "Keychains"
-_MACOS_KEYCHAIN_DB_NAME = "login.keychain-db"
-
-# Single credentials watcher shared across all sandboxed sessions.
-# Maps context_name -> claude_home_dir for all active sandbox sessions.
-_cred_sync_targets: dict[str, Path] = {}
-_cred_sync_lock = threading.Lock()
-_cred_watcher_stop: threading.Event | None = None
-_cred_watcher_thread: threading.Thread | None = None
-
-
-def _host_creds_available() -> bool:
-    """Whether host-side credentials exist to sync into sandboxes."""
-    if sys.platform == "darwin":
-        # The login keychain DB always exists for a logged-in user; we
-        # don't gate on the actual ``Claude Code-credentials`` entry —
-        # if it's missing, the watcher simply won't propagate anything.
-        return (_MACOS_KEYCHAIN_DIR / _MACOS_KEYCHAIN_DB_NAME).exists()
-    return _HOST_CREDENTIALS.exists()
-
-
-def _propagate_credentials(payload: str) -> None:
-    """Write the given credentials JSON into every registered sandbox."""
-    with _cred_sync_lock:
-        targets = list(_cred_sync_targets.items())
-    for ctx_name, claude_home in targets:
-        try:
-            dest = claude_home / ".credentials.json"
-            dest.write_text(payload, encoding="utf-8")
-            logger.debug(
-                "Synced credentials to %s (context %s)",
-                dest, ctx_name,
-            )
-        except Exception:
-            logger.debug(
-                "Failed to sync credentials for context %s",
-                ctx_name, exc_info=True,
-            )
-
-
-def _watch_credentials_linux(stop: threading.Event) -> None:
-    """Watch ``~/.claude/.credentials.json`` for atomic-replace writes.
-
-    We watch the **parent directory** rather than the credentials file
-    itself because Claude Code refreshes credentials via atomic replace
-    (write tmp + rename).  Watching the file directly loses track after
-    the first rename — inotify is bound to the old inode.
-    """
-    from watchfiles import watch
-
-    cred_dir = _HOST_CREDENTIALS.parent
-    cred_name = _HOST_CREDENTIALS.name
-
-    if not cred_dir.exists():
-        return
-
-    try:
-        for changes in watch(
-            cred_dir, stop_event=stop, rust_timeout=1000,
-        ):
-            if stop.is_set():
-                break
-            if not any(Path(path).name == cred_name for _ct, path in changes):
-                continue
-            if not _HOST_CREDENTIALS.exists():
-                continue
-            try:
-                payload = _HOST_CREDENTIALS.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            _propagate_credentials(payload)
-    except Exception:
-        if not stop.is_set():
-            logger.debug("Credentials watcher exited", exc_info=True)
-
-
-def _watch_credentials_macos(stop: threading.Event) -> None:
-    """Watch the macOS login Keychain for ``Claude Code-credentials`` updates.
-
-    The Claude Code app on macOS stores OAuth tokens in the login
-    Keychain rather than ``~/.claude/.credentials.json``.  Any Keychain
-    mutation rewrites ``login.keychain-db``, so FSEvents on the
-    Keychains directory wakes us on token refresh.  We re-extract via
-    ``security`` and only propagate when the parsed ``expiresAt``
-    differs from the last known value, which filters out the noise
-    from unrelated keychain activity (Safari saving passwords, etc.).
-    """
-    from watchfiles import watch
-
-    from open_shrimp.sandbox.lima_helpers import _read_credentials_json
-
-    if not _MACOS_KEYCHAIN_DIR.exists():
-        return
-
-    last_expires_at: int | None = None
-
-    try:
-        for changes in watch(
-            _MACOS_KEYCHAIN_DIR, stop_event=stop, rust_timeout=1000,
-        ):
-            if stop.is_set():
-                break
-            if not any(
-                Path(path).name == _MACOS_KEYCHAIN_DB_NAME
-                for _ct, path in changes
-            ):
-                continue
-            payload = _read_credentials_json()
-            if not payload:
-                continue
-            try:
-                expires_at = int(
-                    json.loads(payload)
-                    .get("claudeAiOauth", {})
-                    .get("expiresAt", 0)
-                )
-            except (ValueError, json.JSONDecodeError):
-                continue
-            if expires_at == last_expires_at:
-                continue
-            last_expires_at = expires_at
-            _propagate_credentials(payload)
-    except Exception:
-        if not stop.is_set():
-            logger.debug("Keychain credentials watcher exited", exc_info=True)
-
-
-def _watch_credentials(stop: threading.Event) -> None:
-    """Background thread: sync host credentials into all active sandboxes.
-
-    Keeps long-lived SDK clients (where the wrapper script doesn't
-    re-run) in sync with host-side token refreshes.  Uses native OS
-    change-notification (FSEvents on macOS, inotify on Linux) so we
-    wake immediately on refresh rather than polling.
-    """
-    if sys.platform == "darwin":
-        _watch_credentials_macos(stop)
-    else:
-        _watch_credentials_linux(stop)
-
-
-def _register_cred_sync(context_name: str, claude_home_dir: Path) -> None:
-    """Register a sandbox for credential syncing, starting the watcher if needed."""
-    global _cred_watcher_stop, _cred_watcher_thread
-
-    with _cred_sync_lock:
-        _cred_sync_targets[context_name] = claude_home_dir
-
-        if _cred_watcher_thread is None or not _cred_watcher_thread.is_alive():
-            _cred_watcher_stop = threading.Event()
-            _cred_watcher_thread = threading.Thread(
-                target=_watch_credentials,
-                args=(_cred_watcher_stop,),
-                daemon=True,
-            )
-            _cred_watcher_thread.start()
-            logger.debug("Started credentials watcher thread")
-
-
-def _unregister_cred_sync(context_name: str) -> None:
-    """Unregister a sandbox; stop the watcher if no targets remain."""
-    global _cred_watcher_stop, _cred_watcher_thread
-
-    with _cred_sync_lock:
-        _cred_sync_targets.pop(context_name, None)
-
-        if not _cred_sync_targets and _cred_watcher_stop is not None:
-            _cred_watcher_stop.set()
-            if _cred_watcher_thread is not None:
-                _cred_watcher_thread.join(timeout=2)
-            _cred_watcher_stop = None
-            _cred_watcher_thread = None
-            logger.debug("Stopped credentials watcher thread")
-
 
 @dataclass
 class CallbackContext:
@@ -265,6 +86,7 @@ class AgentSession:
     context_name: str = ""
     callback_context: CallbackContext = field(default_factory=CallbackContext)
     sandbox: Sandbox | None = None
+    runtime: AgentRuntime | None = None
     mcp_proxy: Any | None = None
     wrapper_cleanup_paths: list[str] = field(default_factory=list)
     last_activity: float = field(default_factory=time.monotonic)
@@ -530,6 +352,7 @@ async def get_or_create_session(
     # ``options.extra["endpoint"]``.  Everything downstream (make_client,
     # make_tool_server, options) stays backend-uniform.
     sandbox: Sandbox | None = None
+    runtime: AgentRuntime | None = None
     cli_path: str | None = None
     wrapper_cleanup_paths: list[str] = []
     served_endpoint: Any = None  # the served endpoint handle, or None
@@ -553,6 +376,7 @@ async def get_or_create_session(
                 context_name=context_name,
                 model=context.model,
             )
+            runtime = _runtime
 
             # The runtime selects the Docker image/run-argv bundle and (for
             # served launches) the extra host-synced home mounts; VM backends
@@ -880,6 +704,7 @@ async def get_or_create_session(
         context_name=context_name,
         callback_context=callback_context,
         sandbox=sandbox,
+        runtime=runtime,
         # Always thread the proxy through: it now serves OpenShrimp's own
         # tools for every context (not just sandboxed ones), so its tool
         # scope must be unregistered on close regardless of containerisation.
@@ -887,12 +712,22 @@ async def get_or_create_session(
         wrapper_cleanup_paths=wrapper_cleanup_paths,
     )
 
-    # Register this sandbox for credential syncing (starts the watcher
-    # if not already running).
-    if sandbox is not None and sandbox_manager is not None and _host_creds_available():
-        claude_home = sandbox_manager.agent_home_dir(context_name)
-        if claude_home.exists():
-            _register_cred_sync(context_name, claude_home)
+    # Register this sandbox for host-side credential syncing.  The watcher
+    # only starts when the runtime declares a non-default
+    # ``watch_host_credentials`` body *and* host credentials are present —
+    # a runtime that re-injects per dispatch (or has no host store at all)
+    # is a no-op here.
+    if sandbox is not None and runtime is not None:
+        home_dir = runtime.home_mount.host_dir
+        if home_dir.exists():
+            register_cred_sandbox(
+                runtime.name,
+                context_name,
+                home_dir,
+                write=runtime.write_cred_target,
+                watch=runtime.watch_host_credentials,
+                host_credentials_available=runtime.host_credentials_available,
+            )
 
     _active_sessions[scope] = session
     return session
@@ -974,14 +809,14 @@ async def close_session(scope: ChatScope) -> None:
     # Unregister from credential syncing if this was a sandboxed session.
     # Check if any other active session still uses the same context before
     # removing the sync target.
-    if session.sandbox is not None:
+    if session.sandbox is not None and session.runtime is not None:
         ctx = session.context_name
         still_used = any(
             s.context_name == ctx and s.sandbox is not None
             for s in _active_sessions.values()
         )
         if not still_used:
-            _unregister_cred_sync(ctx)
+            unregister_cred_sandbox(session.runtime.name, ctx)
     # Unregister proxied MCP servers when no other session needs them.
     if session.mcp_proxy is not None:
         ctx = session.context_name
@@ -1100,6 +935,25 @@ def has_session(scope: ChatScope) -> bool:
     return scope in _active_sessions
 
 
+def _reinject_runtime_credentials(session: AgentSession) -> None:
+    """Re-run the runtime's ``inject`` hook against the sandbox home.
+
+    No-op when the runtime declares ``re_inject_on_dispatch=False`` (the
+    default).  See :class:`AgentRuntime` for the refresh model.  Best-effort:
+    a failing inject must not block the query.
+    """
+    runtime = session.runtime
+    if runtime is None or not runtime.re_inject_on_dispatch:
+        return
+    try:
+        runtime.inject(runtime.home_mount.host_dir)
+    except Exception:
+        logger.debug(
+            "Per-dispatch credential re-inject failed for runtime %s",
+            runtime.name, exc_info=True,
+        )
+
+
 async def query_and_stream(
     session: AgentSession,
     prompt: str,
@@ -1107,6 +961,7 @@ async def query_and_stream(
     """Send a query on an existing session and yield events."""
     session.last_activity = time.monotonic()
     logger.info("Sending query on live client: %s", prompt[:200])
+    _reinject_runtime_credentials(session)
     await session.client.query(prompt)
     async for message in receive_events(session):
         yield message

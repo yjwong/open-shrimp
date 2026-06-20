@@ -34,6 +34,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _no_watch_host_credentials(stop: threading.Event) -> None:
+    """Default ``watch_host_credentials`` body — no host-side watcher.
+
+    A runtime keeps this default when its host-side credential storage is
+    re-read per request (so a per-dispatch re-inject is sufficient) or when it
+    has no host-side credential storage at all.
+    """
+
+
+def _no_host_credentials_available() -> bool:
+    """Default ``host_credentials_available`` body — no host-side probe."""
+    return False
+
+
+def _no_write_cred_target(home_dir: Path, payload: str) -> None:
+    """Default ``write_cred_target`` body — drop the payload.
+
+    A runtime that doesn't watch host credentials never reaches this writer
+    (the watcher is what calls it), so the default is a quiet no-op rather
+    than an error.
+    """
+
+
 @dataclass(frozen=True)
 class WrappedCLI:
     """Launch strategy: the sandbox generates a wrapper script and returns its
@@ -158,9 +181,33 @@ class AgentRuntime:
     ``inject`` writes creds+config into the home dir; ``env`` is merged into the
     guest env.  These are *declared* here so each agent can fill them
     differently; their live bodies stay where they execute today (the credential
-    copy-in inside each backend, the API-key forwarding inside each wrapper, and
-    the cred-sync watcher in ``client_manager``).  This object names the hooks;
-    it does not re-route the implementations.
+    copy-in inside each backend and the API-key forwarding inside each wrapper).
+    This object names the hooks; it does not re-route the implementations.
+
+    Three optional hooks describe the runtime's mid-session credential-refresh
+    model:
+
+    * ``re_inject_on_dispatch`` — when ``True``, the dispatcher re-runs the
+      runtime's ``inject`` against the active sandbox's home dir before each
+      dispatch.  Cheap when no host-side refresh has happened; the inject body
+      is a read + filter + write of a small JSON file.
+    * ``watch_host_credentials`` — a long-lived host-side watcher body that
+      keeps every registered sandbox home in sync with host-side token
+      refreshes.  The runtime-agnostic registration table in
+      :mod:`open_shrimp.sandbox.agent_runtime_watcher` starts this on the
+      first sandbox registration and stops it after the last unregistration.
+    * ``host_credentials_available`` — a non-blocking probe used by the
+      registration plumbing to decide whether watching is meaningful at all.
+    * ``write_cred_target`` — given a host-side credentials payload, write
+      the runtime-specific on-disk shape into a registered sandbox home.
+      Paired with ``watch_host_credentials`` (the watcher is what calls it);
+      ignored when the runtime doesn't watch.
+
+    The two shapes are not mutually exclusive but the typical runtime needs
+    exactly one: a runtime whose host-side store is re-read per request sets
+    ``re_inject_on_dispatch=True`` and leaves the watcher hook at default; a
+    runtime whose host-side store is *not* re-read per session populates the
+    watcher hook and leaves ``re_inject_on_dispatch=False``.
     """
 
     name: str
@@ -172,6 +219,20 @@ class AgentRuntime:
     # sandbox default (VM backends ignore it; their guest image is the
     # operator's precondition).
     image_bundle: "ImageBundle | None" = None
+
+    # Mid-session credential-refresh hooks.  Defaults match a runtime that
+    # needs neither shape; concrete runtimes opt into the one that matches
+    # their host-side refresh model.  See the class docstring.
+    re_inject_on_dispatch: bool = False
+    watch_host_credentials: Callable[[threading.Event], None] = field(
+        default=_no_watch_host_credentials,
+    )
+    host_credentials_available: Callable[[], bool] = field(
+        default=_no_host_credentials_available,
+    )
+    write_cred_target: Callable[[Path, str], None] = field(
+        default=_no_write_cred_target,
+    )
 
 
 @dataclass(frozen=True)
@@ -223,6 +284,11 @@ def claude_runtime(home_dir: Path, *, guest_dir: str = "/home/claude/.claude") -
         env["ANTHROPIC_API_KEY"] = api_key
 
     from open_shrimp.backend.claude_sdk.binary import find_claude_binary
+    from open_shrimp.backend.claude_sdk.cred_watcher import (
+        host_credentials_available,
+        watch_host_credentials,
+        write_target,
+    )
 
     return AgentRuntime(
         name="claude",
@@ -243,6 +309,12 @@ def claude_runtime(home_dir: Path, *, guest_dir: str = "/home/claude/.claude") -
             guest_home="/home/claude",
             dind_user="claude",
         ),
+        # Claude refreshes OAuth tokens independently of dispatches; a
+        # sandboxed process holding a stale file silently 401s.  The watcher
+        # fans host-side refreshes out to every registered sandbox home.
+        watch_host_credentials=watch_host_credentials,
+        host_credentials_available=host_credentials_available,
+        write_cred_target=write_target,
     )
 
 
@@ -368,6 +440,10 @@ def opencode_runtime(
             guest_home=SANDBOX_HOME,
             dind_user="openshrimp",
         ),
+        # For OAuth-backed providers ``auth.json`` is rewritten on refresh,
+        # but ``opencode serve`` re-reads it per request, so a per-dispatch
+        # re-inject is sufficient — no long-lived watcher needed.
+        re_inject_on_dispatch=True,
     )
 
 
