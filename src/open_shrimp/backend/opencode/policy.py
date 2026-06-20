@@ -19,13 +19,20 @@ driven by the native ``question.asked`` SSE arm in
 from __future__ import annotations
 
 import difflib
+import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
 from open_shrimp.web_app_button import make_web_app_button
+
+if TYPE_CHECKING:
+    from open_shrimp.db import ChatScope
+    from open_shrimp.hooks import ApprovalRule
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +765,96 @@ class OpenCodePolicy:
 
     def bash_prefix_rule(self, command: str) -> str | None:
         return _extract_bash_prefix(command)
+
+    # --- durable permission egress ---
+
+    async def persist_session_rule(
+        self,
+        rule: "ApprovalRule",
+        *,
+        directory: str,
+        scope: "ChatScope",
+    ) -> bool:
+        """Persist *rule* via OpenCode's project-config permission API.
+
+        Looks up the live ``OpenCodeClient`` for *scope* and calls
+        ``patch_config_permission``.  *directory* is unused — OpenCode
+        scopes durable rules by the live client's ``cwd``, set at
+        ``connect()`` time.
+        """
+        del directory
+        permission = _opencode_permission_for_rule(rule)
+        if permission is None:
+            return False
+        key, pattern = permission
+
+        from open_shrimp.client_manager import get_session
+
+        session = get_session(scope)
+        if session is None:
+            logger.warning(
+                "No active OpenCode session for durable permission patch: %s",
+                scope,
+            )
+            return False
+        client = session.client
+        if not hasattr(client, "patch_config_permission"):
+            logger.warning(
+                "Active client for scope %s does not support patch_config_permission",
+                scope,
+            )
+            return False
+        try:
+            await client.patch_config_permission({key: {pattern: "allow"}})
+        except Exception:
+            logger.exception(
+                "Failed to patch OpenCode config permission for %s(%s)",
+                key, pattern,
+            )
+            return False
+        return True
+
+    async def load_persistent_rules(
+        self, *, directory: str,
+    ) -> list["ApprovalRule"]:
+        """Return an empty list — OpenCode durable rules arrive through
+        the ``permission.asked.always`` event arm, not by reading any
+        on-disk file.
+        """
+        del directory
+        return []
+
+
+def _opencode_permission_for_rule(
+    rule: "ApprovalRule",
+) -> tuple[str, str] | None:
+    """Translate an ``ApprovalRule`` to an OpenCode ``(permission, pattern)``.
+
+    The session-scoped rule shape in OpenShrimp ships a hooks-style
+    ``ApprovalRule(tool_name="Bash", pattern="git *")``; OpenCode's
+    permission keys are lowercase (``bash``).  Returns None for rules
+    that don't have an OpenCode mapping (e.g. blanket non-Bash rules
+    we don't want to durably persist through this path).
+    """
+    if rule.pattern is None:
+        return None
+    name = rule.tool_name
+    if not name:
+        return None
+    # Hooks-style tool names are capitalised (``Bash``); OpenCode wire
+    # names are lowercase (``bash``).  The session-rule registry stores
+    # the hooks-style name; downstream OpenCode needs lowercase.
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+        if len(parts) == 3:
+            key = f"{parts[1]}_{parts[2]}"
+        else:
+            key = name
+    elif name.startswith("_"):
+        key = name
+    else:
+        key = name.lower()
+    return key, rule.pattern
 
 
 __all__ = [

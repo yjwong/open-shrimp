@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import difflib
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
 from open_shrimp.web_app_button import make_web_app_button
+
+if TYPE_CHECKING:
+    from open_shrimp.db import ChatScope
+    from open_shrimp.hooks import ApprovalRule
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +744,34 @@ class ClaudeSdkPolicy:
 
     def bash_prefix_rule(self, command: str) -> str | None:
         return _extract_bash_prefix(command)
+
+    # --- durable permission egress ---
+
+    async def persist_session_rule(
+        self,
+        rule: "ApprovalRule",
+        *,
+        directory: str,
+        scope: "ChatScope",
+    ) -> bool:
+        """Persist *rule* to ``.claude/settings.local.json`` under *directory*.
+
+        ``scope`` is unused for the SDK — Claude Code's durable rules live
+        in the project-local settings file, not in any in-memory session
+        state.
+        """
+        del scope
+        from open_shrimp.settings_local import save_persistent_rule
+
+        return await save_persistent_rule(directory, rule)
+
+    async def load_persistent_rules(
+        self, *, directory: str,
+    ) -> list["ApprovalRule"]:
+        """Load durable approval rules from ``.claude/settings.local.json``."""
+        from open_shrimp.settings_local import load_persistent_rules
+
+        return await load_persistent_rules(directory)
 
 
 __all__ = [

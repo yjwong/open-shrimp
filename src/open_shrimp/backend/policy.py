@@ -13,9 +13,13 @@ the per-method semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from telegram import InlineKeyboardButton
+
+if TYPE_CHECKING:
+    from open_shrimp.db import ChatScope
+    from open_shrimp.hooks import ApprovalRule
 
 
 @dataclass
@@ -247,6 +251,35 @@ class BackendPolicy(Protocol):
 
         Returns ``"git"`` for ``git status``, etc.  None for compound
         commands or non-extractable shapes."""
+        ...
+
+    # --- durable permission egress (handlers/approval.py, handlers/messages.py) ---
+
+    async def persist_session_rule(
+        self,
+        rule: "ApprovalRule",
+        *,
+        directory: str,
+        scope: "ChatScope",
+    ) -> bool:
+        """Persist *rule* to the backend's durable permission store.
+
+        The SDK writes ``.claude/settings.local.json`` under *directory*;
+        OpenCode patches the project's config permission via the live
+        client (looked up by *scope*).  Returns True if the rule was
+        accepted (newly added), False if already present, unsupported by
+        the policy, or the egress failed.
+        """
+        ...
+
+    async def load_persistent_rules(
+        self, *, directory: str,
+    ) -> list["ApprovalRule"]:
+        """Return durable approval rules to seed the session-scoped cache.
+
+        SDK reads from ``.claude/settings.local.json``; OpenCode returns
+        ``[]`` (durable rules arrive through the ``permission.asked.always``
+        event arm)."""
         ...
 
 

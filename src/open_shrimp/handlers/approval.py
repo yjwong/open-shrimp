@@ -652,7 +652,6 @@ async def handle_approval_callback(
 
         if query.message and prefix:
             from open_shrimp.handlers.state import _tool_approved_sessions
-            from open_shrimp.settings_local import save_persistent_rule
 
             scope = chat_scope_from_message(query.message)
             db: aiosqlite.Connection = context.bot_data["db"]
@@ -661,9 +660,11 @@ async def handle_approval_callback(
             _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
 
             try:
-                persisted = await save_persistent_rule(ctx_config.directory, rule)
+                persisted = await p.persist_session_rule(
+                    rule, directory=ctx_config.directory, scope=scope,
+                )
             except OSError:
-                logger.exception("Failed to persist rule to settings.local.json")
+                logger.exception("Failed to persist rule via backend policy")
                 persisted = False
 
             logger.info(

@@ -720,12 +720,18 @@ async def _start_agent_task(
                     todos=todos if todos else None,
                 )
 
-            # Load persistent approval rules from .claude/settings.local.json
-            # into the in-memory cache so they are checked alongside
-            # session-scoped rules.
-            from open_shrimp.settings_local import load_persistent_rules
+            # Load durable approval rules through the active backend's
+            # policy: SDK reads ``.claude/settings.local.json``; OpenCode
+            # returns ``[]`` because durable rules arrive via the
+            # ``permission.asked.always`` event arm.
+            from open_shrimp.client_manager import resolve_backend
 
-            persistent_rules = await load_persistent_rules(ctx_config.directory)
+            policy = resolve_backend(
+                context.bot_data.get("backend"),
+            ).policy
+            persistent_rules = await policy.load_persistent_rules(
+                directory=ctx_config.directory,
+            )
             if persistent_rules:
                 existing = _tool_approved_sessions.setdefault((scope, ctx_name), [])
                 # Avoid duplicates if rules were already loaded.
