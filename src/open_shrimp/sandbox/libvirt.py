@@ -38,7 +38,12 @@ from open_shrimp.sandbox.port_forward import (
     allocate_host_port,
     open_ssh_tunnel,
 )
-from open_shrimp.sandbox.skill_paths import SANDBOX_HOME, SANDBOX_USER
+from open_shrimp.sandbox.skill_paths import (
+    SANDBOX_HOME,
+    SANDBOX_TMP,
+    SANDBOX_UID,
+    SANDBOX_USER,
+)
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.libvirt_helpers import (
@@ -81,10 +86,6 @@ logger = logging.getLogger(__name__)
 
 # Graceful shutdown timeout before falling back to destroy.
 _SHUTDOWN_TIMEOUT = 180
-
-# UID of the ``claude`` user inside the VM.  Cloud-init creates it as the
-# first non-system user, which gets UID 1000 on Ubuntu.
-_VM_CLAUDE_UID = 1000
 
 
 def _tail_file(
@@ -556,13 +557,13 @@ class LibvirtSandbox:
         if self._runtime is None:
             return
 
-        # Cloud-init creates a single ``claude`` user in the guest with
-        # NOPASSWD sudo (see ``_build_cloud_init_user_data``); both the
-        # Claude and OpenCode installers SSH in as that user.
+        # Cloud-init creates a single ``SANDBOX_USER`` (openshrimp) user in the
+        # guest with NOPASSWD sudo (see ``_build_cloud_init_user_data``); both
+        # the Claude and OpenCode installers SSH in as that user.
         bundle = self._runtime.image_bundle
         if bundle is not None and bundle.libvirt_install is not None:
             bundle.libvirt_install(
-                self._sdir / "ssh_key", self._ssh_port, "claude",
+                self._sdir / "ssh_key", self._ssh_port, SANDBOX_USER,
             )
 
         if self._runtime.provision_credentials is not None:
@@ -803,8 +804,8 @@ class LibvirtSandbox:
         ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
         result = subprocess.run(
             [
-                "ssh", *ssh_opts, "claude@localhost",
-                "env", "XDG_RUNTIME_DIR=/run/user/1000",
+                "ssh", *ssh_opts, f"{SANDBOX_USER}@localhost",
+                "env", f"XDG_RUNTIME_DIR=/run/user/{SANDBOX_UID}",
                 "WAYLAND_DISPLAY=wayland-0",
                 "wl-paste", "--no-newline", "--primary",
             ],
@@ -833,13 +834,13 @@ class LibvirtSandbox:
         remote_cmd = (
             'tmpf=$(mktemp);'
             ' cat > "$tmpf";'
-            ' env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0'
+            f' env XDG_RUNTIME_DIR=/run/user/{SANDBOX_UID} WAYLAND_DISPLAY=wayland-0'
             ' nohup wl-copy < "$tmpf" >/dev/null 2>&1 &'
             ' sleep 0.1;'
             ' rm "$tmpf"'
         )
         result = subprocess.run(
-            ["ssh", *ssh_opts, "claude@localhost", remote_cmd],
+            ["ssh", *ssh_opts, f"{SANDBOX_USER}@localhost", remote_cmd],
             input=text,
             capture_output=True,
             text=True,
@@ -866,7 +867,7 @@ class LibvirtSandbox:
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "LogLevel=ERROR",
-            "claude@localhost",
+            f"{SANDBOX_USER}@localhost",
             "mkdir", "-p", upload_dir,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
@@ -890,7 +891,7 @@ class LibvirtSandbox:
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "LogLevel=ERROR",
                 str(host_path),
-                f"claude@localhost:{vm_path}",
+                f"{SANDBOX_USER}@localhost:{vm_path}",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -935,7 +936,7 @@ class LibvirtSandbox:
             *_ssh_common_opts(self._sdir / "ssh_key", self._ssh_port),
             *SSH_TUNNEL_OPTS,
             "-L", f"127.0.0.1:{host_port}:127.0.0.1:{guest_port}",
-            "claude@localhost",
+            f"{SANDBOX_USER}@localhost",
         ]
         return open_ssh_tunnel(
             cmd,
@@ -976,8 +977,8 @@ class LibvirtSandbox:
         all_dirs.append(str(self._tmp_dir))
         all_dirs.append(str(self._claude_home_dir))
         mount_overrides = {
-            str(self._tmp_dir): f"/tmp/claude-{_VM_CLAUDE_UID}",
-            str(self._claude_home_dir): "/home/claude/.claude",
+            str(self._tmp_dir): SANDBOX_TMP,
+            str(self._claude_home_dir): f"{SANDBOX_HOME}/.claude",
         }
         # Served-endpoint launch only: sync each declared host_dir into the
         # guest at its declared mount point.  The mount SOURCE is whatever
@@ -994,7 +995,7 @@ class LibvirtSandbox:
         if host_skills.is_dir():
             host_skills_str = str(host_skills)
             all_dirs.append(host_skills_str)
-            mount_overrides[host_skills_str] = "/home/claude/.claude/skills"
+            mount_overrides[host_skills_str] = f"{SANDBOX_HOME}/.claude/skills"
             readonly_dirs.add(host_skills_str)
         return all_dirs, mount_overrides, readonly_dirs
 

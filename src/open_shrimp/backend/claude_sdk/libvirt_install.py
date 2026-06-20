@@ -48,10 +48,11 @@ def install_claude_cli_via_ssh(
 def provision_claude_credentials(home_dir: Path) -> None:
     """Copy host Claude credentials into a virtiofs-shared agent home.
 
-    The destination dir is mounted as ``/home/<user>/.claude`` inside the
-    VM, so the CLI picks the credentials up automatically.  On macOS the
-    credentials live in the Keychain (read via ``security``); elsewhere
-    they sit in ``~/.claude/.credentials.json``.
+    The destination dir is mounted as ``/home/<sandbox-user>/.claude``
+    inside the VM (``<sandbox-user>`` is ``openshrimp`` for libvirt and
+    Lima), so the CLI picks the credentials up automatically.  On macOS
+    the credentials live in the Keychain (read via ``security``);
+    elsewhere they sit in ``~/.claude/.credentials.json``.
     """
     home_dir.mkdir(parents=True, exist_ok=True)
     dest = home_dir / ".credentials.json"
