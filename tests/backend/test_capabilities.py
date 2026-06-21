@@ -1,7 +1,7 @@
-"""Tests for ``Backend.command_capabilities`` and ``Backend.auth_copy``.
+"""Tests for ``Backend.command_capabilities`` and ``Backend.copy``.
 
 Each backend declares the set of opt-in commands it implements and the
-copy that drives auth-related UI; the bot uses these to gate command
+copy that drives user-facing UI; the bot uses these to gate command
 registration and build the Telegram menu.
 
 Asserted here:
@@ -14,7 +14,7 @@ Asserted here:
 
 from __future__ import annotations
 
-from open_shrimp.backend import AuthCopy
+from open_shrimp.backend import BackendCopy
 from open_shrimp.backend.claude_sdk import ClaudeSdkBackend
 from open_shrimp.backend.opencode import OpenCodeBackend
 
@@ -24,10 +24,10 @@ class TestClaudeSdkCapabilities:
         b = ClaudeSdkBackend()
         assert b.command_capabilities() == {"login", "usage", "mcp"}
 
-    def test_auth_copy_carries_claude_code_strings(self) -> None:
+    def test_copy_carries_claude_code_strings(self) -> None:
         b = ClaudeSdkBackend()
-        copy = b.auth_copy()
-        assert isinstance(copy, AuthCopy)
+        copy = b.copy()
+        assert isinstance(copy, BackendCopy)
         assert copy.login_command_description == "Re-authenticate Claude Code OAuth"
         assert copy.login_mini_app_body == "Re-authenticate Claude Code OAuth"
         assert copy.auth_error_hint == "Run /login to re-authenticate Claude Code."
@@ -38,19 +38,19 @@ class TestOpenCodeCapabilities:
         b = OpenCodeBackend()
         assert b.command_capabilities() == set()
 
-    def test_auth_copy_auth_error_hint_is_none(self) -> None:
+    def test_copy_auth_error_hint_is_none(self) -> None:
         """``None`` means the auth-error rendering site is skipped —
         OpenCode does not have a Claude-shaped ``/login`` flow to hint at."""
         b = OpenCodeBackend()
-        copy = b.auth_copy()
-        assert isinstance(copy, AuthCopy)
+        copy = b.copy()
+        assert isinstance(copy, BackendCopy)
         assert copy.auth_error_hint is None
 
-    def test_auth_copy_login_strings_present_for_future_opt_in(self) -> None:
+    def test_copy_login_strings_present_for_future_opt_in(self) -> None:
         """Non-``None`` Mini-App and command-description strings so a
         future OpenCode-side login flow can flip ``"login"`` into
-        capabilities without re-touching the auth-copy site."""
+        capabilities without re-touching the copy site."""
         b = OpenCodeBackend()
-        copy = b.auth_copy()
+        copy = b.copy()
         assert copy.login_command_description
         assert copy.login_mini_app_body

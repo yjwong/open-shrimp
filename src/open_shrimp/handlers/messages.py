@@ -884,6 +884,12 @@ async def _start_agent_task(
                     else:
                         terminal_url = f"https://{config.review.host}:{config.review.port}"
 
+                    from open_shrimp.client_manager import resolve_backend
+
+                    _active_backend = resolve_backend(
+                        context.bot_data.get("backend"),
+                        context=ctx_config,
+                    )
                     result = await stream_response(
                         bot=context.bot,
                         chat_id=scope.chat_id,
@@ -894,6 +900,8 @@ async def _start_agent_task(
                         on_todo_update=on_todo_update,
                         terminal_base_url=terminal_url,
                         scope=scope,
+                        policy=_active_backend.policy,
+                        copy=_active_backend.copy(),
                     )
 
                     if result.session_id:

@@ -1360,7 +1360,7 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     body = "Re-authenticate"
     if backend is not None:
-        body = backend.auth_copy().login_mini_app_body or body
+        body = backend.copy().login_mini_app_body or body
 
     # Build the Mini App URL.
     if config.review.public_url:

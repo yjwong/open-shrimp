@@ -53,21 +53,29 @@ ToolFactory = Callable[[], list[Any]]
 
 
 @dataclass(frozen=True)
-class AuthCopy:
-    """Backend-supplied strings for auth-related UI surfaces.
+class BackendCopy:
+    """Backend-supplied strings for user-facing UI surfaces.
 
-    A single declaration site for the bot's auth copy: the ``/login``
-    command description in the Telegram menu, the Mini-App body, and
-    the auth-error hint surfaced when an agent reports an auth failure
-    mid-stream.
+    A single declaration site for the bot's per-backend copy: the
+    ``/login`` command description in the Telegram menu, the Mini-App
+    body, the auth-error hint surfaced when an agent reports an auth
+    failure mid-stream, and the assistant-error rendering table.
 
-    A ``None`` field means "skip the corresponding site entirely" —
-    distinct from an empty string, which would still be rendered.
+    A ``None`` field (or empty mapping for ``assistant_error_messages``)
+    means "skip the corresponding site entirely" — distinct from an
+    empty string, which would still be rendered.
+
+    ``assistant_error_messages`` keys are the neutral error codes from
+    ``AssistantMessage.error``; the value is the rendered message body
+    (GFM, will be converted to MarkdownV2 by ``gfm_to_telegram``).
+    Missing keys fall back to the shared neutral defaults in
+    ``stream.py``, then to a generic ``⚠️ Error: <code>``.
     """
 
     login_command_description: str | None = None
     login_mini_app_body: str | None = None
     auth_error_hint: str | None = None
+    assistant_error_messages: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -293,10 +301,10 @@ class Backend(Protocol):
         """
         ...
 
-    def auth_copy(self) -> "AuthCopy":
-        """Backend-supplied strings for auth-related UI surfaces.
+    def copy(self) -> "BackendCopy":
+        """Backend-supplied strings for user-facing UI surfaces.
 
-        See :class:`AuthCopy` for field semantics.  ``None`` on any
+        See :class:`BackendCopy` for field semantics.  ``None`` on any
         field means "skip the corresponding site entirely" — distinct
         from an empty string.
         """
@@ -334,9 +342,9 @@ class Backend(Protocol):
 
 
 __all__ = [
-    "AuthCopy",
     "Backend",
     "BackendClient",
+    "BackendCopy",
     "BackendOptions",
     "CanUseTool",
     "MCPConfigProvider",

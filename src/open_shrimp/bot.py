@@ -366,10 +366,10 @@ async def run_bot(
     if "login" in caps:
         login_desc = next(
             (
-                b.auth_copy().login_command_description
+                b.copy().login_command_description
                 for b in backends
                 if "login" in b.command_capabilities()
-                and b.auth_copy().login_command_description
+                and b.copy().login_command_description
             ),
             "Re-authenticate",
         )

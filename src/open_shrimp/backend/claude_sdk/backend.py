@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from open_shrimp.backend.claude_sdk.client import ClaudeSdkClient
 from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
 from open_shrimp.backend.protocol import (
-    AuthCopy,
+    BackendCopy,
     BackendOptions,
     CanUseTool,
     MCPConfigProvider,
@@ -183,11 +183,31 @@ class ClaudeSdkBackend:
     def command_capabilities(self) -> set[str]:
         return {"login", "usage", "mcp"}
 
-    def auth_copy(self) -> AuthCopy:
-        return AuthCopy(
+    def copy(self) -> BackendCopy:
+        return BackendCopy(
             login_command_description="Re-authenticate Claude Code OAuth",
             login_mini_app_body="Re-authenticate Claude Code OAuth",
             auth_error_hint="Run /login to re-authenticate Claude Code.",
+            assistant_error_messages={
+                "authentication_failed": (
+                    "⚠️ **Authentication failed.** Claude was unable to "
+                    "authenticate. Check that your API key or OAuth session "
+                    "is valid. Run /login to re-authenticate Claude Code."
+                ),
+                "billing_error": (
+                    "⚠️ **Billing error.** There is a problem with your "
+                    "Anthropic account billing. Please check your account "
+                    "at console.anthropic.com."
+                ),
+                "invalid_request": (
+                    "⚠️ **Invalid request.** The request to Claude was "
+                    "rejected. This may indicate a configuration issue."
+                ),
+                "server_error": (
+                    "⚠️ **Server error.** Anthropic's servers returned an "
+                    "error. Please try again shortly."
+                ),
+            },
         )
 
     def mcp_config_source(self) -> MCPConfigProvider:

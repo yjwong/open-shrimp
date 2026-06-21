@@ -3,7 +3,7 @@
 The registration loop installs the opt-in handlers (``/login``,
 ``/usage``, ``/mcp``) only when at least one configured backend
 declares the corresponding capability.  Stub backends here implement
-only ``command_capabilities`` and ``auth_copy`` — the rest of the
+only ``command_capabilities`` and ``copy`` — the rest of the
 ``Backend`` protocol is unused by the registration path.
 """
 
@@ -16,7 +16,7 @@ import aiosqlite
 import pytest
 from telegram.ext import CommandHandler
 
-from open_shrimp.backend import AuthCopy
+from open_shrimp.backend import BackendCopy
 from open_shrimp.bot import build_application
 from open_shrimp.config import (
     Config,
@@ -33,8 +33,8 @@ class _StubBackend:
     def command_capabilities(self) -> set[str]:
         return set(self._caps)
 
-    def auth_copy(self) -> AuthCopy:
-        return AuthCopy(
+    def copy(self) -> BackendCopy:
+        return BackendCopy(
             login_command_description="stub login",
             login_mini_app_body="stub login",
         )

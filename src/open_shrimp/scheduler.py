@@ -503,7 +503,8 @@ async def _run_scheduled_prompt(
         },
     )
 
-    client = resolve_backend(context=ctx_config).make_client(options)
+    backend = resolve_backend(context=ctx_config)
+    client = backend.make_client(options)
     try:
         await client.connect()
         await client.query(task.prompt)
@@ -523,6 +524,8 @@ async def _run_scheduled_prompt(
             draft_state=draft_state,
             allowed_tools=allowed_tools,
             cwd=ctx_config.directory,
+            policy=backend.policy,
+            copy=backend.copy(),
         )
     finally:
         try:

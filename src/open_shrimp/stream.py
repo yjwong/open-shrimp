@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from open_shrimp.backend.policy import BackendPolicy
+    from open_shrimp.backend.protocol import BackendCopy
 
 from open_shrimp.backend.types import (
     AssistantMessage,
@@ -640,30 +641,17 @@ async def finalize_and_reset(
     state.live_edit_last_text = ""
 
 
-_ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
-    "authentication_failed": (
-        "⚠️ **Authentication failed.** Claude was unable to authenticate. "
-        "Check that your API key or OAuth session is valid. "
-        "Run /login to re-authenticate Claude Code."
-    ),
-    "billing_error": (
-        "⚠️ **Billing error.** There is a problem with your Anthropic account billing. "
-        "Please check your account at console.anthropic.com."
-    ),
+#: Neutral fallback messages for the vendor-agnostic error codes a backend
+#: may emit on ``AssistantMessage.error``.  Per-backend overrides come
+#: through ``BackendCopy.assistant_error_messages``; missing keys land here,
+#: missing here land in the generic ``⚠️ Error: <code>`` fallback.
+_DEFAULT_ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
     "rate_limit": (
-        "⚠️ **Rate limited.** Too many requests — please wait a moment and try again."
-    ),
-    "invalid_request": (
-        "⚠️ **Invalid request.** The request to Claude was rejected. "
-        "This may indicate a configuration issue."
-    ),
-    "server_error": (
-        "⚠️ **Server error.** Anthropic's servers returned an error. "
-        "Please try again shortly."
+        "⚠️ **Rate limited.** Too many requests — please wait a moment "
+        "and try again."
     ),
     "unknown": (
-        "⚠️ **Unknown error.** An unexpected error occurred while communicating "
-        "with Claude."
+        "⚠️ **Unknown error.** An unexpected error occurred."
     ),
 }
 
@@ -671,6 +659,7 @@ _ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
 async def _handle_assistant_error(
     bot: Bot, state: _DraftState, error: str,
     error_detail: str | None = None,
+    copy: "BackendCopy | None" = None,
 ) -> None:
     """Send a user-friendly error message for AssistantMessage errors."""
     if error_detail:
@@ -684,9 +673,11 @@ async def _handle_assistant_error(
             state.chat_id, error,
         )
 
-    msg_text = _ASSISTANT_ERROR_MESSAGES.get(
-        error,
-        f"⚠️ **Error:** {error}",
+    table = copy.assistant_error_messages if copy else {}
+    msg_text = (
+        table.get(error)
+        or _DEFAULT_ASSISTANT_ERROR_MESSAGES.get(error)
+        or f"⚠️ **Error:** {error}"
     )
     # Append the detail from the SDK (e.g. "Prompt is too long") so
     # the user knows *why* the request was rejected.
@@ -730,6 +721,7 @@ async def stream_response(
     terminal_base_url: str | None = None,
     scope: ChatScope | None = None,
     policy: "BackendPolicy | None" = None,
+    copy: "BackendCopy | None" = None,
 ) -> StreamResult:
     """Stream Agent SDK events to Telegram as draft messages.
 
@@ -799,6 +791,7 @@ async def stream_response(
                             break
                     await _handle_assistant_error(
                         bot, state, event.error, error_detail,
+                        copy=copy,
                     )
 
                 # Mark this turn's text as complete. When the next

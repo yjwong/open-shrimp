@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from open_shrimp.backend.opencode.client import OpenCodeClient
 from open_shrimp.backend.opencode.policy import OpenCodePolicy
 from open_shrimp.backend.protocol import (
-    AuthCopy,
+    BackendCopy,
     BackendOptions,
     CanUseTool,
     MCPConfigProvider,
@@ -183,18 +183,34 @@ class OpenCodeBackend:
         """
         return set()
 
-    def auth_copy(self) -> AuthCopy:
-        """Skip every auth-copy site that doesn't apply to OpenCode.
+    def copy(self) -> BackendCopy:
+        """Skip every copy site that doesn't apply to OpenCode.
 
         The Mini-App and command-description strings stay non-empty so
         a future OpenCode-side login flow can flip the capability on
         without re-touching this file.  ``auth_error_hint`` is ``None``
         because the Claude-shaped ``/login`` hint would mislead.
+
+        ``assistant_error_messages`` carries only ``authentication_failed``
+        — the OpenCode translator (``backend/opencode/translate.py``)
+        currently surfaces the raw provider error string rather than
+        normalising to the neutral error codes, so today the rest of
+        the table would never fire.  Everything else falls through to
+        the shared neutral defaults in ``stream.py`` or the generic
+        ``⚠️ Error: <msg>`` fallback.  See the OpenCode normalisation
+        follow-up in ``stream-vendor-neutrality-audit.md``.
         """
-        return AuthCopy(
+        return BackendCopy(
             login_command_description="Re-authenticate provider",
             login_mini_app_body="Re-authenticate provider",
             auth_error_hint=None,
+            assistant_error_messages={
+                "authentication_failed": (
+                    "⚠️ **Authentication failed.** OpenCode could not "
+                    "authenticate with the provider. Run "
+                    "`opencode auth login` on the host to re-authenticate."
+                ),
+            },
         )
 
     def mcp_config_source(self) -> MCPConfigProvider:
