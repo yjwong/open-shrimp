@@ -1133,6 +1133,32 @@ class LibvirtSandboxManager:
 # ---------------------------------------------------------------------------
 
 
+def referenced_backends(config: Config) -> set[str]:
+    """Return the backend names referenced by sandboxed contexts in *config*."""
+    backends: set[str] = set()
+    for ctx in config.contexts.values():
+        if ctx.sandbox is not None and ctx.sandbox.enabled:
+            backends.add(ctx.sandbox.backend)
+        elif ctx.container is not None and ctx.container.enabled:
+            backends.add("docker")
+    return backends
+
+
+_MANAGER_FACTORIES: dict[str, type[SandboxManager]] = {
+    "docker": DockerSandboxManager,
+    "libvirt": LibvirtSandboxManager,
+    "lima": LimaSandboxManager,
+}
+
+
+def create_sandbox_manager(backend: str) -> SandboxManager:
+    """Instantiate a single :class:`SandboxManager` for *backend*."""
+    try:
+        return _MANAGER_FACTORIES[backend]()
+    except KeyError:
+        raise ValueError(f"Unknown sandbox backend: {backend!r}") from None
+
+
 def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
     """Instantiate one :class:`SandboxManager` per backend used in the config.
 
@@ -1142,19 +1168,13 @@ def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
     Returns:
         A dict mapping backend name to its :class:`SandboxManager` instance.
     """
-    # Collect all backends used by sandboxed contexts.
-    backends: set[str] = set()
-    for ctx in config.contexts.values():
-        if ctx.sandbox is not None and ctx.sandbox.enabled:
-            backends.add(ctx.sandbox.backend)
-        elif ctx.container is not None and ctx.container.enabled:
-            backends.add("docker")
+    backends = referenced_backends(config)
 
     managers: dict[str, SandboxManager] = {}
     if "docker" in backends or (not backends and sys.platform != "darwin"):
-        managers["docker"] = DockerSandboxManager()
+        managers["docker"] = create_sandbox_manager("docker")
     if "libvirt" in backends:
-        managers["libvirt"] = LibvirtSandboxManager()
+        managers["libvirt"] = create_sandbox_manager("libvirt")
     if "lima" in backends:
-        managers["lima"] = LimaSandboxManager()
+        managers["lima"] = create_sandbox_manager("lima")
     return managers

@@ -29,7 +29,12 @@ from open_shrimp.client_manager import (
     stop_idle_sweep,
 )
 from open_shrimp.config import Config, load_config
-from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
+from open_shrimp.sandbox import (
+    SandboxManager,
+    create_sandbox_manager,
+    create_sandbox_managers,
+    referenced_backends,
+)
 from open_shrimp.sandbox.manager import destroy_contexts_background
 from open_shrimp.dispatch_registry import register_dispatch
 from open_shrimp.handlers.approval import handle_approval_callback
@@ -151,6 +156,18 @@ async def _handle_suggestion_callback(query: Any, data: str) -> None:
 # ── Config hot-reload ──
 
 
+async def _activate_manager(
+    mgr: SandboxManager, instance_name: str | None,
+) -> None:
+    """Bring a freshly created SandboxManager online.
+
+    ``start_reaper`` does blocking I/O (subprocess/socket/libvirt calls),
+    so it runs off the event loop.
+    """
+    mgr.set_instance_prefix(instance_name)
+    await asyncio.to_thread(mgr.start_reaper)
+
+
 async def _watch_config(config_path: str, bot_data: dict) -> None:
     """Watch the config file for changes and hot-reload into bot_data.
 
@@ -178,6 +195,25 @@ async def _watch_config(config_path: str, bot_data: dict) -> None:
                 )
 
             bot_data["config"] = new_config
+
+            # Enabling a sandbox at runtime (e.g. via the config-app) must
+            # not require a restart — otherwise ``_select_sandbox_manager``
+            # returns ``None`` for the freshly sandboxed context and session
+            # creation asserts.
+            managers: dict[str, SandboxManager] | None = bot_data.get(
+                "sandbox_managers"
+            )
+            if managers is not None:
+                for backend in referenced_backends(new_config):
+                    if backend in managers:
+                        continue
+                    mgr = create_sandbox_manager(backend)
+                    await _activate_manager(mgr, new_config.instance_name)
+                    managers[backend] = mgr
+                    logger.info(
+                        "Config reload: instantiated %s sandbox manager",
+                        backend,
+                    )
 
             # Log context-level changes.
             old_names = set(old_config.contexts)
@@ -418,13 +454,9 @@ async def run_bot(
 
     # Instantiate one SandboxManager per backend used in the config.
     _sandbox_managers = sandbox_managers or create_sandbox_managers(config)
-    for mgr in _sandbox_managers.values():
-        mgr.set_instance_prefix(config.instance_name)
     app.bot_data["sandbox_managers"] = _sandbox_managers
-
-    # Start reapers for all sandbox managers.
     for mgr in _sandbox_managers.values():
-        await asyncio.to_thread(mgr.start_reaper)
+        await _activate_manager(mgr, config.instance_name)
 
     active_contexts = set(config.contexts.keys())
     for name, mgr in _sandbox_managers.items():
