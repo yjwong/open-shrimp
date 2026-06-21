@@ -182,12 +182,12 @@ class OpenCodeBackend:
         )
 
     def command_capabilities(self) -> set[str]:
-        """OpenCode implements none of the opt-in commands.
+        """OpenCode supports MCP management; login/usage ship separately.
 
-        The OpenCode-side equivalents (auth Mini-App, MCP management)
-        ship separately and flip their capabilities on then.
+        The auth Mini-App (the login/usage equivalents) ships separately
+        and flips its capabilities on then.
         """
-        return set()
+        return {"mcp"}
 
     def copy(self) -> BackendCopy:
         """Skip every copy site that doesn't apply to OpenCode.
