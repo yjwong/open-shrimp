@@ -185,6 +185,12 @@ class BackendPolicy(Protocol):
         message update callback."""
         ...
 
+    def is_subagent_task(self, task_type: str | None) -> bool:
+        """True if a task event of this ``task_type`` represents a
+        sub-agent invocation whose descendant messages should be
+        suppressed from the Telegram chat."""
+        ...
+
     def host_bash_render(self) -> tuple[str, str]:
         """The (icon, label) pair used to render host_bash tool-result
         messages in ``stream.py``."""

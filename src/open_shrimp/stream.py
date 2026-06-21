@@ -945,11 +945,7 @@ async def stream_response(
                             tool_use_id=event.tool_use_id,
                             session_id=event.session_id,
                         )
-                    # Record tool_use_id so sub-agent messages are
-                    # suppressed from the Telegram chat.
-                    if event.tool_use_id and event.task_type in (
-                        "local_agent", "remote_agent",
-                    ):
+                    if event.tool_use_id and p.is_subagent_task(event.task_type):
                         state.bg_task_tool_use_ids.add(event.tool_use_id)
                     # Send Telegram notification.
                     await finalize_and_reset(bot, state)

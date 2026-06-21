@@ -599,6 +599,9 @@ class ClaudeSdkPolicy:
     def is_todo_write(self, tool_name: str) -> bool:
         return tool_name == "TodoWrite"
 
+    def is_subagent_task(self, task_type: str | None) -> bool:
+        return task_type in ("local_agent", "remote_agent")
+
     def host_bash_render(self) -> tuple[str, str]:
         return ("\U0001f513", "host_bash")
 

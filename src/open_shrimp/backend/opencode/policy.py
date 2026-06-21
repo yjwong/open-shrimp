@@ -652,6 +652,9 @@ class OpenCodePolicy:
     def is_todo_write(self, tool_name: str) -> bool:
         return tool_name == "todowrite"
 
+    def is_subagent_task(self, task_type: str | None) -> bool:
+        return False
+
     def host_bash_render(self) -> tuple[str, str]:
         return ("\U0001f513", "host_bash")
 
