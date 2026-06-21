@@ -31,6 +31,7 @@ def opencode_image_bundle() -> ImageBundle:
         build_arg=("OPENCODE_BIN", "opencode"),
         guest_home=SANDBOX_HOME,
         dind_user="openshrimp",
+        task_tmp_prefix="openshrimp",
         computer_use_image=OPENCODE_COMPUTER_USE_IMAGE,
         computer_use_build_args=(("INSTALL_CLAUDE_CODE", "false"),),
         libvirt_install=install_opencode_cli_via_ssh,

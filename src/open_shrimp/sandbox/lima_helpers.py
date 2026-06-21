@@ -295,6 +295,7 @@ def generate_lima_yaml(
     context_name: str = "",
     guest_os: str = "linux",
     served_home_mounts: "tuple[GuestMount, ...]" = (),
+    task_tmp_prefix: str = "claude",
 ) -> Path:
     """Generate a Lima YAML template file.
 
@@ -310,6 +311,7 @@ def generate_lima_yaml(
         return generate_lima_yaml_macos(
             sdir, config, project_dir, additional_directories,
             computer_use, context_name=context_name,
+            task_tmp_prefix=task_tmp_prefix,
         )
 
     sdir.mkdir(parents=True, exist_ok=True)
@@ -328,6 +330,7 @@ def generate_lima_yaml(
     # Build mounts.
     mounts = _build_mounts(
         sdir, project_dir, additional_directories, computer_use,
+        task_tmp_prefix=task_tmp_prefix,
         context_name=context_name, served_home_mounts=served_home_mounts,
     )
 
@@ -382,6 +385,7 @@ def _build_mounts(
     *,
     context_name: str = "",
     served_home_mounts: "tuple[GuestMount, ...]" = (),
+    task_tmp_prefix: str = "claude",
 ) -> list[dict]:
     """Build Lima mount entries.
 
@@ -419,12 +423,14 @@ def _build_mounts(
             "writable": False,
         })
 
-    # Host-side tmp directory (for task output files).
+    # Host-side tmp directory (for task output files).  Must mount at the path
+    # the agent CLI writes its background-task output to (Claude →
+    # /tmp/claude-<uid>), or the host terminal mini app can't read it.
     tmp_dir = str(sdir / "tmp")
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
     mounts.append({
         "location": tmp_dir,
-        "mountPoint": "/tmp/claude-1000",
+        "mountPoint": f"/tmp/{task_tmp_prefix}-1000",
         "writable": True,
     })
 
@@ -681,6 +687,7 @@ def lima_config_fingerprint(
     context_name: str = "",
     guest_os: str = "linux",
     served_home_mounts: "tuple[GuestMount, ...]" = (),
+    task_tmp_prefix: str = "claude",
 ) -> str:
     """SHA-256 fingerprint of the Lima YAML template content.
 
@@ -698,6 +705,7 @@ def lima_config_fingerprint(
         return lima_config_fingerprint_macos(
             sdir, config, project_dir, additional_directories,
             computer_use, context_name=context_name,
+            task_tmp_prefix=task_tmp_prefix,
         )
 
     # Build the same template that generate_lima_yaml() would produce,
@@ -706,6 +714,7 @@ def lima_config_fingerprint(
     mounts = _build_mounts(
         sdir, project_dir, additional_directories, computer_use,
         context_name=context_name, served_home_mounts=served_home_mounts,
+        task_tmp_prefix=task_tmp_prefix,
     )
     provision = _build_provision_scripts(config, computer_use)
 

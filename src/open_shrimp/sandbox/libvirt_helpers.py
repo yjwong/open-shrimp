@@ -28,7 +28,6 @@ from open_shrimp.config import SandboxConfig
 from open_shrimp.paths import data_dir as _data_dir
 from open_shrimp.sandbox.skill_paths import (
     SANDBOX_HOME,
-    SANDBOX_TMP,
     SANDBOX_UID,
     SANDBOX_USER,
 )

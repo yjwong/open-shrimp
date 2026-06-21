@@ -139,6 +139,11 @@ class LimaSandbox:
         else:
             self._served_home_mounts = ()
 
+        # The guest path the agent writes background-task output to; the tmp
+        # share must mount there so the host terminal mini app can read it.
+        bundle = runtime.image_bundle if runtime else None
+        self._task_tmp_prefix = bundle.task_tmp_prefix if bundle else "claude"
+
         self._sdir = state_dir_for(context_name)
         self._inst_name = _instance_name(context_name, instance_prefix)
         self._claude_home_dir = self._sdir / "claude-home"
@@ -192,6 +197,7 @@ class LimaSandbox:
             context_name=self._context_name,
             guest_os=self._guest_os,
             served_home_mounts=self._served_home_mounts,
+            task_tmp_prefix=self._task_tmp_prefix,
         )
         saved_fp = load_config_fingerprint(sdir)
         if saved_fp is not None and saved_fp != desired_fp:
@@ -235,6 +241,7 @@ class LimaSandbox:
             context_name=self._context_name,
             guest_os=self._guest_os,
             served_home_mounts=self._served_home_mounts,
+            task_tmp_prefix=self._task_tmp_prefix,
         )
 
         # Create the instance (this downloads the image + boots for cloud-init).

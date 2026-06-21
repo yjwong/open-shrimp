@@ -84,32 +84,38 @@ def _resolve_container_symlink(
 ) -> Path | None:
     """Resolve a broken symlink created inside a container/VM to its host path.
 
-    Inside the container/VM, ``/home/claude/.claude`` is mounted from
+    Inside the container/VM, the agent's ``.claude`` home is mounted from
     the host.  Agent task ``.output`` files are symlinks to ``.jsonl``
-    session files under ``/home/claude/.claude/projects/…``, which don't
+    session files under ``<guest-home>/.claude/projects/…``, which don't
     exist on the host at that path.  This function translates the
     container/VM path back to the host equivalent.
 
+    The guest home varies by backend/user (``/home/claude`` for Docker,
+    ``/home/openshrimp`` for the VM backends, ``/home/<user>.guest`` for
+    Lima), so we key off the stable ``/.claude/`` marker rather than a
+    hardcoded prefix.
+
     Two layouts are supported:
 
-    - **Docker**: *context_dir* IS the ``.claude`` home (bind-mounted as
-      ``/home/claude/.claude``), so the relative path resolves directly.
-    - **Libvirt VM**: *context_dir* contains a ``claude-home/``
-      subdirectory that is shared into the VM as ``/home/claude/.claude``.
+    - **Docker**: *context_dir* IS the ``.claude`` home, so the relative
+      path resolves directly.
+    - **Libvirt/Lima VM**: *context_dir* contains a ``claude-home/``
+      subdirectory that is shared into the VM as ``<guest-home>/.claude``.
     """
     try:
         target = os.readlink(symlink)
     except OSError:
         return None
 
-    container_prefix = "/home/claude/.claude/"
-    if target.startswith(container_prefix):
-        relative = target[len(container_prefix):]
+    marker = "/.claude/"
+    idx = target.find(marker)
+    if idx != -1:
+        relative = target[idx + len(marker):]
         # Docker layout: context_dir IS .claude
         host_path = context_dir / relative
         if host_path.is_file():
             return host_path
-        # Libvirt VM layout: context_dir / "claude-home" IS .claude
+        # Libvirt/Lima VM layout: context_dir / "claude-home" IS .claude
         host_path = context_dir / "claude-home" / relative
         if host_path.is_file():
             return host_path

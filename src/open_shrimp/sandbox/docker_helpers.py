@@ -791,7 +791,7 @@ def _build_docker_run_argv(
         # (the runtime's ``inject`` writes creds into the served home).
         task_tmp_dir = state_dir / "tmp"
         task_tmp_dir.mkdir(exist_ok=True)
-        tmp_target = f"/tmp/{bundle.dind_user}-{uid}"
+        tmp_target = bundle.guest_task_tmp(uid)
         docker_argv.extend([
             "-v", f"{project_dir}:{project_dir}",
             "-v", f"{task_tmp_dir}:{tmp_target}",
@@ -819,7 +819,7 @@ def _build_docker_run_argv(
         docker_argv.extend([
             "-v", f"{project_dir}:{project_dir}",
             "-v", f"{state_dir}:{home_dir}/.claude",
-            "-v", f"{claude_tmp_dir}:/tmp/{bundle.dind_user}-{uid}",
+            "-v", f"{claude_tmp_dir}:{bundle.guest_task_tmp(uid)}",
         ])
         # Sub-mount on top of state_dir; Docker resolves nested binds in flag order.
         host_skills = Path.home() / ".claude" / "skills"

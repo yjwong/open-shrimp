@@ -34,6 +34,8 @@ def claude_image_bundle() -> ImageBundle:
         build_arg=("CLAUDE_CLI", "claude"),
         guest_home="/home/claude",
         dind_user="claude",
+        # Claude Code hardcodes /tmp/claude-<uid> for background-task output.
+        task_tmp_prefix="claude",
         computer_use_image=COMPUTER_USE_IMAGE,
         computer_use_build_args=(("INSTALL_CLAUDE_CODE", "true"),),
         libvirt_install=install_claude_cli_via_ssh,

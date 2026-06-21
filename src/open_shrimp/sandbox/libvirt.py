@@ -40,7 +40,6 @@ from open_shrimp.sandbox.port_forward import (
 )
 from open_shrimp.sandbox.skill_paths import (
     SANDBOX_HOME,
-    SANDBOX_TMP,
     SANDBOX_UID,
     SANDBOX_USER,
 )
@@ -976,8 +975,18 @@ class LibvirtSandbox:
             all_dirs.append(str(self._screenshots_dir))
         all_dirs.append(str(self._tmp_dir))
         all_dirs.append(str(self._claude_home_dir))
+        # The task-output share must mount at the guest path the agent CLI
+        # actually writes to (Claude → /tmp/claude-<uid>), not a vendor-neutral
+        # /tmp/<user>-<uid>; otherwise the CLI writes to an unshared guest path
+        # and the host terminal mini app finds nothing ("View output" 400s).
+        bundle = self._runtime.image_bundle if self._runtime else None
+        task_tmp_guest = (
+            bundle.guest_task_tmp(SANDBOX_UID)
+            if bundle is not None
+            else f"/tmp/claude-{SANDBOX_UID}"
+        )
         mount_overrides = {
-            str(self._tmp_dir): SANDBOX_TMP,
+            str(self._tmp_dir): task_tmp_guest,
             str(self._claude_home_dir): f"{SANDBOX_HOME}/.claude",
         }
         # Served-endpoint launch only: sync each declared host_dir into the

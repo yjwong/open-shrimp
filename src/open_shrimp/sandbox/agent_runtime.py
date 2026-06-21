@@ -152,6 +152,14 @@ class ImageBundle:
     passwd rewrite registers — defaults to ``"claude"`` for the wrapped-CLI
     image; the served image overrides it to match its own ``HOME``.
 
+    ``task_tmp_prefix`` is the ``/tmp/<prefix>-<uid>`` slug the agent CLI writes
+    its background-task output under.  Every sandbox bind/shares a host dir at
+    :meth:`guest_task_tmp` so the host terminal mini app can read those files.
+    This is the agent's own convention, **not** the guest username: Claude Code
+    hardcodes ``/tmp/claude-<uid>`` regardless of who runs it, so the default is
+    ``"claude"``.  Getting this wrong silently breaks "View output" — the guest
+    writes to an unshared path and the host resolver finds nothing.
+
     ``computer_use_image`` is the optional layered "computer-use" image tag
     built on top of the base bundle.  ``None`` → this runtime has no
     computer-use variant.
@@ -178,10 +186,21 @@ class ImageBundle:
     build_arg: tuple[str, str]
     guest_home: str
     dind_user: str = "claude"
+    task_tmp_prefix: str = "claude"
     computer_use_image: str | None = None
     computer_use_build_args: tuple[tuple[str, str], ...] = ()
     libvirt_install: Callable[[Path, int, str], None] | None = None
     lima_install: Callable[[str, str, str], None] | None = None
+
+    def guest_task_tmp(self, uid: int) -> str:
+        """Guest dir the agent writes background-task output to.
+
+        Every sandbox mirrors this to a host dir so the terminal mini app can
+        tail/read it; *uid* is the in-guest uid the agent CLI runs as (the host
+        uid for the bind-mounted Docker container, the fixed sandbox uid for the
+        VM backends).
+        """
+        return f"/tmp/{self.task_tmp_prefix}-{uid}"
 
 
 @dataclass(frozen=True)

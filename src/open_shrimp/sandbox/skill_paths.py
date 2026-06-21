@@ -8,7 +8,6 @@ from pathlib import Path
 SANDBOX_USER = "openshrimp"
 SANDBOX_UID = 1000
 SANDBOX_HOME = f"/home/{SANDBOX_USER}"
-SANDBOX_TMP = f"/tmp/{SANDBOX_USER}-{SANDBOX_UID}"
 
 
 def global_skill_dir_candidates(
