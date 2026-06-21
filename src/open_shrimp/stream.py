@@ -1,4 +1,4 @@
-"""Stream bridge between Agent SDK events and Telegram sendMessageDraft.
+"""Stream bridge between backend events and Telegram sendMessageDraft.
 
 Consumes streaming events from agent.py, buffers text, and sends drafts
 to Telegram at appropriate intervals. Handles message length limits,
@@ -43,35 +43,6 @@ from open_shrimp.markdown import gfm_to_telegram
 from open_shrimp.web_app_button import make_web_app_button
 
 logger = logging.getLogger(__name__)
-
-
-def _is_auto_promoted_fg_bash(
-    state: "_DraftState",
-    event: "TaskStartedMessage | TaskProgressMessage | TaskNotificationMessage",
-) -> bool:
-    """Detect SDK auto-promotion of slow foreground Bash to a task.
-
-    Why: Claude Code CLI 2.1.117 (bundled with claude-agent-sdk 0.1.65)
-    silently wraps long-running foreground Bash in ``task_started`` /
-    ``task_notification`` events even when ``run_in_background`` was not
-    set. Those auto-promoted tasks have an empty ``output_file`` and no
-    ``.output`` file on disk — the regular Bash tool-result flow already
-    rendered the output. Without this filter we'd post ⏳ + 📋 noise and
-    a "View output" button that 404s. Reported upstream as
-    anthropics/claude-code#31518 (closed without fix).
-    """
-    # Only TaskStartedMessage carries task_type; TaskProgressMessage and
-    # TaskNotificationMessage don't, so for those we rely on the task_id
-    # we recorded when the started event was suppressed.
-    task_type = getattr(event, "task_type", None)
-    if task_type is None:
-        return event.task_id in state.suppressed_task_ids
-    if task_type != "local_bash" or not event.tool_use_id:
-        return False
-    info = state.tool_use_map.get(event.tool_use_id)
-    if info is None or info[0] != "Bash":
-        return False
-    return not info[1].get("run_in_background")
 
 
 def _is_thread_not_found(exc: BaseException) -> bool:
@@ -155,7 +126,7 @@ class _DraftState:
     # blockquote ("> Tool: summary").  Used to insert a paragraph break
     # before the next assistant text so it doesn't get swallowed into the
     # notification blockquote.  We track this with a flag instead of
-    # checking raw_text for ">" lines, because Claude's own response text
+    # checking raw_text for ">" lines, because the assistant's own response text
     # may also contain blockquotes that should NOT be broken.
     last_was_notification: bool = False
     # Session ID captured as early as possible (from SystemMessage init or
@@ -170,11 +141,6 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
-    # task_ids of auto-promoted foreground Bash tasks (see
-    # _is_auto_promoted_fg_bash).  Only TaskStartedMessage carries
-    # task_type, so we record the id here at started-time and skip the
-    # matching TaskProgressMessage / TaskNotificationMessage events.
-    suppressed_task_ids: set[str] = field(default_factory=set)
     # Fields for web_app button fallback in group chats.
     user_id: int = 0
     is_private_chat: bool = True
@@ -634,7 +600,7 @@ async def _handle_assistant_error(
         or _DEFAULT_ASSISTANT_ERROR_MESSAGES.get(error)
         or f"⚠️ **Error:** {error}"
     )
-    # Append the detail from the SDK (e.g. "Prompt is too long") so
+    # Append the detail from the backend (e.g. "Prompt is too long") so
     # the user knows *why* the request was rejected.
     if error_detail:
         msg_text += f"\n\n> {error_detail}"
@@ -678,7 +644,7 @@ async def stream_response(
     policy: "BackendPolicy | None" = None,
     copy: "BackendCopy | None" = None,
 ) -> StreamResult:
-    """Stream Agent SDK events to Telegram as draft messages.
+    """Stream backend events to Telegram as draft messages.
 
     Consumes events from the agent, buffers text, sends drafts at intervals,
     and finalizes when the result is received.
@@ -741,11 +707,11 @@ async def stream_response(
                 if turn_usage:
                     result.turn_usage = turn_usage
 
-                # Check for SDK-level errors (auth failures, billing,
+                # Check for backend-level errors (auth failures, billing,
                 # rate limits, etc.) and surface them to the user.
                 if event.error:
                     result.last_turn_had_error = True
-                    # Extract error detail from content blocks (the SDK
+                    # Extract error detail from content blocks (the backend
                     # puts the human-readable reason in a TextBlock, e.g.
                     # "Prompt is too long").
                     error_detail = None
@@ -874,16 +840,6 @@ async def stream_response(
                     result.session_id = sid
 
                 if isinstance(event, TaskStartedMessage):
-                    if _is_auto_promoted_fg_bash(state, event):
-                        state.suppressed_task_ids.add(event.task_id)
-                        logger.debug(
-                            "Skipping auto-promoted FG bash task %s for "
-                            "chat %d (tool_use_id=%s)",
-                            event.task_id,
-                            state.chat_id,
-                            event.tool_use_id,
-                        )
-                        continue
                     logger.info(
                         "Background task started %s (%s) for chat %d: %s",
                         event.task_id,
@@ -960,8 +916,6 @@ async def stream_response(
                         )
 
                 elif isinstance(event, TaskProgressMessage):
-                    if _is_auto_promoted_fg_bash(state, event):
-                        continue
                     logger.debug(
                         "Background task progress %s for chat %d: "
                         "last_tool=%s",
@@ -979,9 +933,6 @@ async def stream_response(
                             )
 
                 elif isinstance(event, TaskNotificationMessage):
-                    if _is_auto_promoted_fg_bash(state, event):
-                        state.suppressed_task_ids.discard(event.task_id)
-                        continue
                     logger.info(
                         "Background task %s %s for chat %d: %s",
                         event.task_id,
@@ -1020,7 +971,7 @@ async def stream_response(
             elif isinstance(event, RateLimitEvent):
                 # backend.types.RateLimitEvent is flat (the SDK's nested
                 # rate_limit_info is flattened in the claude_sdk adapter's
-                # translate._to_backend_event).
+                # translate.SdkTranslator).
                 if event.status == "rejected":
                     logger.warning(
                         "Rate limit hit (%s) for chat %d, resets at %s",

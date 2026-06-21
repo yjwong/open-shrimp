@@ -3,7 +3,7 @@
 A thin wrapper holding one SDK client.  Every method delegates; the only real
 logic is:
 
-* ``receive_response`` applies ``translate._to_backend_event`` to each SDK
+* ``receive_response`` applies a per-session ``SdkTranslator`` to each SDK
   message so SDK types never escape the adapter (this translation used to live
   in ``client_manager.receive_events`` / ``agent.run_agent``).
 * ``is_alive`` owns the ``_transport._process.returncode`` poke that was
@@ -25,7 +25,7 @@ from claude_agent_sdk import ClaudeSDKClient, ProcessError
 
 from open_shrimp.backend import types as bt
 from open_shrimp.backend.claude_sdk.options import translate_options
-from open_shrimp.backend.claude_sdk.translate import _to_backend_event
+from open_shrimp.backend.claude_sdk.translate import SdkTranslator
 from open_shrimp.backend.protocol import BackendOptions
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,9 @@ class ClaudeSdkClient:
         self._options = options
         self._client = ClaudeSDKClient(options=translate_options(options))
         self._session_id: str | None = None
+        # Per-session translator state (auto-promoted-FG-bash bookkeeping
+        # lives on the instance, so concurrent chats can't cross-pollute).
+        self._translate = SdkTranslator()
 
     @property
     def session_id(self) -> str | None:
@@ -89,6 +92,9 @@ class ClaudeSdkClient:
             self._client = ClaudeSDKClient(
                 options=translate_options(self._options)
             )
+            # Reset translator state alongside the rebuilt client — its
+            # tool_use/task bookkeeping is tied to the dropped session.
+            self._translate = SdkTranslator()
             await self._client.connect()
 
     async def disconnect(self) -> None:
@@ -107,7 +113,7 @@ class ClaudeSdkClient:
         before the manager records it.
         """
         async for message in self._client.receive_response():
-            event = _to_backend_event(message)
+            event = self._translate(message)
             if event is None:
                 continue
             if isinstance(event, bt.SystemMessage):

@@ -1,4 +1,4 @@
-"""Equivalence tests for the claude_sdk adapter's _to_backend_event.
+"""Equivalence tests for the claude_sdk adapter's SdkTranslator.
 
 The step's correctness claim is "zero behavior change": each SDK message must
 translate to the matching backend.types instance with the load-bearing fields
@@ -11,7 +11,7 @@ from __future__ import annotations
 import claude_agent_sdk.types as sdk
 
 from open_shrimp.backend import types as bt
-from open_shrimp.backend.claude_sdk.translate import _to_backend_event
+from open_shrimp.backend.claude_sdk.translate import SdkTranslator
 
 
 def test_assistant_message_translates_with_session_id():
@@ -24,7 +24,7 @@ def test_assistant_message_translates_with_session_id():
         error=None,
         session_id="sess-abc",
     )
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.AssistantMessage)
     assert out.session_id == "sess-abc"
     assert out.usage == {"input_tokens": 3}
@@ -50,7 +50,7 @@ def test_result_message_keeps_num_turns_and_session():
         model_usage={"claude-x": {"output_tokens": 5}},
         errors=None,
     )
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.ResultMessage)
     assert out.session_id == "sess-r"
     assert out.num_turns == 4  # decision 2: keep num_turns
@@ -63,7 +63,7 @@ def test_result_message_keeps_num_turns_and_session():
 
 def test_system_message_has_no_session_id_attr():
     msg = sdk.SystemMessage(subtype="init", data={"session_id": "x"})
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.SystemMessage)
     assert out.subtype == "init"
     assert out.data == {"session_id": "x"}
@@ -81,7 +81,7 @@ def test_text_delta_carries_text_and_session():
             "delta": {"type": "text_delta", "text": "hello"},
         },
     )
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.TextDeltaEvent)
     assert out.text == "hello"
     assert out.session_id == "sess-s"
@@ -96,7 +96,7 @@ def test_non_text_stream_event_returns_none():
     consumers can skip without a shape check.
     """
     msg = sdk.StreamEvent(uuid="u1", session_id="sess-s", event={"type": "ping"})
-    assert _to_backend_event(msg) is None
+    assert SdkTranslator()(msg) is None
 
 
 def test_rate_limit_event_flattens_rate_limit_info():
@@ -108,7 +108,7 @@ def test_rate_limit_event_flattens_rate_limit_info():
         utilization=0.83,
     )
     msg = sdk.RateLimitEvent(rate_limit_info=info, uuid="u", session_id="sess-rl")
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.RateLimitEvent)
     assert out.status == "allowed_warning"
     assert out.rate_limit_type == "five_hour"
@@ -130,7 +130,7 @@ def test_task_started_is_systemmessage_subclass_and_preserves_fields():
         tool_use_id="tu-1",
         task_type="bash",
     )
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.TaskStartedMessage)
     # decision 4: Task* mirror SDK inheritance so stream.py's nested dispatch
     # (Task* checks inside the isinstance(SystemMessage) branch) is untouched.
@@ -158,7 +158,7 @@ def test_task_progress_translates():
         uuid="u",
         session_id="sess-tp",
     )
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.TaskProgressMessage)
     assert isinstance(out, bt.SystemMessage)
     assert out.task_id == "task-2"
@@ -178,7 +178,7 @@ def test_task_notification_translates():
         session_id="sess-tn",
         tool_use_id="tu-3",
     )
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.TaskNotificationMessage)
     assert isinstance(out, bt.SystemMessage)
     assert out.task_id == "task-3"
@@ -191,7 +191,7 @@ def test_task_notification_translates():
 
 def test_user_message_str_content_passes_through():
     msg = sdk.UserMessage(content="plain string prompt")
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.UserMessage)
     assert out.content == "plain string prompt"
 
@@ -206,7 +206,7 @@ def test_user_message_list_with_thinking_block_surfaces_tool_result():
         tool_use_id="tu-9", content="output text", is_error=False
     )
     msg = sdk.UserMessage(content=[thinking, tool_result])
-    out = _to_backend_event(msg)
+    out = SdkTranslator()(msg)
     assert isinstance(out, bt.UserMessage)
     assert isinstance(out.content, list) and len(out.content) == 2
     # The ToolResultBlock is translated to the contract type so downstream
@@ -220,7 +220,7 @@ def test_user_message_list_with_thinking_block_surfaces_tool_result():
 
 
 def test_parent_tool_use_id_round_trips():
-    assistant = _to_backend_event(
+    assistant = SdkTranslator()(
         sdk.AssistantMessage(
             content=[sdk.TextBlock(text="hi")],
             model="claude-x",
@@ -230,13 +230,13 @@ def test_parent_tool_use_id_round_trips():
     assert isinstance(assistant, bt.AssistantMessage)
     assert assistant.parent_tool_use_id == "parent-1"
 
-    user = _to_backend_event(
+    user = SdkTranslator()(
         sdk.UserMessage(content="sub", parent_tool_use_id="parent-2")
     )
     assert isinstance(user, bt.UserMessage)
     assert user.parent_tool_use_id == "parent-2"
 
-    stream = _to_backend_event(
+    stream = SdkTranslator()(
         sdk.StreamEvent(
             uuid="u1",
             session_id="s1",
@@ -253,4 +253,4 @@ def test_parent_tool_use_id_round_trips():
 
 def test_unknown_message_passes_through():
     sentinel = object()
-    assert _to_backend_event(sentinel) is sentinel
+    assert SdkTranslator()(sentinel) is sentinel
