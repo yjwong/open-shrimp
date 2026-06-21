@@ -468,8 +468,8 @@ async def _run_scheduled_prompt(
     Creates an isolated session (not shared with interactive sessions),
     sends the prompt, and streams results to the chat.
     """
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-
+    from open_shrimp.backend import BackendOptions
+    from open_shrimp.client_manager import resolve_backend
     from open_shrimp.stream import _DraftState, stream_response
 
     # Read-only tools by default. Bash is only allowed in containerized
@@ -484,7 +484,7 @@ async def _run_scheduled_prompt(
     if is_sandboxed(ctx_config):
         allowed_tools.append("Bash")
 
-    options = ClaudeAgentOptions(
+    options = BackendOptions(
         cwd=ctx_config.directory,
         model=ctx_config.model,
         allowed_tools=allowed_tools,
@@ -503,7 +503,8 @@ async def _run_scheduled_prompt(
         },
     )
 
-    client = ClaudeSDKClient(options=options)
+    backend = resolve_backend(context=ctx_config)
+    client = backend.make_client(options)
     try:
         await client.connect()
         await client.query(task.prompt)
@@ -523,6 +524,8 @@ async def _run_scheduled_prompt(
             draft_state=draft_state,
             allowed_tools=allowed_tools,
             cwd=ctx_config.directory,
+            policy=backend.policy,
+            copy=backend.copy(),
         )
     finally:
         try:

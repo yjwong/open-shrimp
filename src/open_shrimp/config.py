@@ -82,6 +82,18 @@ class ContextConfig:
     locked_for_chats: list[int] = field(default_factory=list)
     container: ContainerConfig | None = None
     sandbox: SandboxConfig | None = None
+    mcp: dict[str, Any] = field(default_factory=dict)
+    # Optional per-context backend override.  ``None`` inherits the top-level
+    # ``backend:`` key (which itself defaults to ``claude_sdk``).
+    backend: str | None = None
+
+
+def effective_backend(ctx: ContextConfig, config: "Config") -> str:
+    """Return the backend name that should serve *ctx*.
+
+    Falls back to the top-level ``backend:`` when the context omits its own.
+    """
+    return ctx.backend or config.backend
 
 
 @dataclass
@@ -101,6 +113,9 @@ class Config:
     review: ReviewConfig = field(default_factory=ReviewConfig)
     instance_name: str | None = None
     auto_update: bool = True
+    # The agent backend, selected once at startup (resolved via
+    # ``open_shrimp.backend.get_backend``).  Absent defaults to ``claude_sdk``.
+    backend: str = "claude_sdk"
 
 
 def _validate_raw(raw: dict) -> None:
@@ -283,6 +298,63 @@ def _validate_raw(raw: dict) -> None:
             f"{list(contexts.keys())}"
         )
 
+    # Optional top-level backend: validate against the registry so a typo
+    # fails fast at startup rather than at first message.
+    from open_shrimp.backend import DEFAULT_BACKEND, known_backends
+
+    backend = raw.get("backend")
+    if backend is not None:
+        if not isinstance(backend, str) or backend not in known_backends():
+            raise ValueError(
+                f"backend must be one of {known_backends()}, got: {backend!r}"
+            )
+
+    # Per-context backend overrides.  Each context's optional ``backend:``
+    # mirrors the top-level key; absent / null inherits the default.
+    for name, ctx in contexts.items():
+        ctx_backend = ctx.get("backend")
+        if ctx_backend is None:
+            continue
+        if not isinstance(ctx_backend, str) or ctx_backend not in known_backends():
+            raise ValueError(
+                f"Context '{name}': backend must be one of "
+                f"{known_backends()}, got: {ctx_backend!r}"
+            )
+
+    # OpenCode-specific startup validation, run per context whose effective
+    # backend is ``opencode`` (top-level default + any per-context override).
+    # OpenCode addresses models as ``provider/model`` and the computer-use
+    # image carries no ``opencode`` binary — fail fast at startup instead of
+    # at the first turn.
+    default_backend = backend or DEFAULT_BACKEND
+    opencode_contexts = [
+        (name, ctx) for name, ctx in contexts.items()
+        if (ctx.get("backend") or default_backend) == "opencode"
+    ]
+    if opencode_contexts:
+        from open_shrimp.backend.opencode.options import split_provider_model
+
+        for name, ctx in opencode_contexts:
+            model = ctx.get("model")
+            try:
+                split_provider_model(model)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Context '{name}': backend 'opencode' requires a "
+                    f"provider-qualified model (e.g. 'openai/gpt-5.5'): {exc}"
+                ) from exc
+
+        # Check the opencode binary exactly once across all opencode contexts.
+        from open_shrimp.backend.opencode.binary import find_opencode_binary
+
+        try:
+            find_opencode_binary()
+        except RuntimeError as exc:
+            raise ValueError(
+                f"backend 'opencode' selected but the opencode binary could "
+                f"not be found: {exc}"
+            ) from exc
+
 
 def _parse_sandbox_config(raw: dict) -> SandboxConfig:
     """Parse a sandbox config dict into a SandboxConfig dataclass."""
@@ -353,6 +425,12 @@ def _parse(raw: dict) -> Config:
                     computer_use=sandbox.computer_use,
                 )
 
+        mcp_raw = ctx.get("mcp", {})
+        if not isinstance(mcp_raw, dict):
+            raise ValueError(
+                f"Context '{name}': mcp must be a mapping"
+            )
+
         contexts[name] = ContextConfig(
             directory=ctx["directory"],
             description=ctx["description"],
@@ -364,6 +442,8 @@ def _parse(raw: dict) -> Config:
             locked_for_chats=ctx.get("locked_for_chats", []),
             container=container,
             sandbox=sandbox,
+            mcp=mcp_raw,
+            backend=ctx.get("backend"),
         )
 
     # Parse optional review config.
@@ -390,6 +470,7 @@ def _parse(raw: dict) -> Config:
         review=review,
         instance_name=raw.get("instance_name"),
         auto_update=bool(raw.get("auto_update", True)),
+        backend=str(raw.get("backend", "claude_sdk")),
     )
 
 
@@ -485,6 +566,12 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                 container_dict["computer_use"] = True
             ctx_dict["container"] = container_dict
 
+        if ctx.mcp:
+            ctx_dict["mcp"] = ctx.mcp
+
+        if ctx.backend is not None:
+            ctx_dict["backend"] = ctx.backend
+
         contexts[name] = ctx_dict
 
     result: dict[str, Any] = {
@@ -512,6 +599,9 @@ def config_to_dict(config: Config) -> dict[str, Any]:
 
     if not config.auto_update:
         result["auto_update"] = False
+
+    if config.backend != "claude_sdk":
+        result["backend"] = config.backend
 
     return result
 

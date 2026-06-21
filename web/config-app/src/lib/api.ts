@@ -1,6 +1,11 @@
 import { getAuthHeader } from "./auth";
 import type { AppConfig } from "./types";
 
+export interface ModelOption {
+  value: string;
+  label: string;
+}
+
 export async function fetchConfig(): Promise<AppConfig> {
   const response = await fetch("/api/config", {
     headers: getAuthHeader(),
@@ -40,6 +45,21 @@ export async function validatePath(path: string): Promise<{ exists: boolean; pat
     throw new Error(`Failed to validate path: ${response.status}`);
   }
   return response.json();
+}
+
+export async function fetchModels(directory: string): Promise<ModelOption[]> {
+  const params = new URLSearchParams();
+  if (directory.trim()) params.set("directory", directory.trim());
+  const query = params.toString();
+  const response = await fetch(`/api/config/models${query ? `?${query}` : ""}`, {
+    headers: getAuthHeader(),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch models: ${response.status}`);
+  }
+  const body = (await response.json()) as { models?: ModelOption[] };
+  return Array.isArray(body.models) ? body.models : [];
 }
 
 export interface SandboxActionResult {

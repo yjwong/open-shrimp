@@ -5,11 +5,9 @@
 from __future__ import annotations
 
 import asyncio
-import json as _json
 import logging
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -23,7 +21,7 @@ from open_shrimp.client_manager import (
     close_session,
     get_session,
 )
-from open_shrimp.config import Config, ContextConfig
+from open_shrimp.config import Config, ContextConfig, effective_backend
 from open_shrimp.db import ChatScope, delete_session, get_session_id, set_session_id
 from open_shrimp.handlers.state import (
     _MCP_STATUS_EMOJI,
@@ -48,6 +46,7 @@ from open_shrimp.handlers.utils import (
     _is_authorized,
     _update_pinned_status,
     chat_scope_from_message,
+    get_backend_for_scope,
 )
 
 logger = logging.getLogger(__name__)
@@ -387,6 +386,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lines = [
         f"*Context:* `{ctx_name}`",
         f"*Directory:* `{ctx.directory}`",
+        f"*Backend:* `{effective_backend(ctx, config)}`",
         f"*Model:* `{ctx.model or 'CLI default'}`" + (" (override)" if scope in _model_overrides else ""),
         f"*Effort:* `{ctx.effort or 'default'}`" + (" (override)" if scope in _effort_overrides else ""),
         f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
@@ -853,65 +853,6 @@ async def _reconnect_after_dir_change(
             manager.invalidate_sandbox(ctx_name)
 
 
-def _list_sessions_for_context(
-    ctx_name: str,
-    ctx: ContextConfig,
-    sandbox_managers: "dict[str, Any] | None" = None,
-    **kwargs: Any,
-) -> "list[Any]":
-    """Call ``list_sessions`` respecting sandboxed session storage.
-
-    For sandboxed contexts the session ``.jsonl`` files live under the
-    per-context claude-home directory (mapped as ``~/.claude`` inside the
-    sandbox), not the host's ``~/.claude``.  We scan that directory
-    directly using the SDK's internal helpers to avoid mutating global
-    process state (``CLAUDE_CONFIG_DIR``).
-    """
-    from claude_agent_sdk import list_sessions
-    from claude_agent_sdk._internal.sessions import (
-        MAX_SANITIZED_LENGTH,
-        _apply_sort_limit_offset,
-        _canonicalize_path,
-        _read_sessions_from_dir,
-        _sanitize_path,
-    )
-
-    # Resolve the host-side claude-home directory for sandboxed contexts.
-    claude_home: Path | None = None
-    if ctx.sandbox is not None and ctx.sandbox.enabled and sandbox_managers:
-        mgr = sandbox_managers.get(ctx.sandbox.backend)
-        if mgr is not None:
-            claude_home = mgr.claude_home_dir(ctx_name)
-
-    if claude_home is not None:
-        projects_dir = claude_home / "projects"
-        canonical = _canonicalize_path(ctx.directory)
-        sanitized = _sanitize_path(canonical)
-        candidate = projects_dir / sanitized
-        project_dir = None
-        if candidate.is_dir():
-            project_dir = candidate
-        elif len(sanitized) > MAX_SANITIZED_LENGTH:
-            # Prefix scan for long paths (hash mismatch tolerance).
-            prefix = sanitized[:MAX_SANITIZED_LENGTH]
-            try:
-                for entry in projects_dir.iterdir():
-                    if entry.is_dir() and entry.name.startswith(prefix + "-"):
-                        project_dir = entry
-                        break
-            except OSError:
-                pass
-
-        if project_dir is None:
-            return []
-        sessions = _read_sessions_from_dir(project_dir, canonical)
-        return _apply_sort_limit_offset(
-            sessions, kwargs.get("limit"), kwargs.get("offset", 0),
-        )
-
-    return list_sessions(directory=ctx.directory, **kwargs)
-
-
 # ── /resume ──
 
 
@@ -942,19 +883,26 @@ async def _build_resume_page(
     scope: ChatScope,
     page: int,
     sandbox_managers: "dict[str, Any] | None" = None,
+    backend: Any = None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Build a single page of the resume session list.
 
     Returns ``(text, keyboard)`` where *keyboard* is ``None`` when there are
     no sessions at all.
     """
+    from open_shrimp.client_manager import resolve_backend
+
+    backend = resolve_backend(backend, context=ctx)
     per_page = _RESUME_LIST_LIMIT
     offset = page * per_page
     # Fetch one extra to detect whether a next page exists.
-    sessions = await asyncio.to_thread(
-        _list_sessions_for_context, ctx_name, ctx,
+    sessions = await backend.list_sessions(
+        ctx.directory,
+        limit=per_page + 1,
+        offset=offset,
+        ctx=ctx,
+        ctx_name=ctx_name,
         sandbox_managers=sandbox_managers,
-        limit=per_page + 1, offset=offset,
     )
 
     if not sessions:
@@ -967,6 +915,7 @@ async def _build_resume_page(
         return await _build_resume_page(
             ctx_name, ctx, db, scope, page - 1,
             sandbox_managers=sandbox_managers,
+            backend=backend,
         )
 
     has_next = len(sessions) > per_page
@@ -1080,6 +1029,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     config: Config = context.bot_data["config"]
     db: aiosqlite.Connection = context.bot_data["db"]
     sandbox_managers = context.bot_data.get("sandbox_managers")
+    backend = context.bot_data.get("backend")
     message = update.effective_message
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
@@ -1090,10 +1040,14 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     args = message.text.split() if message.text else []
 
     if len(args) >= 2:
-        # Direct resume by session ID (or prefix)
+        from open_shrimp.client_manager import resolve_backend
+
+        # Direct resume by session ID (or prefix).
         target = args[1]
-        sessions = await asyncio.to_thread(
-            _list_sessions_for_context, ctx_name, ctx,
+        sessions = await resolve_backend(backend, context=ctx).list_sessions(
+            ctx.directory,
+            ctx=ctx,
+            ctx_name=ctx_name,
             sandbox_managers=sandbox_managers,
         )
         match = None
@@ -1123,6 +1077,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text, keyboard = await _build_resume_page(
         ctx_name, ctx, db, scope, page=0,
         sandbox_managers=sandbox_managers,
+        backend=backend,
     )
 
     if keyboard is None:
@@ -1145,6 +1100,7 @@ async def handle_resume_callback(
 
     db: aiosqlite.Connection = context.bot_data["db"]
     sandbox_managers = context.bot_data.get("sandbox_managers")
+    backend = context.bot_data.get("backend")
 
     # Handle pagination
     if data.startswith("resume_page:"):
@@ -1168,6 +1124,7 @@ async def handle_resume_callback(
         text, keyboard = await _build_resume_page(
             ctx_name_req, ctx, db, scope, page,
             sandbox_managers=sandbox_managers,
+            backend=backend,
         )
         await query.answer()
         try:
@@ -1379,7 +1336,7 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /login -- open the login Mini App to re-authenticate Claude Code OAuth."""
+    """Handle /login -- open the login Mini App to re-authenticate."""
     if not update.effective_user or not update.message:
         return
 
@@ -1392,6 +1349,19 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
         return
 
+    scope = chat_scope_from_message(update.message)
+    backend = get_backend_for_scope(context.bot_data, scope)
+    if backend is not None and "login" not in backend.command_capabilities():
+        await update.message.reply_text(
+            f"/login is not available on the `{_escape_mdv2(backend.name)}` backend\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    body = "Re-authenticate"
+    if backend is not None:
+        body = backend.copy().login_mini_app_body or body
+
     # Build the Mini App URL.
     if config.review.public_url:
         base_url = config.review.public_url.rstrip("/")
@@ -1399,7 +1369,6 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         base_url = f"https://{config.review.host}:{config.review.port}"
 
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    scope = chat_scope_from_message(update.message)
     login_url = f"{base_url}/terminal/?mode=login"
     keyboard = InlineKeyboardMarkup([
         [make_web_app_button(
@@ -1413,7 +1382,7 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ])
 
     await update.message.reply_text(
-        "Re\\-authenticate Claude Code OAuth",
+        _escape_mdv2(body),
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
     )
@@ -1438,6 +1407,13 @@ async def mcp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     scope = chat_scope_from_message(message)
+    backend = get_backend_for_scope(context.bot_data, scope)
+    if backend is not None and "mcp" not in backend.command_capabilities():
+        await message.reply_text(
+            f"/mcp is not available on the `{_escape_mdv2(backend.name)}` backend\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
 
     session = get_session(scope)
     if session is None:
@@ -1760,132 +1736,52 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ── /usage ──
 
-# Cache: (timestamp, response_dict)
-_usage_cache: tuple[float, dict[str, Any]] | None = None
-_USAGE_CACHE_TTL = 60  # seconds
-
-
-async def _fetch_usage() -> dict[str, Any] | None:
-    """Fetch usage data from the Anthropic OAuth usage endpoint.
-
-    Returns the parsed JSON response, or None if unavailable.
-    Uses a 60-second cache to avoid hitting the rate limit.
-    """
-    global _usage_cache
-    now = time.monotonic()
-    if _usage_cache and now - _usage_cache[0] < _USAGE_CACHE_TTL:
-        return _usage_cache[1]
-
-    credentials_path = Path.home() / ".claude" / ".credentials.json"
-    if not credentials_path.exists():
-        return None
-
-    try:
-        creds = _json.loads(credentials_path.read_text(encoding="utf-8"))
-        oauth = creds["claudeAiOauth"]
-        token = oauth["accessToken"]
-        # Skip API call if token is expired (with 5-minute buffer)
-        expires_at = oauth.get("expiresAt")
-        if expires_at is not None:
-            buffer_ms = 5 * 60 * 1000
-            if (time.time() * 1000 + buffer_ms) >= expires_at:
-                return None
-    except (KeyError, _json.JSONDecodeError, OSError):
-        return None
-
-    import httpx
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://api.anthropic.com/api/oauth/usage",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "anthropic-beta": "oauth-2025-04-20",
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            _usage_cache = (now, data)
-            return data
-    except (httpx.HTTPError, _json.JSONDecodeError):
-        return None
-
-
-def _format_tier(name: str, tier: dict[str, Any] | None) -> str | None:
-    """Format a single usage tier line. Returns None if tier is absent."""
-    if not tier or tier.get("utilization") is None:
-        return None
-    util = tier["utilization"]
-    used = min(100, util)
-    bar = _usage_bar(used)
-    line = f"*{_escape_mdv2(name)}:* {bar} {_escape_mdv2(f'{used:.0f}% used')}"
-    resets_at = tier.get("resets_at")
-    if resets_at:
-        try:
-            reset_dt = datetime.fromisoformat(resets_at)
-            delta = reset_dt - datetime.now(timezone.utc)
-            total_seconds = int(delta.total_seconds())
-            if total_seconds > 0:
-                hours, remainder = divmod(total_seconds, 3600)
-                minutes = remainder // 60
-                if hours > 0:
-                    line += _escape_mdv2(f" (resets in {hours}h{minutes}m)")
-                else:
-                    line += _escape_mdv2(f" (resets in {minutes}m)")
-        except (ValueError, TypeError):
-            pass
-    return line
-
-
-def _usage_bar(used: float) -> str:
-    """Build a small text-based usage bar (10 segments)."""
-    filled = round(used / 10)
-    return _escape_mdv2("[" + "█" * filled + "░" * (10 - filled) + "]")
-
 
 async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /usage command: show Claude quota/usage stats."""
+    """Handle /usage command: show operator quota/usage stats.
+
+    Queries every configured backend that declares the ``"usage"``
+    capability and renders a union of their reports.  A single backend
+    with data produces today's flat output; multiple backends produce
+    one section per backend.
+    """
+    from open_shrimp.backend.usage import UsageReport
+    from open_shrimp.handlers.usage_render import render_usage_reports
+
     config: Config = context.bot_data["config"]
     message = update.effective_message
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    data = await _fetch_usage()
-    if data is None:
+    backends = context.bot_data.get("backends") or []
+    capable = [b for b in backends if "usage" in b.command_capabilities()]
+    if not capable:
+        # Mirrors the legacy single-backend "not available on <name>" message,
+        # generalised over the configured set (empty list → "this install").
+        if backends:
+            names = ", ".join(f"`{_escape_mdv2(b.name)}`" for b in backends)
+        else:
+            names = "this install"
+        await message.reply_text(
+            f"/usage is not available on {names}\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    reports: list[tuple[str, UsageReport]] = []
+    for backend in capable:
+        report = await backend.usage()
+        if report is not None and (report.tiers or report.extra):
+            reports.append((backend.name, report))
+
+    if not reports:
         await message.reply_text(
             "Usage data unavailable\\. OAuth credentials not found or endpoint unreachable\\.",
             parse_mode="MarkdownV2",
         )
         return
 
-    lines: list[str] = []
-    for label, key in [
-        ("5-hour session", "five_hour"),
-        ("7-day overall", "seven_day"),
-        ("7-day Sonnet", "seven_day_sonnet"),
-    ]:
-        line = _format_tier(label, data.get(key))
-        if line:
-            lines.append(line)
-
-    # Extra usage (overuse billing)
-    extra = data.get("extra_usage")
-    if extra and extra.get("is_enabled"):
-        used = (extra.get("used_credits") or 0) / 100
-        limit = (extra.get("monthly_limit") or 0) / 100
-        if limit > 0:
-            pct = min(100, used / limit * 100)
-            lines.append(
-                f"*Extra usage:* {_escape_mdv2(f'${used:.2f} / ${limit:.2f} ({pct:.0f}%)')}"
-            )
-
-    if not lines:
-        await message.reply_text("No usage data available\\.", parse_mode="MarkdownV2")
-        return
-
-    text = "\n".join(lines)
+    text = render_usage_reports(reports)
     await message.reply_text(text, parse_mode="MarkdownV2")
 
 

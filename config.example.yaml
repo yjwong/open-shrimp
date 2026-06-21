@@ -80,8 +80,40 @@ contexts:
     #   # disk_size: 20             # VM disk in GB (default: 20)
     #   # provision: |              # Shell script run on first boot
     #   #   apt-get install -y nodejs npm
+    # mcp:                          # Per-context MCP server overlay (opencode only).
+    #                               # Honoured by `backend: opencode`; ignored by the
+    #                               # claude backend, which reads MCP servers from
+    #                               # `~/.claude.json` (user-scope + per-project).
+    #   my-stdio-tool:
+    #     type: stdio
+    #     command: my-tool
+    #     args: ["--flag"]
+    #     env:
+    #       FOO: bar
+    # backend: opencode             # Override the top-level `backend:` for this
+    #                               # context only.  Same values as the top-level key
+    #                               # (claude_sdk / opencode).  Omit to inherit.
 
 default_context: default
+
+# Agent backend (optional, top-level).  Selects which agent runtime drives
+# every context.  Defaults to "claude_sdk" when omitted.
+#
+#   backend: claude_sdk   # (default) the Claude Agent SDK.
+#   backend: opencode     # OpenCode (sst/opencode) via its HTTP serve API.
+#
+# OpenCode preconditions:
+#   * Every context's `model:` MUST be provider-qualified as `provider/model`
+#     (OpenCode has no implicit default provider), e.g.:
+#         model: openai/gpt-5.5
+#         model: anthropic/claude-opus-4-7
+#         model: google/gemini-2.5-pro
+#     An unqualified model fails fast at startup.
+#   * The host must be pre-authenticated out-of-band — run `opencode auth login`
+#     so `~/.local/share/opencode/auth.json` exists.
+#   * The `opencode` binary must be discoverable (`$OPENCODE_BIN`, then
+#     `~/.opencode/bin/opencode`, then `PATH`); checked at startup.
+# backend: claude_sdk
 
 # Instance name (required when running multiple OpenShrimp instances on the
 # same host).  Isolates the database, sandbox state, Docker images, Lima VMs,

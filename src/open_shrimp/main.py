@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from open_shrimp.bot import run_bot
-from open_shrimp.config import DEFAULT_CONFIG_PATH, is_sandboxed, load_config
+from open_shrimp.config import DEFAULT_CONFIG_PATH, load_config
 from open_shrimp.db import init_db
 from open_shrimp.paths import init_paths
 from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
@@ -141,17 +141,6 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     and the macOS menu-bar app.  When *stop_event* is ``None`` (the CLI
     path), SIGTERM/SIGINT handlers are installed automatically.
     """
-    # Patch SDK before any clients are created (workaround for #810).
-    from open_shrimp.sdk_patches import apply as apply_sdk_patches
-    apply_sdk_patches()
-
-    # Enable prompt_suggestion frames (CLI feature not yet exposed by
-    # the Python SDK).  Order matters: sdk_patches subclasses the
-    # transport, so installing read_messages override on the resulting
-    # class must happen after.
-    from open_shrimp.prompt_suggestion import install_patches as install_suggestion_patches
-    install_suggestion_patches()
-
     config = load_config(config_path)
     logger.info("Config loaded from %s", config_path)
     logger.info("Contexts: %s", ", ".join(config.contexts.keys()))
@@ -186,15 +175,34 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
 
     sandbox_mgrs = create_sandbox_managers(config)
 
-    # Start the MCP proxy if any context uses a sandbox.  The proxy
-    # runs on a separate listener so that sandboxes cannot reach the
+    # Start the MCP proxy unconditionally — it now serves OpenShrimp's own
+    # tools (send_file, edit_topic, schedules, host_bash, computer use) over
+    # a host-loopback HTTP endpoint for *every* context, in addition to
+    # reverse-proxying external MCP servers for sandboxed contexts.  The
+    # proxy runs on a separate listener so that sandboxes cannot reach the
     # main Starlette server (review-app, config-app, etc.).
-    mcp_proxy = None
-    if any(is_sandboxed(ctx) for ctx in config.contexts.values()):
-        from open_shrimp.mcp_proxy import McpProxy
+    #
+    # Do not abort boot if it fails: a self-hosted personal bot should keep
+    # answering messages even if the local tool listener can't bind.  The
+    # session layer treats ``mcp_proxy is None`` as "degraded; omit the
+    # OpenShrimp tools and warn the user once".
+    #
+    # Resolve the backend here (rather than only in ``run_bot``) so its
+    # OAuth-source provider can be wired into the proxy at construction.
+    from open_shrimp.backend import get_backend
+    from open_shrimp.mcp_proxy import McpProxy
 
-        mcp_proxy = McpProxy()
+    backend = get_backend(config)
+    mcp_proxy = McpProxy(backend.mcp_oauth_source())
+    try:
         await mcp_proxy.start()
+    except Exception:
+        logger.exception(
+            "MCP proxy failed to start — OpenShrimp tools (send_file, "
+            "edit_topic, schedules, host_bash, computer use) will be "
+            "UNAVAILABLE this run. Chat still works; restart to retry.",
+        )
+        mcp_proxy = None
 
     http_server = _create_http_server(
         config, db, sandbox_managers=sandbox_mgrs, config_path=config_path
@@ -273,11 +281,6 @@ def main() -> None:
         from open_shrimp.updater import run_update_cli
 
         sys.exit(asyncio.run(run_update_cli()))
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        logger.warning(
-            "ANTHROPIC_API_KEY not set — will use Claude Code OAuth if available"
-        )
 
     # Offer guided setup when config is missing and running interactively.
     config_path = Path(args.config)

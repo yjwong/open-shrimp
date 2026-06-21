@@ -15,17 +15,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
+from open_shrimp.sandbox.agent_runtime import (
+    AgentHandle,
+    AgentRuntime,
+    GuestMount,
+    ServedEndpoint,
+    WrappedCLI,
+    run_served_endpoint,
+    terminate_served_proc,
+)
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox.port_forward import (
     SSH_TUNNEL_OPTS,
     PortForwardRegistry,
     allocate_host_port,
     open_ssh_tunnel,
+)
+from open_shrimp.sandbox.skill_paths import (
+    SANDBOX_HOME,
+    SANDBOX_UID,
+    SANDBOX_USER,
 )
 
 from open_shrimp.config import SandboxConfig
@@ -69,10 +85,6 @@ logger = logging.getLogger(__name__)
 
 # Graceful shutdown timeout before falling back to destroy.
 _SHUTDOWN_TIMEOUT = 180
-
-# UID of the ``claude`` user inside the VM.  Cloud-init creates it as the
-# first non-system user, which gets UID 1000 on Ubuntu.
-_VM_CLAUDE_UID = 1000
 
 
 def _tail_file(
@@ -135,6 +147,7 @@ class LibvirtSandbox:
         instance_prefix: str = "openshrimp",
         computer_use: bool = False,
         virgl: bool = False,
+        runtime: AgentRuntime | None = None,
     ) -> None:
         self._context_name = context_name
         self._config = config
@@ -146,6 +159,19 @@ class LibvirtSandbox:
         self._virgl = virgl
         self._virtiofsd_procs: list[subprocess.Popen[bytes]] = []
         self._use_virtiofs: bool = find_virtiofsd() is not None
+
+        # Served-endpoint launch's extra home mounts are synced into the
+        # guest (the runtime's data home, plugin-config dir, …) so the
+        # injected provider ``auth.json`` and the managed plugin config reach
+        # the served process.  The wrapped-CLI launch contributes none.  The
+        # mount SOURCE must match the inject TARGET (the runtime's host_dir)
+        # or the guest never sees the synced files.
+        self._runtime = runtime
+        launch = runtime.launch if runtime else None
+        if isinstance(launch, ServedEndpoint):
+            self._served_home_mounts: tuple[GuestMount, ...] = launch.home_mounts
+        else:
+            self._served_home_mounts = ()
 
         self._sdir = state_dir_for(context_name)
         self._dom_name = _domain_name(context_name, instance_prefix)
@@ -163,6 +189,11 @@ class LibvirtSandbox:
         self._claude_home_dir = self._sdir / "claude-home"
 
         self._port_forwards = PortForwardRegistry()
+
+        # Served-endpoint state.  ``_served_proc`` is read by the
+        # served-endpoint client's liveness check via the endpoint's ``owner``.
+        self._served_proc: subprocess.Popen[str] | None = None
+        self._served_endpoint: Any = None
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -257,6 +288,8 @@ class LibvirtSandbox:
         # Ensure host-side shared directories exist.
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._claude_home_dir.mkdir(parents=True, exist_ok=True)
+        for mount in self._served_home_mounts:
+            mount.host_dir.mkdir(parents=True, exist_ok=True)
 
         # Build shared_dirs list for domain XML: (host_dir, socket | None).
         # The domain must declare virtiofs/9p devices for all dirs even
@@ -518,62 +551,96 @@ class LibvirtSandbox:
             )
 
     def provision_workspace(self) -> None:
-        """Provision the workspace: ensure Claude CLI is installed in the VM."""
+        """Install the bundle's CLI binary and copy credentials into the VM."""
         assert self._ssh_port is not None
-        ssh_key = self._sdir / "ssh_key"
+        if self._runtime is None:
+            return
 
-        from open_shrimp.claude_binary import find_claude_binary
+        # Cloud-init creates a single ``SANDBOX_USER`` (openshrimp) user in the
+        # guest with NOPASSWD sudo (see ``_build_cloud_init_user_data``); both
+        # the Claude and OpenCode installers SSH in as that user.
+        bundle = self._runtime.image_bundle
+        if bundle is not None and bundle.libvirt_install is not None:
+            bundle.libvirt_install(
+                self._sdir / "ssh_key", self._ssh_port, SANDBOX_USER,
+            )
+
+        if self._runtime.provision_credentials is not None:
+            self._runtime.provision_credentials(self._claude_home_dir)
+
+    def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
+        if isinstance(runtime.launch, WrappedCLI):
+            cli_path, cleanup_paths = self.build_cli_wrapper()
+            return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
+        if isinstance(runtime.launch, ServedEndpoint):
+            return self._start_served_endpoint(runtime, runtime.launch)
+        raise NotImplementedError(
+            f"Unsupported launch strategy: {runtime.launch!r}"
+        )
+
+    def _start_served_endpoint(
+        self, runtime: AgentRuntime, launch: ServedEndpoint,
+    ) -> AgentHandle:
+        """Run the serve argv over SSH in the VM and reach its port.
+
+        The runtime supplies the serve argv + env + inject hook; this sandbox
+        owns only the remote SSH spawn and hands the tunnel to :meth:`reach` (an
+        ``ssh -L`` forward via :meth:`add_port_forward`).  The shared launch body
+        lives in :func:`run_served_endpoint`.
+
+        Guest-image precondition: this launch does **not** provision the VM
+        image.  The ``opencode`` binary must already be on the guest ``PATH``
+        for the ``{SANDBOX_USER}@localhost`` user (base image / ``provision``
+        script — operator's responsibility, documented in CLAUDE.md → Backends).
+        The per-context ``opencode-home`` (→
+        ``{SANDBOX_HOME}/.local/share/opencode``) and ``openshrimp-data`` (→
+        ``{SANDBOX_HOME}/.local/share/openshrimp``) host dirs are
+        virtiofs/9p-mounted into the guest (see
+        :meth:`_shared_dirs_and_overrides`), and ``runtime.inject`` syncs the
+        provider ``auth.json`` + managed plugin config into them, so they reach
+        the served process (which runs with ``HOME={SANDBOX_HOME}``).  When the
+        binary is absent, the serve process exits early and readiness wait raises.
+        """
         from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
 
-        cli_binary = find_claude_binary()
-        ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
-        scp_opts = [
-            "-i", str(ssh_key),
-            "-P", str(self._ssh_port),
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-        ]
+        if self._served_proc is not None and self._served_proc.poll() is None:
+            if self._served_endpoint is not None:
+                return AgentHandle(endpoint=self._served_endpoint)
 
-        # Check if claude is already available in the VM.
-        result = subprocess.run(
-            ["ssh", *ssh_opts, "claude@localhost", "which", "claude"],
-            capture_output=True,
+        if self._ssh_port is None:
+            raise RuntimeError("Cannot start served endpoint: libvirt VM is not running")
+
+        ssh_port = self._ssh_port
+
+        def spawn(
+            serve_argv: list[str], env: dict[str, str],
+        ) -> subprocess.Popen[str]:
+            env_prefix = " ".join(
+                f"{key}={shlex.quote(value)}" for key, value in env.items()
+            )
+            remote_cmd = (
+                f"cd {shlex.quote(self._project_dir)} && "
+                f"{env_prefix} {shlex.join(serve_argv)}"
+            )
+            ssh_opts = _ssh_common_opts(self._sdir / "ssh_key", ssh_port)
+            return subprocess.Popen(
+                ["ssh", *ssh_opts, f"{SANDBOX_USER}@localhost", remote_cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+        proc, endpoint = run_served_endpoint(
+            runtime,
+            launch,
+            spawn=spawn,
+            reach=self.reach,
+            owner=self,
+            log_label=f"Libvirt context '{self._context_name}'",
         )
-        if result.returncode != 0:
-            # SCP the Claude CLI binary into the VM.
-            logger.info("Installing Claude CLI into VM %s...", self._dom_name)
-            subprocess.run(
-                [
-                    "scp", *scp_opts,
-                    str(cli_binary),
-                    "claude@localhost:/tmp/claude",
-                ],
-                check=True,
-                capture_output=True,
-            )
-            # Move to /usr/local/bin (needs sudo).
-            subprocess.run(
-                [
-                    "ssh", *ssh_opts,
-                    "claude@localhost",
-                    "--",
-                    "sudo mv /tmp/claude /usr/local/bin/claude && sudo chmod +x /usr/local/bin/claude",
-                ],
-                check=True,
-                capture_output=True,
-            )
-            logger.info("Claude CLI installed in VM %s", self._dom_name)
-
-        # Copy credentials into the host-side claude-home directory.
-        # This directory is shared into the VM as /home/claude/.claude
-        # via virtiofs/9p, so the CLI picks them up automatically.
-        host_credentials = Path.home() / ".claude" / ".credentials.json"
-        if host_credentials.exists():
-            import shutil
-            dest = self._claude_home_dir / ".credentials.json"
-            shutil.copy2(str(host_credentials), str(dest))
-            logger.info("Copied credentials to %s", dest)
+        self._served_proc = proc
+        self._served_endpoint = endpoint
+        return AgentHandle(endpoint=endpoint)
 
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         assert self._ssh_port is not None
@@ -587,9 +654,24 @@ class LibvirtSandbox:
         )
         return path, [path]
 
+    def reach(self, guest_port: int) -> str:
+        forward = self.add_port_forward(
+            guest_port=guest_port,
+            requested_host_port=None,
+            scope_key=None,
+            description=f"reach({guest_port})",
+        )
+        return f"127.0.0.1:{forward.host_port}"
+
     def stop(self) -> None:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""
         import libvirt
+
+        # Tear down any served process (the ssh -L tunnel is reaped below with
+        # the rest of the port forwards).
+        terminate_served_proc(self._served_proc)
+        self._served_proc = None
+        self._served_endpoint = None
 
         # Reap forward subprocesses before the VM goes away — ssh would
         # die on its own but the Popen handles would linger as zombies.
@@ -721,8 +803,8 @@ class LibvirtSandbox:
         ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
         result = subprocess.run(
             [
-                "ssh", *ssh_opts, "claude@localhost",
-                "env", "XDG_RUNTIME_DIR=/run/user/1000",
+                "ssh", *ssh_opts, f"{SANDBOX_USER}@localhost",
+                "env", f"XDG_RUNTIME_DIR=/run/user/{SANDBOX_UID}",
                 "WAYLAND_DISPLAY=wayland-0",
                 "wl-paste", "--no-newline", "--primary",
             ],
@@ -751,13 +833,13 @@ class LibvirtSandbox:
         remote_cmd = (
             'tmpf=$(mktemp);'
             ' cat > "$tmpf";'
-            ' env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0'
+            f' env XDG_RUNTIME_DIR=/run/user/{SANDBOX_UID} WAYLAND_DISPLAY=wayland-0'
             ' nohup wl-copy < "$tmpf" >/dev/null 2>&1 &'
             ' sleep 0.1;'
             ' rm "$tmpf"'
         )
         result = subprocess.run(
-            ["ssh", *ssh_opts, "claude@localhost", remote_cmd],
+            ["ssh", *ssh_opts, f"{SANDBOX_USER}@localhost", remote_cmd],
             input=text,
             capture_output=True,
             text=True,
@@ -784,7 +866,7 @@ class LibvirtSandbox:
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "LogLevel=ERROR",
-            "claude@localhost",
+            f"{SANDBOX_USER}@localhost",
             "mkdir", "-p", upload_dir,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
@@ -808,7 +890,7 @@ class LibvirtSandbox:
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "LogLevel=ERROR",
                 str(host_path),
-                f"claude@localhost:{vm_path}",
+                f"{SANDBOX_USER}@localhost:{vm_path}",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -853,7 +935,7 @@ class LibvirtSandbox:
             *_ssh_common_opts(self._sdir / "ssh_key", self._ssh_port),
             *SSH_TUNNEL_OPTS,
             "-L", f"127.0.0.1:{host_port}:127.0.0.1:{guest_port}",
-            "claude@localhost",
+            f"{SANDBOX_USER}@localhost",
         ]
         return open_ssh_tunnel(
             cmd,
@@ -893,16 +975,36 @@ class LibvirtSandbox:
             all_dirs.append(str(self._screenshots_dir))
         all_dirs.append(str(self._tmp_dir))
         all_dirs.append(str(self._claude_home_dir))
+        # The task-output share must mount at the guest path the agent CLI
+        # actually writes to (Claude → /tmp/claude-<uid>), not a vendor-neutral
+        # /tmp/<user>-<uid>; otherwise the CLI writes to an unshared guest path
+        # and the host terminal mini app finds nothing ("View output" 400s).
+        bundle = self._runtime.image_bundle if self._runtime else None
+        task_tmp_guest = (
+            bundle.guest_task_tmp(SANDBOX_UID)
+            if bundle is not None
+            else f"/tmp/claude-{SANDBOX_UID}"
+        )
         mount_overrides = {
-            str(self._tmp_dir): f"/tmp/claude-{_VM_CLAUDE_UID}",
-            str(self._claude_home_dir): "/home/claude/.claude",
+            str(self._tmp_dir): task_tmp_guest,
+            str(self._claude_home_dir): f"{SANDBOX_HOME}/.claude",
         }
+        # Served-endpoint launch only: sync each declared host_dir into the
+        # guest at its declared mount point.  The mount SOURCE is whatever
+        # path the served runtime's ``inject`` writes to host-side (provider
+        # ``auth.json``, managed plugin config), so the served process (which
+        # runs under its own ``HOME``) sees the synced files.  The wrapped-CLI
+        # launch contributes ZERO new mounts here.
+        for mount in self._served_home_mounts:
+            host_str = str(mount.host_dir)
+            all_dirs.append(host_str)
+            mount_overrides[host_str] = mount.guest_mount_point
         readonly_dirs: set[str] = set()
         host_skills = Path.home() / ".claude" / "skills"
         if host_skills.is_dir():
             host_skills_str = str(host_skills)
             all_dirs.append(host_skills_str)
-            mount_overrides[host_skills_str] = "/home/claude/.claude/skills"
+            mount_overrides[host_skills_str] = f"{SANDBOX_HOME}/.claude/skills"
             readonly_dirs.add(host_skills_str)
         return all_dirs, mount_overrides, readonly_dirs
 

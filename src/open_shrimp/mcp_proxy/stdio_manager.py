@@ -14,13 +14,13 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from open_shrimp.mcp_proxy.config_reader import StdioServerConfig
+from open_shrimp.mcp_proxy.types import StdioServerConfig
 
 logger = logging.getLogger(__name__)
 
 # 16 MiB — generous limit for MCP responses (e.g. large database query
 # results).  Python's asyncio StreamReader defaults to 64 KiB which is
-# far too small.  Bun (used by Claude Code) has no such limit.
+# far too small.
 _STDOUT_BUFFER_LIMIT = 16 * 1024 * 1024
 
 

@@ -1,9 +1,10 @@
-"""Sandbox abstraction for isolated Claude CLI execution.
+"""Sandbox abstraction for isolated agent execution.
 
 Defines the :class:`Sandbox` protocol that encapsulates different isolation
 backends (Docker containers, Lima/libvirt VMs, etc.) behind a
-common lifecycle interface.  The SDK's ``cli_path`` option is pointed at a
-wrapper script produced by :meth:`Sandbox.build_cli_wrapper`; all other SDK
+common lifecycle interface.  The agent is launched via
+:meth:`Sandbox.start_agent`, which for the wrapped-CLI strategy points the
+driver's ``cli_path`` option at a generated wrapper script; all other driver
 machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.
 
 Use :meth:`SandboxManager.create_sandbox
@@ -15,7 +16,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime
 
 
 @dataclass(frozen=True)
@@ -56,7 +60,7 @@ VncQuirk = Literal["rfb_drops_set_encodings", "rfb_bgra_pixel_format"]
 
 @runtime_checkable
 class Sandbox(Protocol):
-    """Isolated execution environment for the Claude CLI.
+    """Isolated execution environment for the agent CLI.
 
     A single instance represents one VM/container and is shared across
     multiple sessions (ChatScopes) using the same context.  Instances
@@ -66,7 +70,7 @@ class Sandbox(Protocol):
         1. ``ensure_environment()`` — build image / provision VM (slow, idempotent)
         2. ``ensure_running()`` — start container / check SSH (fast when warm)
         3. ``provision_workspace()`` — sync files into sandbox (idempotent)
-        4. ``build_cli_wrapper()`` — generate shell script for ``cli_path``
+        4. ``start_agent(runtime)`` — launch the agent (wrapped-CLI today)
         5. ``stop()`` — tear down runtime (VM, container, daemons)
     """
 
@@ -135,7 +139,7 @@ class Sandbox(Protocol):
         """Provision the workspace filesystem inside the sandbox.
 
         Called after :meth:`ensure_running` and before
-        :meth:`build_cli_wrapper`.  For backends where the workspace is
+        :meth:`start_agent`.  For backends where the workspace is
         already available (bind mounts, shared filesystems), this is a
         no-op.  VM backends may use this to clone repositories or sync
         files.
@@ -144,11 +148,29 @@ class Sandbox(Protocol):
         """
         ...
 
+    def start_agent(self, runtime: "AgentRuntime") -> "AgentHandle":
+        """Launch the agent described by *runtime* and return a handle.
+
+        This is the single agent-neutral launch call site.  It dispatches on
+        ``runtime.launch.kind``:
+
+        * ``wrapped_cli`` — generate the wrapper script and return its
+          ``cli_path`` (today's :meth:`build_cli_wrapper` body, wrapped in an
+          :class:`~open_shrimp.sandbox.agent_runtime.AgentHandle`).
+        * ``served_endpoint`` — run the serve argv inside the sandbox, call
+          :meth:`reach` to expose its guest port, and return a served-endpoint
+          handle (the served-endpoint launch flavour).
+        """
+        ...
+
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         """Generate a shell script that execs into the sandbox.
 
+        Internal to the ``wrapped_cli`` branch of :meth:`start_agent` — callers
+        outside the sandbox layer should use :meth:`start_agent`.
+
         The script must:
-        - Accept Claude CLI args as ``"$@"``
+        - Accept the agent CLI args as ``"$@"``
         - Forward stdin/stdout (interactive, ``-i``)
         - Forward ``ANTHROPIC_API_KEY``
         - Self-heal if the runtime died
@@ -158,6 +180,19 @@ class Sandbox(Protocol):
             absolute path to the wrapper script.  *cleanup_paths* lists
             all temp files (including the wrapper) that should be deleted
             when the session ends.
+        """
+        ...
+
+    def reach(self, guest_port: int) -> str:
+        """Expose a guest TCP port to the host; return ``"127.0.0.1:<host_port>"``.
+
+        Docker: a published-port lookup.  libvirt/lima: an ``ssh -L`` tunnel
+        (reusing :meth:`add_port_forward`).  Both already exist internally; this
+        names them under one method.
+
+        Has no caller today — the :class:`~open_shrimp.sandbox.agent_runtime.WrappedCLI`
+        launch flavour needs no ``reach``.  Its first consumer is the
+        served-endpoint launch flavour.
         """
         ...
 

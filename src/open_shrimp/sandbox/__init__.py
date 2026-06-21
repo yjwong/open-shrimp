@@ -6,7 +6,9 @@ from open_shrimp.sandbox.manager import (
     LibvirtSandboxManager,
     LimaSandboxManager,
     SandboxManager,
+    create_sandbox_manager,
     create_sandbox_managers,
+    referenced_backends,
 )
 
 __all__ = [
@@ -15,5 +17,7 @@ __all__ = [
     "LimaSandboxManager",
     "Sandbox",
     "SandboxManager",
+    "create_sandbox_manager",
     "create_sandbox_managers",
+    "referenced_backends",
 ]

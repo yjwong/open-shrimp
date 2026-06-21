@@ -12,19 +12,37 @@ import mimetypes
 import os
 import signal
 import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from open_shrimp.sandbox.base import Sandbox
 
-from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
-from claude_agent_sdk.types import McpSdkServerConfig
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardMarkup
 
 from open_shrimp.web_app_button import make_web_app_button
 
 logger = logging.getLogger(__name__)
+
+ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class OpenShrimpTool:
+    """Transport-neutral descriptor for an OpenShrimp MCP tool.
+
+    The ``mcp__openshrimp__`` name prefix is added by whichever transport
+    installs the tool, not stored here. ``read_only`` maps to MCP's
+    ``annotations.readOnlyHint`` in the ``tools/list`` response.
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    read_only: bool
+    handler: ToolHandler
 
 # Telegram Bot API limits.
 _MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -50,7 +68,7 @@ def _guess_mime(path: str) -> str | None:
     return mime
 
 
-def create_openshrimp_mcp_server(
+def create_openshrimp_tools(
     bot: Bot,
     chat_id: int,
     thread_id: int | None = None,
@@ -62,17 +80,17 @@ def create_openshrimp_mcp_server(
     user_id: int = 0,
     is_private_chat: bool = True,
     host_bash_workdir: str | None = None,
-) -> McpSdkServerConfig:
-    """Create an in-process MCP server with OpenShrimp-specific tools.
+) -> list[OpenShrimpTool]:
+    """Build the transport-neutral OpenShrimp tool descriptors.
 
-    The returned server is bound to a specific *bot*, *chat_id*, and
+    The returned tools are bound to a specific *bot*, *chat_id*, and
     optional *thread_id* so tool handlers can send files directly to the
     correct Telegram chat or forum thread.
 
     When *db*, *config*, and *job_queue* are provided, scheduling tools
-    (create_schedule, list_schedules, delete_schedule) are also registered.
+    (create_schedule, list_schedules, delete_schedule) are also included.
 
-    Computer-use tools are registered when *sandbox* has a non-``None``
+    Computer-use tools are included when *sandbox* has a non-``None``
     :meth:`~Sandbox.get_screenshots_dir`, indicating the backend supports
     GUI interaction.
 
@@ -86,7 +104,9 @@ def create_openshrimp_mcp_server(
         sandbox: Optional sandbox with computer-use support.
 
     Returns:
-        An ``McpSdkServerConfig`` ready for ``ClaudeAgentOptions.mcp_servers``.
+        A ``list[OpenShrimpTool]`` for installation by a backend transport
+        (served over HTTP by the :class:`~open_shrimp.mcp_proxy.McpProxy`
+        ``/tools/{scope_token}`` JSON-RPC endpoint).
     """
 
     # Build common kwargs for message_thread_id support.
@@ -94,40 +114,32 @@ def create_openshrimp_mcp_server(
     if thread_id is not None:
         _thread_kwargs["message_thread_id"] = thread_id
 
-    @tool(
-        "send_file",
-        "Send a file to the user via Telegram. Use this when the user asks "
-        "you to send, share, or deliver a file. The file must exist on the "
-        "local filesystem. Maximum size is 50 MB. Images (JPEG, PNG, GIF, "
-        "WebP) under 10 MB are automatically sent as inline photos unless "
-        "type is set to 'document'.",
-        {
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Absolute path to the file to send.",
-                },
-                "caption": {
-                    "type": "string",
-                    "description": "Optional caption to display with the file.",
-                },
-                "type": {
-                    "type": "string",
-                    "enum": ["auto", "photo", "document"],
-                    "description": (
-                        "How to send the file. 'photo' sends as an inline "
-                        "image (max 10 MB, JPEG/PNG/GIF/WebP only). "
-                        "'document' sends as a file attachment. 'auto' "
-                        "(default) picks photo for eligible images, "
-                        "document otherwise."
-                    ),
-                },
+    _send_file_schema = {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Absolute path to the file to send.",
             },
-            "required": ["file_path"],
+            "caption": {
+                "type": "string",
+                "description": "Optional caption to display with the file.",
+            },
+            "type": {
+                "type": "string",
+                "enum": ["auto", "photo", "document"],
+                "description": (
+                    "How to send the file. 'photo' sends as an inline "
+                    "image (max 10 MB, JPEG/PNG/GIF/WebP only). "
+                    "'document' sends as a file attachment. 'auto' "
+                    "(default) picks photo for eligible images, "
+                    "document otherwise."
+                ),
+            },
         },
-        annotations=ToolAnnotations(readOnlyHint=True),
-    )
+        "required": ["file_path"],
+    }
+
     async def send_file(args: dict[str, Any]) -> dict[str, Any]:
         file_path = args.get("file_path", "")
         caption = args.get("caption")
@@ -230,7 +242,21 @@ def create_openshrimp_mcp_server(
     # --- edit_topic (forum topics only) ---
     # Only register this tool when the chat is a forum topic, so Claude
     # can set/update the thread title and/or icon.
-    tools_list: list[Any] = [send_file]
+    tools_list: list[OpenShrimpTool] = [
+        OpenShrimpTool(
+            name="send_file",
+            description=(
+                "Send a file to the user via Telegram. Use this when the user "
+                "asks you to send, share, or deliver a file. The file must "
+                "exist on the local filesystem. Maximum size is 50 MB. Images "
+                "(JPEG, PNG, GIF, WebP) under 10 MB are automatically sent as "
+                "inline photos unless type is set to 'document'."
+            ),
+            input_schema=_send_file_schema,
+            read_only=True,
+            handler=send_file,
+        ),
+    ]
 
     if thread_id is not None:
         # Cache for emoji -> custom_emoji_id mapping, populated lazily.
@@ -250,38 +276,28 @@ def create_openshrimp_mcp_server(
                 )
             return _emoji_map
 
-        @tool(
-            "edit_topic",
-            "Set or update the title and/or icon of the current Telegram "
-            "forum topic. Use this after your first response to set a "
-            "concise title (max 128 chars) summarizing the conversation. "
-            "If the topic changes significantly later, update the title "
-            "again. Optionally set an icon using a standard emoji (e.g. "
-            '"📝", "🔥", "💬", "🤖"). Pass an empty string for icon '
-            "to remove it.",
-            {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": (
-                            "The title for the forum topic. Should be a "
-                            "short, descriptive summary (max 128 characters)."
-                        ),
-                    },
-                    "icon": {
-                        "type": "string",
-                        "description": (
-                            "A standard emoji to use as the topic icon "
-                            '(e.g. "📝", "🔥", "🤖"). Pass an empty '
-                            "string to remove the icon. If omitted, the "
-                            "current icon is kept."
-                        ),
-                    },
+        _edit_topic_schema = {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "The title for the forum topic. Should be a "
+                        "short, descriptive summary (max 128 characters)."
+                    ),
+                },
+                "icon": {
+                    "type": "string",
+                    "description": (
+                        "A standard emoji to use as the topic icon "
+                        '(e.g. "📝", "🔥", "🤖"). Pass an empty '
+                        "string to remove the icon. If omitted, the "
+                        "current icon is kept."
+                    ),
                 },
             },
-            annotations=ToolAnnotations(readOnlyHint=True),
-        )
+        }
+
         async def edit_topic(args: dict[str, Any]) -> dict[str, Any]:
             title = args.get("title", "").strip() or None
             icon = args.get("icon")
@@ -350,7 +366,21 @@ def create_openshrimp_mcp_server(
             )
             return _text_result(f"Topic updated: {summary}")
 
-        tools_list.append(edit_topic)
+        tools_list.append(OpenShrimpTool(
+            name="edit_topic",
+            description=(
+                "Set or update the title and/or icon of the current Telegram "
+                "forum topic. Use this after your first response to set a "
+                "concise title (max 128 chars) summarizing the conversation. "
+                "If the topic changes significantly later, update the title "
+                "again. Optionally set an icon using a standard emoji (e.g. "
+                '"📝", "🔥", "💬", "🤖"). Pass an empty string for icon '
+                "to remove it."
+            ),
+            input_schema=_edit_topic_schema,
+            read_only=True,
+            handler=edit_topic,
+        ))
 
     # --- Scheduling tools (when db, config, and job_queue are available) ---
     if db is not None and config is not None and job_queue is not None:
@@ -372,65 +402,55 @@ def create_openshrimp_mcp_server(
             thread_id=thread_id,
         )
 
-        @tool(
-            "create_schedule",
-            "Create a scheduled task that runs a Claude prompt automatically. "
-            "The task will run in the current chat/thread with read-only tools. "
-            "Supports three schedule types: 'interval' (e.g. '30m', '1h', '2d'), "
-            "'cron' (standard 5-field cron: 'minute hour day month day_of_week'), "
-            "and 'once' (ISO 8601 datetime for a one-shot task). "
-            "Minimum interval for recurring tasks is 5 minutes. "
-            "Maximum 20 scheduled tasks per chat.",
-            {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": (
-                            "A short, descriptive name for this task "
-                            "(e.g. 'CI check', 'daily summary'). Must be "
-                            "unique within this chat."
-                        ),
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": (
-                            "The prompt to send to Claude when the task fires. "
-                            "Be specific about what you want checked or summarized."
-                        ),
-                    },
-                    "schedule_type": {
-                        "type": "string",
-                        "enum": ["interval", "cron", "once"],
-                        "description": (
-                            "Type of schedule: 'interval' for recurring with "
-                            "a fixed gap (e.g. every 30m), 'cron' for "
-                            "time-of-day patterns (e.g. 9am weekdays), "
-                            "'once' for a single future execution."
-                        ),
-                    },
-                    "schedule_expr": {
-                        "type": "string",
-                        "description": (
-                            "The schedule expression. For 'interval': '30m', "
-                            "'1h', '2d'. For 'cron': '0 9 * * 1-5' (9am "
-                            "weekdays). For 'once': ISO datetime like "
-                            "'2026-03-21T09:00:00'."
-                        ),
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": (
-                            "Maximum execution time in seconds. Default 600 "
-                            "(10 minutes). The task is cancelled if it exceeds "
-                            "this timeout."
-                        ),
-                    },
+        _create_schedule_schema = {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "A short, descriptive name for this task "
+                        "(e.g. 'CI check', 'daily summary'). Must be "
+                        "unique within this chat."
+                    ),
                 },
-                "required": ["name", "prompt", "schedule_type", "schedule_expr"],
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "The prompt to send to Claude when the task fires. "
+                        "Be specific about what you want checked or summarized."
+                    ),
+                },
+                "schedule_type": {
+                    "type": "string",
+                    "enum": ["interval", "cron", "once"],
+                    "description": (
+                        "Type of schedule: 'interval' for recurring with "
+                        "a fixed gap (e.g. every 30m), 'cron' for "
+                        "time-of-day patterns (e.g. 9am weekdays), "
+                        "'once' for a single future execution."
+                    ),
+                },
+                "schedule_expr": {
+                    "type": "string",
+                    "description": (
+                        "The schedule expression. For 'interval': '30m', "
+                        "'1h', '2d'. For 'cron': '0 9 * * 1-5' (9am "
+                        "weekdays). For 'once': ISO datetime like "
+                        "'2026-03-21T09:00:00'."
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum execution time in seconds. Default 600 "
+                        "(10 minutes). The task is cancelled if it exceeds "
+                        "this timeout."
+                    ),
+                },
             },
-            annotations=ToolAnnotations(readOnlyHint=False),
-        )
+            "required": ["name", "prompt", "schedule_type", "schedule_expr"],
+        }
+
         async def create_schedule(args: dict[str, Any]) -> dict[str, Any]:
             name = args.get("name", "").strip()
             prompt = args.get("prompt", "").strip()
@@ -504,16 +524,6 @@ def create_openshrimp_mcp_server(
                 f"Prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}"
             )
 
-        @tool(
-            "list_schedules",
-            "List all scheduled tasks in the current chat/thread. "
-            "Shows task name, schedule, context, and prompt.",
-            {
-                "type": "object",
-                "properties": {},
-            },
-            annotations=ToolAnnotations(readOnlyHint=True),
-        )
         async def list_schedules(args: dict[str, Any]) -> dict[str, Any]:
             tasks = await list_scheduled_tasks(db, _scope)
 
@@ -541,22 +551,17 @@ def create_openshrimp_mcp_server(
 
             return _text_result("\n".join(lines))
 
-        @tool(
-            "delete_schedule",
-            "Delete a scheduled task by name. The task will stop firing "
-            "immediately.",
-            {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The name of the scheduled task to delete.",
-                    },
+        _delete_schedule_schema = {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name of the scheduled task to delete.",
                 },
-                "required": ["name"],
             },
-            annotations=ToolAnnotations(readOnlyHint=False),
-        )
+            "required": ["name"],
+        }
+
         async def delete_schedule(args: dict[str, Any]) -> dict[str, Any]:
             name = args.get("name", "").strip()
             if not name:
@@ -586,7 +591,44 @@ def create_openshrimp_mcp_server(
 
             return _text_result(f"Scheduled task '{name}' deleted successfully.")
 
-        tools_list.extend([create_schedule, list_schedules, delete_schedule])
+        tools_list.extend([
+            OpenShrimpTool(
+                name="create_schedule",
+                description=(
+                    "Create a scheduled task that runs a Claude prompt "
+                    "automatically. The task will run in the current "
+                    "chat/thread with read-only tools. Supports three "
+                    "schedule types: 'interval' (e.g. '30m', '1h', '2d'), "
+                    "'cron' (standard 5-field cron: 'minute hour day month "
+                    "day_of_week'), and 'once' (ISO 8601 datetime for a "
+                    "one-shot task). Minimum interval for recurring tasks is "
+                    "5 minutes. Maximum 20 scheduled tasks per chat."
+                ),
+                input_schema=_create_schedule_schema,
+                read_only=False,
+                handler=create_schedule,
+            ),
+            OpenShrimpTool(
+                name="list_schedules",
+                description=(
+                    "List all scheduled tasks in the current chat/thread. "
+                    "Shows task name, schedule, context, and prompt."
+                ),
+                input_schema={"type": "object", "properties": {}},
+                read_only=True,
+                handler=list_schedules,
+            ),
+            OpenShrimpTool(
+                name="delete_schedule",
+                description=(
+                    "Delete a scheduled task by name. The task will stop "
+                    "firing immediately."
+                ),
+                input_schema=_delete_schedule_schema,
+                read_only=False,
+                handler=delete_schedule,
+            ),
+        ])
 
     # --- Computer use tools (GUI interaction) ---
     # All backends implement the same Sandbox protocol methods
@@ -601,19 +643,6 @@ def create_openshrimp_mcp_server(
 
     if _cu_sandbox is not None and _screenshots_dir is not None:
 
-        @tool(
-            "computer_screenshot",
-            "Take a screenshot of the current screen. The screen is a "
-            "headless 1280x720 Linux desktop with a Wayland compositor. "
-            "Returns the file path of the screenshot. Use the Read tool "
-            "to view the screenshot image. Always take a screenshot first "
-            "to understand the current state before interacting.",
-            {
-                "type": "object",
-                "properties": {},
-            },
-            annotations=ToolAnnotations(readOnlyHint=True),
-        )
         async def computer_screenshot(args: dict[str, Any]) -> dict[str, Any]:
             ts = int(time.time() * 1000)
             host_path = os.path.join(
@@ -671,32 +700,28 @@ def create_openshrimp_mcp_server(
                 f"Use the Read tool to view the image."
             )
 
-        @tool(
-            "computer_click",
-            "Click at a specific position on the screen. Moves the pointer "
-            "to (x, y) and performs a click. Screen size is 1280x720.",
-            {
-                "type": "object",
-                "properties": {
-                    "x": {
-                        "type": "integer",
-                        "description": "X coordinate (0-1279).",
-                    },
-                    "y": {
-                        "type": "integer",
-                        "description": "Y coordinate (0-719).",
-                    },
-                    "button": {
-                        "type": "string",
-                        "enum": ["left", "right", "middle"],
-                        "description": (
-                            "Mouse button to click. Default: left."
-                        ),
-                    },
+        _computer_click_schema = {
+            "type": "object",
+            "properties": {
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate (0-1279).",
                 },
-                "required": ["x", "y"],
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate (0-719).",
+                },
+                "button": {
+                    "type": "string",
+                    "enum": ["left", "right", "middle"],
+                    "description": (
+                        "Mouse button to click. Default: left."
+                    ),
+                },
             },
-        )
+            "required": ["x", "y"],
+        }
+
         async def computer_click(args: dict[str, Any]) -> dict[str, Any]:
             x = args.get("x", 0)
             y = args.get("y", 0)
@@ -724,21 +749,17 @@ def create_openshrimp_mcp_server(
 
             return _text_result(f"Clicked {btn} at ({x}, {y}).")
 
-        @tool(
-            "computer_type",
-            "Type text into the currently focused window. The text is sent "
-            "as keyboard input character by character.",
-            {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "The text to type.",
-                    },
+        _computer_type_schema = {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to type.",
                 },
-                "required": ["text"],
             },
-        )
+            "required": ["text"],
+        }
+
         async def computer_type(args: dict[str, Any]) -> dict[str, Any]:
             text = args.get("text", "")
             if not text:
@@ -756,25 +777,20 @@ def create_openshrimp_mcp_server(
             preview = text[:50] + ("..." if len(text) > 50 else "")
             return _text_result(f"Typed: {preview!r}")
 
-        @tool(
-            "computer_key",
-            "Press a key or key combination. Supports special keys like "
-            "Return, Tab, Escape, BackSpace, and modifier combos like "
-            "ctrl+a, alt+F4, super+d. Modifiers: ctrl, alt, shift, super.",
-            {
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": (
-                            "Key or combo to press, e.g. 'Return', 'ctrl+a', "
-                            "'alt+F4', 'Tab'."
-                        ),
-                    },
+        _computer_key_schema = {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": (
+                        "Key or combo to press, e.g. 'Return', 'ctrl+a', "
+                        "'alt+F4', 'Tab'."
+                    ),
                 },
-                "required": ["key"],
             },
-        )
+            "required": ["key"],
+        }
+
         async def computer_key(args: dict[str, Any]) -> dict[str, Any]:
             key = args.get("key", "")
             if not key:
@@ -791,36 +807,32 @@ def create_openshrimp_mcp_server(
 
             return _text_result(f"Pressed key: {args.get('key', '')}")
 
-        @tool(
-            "computer_scroll",
-            "Scroll at a specific position on the screen. Moves the pointer "
-            "to (x, y) and scrolls in the given direction.",
-            {
-                "type": "object",
-                "properties": {
-                    "x": {
-                        "type": "integer",
-                        "description": "X coordinate (0-1279).",
-                    },
-                    "y": {
-                        "type": "integer",
-                        "description": "Y coordinate (0-719).",
-                    },
-                    "direction": {
-                        "type": "string",
-                        "enum": ["up", "down", "left", "right"],
-                        "description": "Scroll direction.",
-                    },
-                    "amount": {
-                        "type": "integer",
-                        "description": (
-                            "Number of scroll steps. Default: 3."
-                        ),
-                    },
+        _computer_scroll_schema = {
+            "type": "object",
+            "properties": {
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate (0-1279).",
                 },
-                "required": ["x", "y", "direction"],
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate (0-719).",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down", "left", "right"],
+                    "description": "Scroll direction.",
+                },
+                "amount": {
+                    "type": "integer",
+                    "description": (
+                        "Number of scroll steps. Default: 3."
+                    ),
+                },
             },
-        )
+            "required": ["x", "y", "direction"],
+        }
+
         async def computer_scroll(args: dict[str, Any]) -> dict[str, Any]:
             x = args.get("x", 0)
             y = args.get("y", 0)
@@ -847,24 +859,20 @@ def create_openshrimp_mcp_server(
                 f"Scrolled {direction} by {amount} at ({x}, {y})."
             )
 
-        @tool(
-            "computer_toplevel",
-            "Focus a window by name or part of its title. Use this to "
-            "switch between applications (e.g. 'Chromium', 'Google Chrome', 'foot').",
-            {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": (
-                            "Window title or app name to focus "
-                            "(case-insensitive substring match)."
-                        ),
-                    },
+        _computer_toplevel_schema = {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Window title or app name to focus "
+                        "(case-insensitive substring match)."
+                    ),
                 },
-                "required": ["name"],
             },
-        )
+            "required": ["name"],
+        }
+
         async def computer_toplevel(args: dict[str, Any]) -> dict[str, Any]:
             name = args.get("name", "")
             if not name:
@@ -884,12 +892,73 @@ def create_openshrimp_mcp_server(
             return _text_result(f"Focused window matching: {name!r}")
 
         tools_list.extend([
-            computer_screenshot,
-            computer_click,
-            computer_type,
-            computer_key,
-            computer_scroll,
-            computer_toplevel,
+            OpenShrimpTool(
+                name="computer_screenshot",
+                description=(
+                    "Take a screenshot of the current screen. The screen is a "
+                    "headless 1280x720 Linux desktop with a Wayland compositor. "
+                    "Returns the file path of the screenshot. Use the Read tool "
+                    "to view the screenshot image. Always take a screenshot "
+                    "first to understand the current state before interacting."
+                ),
+                input_schema={"type": "object", "properties": {}},
+                read_only=True,
+                handler=computer_screenshot,
+            ),
+            OpenShrimpTool(
+                name="computer_click",
+                description=(
+                    "Click at a specific position on the screen. Moves the "
+                    "pointer to (x, y) and performs a click. Screen size is "
+                    "1280x720."
+                ),
+                input_schema=_computer_click_schema,
+                read_only=False,
+                handler=computer_click,
+            ),
+            OpenShrimpTool(
+                name="computer_type",
+                description=(
+                    "Type text into the currently focused window. The text is "
+                    "sent as keyboard input character by character."
+                ),
+                input_schema=_computer_type_schema,
+                read_only=False,
+                handler=computer_type,
+            ),
+            OpenShrimpTool(
+                name="computer_key",
+                description=(
+                    "Press a key or key combination. Supports special keys "
+                    "like Return, Tab, Escape, BackSpace, and modifier combos "
+                    "like ctrl+a, alt+F4, super+d. Modifiers: ctrl, alt, "
+                    "shift, super."
+                ),
+                input_schema=_computer_key_schema,
+                read_only=False,
+                handler=computer_key,
+            ),
+            OpenShrimpTool(
+                name="computer_scroll",
+                description=(
+                    "Scroll at a specific position on the screen. Moves the "
+                    "pointer to (x, y) and scrolls in the given direction."
+                ),
+                input_schema=_computer_scroll_schema,
+                read_only=False,
+                handler=computer_scroll,
+            ),
+            OpenShrimpTool(
+                name="computer_toplevel",
+                description=(
+                    "Focus a window by name or part of its title. Use this to "
+                    "switch between applications (e.g. 'Chromium', 'Google "
+                    "Chrome', 'foot')."
+                ),
+                input_schema=_computer_toplevel_schema,
+                read_only=False,
+                handler=computer_toplevel,
+            ),
         ])
 
     # --- Port forwarding (sandboxed contexts that support it) ---
@@ -897,65 +966,54 @@ def create_openshrimp_mcp_server(
         from open_shrimp.db import ChatScope
         _scope_key = ChatScope(chat_id=chat_id, thread_id=thread_id).key
 
-        @tool(
-            "port_forward",
-            "Manage TCP port forwards from the sandbox to the host's "
-            "loopback interface (127.0.0.1). Use this to expose a service "
-            "running inside the sandbox (e.g. a dev server, API) to the "
-            "user on their host machine. Three actions: 'create' opens a "
-            "new forward and returns the host port (requires user approval); "
-            "'list' shows active forwards in this conversation; 'remove' "
-            "tears down a forward by id. Forwards are automatically cleaned "
-            "up on /clear or when the sandbox stops.",
-            {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["create", "list", "remove"],
-                        "description": (
-                            "What to do: 'create' opens a new forward, "
-                            "'list' shows active forwards, 'remove' tears "
-                            "down a forward by id."
-                        ),
-                    },
-                    "guest_port": {
-                        "type": "integer",
-                        "description": (
-                            "[create only] Port inside the sandbox to "
-                            "expose (1-65535)."
-                        ),
-                    },
-                    "host_port": {
-                        "type": "integer",
-                        "description": (
-                            "[create only] Preferred host port. If "
-                            "omitted, the same number as guest_port is "
-                            "tried first; if that's taken, the system "
-                            "picks any free port. Always bound to "
-                            "127.0.0.1 only."
-                        ),
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": (
-                            "[create only] Short human-readable label "
-                            "shown to the user in the approval prompt "
-                            "(e.g. 'Next.js dev server')."
-                        ),
-                    },
-                    "forward_id": {
-                        "type": "string",
-                        "description": (
-                            "[remove only] The id returned by a previous "
-                            "create call (e.g. 'pf-abc12345')."
-                        ),
-                    },
+        _port_forward_schema = {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "list", "remove"],
+                    "description": (
+                        "What to do: 'create' opens a new forward, "
+                        "'list' shows active forwards, 'remove' tears "
+                        "down a forward by id."
+                    ),
                 },
-                "required": ["action"],
+                "guest_port": {
+                    "type": "integer",
+                    "description": (
+                        "[create only] Port inside the sandbox to "
+                        "expose (1-65535)."
+                    ),
+                },
+                "host_port": {
+                    "type": "integer",
+                    "description": (
+                        "[create only] Preferred host port. If "
+                        "omitted, the same number as guest_port is "
+                        "tried first; if that's taken, the system "
+                        "picks any free port. Always bound to "
+                        "127.0.0.1 only."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "[create only] Short human-readable label "
+                        "shown to the user in the approval prompt "
+                        "(e.g. 'Next.js dev server')."
+                    ),
+                },
+                "forward_id": {
+                    "type": "string",
+                    "description": (
+                        "[remove only] The id returned by a previous "
+                        "create call (e.g. 'pf-abc12345')."
+                    ),
+                },
             },
-            annotations=ToolAnnotations(readOnlyHint=False),
-        )
+            "required": ["action"],
+        }
+
         async def port_forward(args: dict[str, Any]) -> dict[str, Any]:
             action = args.get("action", "")
 
@@ -1042,7 +1100,23 @@ def create_openshrimp_mcp_server(
                 is_error=True,
             )
 
-        tools_list.append(port_forward)
+        tools_list.append(OpenShrimpTool(
+            name="port_forward",
+            description=(
+                "Manage TCP port forwards from the sandbox to the host's "
+                "loopback interface (127.0.0.1). Use this to expose a service "
+                "running inside the sandbox (e.g. a dev server, API) to the "
+                "user on their host machine. Three actions: 'create' opens a "
+                "new forward and returns the host port (requires user "
+                "approval); 'list' shows active forwards in this "
+                "conversation; 'remove' tears down a forward by id. Forwards "
+                "are automatically cleaned up on /clear or when the sandbox "
+                "stops."
+            ),
+            input_schema=_port_forward_schema,
+            read_only=False,
+            handler=port_forward,
+        ))
 
     # --- host_bash (sudo mode): run a shell command on the host, OUTSIDE
     # the sandbox.  Only registered when the context's sandbox config has
@@ -1052,47 +1126,37 @@ def create_openshrimp_mcp_server(
     if host_bash_workdir is not None:
         _host_workdir = host_bash_workdir
 
-        @tool(
-            "host_bash",
-            "Run a shell command on the HOST, outside the sandbox. Use this "
-            "only when a task fundamentally requires host access (e.g. "
-            "manipulating files outside the mounted project directory, "
-            "interacting with host-only services). Every invocation prompts "
-            "the user for approval and auto-denies after 10 seconds if they "
-            "don't respond. Prefer the sandboxed Bash tool whenever "
-            "possible. Captures stdout, stderr, and exit code.",
-            {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": (
-                            "The shell command to execute on the host. "
-                            "Runs via /bin/sh -c."
-                        ),
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": (
-                            "Short human-readable explanation shown to the "
-                            "user in the approval prompt (e.g. 'install "
-                            "system package'). Optional but strongly "
-                            "recommended — the user has 10 seconds to "
-                            "decide."
-                        ),
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": (
-                            "Maximum execution time in seconds. Default "
-                            "120. The command is killed if it exceeds this."
-                        ),
-                    },
+        _host_bash_schema = {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "The shell command to execute on the host. "
+                        "Runs via /bin/sh -c."
+                    ),
                 },
-                "required": ["command"],
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Short human-readable explanation shown to the "
+                        "user in the approval prompt (e.g. 'install "
+                        "system package'). Optional but strongly "
+                        "recommended — the user has 10 seconds to "
+                        "decide."
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum execution time in seconds. Default "
+                        "120. The command is killed if it exceeds this."
+                    ),
+                },
             },
-            annotations=ToolAnnotations(readOnlyHint=False),
-        )
+            "required": ["command"],
+        }
+
         async def host_bash(args: dict[str, Any]) -> dict[str, Any]:
             command = args.get("command", "")
             if not command:
@@ -1147,9 +1211,21 @@ def create_openshrimp_mcp_server(
                 "\n\n".join(parts), is_error=(exit_code != 0),
             )
 
-        tools_list.append(host_bash)
+        tools_list.append(OpenShrimpTool(
+            name="host_bash",
+            description=(
+                "Run a shell command on the HOST, outside the sandbox. Use "
+                "this only when a task fundamentally requires host access "
+                "(e.g. manipulating files outside the mounted project "
+                "directory, interacting with host-only services). Every "
+                "invocation prompts the user for approval and auto-denies "
+                "after 10 seconds if they don't respond. Prefer the "
+                "sandboxed Bash tool whenever possible. Captures stdout, "
+                "stderr, and exit code."
+            ),
+            input_schema=_host_bash_schema,
+            read_only=False,
+            handler=host_bash,
+        ))
 
-    return create_sdk_mcp_server(
-        name="openshrimp",
-        tools=tools_list,
-    )
+    return tools_list

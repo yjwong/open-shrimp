@@ -11,7 +11,17 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
+from open_shrimp.sandbox.agent_runtime import (
+    AgentHandle,
+    AgentRuntime,
+    ImageBundle,
+    ServedEndpoint,
+    WrappedCLI,
+    run_served_endpoint,
+    terminate_served_proc,
+)
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 
 import open_shrimp.sandbox.docker_helpers as _dh
@@ -19,9 +29,9 @@ import open_shrimp.sandbox.docker_helpers as _dh
 from open_shrimp.sandbox.docker_helpers import (
     build_cli_wrapper as _build_cli_wrapper,
     container_name as _container_name_fn,
-    ensure_computer_use_image as _ensure_computer_use_image,
     ensure_container_running as _ensure_container_running,
     ensure_image as _ensure_image,
+    ensure_layered_computer_use_image as _ensure_layered_computer_use_image,
     get_screenshots_dir as _get_screenshots_dir,
     get_text_input_active as _get_text_input_active,
     get_text_input_state_path as _get_text_input_state_path,
@@ -47,6 +57,7 @@ class DockerSandbox:
         docker_in_docker: bool = False,
         computer_use: bool = False,
         custom_dockerfile: str | None = None,
+        runtime: AgentRuntime | None = None,
     ) -> None:
         self._context_name = context_name
         self._project_dir = project_dir
@@ -55,13 +66,46 @@ class DockerSandbox:
         self._computer_use = computer_use
         self._custom_dockerfile = custom_dockerfile
 
+        # The bundle carries the image-build inputs and guest user/home; the
+        # launch carries any served-endpoint home mounts and the published
+        # guest port.  All decisions key off the bundle, not a flavour string.
+        # The runtime is required for Docker: callers (the SandboxManager
+        # factory) always have one in hand by the time they instantiate.
+        if runtime is None or runtime.image_bundle is None:
+            raise ValueError(
+                "DockerSandbox requires a runtime with an ImageBundle; "
+                "callers should construct a runtime before instantiating."
+            )
+        self._bundle: ImageBundle = runtime.image_bundle
+        launch = runtime.launch if runtime else None
+        if isinstance(launch, ServedEndpoint):
+            self._served_home_mounts = launch.home_mounts
+            self._served_guest_port: int | None = launch.guest_port
+        else:
+            self._served_home_mounts = ()
+            self._served_guest_port = None
+
+        # Custom Dockerfile and computer-use take precedence over the
+        # bundle's base tag.
         if custom_dockerfile:
-            repo = _dh.CONTAINER_IMAGE.rsplit(":", 1)[0]
+            base = _dh._base_image_for(self._bundle)
+            repo = base.rsplit(":", 1)[0]
             self._image_name = f"{repo}:{context_name}"
         elif computer_use:
-            self._image_name = _dh.COMPUTER_USE_IMAGE
+            image = self._bundle.computer_use_image
+            if image is None:
+                raise ValueError(
+                    f"Runtime bundle {self._bundle.tag_suffix!r} has no "
+                    f"computer-use image",
+                )
+            self._image_name = image
         else:
-            self._image_name = _dh.CONTAINER_IMAGE
+            self._image_name = _dh._base_image_for(self._bundle)
+
+        # Served-endpoint state, read by the served-endpoint client's liveness
+        # check via the endpoint's ``owner`` (``owner._served_proc``).
+        self._served_proc: subprocess.Popen[str] | None = None
+        self._served_endpoint: Any = None
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -86,23 +130,26 @@ class DockerSandbox:
 
     def ensure_environment(self, *, log_file: Path | None = None) -> None:
         if self._computer_use and self._custom_dockerfile:
-            _ensure_computer_use_image(log_file=log_file)
+            _ensure_layered_computer_use_image(
+                self._bundle, log_file=log_file,
+            )
             _ensure_image(
+                bundle=self._bundle,
                 image_name=self._image_name,
                 dockerfile=self._custom_dockerfile,
-                base_image=_dh.COMPUTER_USE_IMAGE,
+                base_image=self._bundle.computer_use_image,
                 log_file=log_file,
             )
         elif self._computer_use:
-            _ensure_computer_use_image(
-                image_name=self._image_name,
-                log_file=log_file,
+            _ensure_layered_computer_use_image(
+                self._bundle, log_file=log_file,
             )
         else:
             _ensure_image(
                 image_name=self._image_name,
                 dockerfile=self._custom_dockerfile,
                 log_file=log_file,
+                bundle=self._bundle,
             )
 
     def running(self) -> bool:
@@ -124,11 +171,75 @@ class DockerSandbox:
             docker_in_docker=self._docker_in_docker,
             computer_use=self._computer_use,
             image_name=self._image_name,
+            bundle=self._bundle,
+            served_home_mounts=self._served_home_mounts,
+            served_guest_port=self._served_guest_port,
         )
 
     def provision_workspace(self) -> None:
         # Docker uses bind mounts — workspace is already in place.
         pass
+
+    def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
+        if isinstance(runtime.launch, WrappedCLI):
+            cli_path, cleanup_paths = self.build_cli_wrapper()
+            return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
+        if isinstance(runtime.launch, ServedEndpoint):
+            return self._start_served_endpoint(runtime, runtime.launch)
+        raise NotImplementedError(
+            f"Unsupported launch strategy: {runtime.launch!r}"
+        )
+
+    def _start_served_endpoint(
+        self, runtime: AgentRuntime, launch: ServedEndpoint,
+    ) -> AgentHandle:
+        """Run the serve argv inside the container and reach its port.
+
+        The runtime supplies the serve argv, the home/env contributions, and the
+        inject hook; this sandbox owns only the ``docker exec`` spawn and the
+        published-port :meth:`reach`.  The shared launch body lives in
+        :func:`run_served_endpoint`.  The served image (binary + home + extra
+        home mounts + published ``launch.guest_port``) is built and run by
+        ``docker_helpers``.
+        """
+        # Reuse a healthy server if one is already up for this container.
+        if self._served_proc is not None and self._served_proc.poll() is None:
+            if self._served_endpoint is not None:
+                return AgentHandle(endpoint=self._served_endpoint)
+
+        def spawn(
+            serve_argv: list[str], env: dict[str, str],
+        ) -> subprocess.Popen[str]:
+            env_args: list[str] = []
+            for key, value in env.items():
+                env_args.extend(["-e", f"{key}={value}"])
+            cmd = [
+                "docker", "exec",
+                *env_args,
+                "-w", self._project_dir,
+                self.container_name,
+                *serve_argv,
+            ]
+            return subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+        # The sandbox owns reach: a ``docker port`` lookup for the published
+        # guest port → ``"127.0.0.1:<host_port>"``.
+        proc, endpoint = run_served_endpoint(
+            runtime,
+            launch,
+            spawn=spawn,
+            reach=self.reach,
+            owner=self,
+            log_label=f"Sandbox context '{self._context_name}'",
+        )
+        self._served_proc = proc
+        self._served_endpoint = endpoint
+        return AgentHandle(endpoint=endpoint)
 
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         path = _build_cli_wrapper(
@@ -141,7 +252,38 @@ class DockerSandbox:
         )
         return path, [path]
 
+    def reach(self, guest_port: int) -> str:
+        # Docker publishes container ports with dynamic host mapping; query
+        # the actual mapped host port (same lookup ``get_vnc_port`` uses).
+        name = self.container_name
+        assert name is not None
+        result = subprocess.run(
+            ["docker", "port", name, str(guest_port)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"No published host port for guest port {guest_port} on "
+                f"container {name}: {result.stderr.strip()}"
+            )
+        for line in result.stdout.strip().splitlines():
+            port_str = line.rsplit(":", 1)[-1]
+            try:
+                host_port = int(port_str)
+            except ValueError:
+                continue
+            return f"127.0.0.1:{host_port}"
+        raise RuntimeError(
+            f"Could not parse published host port for guest port "
+            f"{guest_port} on container {name}: {result.stdout.strip()!r}"
+        )
+
     def stop(self) -> None:
+        # Tear down any served process before removing the container.
+        terminate_served_proc(self._served_proc)
+        self._served_proc = None
+        self._served_endpoint = None
         name = self.container_name
         if name:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True)

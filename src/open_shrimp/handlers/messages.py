@@ -19,7 +19,7 @@ from open_shrimp.agent import (
     save_attachments,
 )
 from open_shrimp.stt import transcribe as stt_transcribe
-from claude_agent_sdk import CLIConnectionError, ProcessError
+from open_shrimp.backend.errors import CLIConnectionError, ProcessError
 from open_shrimp.client_manager import (
     CallbackContext,
     close_session,
@@ -34,7 +34,7 @@ from open_shrimp.handlers.approval import (
     _send_auto_approved_diff,
     _send_host_bash_approval,
 )
-from open_shrimp.hooks import matches_approval_rule as _matches_rule
+from open_shrimp.hooks import ApprovalRule, matches_approval_rule as _matches_rule
 from open_shrimp.handlers.questions import (
     _complete_other_input,
     _handle_ask_user_questions,
@@ -418,6 +418,29 @@ async def _handle_media_group_message(
 # ---------------------------------------------------------------------------
 
 
+def _reinject_runtime_credentials(session: Any) -> None:
+    """Re-run the runtime's ``inject`` hook against the active sandbox home.
+
+    No-op when the runtime declares ``re_inject_on_dispatch=False`` (the
+    default) — only runtimes whose host-side credential store is re-read per
+    request (OpenCode's ``auth.json``) opt into this shape.  Runtimes that
+    rely on a long-lived host-side watcher (Claude OAuth) keep their refresh
+    machinery in :mod:`open_shrimp.sandbox.agent_runtime_watcher`.
+
+    Best-effort: a failing inject must not block the dispatch.
+    """
+    runtime = getattr(session, "runtime", None)
+    if runtime is None or not runtime.re_inject_on_dispatch:
+        return
+    try:
+        runtime.inject(runtime.home_mount.host_dir)
+    except Exception:
+        logger.debug(
+            "Per-dispatch credential re-inject failed for runtime %s",
+            runtime.name, exc_info=True,
+        )
+
+
 async def _dispatch_to_agent(
     prompt: str,
     attachments: list[FileAttachment],
@@ -575,6 +598,8 @@ async def _inject_message(
     if attachment_paths:
         _injected_attachment_paths.setdefault(scope, []).extend(attachment_paths)
 
+    _reinject_runtime_credentials(session)
+
     try:
         await session.client.query(actual_prompt)
         logger.info(
@@ -720,12 +745,19 @@ async def _start_agent_task(
                     todos=todos if todos else None,
                 )
 
-            # Load persistent approval rules from .claude/settings.local.json
-            # into the in-memory cache so they are checked alongside
-            # session-scoped rules.
-            from open_shrimp.settings_local import load_persistent_rules
+            # Load durable approval rules through the active backend's
+            # policy: SDK reads ``.claude/settings.local.json``; OpenCode
+            # returns ``[]`` because durable rules arrive via the
+            # ``permission.asked.always`` event arm.
+            from open_shrimp.client_manager import resolve_backend
 
-            persistent_rules = await load_persistent_rules(ctx_config.directory)
+            policy = resolve_backend(
+                context.bot_data.get("backend"),
+                context=ctx_config,
+            ).policy
+            persistent_rules = await policy.load_persistent_rules(
+                directory=ctx_config.directory,
+            )
             if persistent_rules:
                 existing = _tool_approved_sessions.setdefault((scope, ctx_name), [])
                 # Avoid duplicates if rules were already loaded.
@@ -733,6 +765,24 @@ async def _start_agent_task(
                 for rule in persistent_rules:
                     if (rule.tool_name, rule.pattern) not in existing_set:
                         existing.append(rule)
+
+            def _register_session_rule(tool_name: str, pattern: str) -> None:
+                """Inject an ``ApprovalRule`` into the live session cache.
+
+                Fired by the OpenCode ``PermissionBridge`` for each
+                ``permission.asked.always`` pattern it observes — the
+                user's earlier "always allow" choice (made through
+                OpenCode's own UI, or replayed by OpenCode for an
+                already-durable rule) takes effect immediately inside
+                the current OpenShrimp session.
+                """
+                bucket = _tool_approved_sessions.setdefault(
+                    (scope, ctx_name), [],
+                )
+                existing_keys = {(r.tool_name, r.pattern) for r in bucket}
+                if (tool_name, pattern) in existing_keys:
+                    return
+                bucket.append(ApprovalRule(tool_name=tool_name, pattern=pattern))
 
             cb_ctx = CallbackContext(
                 request_approval=request_approval,
@@ -747,6 +797,7 @@ async def _start_agent_task(
                     _session_approved_dirs.get((scope, ctx_name), set())
                 ),
                 request_host_bash_approval=request_host_bash,
+                register_session_rule=_register_session_rule,
             )
 
             session = await get_or_create_session(
@@ -764,6 +815,7 @@ async def _start_agent_task(
                 is_private_chat=is_private_chat,
                 sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
                 mcp_proxy=context.bot_data.get("mcp_proxy"),
+                backend=context.bot_data.get("backend"),
             )
 
             # Copy attachments into sandbox (if applicable) and build prompt.
@@ -780,6 +832,7 @@ async def _start_agent_task(
                 actual_prompt = prompt
 
             # Send the primary query.
+            _reinject_runtime_credentials(session)
             await session.client.query(actual_prompt)
 
             # Mark session as injectable so concurrent messages are
@@ -806,6 +859,7 @@ async def _start_agent_task(
                     queued_actual = queued_prompt
                 all_attachment_paths.extend(queued_paths)
                 try:
+                    _reinject_runtime_credentials(session)
                     await session.client.query(queued_actual)
                     logger.info(
                         "Injected setup-queued message for scope %s: %s",
@@ -830,6 +884,12 @@ async def _start_agent_task(
                     else:
                         terminal_url = f"https://{config.review.host}:{config.review.port}"
 
+                    from open_shrimp.client_manager import resolve_backend
+
+                    _active_backend = resolve_backend(
+                        context.bot_data.get("backend"),
+                        context=ctx_config,
+                    )
                     result = await stream_response(
                         bot=context.bot,
                         chat_id=scope.chat_id,
@@ -840,6 +900,8 @@ async def _start_agent_task(
                         on_todo_update=on_todo_update,
                         terminal_base_url=terminal_url,
                         scope=scope,
+                        policy=_active_backend.policy,
+                        copy=_active_backend.copy(),
                     )
 
                     if result.session_id:
@@ -851,6 +913,26 @@ async def _start_agent_task(
                             model_usage=result.model_usage,
                             turn_usage=result.turn_usage,
                             todos=latest_todos if latest_todos else None,
+                        )
+
+                    # Per-turn backend hook. Runs only on the interactive
+                    # handler path — the scheduler intentionally skips it
+                    # because scheduled tasks have no user waiting on
+                    # any per-turn UI affordance.
+                    try:
+                        await _active_backend.on_turn_end(
+                            bot=context.bot,
+                            scope=scope,
+                            client=session.client,
+                            result=result,
+                            config=config,
+                            context_name=ctx_name,
+                            context_config=ctx_config,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Backend.on_turn_end failed for scope %s",
+                            scope,
                         )
 
                     if result.num_turns == 0 and result.session_id is None:
@@ -882,6 +964,7 @@ async def _start_agent_task(
                         is_private_chat=is_private_chat,
                         sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
                         mcp_proxy=context.bot_data.get("mcp_proxy"),
+                        backend=context.bot_data.get("backend"),
                     )
                     if new_session is None:
                         raise

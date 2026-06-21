@@ -17,7 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from claude_agent_sdk.types import (
+from open_shrimp.backend.types import (
     PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,
@@ -299,3 +299,131 @@ def test_matches_approval_rule_blanket() -> None:
     rule = ApprovalRule(tool_name="WebFetch", pattern=None)
     assert matches_approval_rule(rule, "WebFetch", {"url": "x"}) is True
     assert matches_approval_rule(rule, "WebSearch", {"query": "x"}) is False
+
+
+# --- NotebookEdit ---
+
+
+from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
+
+
+def test_notebook_edit_is_path_scoped() -> None:
+    assert ClaudeSdkPolicy().is_path_scoped("NotebookEdit") is True
+
+
+def test_notebook_edit_is_mutating() -> None:
+    assert ClaudeSdkPolicy().is_mutating("NotebookEdit") is True
+
+
+def test_notebook_edit_is_file_targeted() -> None:
+    assert ClaudeSdkPolicy().is_file_targeted("NotebookEdit") is True
+
+
+def test_notebook_edit_suppress_notification() -> None:
+    assert ClaudeSdkPolicy().suppress_notification("NotebookEdit") is True
+
+
+def test_notebook_edit_extract_path() -> None:
+    p = ClaudeSdkPolicy()
+    assert p.extract_path(
+        "NotebookEdit", {"notebook_path": "/x/y.ipynb"}, "/cwd",
+    ) == "/x/y.ipynb"
+    assert p.extract_path("NotebookEdit", {}, "/cwd") is None
+
+
+def test_notebook_edit_suggested_session_dir() -> None:
+    assert ClaudeSdkPolicy().suggested_session_dir(
+        "NotebookEdit", {"notebook_path": "/var/data/x.ipynb"},
+    ) == "/var/data"
+
+
+def test_notebook_edit_summarize() -> None:
+    assert ClaudeSdkPolicy().summarize(
+        "NotebookEdit", {"notebook_path": "/cwd/x.ipynb"}, "/cwd",
+    ) == "x.ipynb"
+
+
+def test_notebook_edit_format_approval_text() -> None:
+    text = ClaudeSdkPolicy().format_approval_text(
+        "NotebookEdit",
+        {"notebook_path": "/cwd/x.ipynb",
+         "old_string": "a", "new_string": "b"},
+        "/cwd",
+    )
+    assert "NotebookEdit" in text
+    # MarkdownV2 escapes the dot: ``x.ipynb`` -> ``x\.ipynb``.
+    assert "x\\.ipynb" in text
+
+
+@pytest.mark.asyncio
+async def test_notebook_edit_in_cwd_requires_approval(
+    tmp_path: Path,
+) -> None:
+    request_approval = AsyncMock(return_value=False)
+    can_use = make_can_use_tool(
+        request_approval=request_approval, cwd=str(tmp_path),
+    )
+    target = tmp_path / "nb.ipynb"
+    target.write_text("{}")
+    await can_use(
+        "NotebookEdit",
+        {"notebook_path": str(target),
+         "old_string": "a", "new_string": "b"},
+        _ctx("t_nb_1"),
+    )
+    request_approval.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_notebook_edit_accept_all_edits_auto_approves(
+    tmp_path: Path,
+) -> None:
+    request_approval = AsyncMock(return_value=False)
+    can_use = make_can_use_tool(
+        request_approval=request_approval,
+        cwd=str(tmp_path),
+        is_edit_auto_approved=lambda: True,
+    )
+    target = tmp_path / "nb.ipynb"
+    target.write_text("{}")
+    result = await can_use(
+        "NotebookEdit",
+        {"notebook_path": str(target),
+         "old_string": "a", "new_string": "b"},
+        _ctx("t_nb_2"),
+    )
+    assert isinstance(result, PermissionResultAllow)
+    request_approval.assert_not_awaited()
+
+
+# --- auto_approved_at_session_start seeding ---
+
+
+def test_seed_includes_task_management() -> None:
+    names = set(ClaudeSdkPolicy().auto_approved_at_session_start())
+    expected = {
+        "TaskCreate", "TaskGet", "TaskUpdate",
+        "TaskList", "TaskStop", "TaskOutput",
+    }
+    assert expected <= names
+
+
+def test_seed_includes_mode_transitions() -> None:
+    names = set(ClaudeSdkPolicy().auto_approved_at_session_start())
+    assert {"EnterPlanMode", "EnterWorktree", "ExitWorktree"} <= names
+
+
+def test_seed_includes_registry_discovery() -> None:
+    names = set(ClaudeSdkPolicy().auto_approved_at_session_start())
+    assert {"ToolSearch", "ListMcpResources", "ReadMcpResource"} <= names
+
+
+def test_seed_excludes_exit_plan_mode() -> None:
+    names = set(ClaudeSdkPolicy().auto_approved_at_session_start())
+    assert "ExitPlanMode" not in names
+
+
+def test_seed_excludes_user_facing_tools() -> None:
+    names = set(ClaudeSdkPolicy().auto_approved_at_session_start())
+    for tool in ("Edit", "Write", "Bash", "Read", "AskUserQuestion"):
+        assert tool not in names

@@ -1,4 +1,4 @@
-"""Stream bridge between Agent SDK events and Telegram sendMessageDraft.
+"""Stream bridge between backend events and Telegram sendMessageDraft.
 
 Consumes streaming events from agent.py, buffers text, and sends drafts
 to Telegram at appropriate intervals. Handles message length limits,
@@ -14,23 +14,25 @@ import random
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from claude_agent_sdk import (
+if TYPE_CHECKING:
+    from open_shrimp.backend.policy import BackendPolicy
+    from open_shrimp.backend.protocol import BackendCopy
+
+from open_shrimp.backend.types import (
     AssistantMessage,
+    RateLimitEvent,
     ResultMessage,
     SystemMessage,
-    TextBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-)
-from claude_agent_sdk.types import (
-    RateLimitEvent,
-    StreamEvent,
     TaskNotificationMessage,
     TaskProgressMessage,
     TaskStartedMessage,
+    TextBlock,
+    TextDeltaEvent,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
@@ -41,35 +43,6 @@ from open_shrimp.markdown import gfm_to_telegram
 from open_shrimp.web_app_button import make_web_app_button
 
 logger = logging.getLogger(__name__)
-
-
-def _is_auto_promoted_fg_bash(
-    state: "_DraftState",
-    event: "TaskStartedMessage | TaskProgressMessage | TaskNotificationMessage",
-) -> bool:
-    """Detect SDK auto-promotion of slow foreground Bash to a task.
-
-    Why: Claude Code CLI 2.1.117 (bundled with claude-agent-sdk 0.1.65)
-    silently wraps long-running foreground Bash in ``task_started`` /
-    ``task_notification`` events even when ``run_in_background`` was not
-    set. Those auto-promoted tasks have an empty ``output_file`` and no
-    ``.output`` file on disk — the regular Bash tool-result flow already
-    rendered the output. Without this filter we'd post ⏳ + 📋 noise and
-    a "View output" button that 404s. Reported upstream as
-    anthropics/claude-code#31518 (closed without fix).
-    """
-    # Only TaskStartedMessage carries task_type; TaskProgressMessage and
-    # TaskNotificationMessage don't, so for those we rely on the task_id
-    # we recorded when the started event was suppressed.
-    task_type = getattr(event, "task_type", None)
-    if task_type is None:
-        return event.task_id in state.suppressed_task_ids
-    if task_type != "local_bash" or not event.tool_use_id:
-        return False
-    info = state.tool_use_map.get(event.tool_use_id)
-    if info is None or info[0] != "Bash":
-        return False
-    return not info[1].get("run_in_background")
 
 
 def _is_thread_not_found(exc: BaseException) -> bool:
@@ -89,72 +62,10 @@ DRAFT_INTERVAL_SECONDS = 0.5
 BASH_OUTPUT_MAX_LINES = 50
 # Maximum characters of Bash output to display.
 BASH_OUTPUT_MAX_CHARS = 1500
-# Tools whose blockquote notifications are suppressed because their output
-# is shown directly (Bash output as code block, Write via edit notification).
-_SUPPRESS_NOTIFICATION_TOOLS: set[str] = {"Bash", "Edit", "Write"}
 
 # Stored Bash outputs for on-demand reveal via inline keyboard button.
 # Keyed by a unique callback ID, value is the formatted GFM output string.
 _bash_output_store: dict[str, str] = {}
-
-
-def _register_suggestion_for_turn(
-    *,
-    bot: Bot,
-    chat_id: int,
-    message_id: int,
-    session_id: str,
-) -> None:
-    """Arrange for the next prompt_suggestion frame to add an inline button.
-
-    The CLI emits a ``prompt_suggestion`` frame asynchronously after the
-    result.  When it arrives, the handler edits the supplied
-    ``message_id`` (the last message of the just-finished turn) to add a
-    single inline button labelled with the suggestion.  Tapping the
-    button dispatches the suggestion text as the user's next message.
-    """
-    from open_shrimp.prompt_suggestion import (
-        CALLBACK_PREFIX,
-        register_handler,
-        store_suggestion,
-    )
-
-    async def handler(suggestion: str) -> None:
-        suggestion = suggestion.strip()
-        if not suggestion:
-            return
-        suggest_id = store_suggestion(suggestion)
-        # Telegram caps button labels at 64 bytes UTF-8; truncate with
-        # an ellipsis to stay safely under.
-        encoded = suggestion.encode("utf-8")
-        if len(encoded) > 60:
-            label = encoded[:57].decode("utf-8", errors="ignore") + "…"
-        else:
-            label = suggestion
-        button = InlineKeyboardButton(
-            f"💡 {label}", callback_data=f"{CALLBACK_PREFIX}{suggest_id}",
-        )
-        try:
-            await bot.edit_message_reply_markup(
-                chat_id=chat_id,
-                message_id=message_id,
-                reply_markup=InlineKeyboardMarkup([[button]]),
-            )
-        except BadRequest as e:
-            # Common: "message is not modified" if a previous edit
-            # already attached a keyboard, or "message to edit not
-            # found" if the user deleted the message.  Both are benign.
-            logger.debug(
-                "Skipped suggestion edit for chat %d msg %d: %s",
-                chat_id, message_id, e,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to attach suggestion button for chat %d msg %d",
-                chat_id, message_id,
-            )
-
-    register_handler(session_id, handler)
 
 
 @dataclass
@@ -169,6 +80,20 @@ class StreamResult:
     turn_usage: dict[str, Any] | None = None
     num_turns: int = 0
     duration_ms: int = 0
+    #: Finalized Telegram message ids for this turn, in send order.
+    #: A snapshot of the slice ``state.sent_message_ids`` grew by during
+    #: the turn — consumers (Backend.on_turn_end) read the last id to
+    #: attach per-turn affordances (e.g. the prompt-suggestion button).
+    sent_message_ids: list[int] = field(default_factory=list)
+    #: True iff this turn emitted an ``AssistantMessage`` with an
+    #: ``error`` field set (auth / billing / invalid_request /
+    #: server_error).  Per-turn affordances may skip work when the turn
+    #: didn't produce a useful assistant reply.
+    last_turn_had_error: bool = False
+    #: Count of ``AssistantMessage`` events observed in this turn.
+    #: ``None`` if no assistant message arrived (e.g. cancelled before
+    #: first reply); otherwise the in-stream count.
+    assistant_turn_count: int | None = None
 
 
 @dataclass
@@ -201,7 +126,7 @@ class _DraftState:
     # blockquote ("> Tool: summary").  Used to insert a paragraph break
     # before the next assistant text so it doesn't get swallowed into the
     # notification blockquote.  We track this with a flag instead of
-    # checking raw_text for ">" lines, because Claude's own response text
+    # checking raw_text for ">" lines, because the assistant's own response text
     # may also contain blockquotes that should NOT be broken.
     last_was_notification: bool = False
     # Session ID captured as early as possible (from SystemMessage init or
@@ -216,11 +141,6 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
-    # task_ids of auto-promoted foreground Bash tasks (see
-    # _is_auto_promoted_fg_bash).  Only TaskStartedMessage carries
-    # task_type, so we record the id here at started-time and skip the
-    # matching TaskProgressMessage / TaskNotificationMessage events.
-    suppressed_task_ids: set[str] = field(default_factory=set)
     # Fields for web_app button fallback in group chats.
     user_id: int = 0
     is_private_chat: bool = True
@@ -453,60 +373,23 @@ def _relative_path(path: str, cwd: str | None) -> str:
     return rel
 
 
+def _resolve_policy(
+    policy: "BackendPolicy | None",
+    scope: "ChatScope | None" = None,
+) -> "BackendPolicy":
+    if policy is not None:
+        return policy
+    from open_shrimp.client_manager import resolve_backend
+
+    return resolve_backend(scope=scope).policy
+
+
 def extract_tool_summary(
     tool_name: str, tool_input: dict[str, Any], cwd: str | None = None,
+    policy: "BackendPolicy | None" = None,
 ) -> str:
     """Extract a brief summary from tool input for notifications."""
-    if tool_name == "Read":
-        return _relative_path(tool_input.get("file_path", ""), cwd)
-    if tool_name == "Glob":
-        return tool_input.get("pattern", "")
-    if tool_name == "Grep":
-        pattern = tool_input.get("pattern", "")
-        path = tool_input.get("path", "")
-        if path:
-            return f"{pattern} in {_relative_path(path, cwd)}"
-        return pattern
-    if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        return cmd[:80] + ("..." if len(cmd) > 80 else "")
-    if tool_name == "Write" or tool_name == "Edit":
-        return _relative_path(tool_input.get("file_path", ""), cwd)
-    if tool_name == "LSP":
-        return tool_input.get("command", "")
-    if tool_name == "Agent":
-        desc = tool_input.get("description", "")
-        subagent = tool_input.get("subagent_type", "")
-        label = f"({subagent}) " if subagent else ""
-        return f"{label}{desc}" if desc else subagent
-    if tool_name == "AskUserQuestion":
-        questions = tool_input.get("questions", [])
-        if questions:
-            return questions[0].get("header", questions[0].get("question", ""))[:60]
-        return "asking user"
-    if tool_name == "TodoWrite":
-        todos = tool_input.get("todos", [])
-        if not todos:
-            return "clear all"
-        completed = sum(
-            1 for t in todos
-            if isinstance(t, dict) and t.get("status") == "completed"
-        )
-        total = len(todos)
-        return f"{completed}/{total} done"
-    if tool_name == "mcp__openshrimp__send_file":
-        path = tool_input.get("file_path", "")
-        basename = os.path.basename(path) if path else ""
-        caption = tool_input.get("caption", "")
-        if caption:
-            return f"{basename} — {caption[:40]}"
-        return basename
-    # Generic: show first key's value
-    for key, val in tool_input.items():
-        if isinstance(val, str):
-            s = val[:60]
-            return s + ("..." if len(val) > 60 else "")
-    return ""
+    return _resolve_policy(policy).summarize(tool_name, tool_input, cwd)
 
 
 def _extract_bash_output_text(
@@ -679,30 +562,17 @@ async def finalize_and_reset(
     state.live_edit_last_text = ""
 
 
-_ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
-    "authentication_failed": (
-        "⚠️ **Authentication failed.** Claude was unable to authenticate. "
-        "Check that your API key or OAuth session is valid. "
-        "Run /login to re-authenticate Claude Code."
-    ),
-    "billing_error": (
-        "⚠️ **Billing error.** There is a problem with your Anthropic account billing. "
-        "Please check your account at console.anthropic.com."
-    ),
+#: Neutral fallback messages for the vendor-agnostic error codes a backend
+#: may emit on ``AssistantMessage.error``.  Per-backend overrides come
+#: through ``BackendCopy.assistant_error_messages``; missing keys land here,
+#: missing here land in the generic ``⚠️ Error: <code>`` fallback.
+_DEFAULT_ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
     "rate_limit": (
-        "⚠️ **Rate limited.** Too many requests — please wait a moment and try again."
-    ),
-    "invalid_request": (
-        "⚠️ **Invalid request.** The request to Claude was rejected. "
-        "This may indicate a configuration issue."
-    ),
-    "server_error": (
-        "⚠️ **Server error.** Anthropic's servers returned an error. "
-        "Please try again shortly."
+        "⚠️ **Rate limited.** Too many requests — please wait a moment "
+        "and try again."
     ),
     "unknown": (
-        "⚠️ **Unknown error.** An unexpected error occurred while communicating "
-        "with Claude."
+        "⚠️ **Unknown error.** An unexpected error occurred."
     ),
 }
 
@@ -710,6 +580,7 @@ _ASSISTANT_ERROR_MESSAGES: dict[str, str] = {
 async def _handle_assistant_error(
     bot: Bot, state: _DraftState, error: str,
     error_detail: str | None = None,
+    copy: "BackendCopy | None" = None,
 ) -> None:
     """Send a user-friendly error message for AssistantMessage errors."""
     if error_detail:
@@ -723,11 +594,13 @@ async def _handle_assistant_error(
             state.chat_id, error,
         )
 
-    msg_text = _ASSISTANT_ERROR_MESSAGES.get(
-        error,
-        f"⚠️ **Error:** {error}",
+    table = copy.assistant_error_messages if copy else {}
+    msg_text = (
+        table.get(error)
+        or _DEFAULT_ASSISTANT_ERROR_MESSAGES.get(error)
+        or f"⚠️ **Error:** {error}"
     )
-    # Append the detail from the SDK (e.g. "Prompt is too long") so
+    # Append the detail from the backend (e.g. "Prompt is too long") so
     # the user knows *why* the request was rejected.
     if error_detail:
         msg_text += f"\n\n> {error_detail}"
@@ -768,8 +641,10 @@ async def stream_response(
     on_todo_update: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     terminal_base_url: str | None = None,
     scope: ChatScope | None = None,
+    policy: "BackendPolicy | None" = None,
+    copy: "BackendCopy | None" = None,
 ) -> StreamResult:
-    """Stream Agent SDK events to Telegram as draft messages.
+    """Stream backend events to Telegram as draft messages.
 
     Consumes events from the agent, buffers text, sends drafts at intervals,
     and finalizes when the result is received.
@@ -777,7 +652,8 @@ async def stream_response(
     Args:
         bot: Telegram Bot instance.
         chat_id: Telegram chat ID to send messages to.
-        events: Async iterator of AgentEvent from agent.run_agent().
+        events: Async iterator of AgentEvent from the backend client
+            (client_manager.query_and_stream / receive_events).
         draft_state: Optional pre-created draft state. If provided, the
             same state can be shared with tool approval callbacks so they
             can finalize the draft before sending approval keyboards,
@@ -793,7 +669,12 @@ async def stream_response(
     state = draft_state or _DraftState(chat_id=chat_id)
     auto_set = set(allowed_tools or [])
     result = StreamResult()
+    # Snapshot the sent_message_ids length so the on_turn_end hook gets
+    # only the ids this turn appended (the same ``_DraftState`` is reused
+    # across turns when the caller passes one in).
+    sent_message_start = len(state.sent_message_ids)
     draft_task: asyncio.Task[None] | None = None
+    p = _resolve_policy(policy, scope=scope)
 
     async def periodic_flush() -> None:
         """Periodically flush dirty drafts."""
@@ -817,15 +698,20 @@ async def stream_response(
                 continue
 
             if isinstance(event, AssistantMessage):
+                result.assistant_turn_count = (
+                    (result.assistant_turn_count or 0) + 1
+                )
+
                 # Capture per-turn token usage.
                 turn_usage = event.usage
                 if turn_usage:
                     result.turn_usage = turn_usage
 
-                # Check for SDK-level errors (auth failures, billing,
+                # Check for backend-level errors (auth failures, billing,
                 # rate limits, etc.) and surface them to the user.
                 if event.error:
-                    # Extract error detail from content blocks (the SDK
+                    result.last_turn_had_error = True
+                    # Extract error detail from content blocks (the backend
                     # puts the human-readable reason in a TextBlock, e.g.
                     # "Prompt is too long").
                     error_detail = None
@@ -835,6 +721,7 @@ async def stream_response(
                             break
                     await _handle_assistant_error(
                         bot, state, event.error, error_detail,
+                        copy=copy,
                     )
 
                 # Mark this turn's text as complete. When the next
@@ -862,18 +749,19 @@ async def stream_response(
 
                         # Add tool invocation as an inline notification,
                         # but suppress tools whose output is shown directly.
-                        if block.name not in _SUPPRESS_NOTIFICATION_TOOLS:
+                        if not p.suppress_notification(block.name):
                             add_tool_notification(
                                 state,
                                 tool_name=block.name,
                                 tool_input=block.input,
                                 auto=block.name in auto_set,
                                 cwd=cwd,
+                                policy=p,
                             )
 
-                        # TodoWrite: update the pinned message with the
-                        # current task list.
-                        if block.name == "TodoWrite" and on_todo_update is not None:
+                        # TodoWrite-equivalent: update the pinned message
+                        # with the current task list.
+                        if p.is_todo_write(block.name) and on_todo_update is not None:
                             todos = block.input.get("todos", [])
                             try:
                                 await on_todo_update(todos)
@@ -885,65 +773,49 @@ async def stream_response(
 
             elif isinstance(event, UserMessage):
                 # UserMessage carries tool results (ToolResultBlock).
-                # For Bash, send a collapsible message with a "Show output"
-                # button instead of embedding the output inline.
+                # For Bash-like tools, send a collapsible message with a
+                # "Show output" button instead of embedding the output
+                # inline.
                 if isinstance(event.content, list):
                     for block in event.content:
                         if isinstance(block, ToolResultBlock):
                             tool_info = state.tool_use_map.get(
-                                block.tool_use_id
+                                block.tool_use_id,
                             )
-                            if tool_info and tool_info[0] == "Bash":
-                                tool_input = tool_info[1]
+                            if not tool_info:
+                                continue
+                            name = tool_info[0]
+                            if p.is_host_bash(name):
+                                icon, label = p.host_bash_render()
                                 await _send_bash_button(
-                                    bot, state, tool_input,
+                                    bot, state, tool_info[1],
+                                    block.content,
+                                    icon=icon,
+                                    label=label,
+                                )
+                            elif p.is_bash_like(name):
+                                await _send_bash_button(
+                                    bot, state, tool_info[1],
                                     block.content,
                                 )
-                            elif (
-                                tool_info
-                                and tool_info[0]
-                                == "mcp__openshrimp__host_bash"
-                            ):
-                                tool_input = tool_info[1]
-                                await _send_bash_button(
-                                    bot, state, tool_input,
-                                    block.content,
-                                    icon="🔓",
-                                    label="host_bash",
-                                )
 
-            elif isinstance(event, StreamEvent):
-                # Token-level streaming: extract text deltas from raw
-                # Anthropic API stream events.
-                raw = event.event
-                if raw.get("type") == "content_block_delta":
-                    delta = raw.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        text = delta.get("text", "")
-                        if text:
-                            # Insert a newline separator if this is
-                            # the first text from a new assistant turn
-                            # to prevent concatenation with the
-                            # previous turn's text.
-                            if state.turn_complete:
-                                state.raw_text += "\n\n"
-                                state.turn_complete = False
-                            # Ensure a blank line after a tool notification
-                            # blockquote so assistant text isn't swallowed
-                            # into it.  Only trigger for notifications (tracked
-                            # via flag), NOT for Claude's own blockquote lines.
-                            if state.last_was_notification:
-                                stripped = state.raw_text.rstrip()
-                                state.raw_text = stripped + "\n\n"
-                                state.last_was_notification = False
-                            state.raw_text += text
-                            state.dirty = True
+            elif isinstance(event, TextDeltaEvent):
+                text = event.text
+                if text:
+                    if state.turn_complete:
+                        state.raw_text += "\n\n"
+                        state.turn_complete = False
+                    if state.last_was_notification:
+                        stripped = state.raw_text.rstrip()
+                        state.raw_text = stripped + "\n\n"
+                        state.last_was_notification = False
+                    state.raw_text += text
+                    state.dirty = True
 
-                            # Check if we're approaching the message limit
-                            full = _build_full_text(state)
-                            converted = gfm_to_telegram(full)
-                            if len(converted) > 1:
-                                await _finalize_current(bot, state)
+                    full = _build_full_text(state)
+                    converted = gfm_to_telegram(full)
+                    if len(converted) > 1:
+                        await _finalize_current(bot, state)
 
             elif isinstance(event, ResultMessage):
                 result.session_id = event.session_id
@@ -968,16 +840,6 @@ async def stream_response(
                     result.session_id = sid
 
                 if isinstance(event, TaskStartedMessage):
-                    if _is_auto_promoted_fg_bash(state, event):
-                        state.suppressed_task_ids.add(event.task_id)
-                        logger.debug(
-                            "Skipping auto-promoted FG bash task %s for "
-                            "chat %d (tool_use_id=%s)",
-                            event.task_id,
-                            state.chat_id,
-                            event.tool_use_id,
-                        )
-                        continue
                     logger.info(
                         "Background task started %s (%s) for chat %d: %s",
                         event.task_id,
@@ -1003,11 +865,7 @@ async def stream_response(
                             tool_use_id=event.tool_use_id,
                             session_id=event.session_id,
                         )
-                    # Record tool_use_id so sub-agent messages are
-                    # suppressed from the Telegram chat.
-                    if event.tool_use_id and event.task_type in (
-                        "local_agent", "remote_agent",
-                    ):
+                    if event.tool_use_id and p.is_subagent_task(event.task_type):
                         state.bg_task_tool_use_ids.add(event.tool_use_id)
                     # Send Telegram notification.
                     await finalize_and_reset(bot, state)
@@ -1058,8 +916,6 @@ async def stream_response(
                         )
 
                 elif isinstance(event, TaskProgressMessage):
-                    if _is_auto_promoted_fg_bash(state, event):
-                        continue
                     logger.debug(
                         "Background task progress %s for chat %d: "
                         "last_tool=%s",
@@ -1077,9 +933,6 @@ async def stream_response(
                             )
 
                 elif isinstance(event, TaskNotificationMessage):
-                    if _is_auto_promoted_fg_bash(state, event):
-                        state.suppressed_task_ids.discard(event.task_id)
-                        continue
                     logger.info(
                         "Background task %s %s for chat %d: %s",
                         event.task_id,
@@ -1116,13 +969,15 @@ async def stream_response(
                         )
 
             elif isinstance(event, RateLimitEvent):
-                info = event.rate_limit_info
-                if info.status == "rejected":
+                # backend.types.RateLimitEvent is flat (the SDK's nested
+                # rate_limit_info is flattened in the claude_sdk adapter's
+                # translate.SdkTranslator).
+                if event.status == "rejected":
                     logger.warning(
                         "Rate limit hit (%s) for chat %d, resets at %s",
-                        info.rate_limit_type,
+                        event.rate_limit_type,
                         state.chat_id,
-                        info.resets_at,
+                        event.resets_at,
                     )
                     await finalize_and_reset(bot, state)
                     try:
@@ -1137,10 +992,10 @@ async def stream_response(
                         if _is_thread_not_found(e):
                             raise
                         logger.exception("Failed to send rate limit message")
-                elif info.status == "allowed_warning":
+                elif event.status == "allowed_warning":
                     pct = (
-                        f" ({info.utilization:.0%})"
-                        if info.utilization is not None
+                        f" ({event.utilization:.0%})"
+                        if event.utilization is not None
                         else ""
                     )
                     logger.info(
@@ -1162,17 +1017,12 @@ async def stream_response(
             msg_ids = await _finalize_message(bot, state, silent=False)
             state.sent_message_ids.extend(msg_ids)
 
-        # Register a prompt_suggestion handler against the last assistant
-        # message of this turn.  The CLI emits the suggestion ~1.5 s after
-        # the result frame, well after this function returns; the handler
-        # is a closure that edits the message-id snapshot we have right now.
-        if state.session_id and state.sent_message_ids:
-            _register_suggestion_for_turn(
-                bot=bot,
-                chat_id=state.chat_id,
-                message_id=state.sent_message_ids[-1],
-                session_id=state.session_id,
-            )
+        # Snapshot the message ids this turn produced for the per-turn
+        # backend hook (Backend.on_turn_end).  The handler reads the
+        # last id to attach the prompt-suggestion button; the slice
+        # bound is recorded at turn start so we ignore ids from prior
+        # turns sharing the same draft state.
+        result.sent_message_ids = state.sent_message_ids[sent_message_start:]
 
         # Reset for the next stream_response() iteration.
         state.raw_text = ""
@@ -1305,9 +1155,10 @@ def add_tool_notification(
     tool_input: dict[str, Any],
     auto: bool,
     cwd: str | None = None,
+    policy: "BackendPolicy | None" = None,
 ) -> None:
     """Add a tool call notification inline as a GFM blockquote."""
-    summary = extract_tool_summary(tool_name, tool_input, cwd=cwd)
+    summary = extract_tool_summary(tool_name, tool_input, cwd=cwd, policy=policy)
     suffix = " (auto)" if auto else ""
     line = f"> {tool_name}: {summary}{suffix}"
 

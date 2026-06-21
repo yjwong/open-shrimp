@@ -43,6 +43,7 @@ def generate_lima_yaml_macos(
     computer_use: bool = False,
     *,
     context_name: str = "",
+    task_tmp_prefix: str = "claude",
 ) -> Path:
     """Generate a Lima YAML template for a macOS guest.
 
@@ -54,7 +55,10 @@ def generate_lima_yaml_macos(
     """
     sdir.mkdir(parents=True, exist_ok=True)
 
-    mounts = _build_mounts_macos(sdir, project_dir, additional_directories, computer_use)
+    mounts = _build_mounts_macos(
+        sdir, project_dir, additional_directories, computer_use,
+        task_tmp_prefix=task_tmp_prefix,
+    )
     provision = _build_provision_scripts_macos(config, computer_use)
 
     template: dict = {
@@ -112,6 +116,8 @@ def _build_mounts_macos(
     project_dir: str,
     additional_directories: list[str] | None,
     computer_use: bool = False,
+    *,
+    task_tmp_prefix: str = "claude",
 ) -> list[dict]:
     """Build Lima mount entries for a macOS guest.
 
@@ -149,12 +155,14 @@ def _build_mounts_macos(
             "writable": False,
         })
 
-    # Host-side tmp directory (for task output files).
+    # Host-side tmp directory (for task output files).  Must mount at the path
+    # the agent CLI writes its background-task output to (Claude →
+    # /tmp/claude-<uid>), or the host terminal mini app can't read it.
     tmp_dir = str(sdir / "tmp")
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
     mounts.append({
         "location": tmp_dir,
-        "mountPoint": "/tmp/claude-1000",
+        "mountPoint": f"/tmp/{task_tmp_prefix}-1000",
         "writable": True,
     })
 
@@ -463,9 +471,13 @@ def lima_config_fingerprint_macos(
     computer_use: bool,
     *,
     context_name: str = "",
+    task_tmp_prefix: str = "claude",
 ) -> str:
     """SHA-256 fingerprint of the macOS Lima YAML template content."""
-    mounts = _build_mounts_macos(sdir, project_dir, additional_directories, computer_use)
+    mounts = _build_mounts_macos(
+        sdir, project_dir, additional_directories, computer_use,
+        task_tmp_prefix=task_tmp_prefix,
+    )
     provision = _build_provision_scripts_macos(config, computer_use)
 
     template: dict = {
@@ -512,7 +524,7 @@ def ensure_claude_cli_in_vm_macos(
         return
 
     # Find host binary.
-    from open_shrimp.claude_binary import find_claude_binary
+    from open_shrimp.backend.claude_sdk.binary import find_claude_binary
     host_binary = find_claude_binary()
     logger.info("Copying host Claude CLI (%s) into macOS VM %s...", host_binary, inst_name)
 

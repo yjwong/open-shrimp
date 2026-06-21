@@ -21,11 +21,14 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from open_shrimp.config import Config, ContextConfig
 from open_shrimp.paths import build_log_dir as _build_log_dir, data_dir as _data_dir
 from open_shrimp.sandbox.base import Sandbox
+
+if TYPE_CHECKING:
+    from open_shrimp.sandbox.agent_runtime import AgentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -174,12 +177,22 @@ class SandboxManager(Protocol):
 
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
+        *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
         """Return a cached or new per-context :class:`Sandbox` instance.
 
         The same instance is returned for the same *context_name* across
         multiple calls.  The sandbox's lifecycle (VM/container) is
         independent of individual sessions.
+
+        *runtime* is the :class:`AgentRuntime` the sandbox will host.  Its
+        :attr:`AgentRuntime.image_bundle` selects the Docker image / run-argv
+        bundle; its :attr:`AgentRuntime.launch` (for a
+        :class:`ServedEndpoint`) provides the extra host-synced home mounts
+        and the published guest port.  ``None`` selects the wrapped-CLI
+        default bundle.  VM backends consult only the bundle's identity for
+        served-flavour host syncs; the guest binary itself is the operator's
+        precondition.
         """
         ...
 
@@ -207,11 +220,16 @@ class SandboxManager(Protocol):
         """Base directory for per-context sandbox state."""
         ...
 
-    def claude_home_dir(self, context_name: str) -> Path:
-        """Host-side directory mapped to ``~/.claude`` inside the sandbox.
+    def agent_home_dir(self, context_name: str) -> Path:
+        """Host-side directory mapped to the agent's home inside the sandbox.
 
         Used to locate session ``.jsonl`` files without creating a full
         :class:`Sandbox` instance (e.g. for ``/resume`` session listing).
+
+        For the Claude runtime this resolves to the per-context
+        ``claude-home`` dir (mapped to ``~/.claude`` inside the sandbox); the
+        name is the agent-neutral contract, the directory contents are the
+        active agent's.
         """
         ...
 
@@ -252,16 +270,13 @@ class DockerSandboxManager:
             self._instance_prefix = "openshrimp"
             self._container_label = "openshrimp"
         # Keep the legacy module globals in sync so that free functions in
-        # container.py (called by DockerSandbox) see the right prefix.
+        # docker_helpers.py (called by DockerSandbox) see the right prefix.
+        # Every bundle's image tag is derived from the instance prefix +
+        # ``bundle.tag_suffix`` via :func:`docker_helpers.set_image_prefix`.
         import open_shrimp.sandbox.docker_helpers as _c
         _c._INSTANCE_PREFIX = self._instance_prefix  # noqa: SLF001
         _c._CONTAINER_LABEL = self._container_label  # noqa: SLF001
-        if instance_name:
-            _c.CONTAINER_IMAGE = f"openshrimp-{instance_name}-claude:latest"
-            _c.COMPUTER_USE_IMAGE = f"openshrimp-{instance_name}-computer-use:latest"
-        else:
-            _c.CONTAINER_IMAGE = "openshrimp-claude:latest"
-            _c.COMPUTER_USE_IMAGE = "openshrimp-computer-use:latest"
+        _c.set_image_prefix(self._instance_prefix)
 
     @property
     def instance_prefix(self) -> str:
@@ -477,6 +492,7 @@ class DockerSandboxManager:
 
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
+        *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
         cached = self._sandbox_cache.get(context_name)
         if cached is not None:
@@ -492,6 +508,7 @@ class DockerSandboxManager:
             docker_in_docker=context.container.docker_in_docker,
             computer_use=context.container.computer_use,
             custom_dockerfile=context.container.dockerfile,
+            runtime=runtime,
         )
         self._sandbox_cache[context_name] = sandbox
         return sandbox
@@ -542,7 +559,7 @@ class DockerSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def claude_home_dir(self, context_name: str) -> Path:
+    def agent_home_dir(self, context_name: str) -> Path:
         return self._state_dir / context_name
 
 
@@ -686,7 +703,12 @@ class LimaSandboxManager:
 
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
+        *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
+        # VM backend: the guest binary is the operator's precondition, but a
+        # served-endpoint launch's extra home/data dirs are host-synced — so
+        # the runtime's launch is forwarded to gate those mounts.  VM
+        # backends otherwise ignore the image bundle.
         cached = self._sandbox_cache.get(context_name)
         if cached is not None:
             return cached
@@ -710,6 +732,7 @@ class LimaSandboxManager:
             instance_prefix=self._instance_prefix,
             computer_use=context.sandbox.computer_use,
             guest_os=context.sandbox.guest_os,
+            runtime=runtime,
         )
         self._sandbox_cache[context_name] = sandbox
         return sandbox
@@ -759,7 +782,7 @@ class LimaSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def claude_home_dir(self, context_name: str) -> Path:
+    def agent_home_dir(self, context_name: str) -> Path:
         return self._state_dir / context_name / "claude-home"
 
 
@@ -1022,7 +1045,12 @@ class LibvirtSandboxManager:
 
     def create_sandbox(
         self, context_name: str, context: ContextConfig,
+        *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
+        # VM backend: the guest binary is the operator's precondition, but a
+        # served-endpoint launch's extra home/data dirs are host-synced — so
+        # the runtime's launch is forwarded to gate those mounts.  VM
+        # backends otherwise ignore the image bundle.
         cached = self._sandbox_cache.get(context_name)
         if cached is not None:
             return cached
@@ -1046,6 +1074,7 @@ class LibvirtSandboxManager:
             instance_prefix=self._instance_prefix,
             computer_use=context.sandbox.computer_use,
             virgl=context.sandbox.virgl,
+            runtime=runtime,
         )
         self._sandbox_cache[context_name] = sandbox
         return sandbox
@@ -1095,13 +1124,39 @@ class LibvirtSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def claude_home_dir(self, context_name: str) -> Path:
+    def agent_home_dir(self, context_name: str) -> Path:
         return self._state_dir / context_name / "claude-home"
 
 
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
+
+
+def referenced_backends(config: Config) -> set[str]:
+    """Return the backend names referenced by sandboxed contexts in *config*."""
+    backends: set[str] = set()
+    for ctx in config.contexts.values():
+        if ctx.sandbox is not None and ctx.sandbox.enabled:
+            backends.add(ctx.sandbox.backend)
+        elif ctx.container is not None and ctx.container.enabled:
+            backends.add("docker")
+    return backends
+
+
+_MANAGER_FACTORIES: dict[str, type[SandboxManager]] = {
+    "docker": DockerSandboxManager,
+    "libvirt": LibvirtSandboxManager,
+    "lima": LimaSandboxManager,
+}
+
+
+def create_sandbox_manager(backend: str) -> SandboxManager:
+    """Instantiate a single :class:`SandboxManager` for *backend*."""
+    try:
+        return _MANAGER_FACTORIES[backend]()
+    except KeyError:
+        raise ValueError(f"Unknown sandbox backend: {backend!r}") from None
 
 
 def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
@@ -1113,19 +1168,13 @@ def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
     Returns:
         A dict mapping backend name to its :class:`SandboxManager` instance.
     """
-    # Collect all backends used by sandboxed contexts.
-    backends: set[str] = set()
-    for ctx in config.contexts.values():
-        if ctx.sandbox is not None and ctx.sandbox.enabled:
-            backends.add(ctx.sandbox.backend)
-        elif ctx.container is not None and ctx.container.enabled:
-            backends.add("docker")
+    backends = referenced_backends(config)
 
     managers: dict[str, SandboxManager] = {}
     if "docker" in backends or (not backends and sys.platform != "darwin"):
-        managers["docker"] = DockerSandboxManager()
+        managers["docker"] = create_sandbox_manager("docker")
     if "libvirt" in backends:
-        managers["libvirt"] = LibvirtSandboxManager()
+        managers["libvirt"] = create_sandbox_manager("libvirt")
     if "lima" in backends:
-        managers["lima"] = LimaSandboxManager()
+        managers["lima"] = create_sandbox_manager("lima")
     return managers

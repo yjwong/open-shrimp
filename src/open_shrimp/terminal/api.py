@@ -25,7 +25,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from open_shrimp.claude_binary import find_claude_binary
+from open_shrimp.backend.claude_sdk.binary import find_claude_binary
 from open_shrimp.config import Config
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines

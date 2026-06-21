@@ -1,0 +1,68 @@
+# Minimal container image for running sandboxed OpenCode in isolation.
+#
+# Build:
+#   docker build -f Dockerfile.opencode -t openshrimp-opencode:latest .
+
+FROM debian:trixie-slim
+
+# Install common tools the agent might need (git, curl, etc.).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install rootless Docker dependencies for optional Docker-in-Docker.
+# Packages are always installed (small footprint); DinD is activated at
+# runtime only when the context has docker_in_docker: true.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        iproute2 \
+        procps \
+        uidmap \
+        fuse-overlayfs \
+        slirp4netns \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+        -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+        https://download.docker.com/linux/debian trixie stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce \
+        docker-ce-cli \
+        docker-ce-rootless-extras \
+        docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a home directory for the non-root user.
+# The actual uid/gid is set at runtime via --user, but the directory
+# must exist and be writable.  The home matches SANDBOX_HOME
+# (/home/openshrimp) used by the sandbox launch and bind mounts.
+RUN mkdir -p /home/openshrimp/.local/share/docker \
+        /home/openshrimp/.local/share/opencode \
+        /home/openshrimp/.local/share/openshrimp \
+        /home/openshrimp/.config/opencode \
+        /home/openshrimp/.claude \
+        /home/openshrimp/.agents \
+    && chmod -R 777 /home/openshrimp
+
+# Allow the runtime user (arbitrary uid via --user) to write subuid/subgid
+# and passwd/group entries needed by rootless Docker. Safe in an ephemeral
+# container.
+RUN touch /etc/subuid /etc/subgid \
+    && chmod 666 /etc/subuid /etc/subgid /etc/passwd /etc/group \
+    && chmod 777 /var/run
+
+# Copy the OpenCode CLI binary for sandboxed OpenCode server mode.
+ARG OPENCODE_BIN=opencode
+COPY ${OPENCODE_BIN} /usr/local/bin/opencode
+RUN chmod +x /usr/local/bin/opencode
+
+# Verify it runs.
+RUN /usr/local/bin/opencode --version || true
+
+ENV HOME=/home/openshrimp
+WORKDIR /workspace

@@ -1,9 +1,16 @@
-"""Persistent Claude Agent SDK client manager for OpenShrimp.
+"""Persistent backend client manager for OpenShrimp.
 
-Manages long-lived ClaudeSDKClient instances keyed by ChatScope, so the CLI
+Manages long-lived backend clients keyed by ChatScope, so the agent CLI
 subprocess stays alive across multiple messages in the same conversation.
 This avoids the "Continue from where you left off." injection that the CLI
 performs when it detects an interrupted turn on session resume.
+
+The concrete client is produced by the configured ``Backend``: the manager
+constructs ``BackendOptions``, calls ``backend.make_client(opts)``, and drives
+the resulting ``BackendClient`` through the protocol method set.  The
+SDK-specific details (options translation, the resume-fallback retry on
+connect, the subprocess liveness poke, SDK-message translation) live inside the
+``claude_sdk`` adapter, not here.
 
 Only the first message in a session uses ``--resume`` to restore history;
 subsequent messages simply call ``client.query()`` on the already-connected
@@ -13,24 +20,16 @@ client.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import sys
-import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import (
-    CLIConnectionError,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ProcessError,
-    ResultMessage,
-    SystemMessage,
-)
+from open_shrimp.backend import get_backend, get_backend_by_name
+from open_shrimp.backend.protocol import Backend, BackendClient, BackendOptions
+from open_shrimp.backend.types import ResultMessage, SystemMessage
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -46,190 +45,17 @@ from open_shrimp.hooks import (
     QuestionCallback,
 )
 from open_shrimp.sandbox import Sandbox, SandboxManager
-from open_shrimp.tools import create_openshrimp_mcp_server
+from open_shrimp.sandbox.agent_runtime import (
+    AgentHandle,
+    AgentRuntime,
+)
+from open_shrimp.sandbox.agent_runtime_watcher import (
+    register_sandbox as register_cred_sandbox,
+    unregister_sandbox as unregister_cred_sandbox,
+)
+from open_shrimp.tools import OpenShrimpTool, create_openshrimp_tools
 
 logger = logging.getLogger(__name__)
-
-# Host-side credentials file that needs to be synced into sandboxes.
-# (Linux/Windows; macOS uses Keychain — see ``_watch_credentials_macos``.)
-_HOST_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
-
-# macOS login Keychain DB path.  Mtime is bumped on every Keychain mutation,
-# so FSEvents on the parent directory wake us up on token refresh.
-_MACOS_KEYCHAIN_DIR = Path.home() / "Library" / "Keychains"
-_MACOS_KEYCHAIN_DB_NAME = "login.keychain-db"
-
-# Single credentials watcher shared across all sandboxed sessions.
-# Maps context_name -> claude_home_dir for all active sandbox sessions.
-_cred_sync_targets: dict[str, Path] = {}
-_cred_sync_lock = threading.Lock()
-_cred_watcher_stop: threading.Event | None = None
-_cred_watcher_thread: threading.Thread | None = None
-
-
-def _host_creds_available() -> bool:
-    """Whether host-side credentials exist to sync into sandboxes."""
-    if sys.platform == "darwin":
-        # The login keychain DB always exists for a logged-in user; we
-        # don't gate on the actual ``Claude Code-credentials`` entry —
-        # if it's missing, the watcher simply won't propagate anything.
-        return (_MACOS_KEYCHAIN_DIR / _MACOS_KEYCHAIN_DB_NAME).exists()
-    return _HOST_CREDENTIALS.exists()
-
-
-def _propagate_credentials(payload: str) -> None:
-    """Write the given credentials JSON into every registered sandbox."""
-    with _cred_sync_lock:
-        targets = list(_cred_sync_targets.items())
-    for ctx_name, claude_home in targets:
-        try:
-            dest = claude_home / ".credentials.json"
-            dest.write_text(payload, encoding="utf-8")
-            logger.debug(
-                "Synced credentials to %s (context %s)",
-                dest, ctx_name,
-            )
-        except Exception:
-            logger.debug(
-                "Failed to sync credentials for context %s",
-                ctx_name, exc_info=True,
-            )
-
-
-def _watch_credentials_linux(stop: threading.Event) -> None:
-    """Watch ``~/.claude/.credentials.json`` for atomic-replace writes.
-
-    We watch the **parent directory** rather than the credentials file
-    itself because Claude Code refreshes credentials via atomic replace
-    (write tmp + rename).  Watching the file directly loses track after
-    the first rename — inotify is bound to the old inode.
-    """
-    from watchfiles import watch
-
-    cred_dir = _HOST_CREDENTIALS.parent
-    cred_name = _HOST_CREDENTIALS.name
-
-    if not cred_dir.exists():
-        return
-
-    try:
-        for changes in watch(
-            cred_dir, stop_event=stop, rust_timeout=1000,
-        ):
-            if stop.is_set():
-                break
-            if not any(Path(path).name == cred_name for _ct, path in changes):
-                continue
-            if not _HOST_CREDENTIALS.exists():
-                continue
-            try:
-                payload = _HOST_CREDENTIALS.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            _propagate_credentials(payload)
-    except Exception:
-        if not stop.is_set():
-            logger.debug("Credentials watcher exited", exc_info=True)
-
-
-def _watch_credentials_macos(stop: threading.Event) -> None:
-    """Watch the macOS login Keychain for ``Claude Code-credentials`` updates.
-
-    The Claude Code app on macOS stores OAuth tokens in the login
-    Keychain rather than ``~/.claude/.credentials.json``.  Any Keychain
-    mutation rewrites ``login.keychain-db``, so FSEvents on the
-    Keychains directory wakes us on token refresh.  We re-extract via
-    ``security`` and only propagate when the parsed ``expiresAt``
-    differs from the last known value, which filters out the noise
-    from unrelated keychain activity (Safari saving passwords, etc.).
-    """
-    from watchfiles import watch
-
-    from open_shrimp.sandbox.lima_helpers import _read_credentials_json
-
-    if not _MACOS_KEYCHAIN_DIR.exists():
-        return
-
-    last_expires_at: int | None = None
-
-    try:
-        for changes in watch(
-            _MACOS_KEYCHAIN_DIR, stop_event=stop, rust_timeout=1000,
-        ):
-            if stop.is_set():
-                break
-            if not any(
-                Path(path).name == _MACOS_KEYCHAIN_DB_NAME
-                for _ct, path in changes
-            ):
-                continue
-            payload = _read_credentials_json()
-            if not payload:
-                continue
-            try:
-                expires_at = int(
-                    json.loads(payload)
-                    .get("claudeAiOauth", {})
-                    .get("expiresAt", 0)
-                )
-            except (ValueError, json.JSONDecodeError):
-                continue
-            if expires_at == last_expires_at:
-                continue
-            last_expires_at = expires_at
-            _propagate_credentials(payload)
-    except Exception:
-        if not stop.is_set():
-            logger.debug("Keychain credentials watcher exited", exc_info=True)
-
-
-def _watch_credentials(stop: threading.Event) -> None:
-    """Background thread: sync host credentials into all active sandboxes.
-
-    Keeps long-lived SDK clients (where the wrapper script doesn't
-    re-run) in sync with host-side token refreshes.  Uses native OS
-    change-notification (FSEvents on macOS, inotify on Linux) so we
-    wake immediately on refresh rather than polling.
-    """
-    if sys.platform == "darwin":
-        _watch_credentials_macos(stop)
-    else:
-        _watch_credentials_linux(stop)
-
-
-def _register_cred_sync(context_name: str, claude_home_dir: Path) -> None:
-    """Register a sandbox for credential syncing, starting the watcher if needed."""
-    global _cred_watcher_stop, _cred_watcher_thread
-
-    with _cred_sync_lock:
-        _cred_sync_targets[context_name] = claude_home_dir
-
-        if _cred_watcher_thread is None or not _cred_watcher_thread.is_alive():
-            _cred_watcher_stop = threading.Event()
-            _cred_watcher_thread = threading.Thread(
-                target=_watch_credentials,
-                args=(_cred_watcher_stop,),
-                daemon=True,
-            )
-            _cred_watcher_thread.start()
-            logger.debug("Started credentials watcher thread")
-
-
-def _unregister_cred_sync(context_name: str) -> None:
-    """Unregister a sandbox; stop the watcher if no targets remain."""
-    global _cred_watcher_stop, _cred_watcher_thread
-
-    with _cred_sync_lock:
-        _cred_sync_targets.pop(context_name, None)
-
-        if not _cred_sync_targets and _cred_watcher_stop is not None:
-            _cred_watcher_stop.set()
-            if _cred_watcher_thread is not None:
-                _cred_watcher_thread.join(timeout=2)
-            _cred_watcher_stop = None
-            _cred_watcher_thread = None
-            logger.debug("Stopped credentials watcher thread")
-
 
 @dataclass
 class CallbackContext:
@@ -248,23 +74,66 @@ class CallbackContext:
     is_tool_auto_approved: Callable[[str, dict[str, Any]], bool] | None = None
     get_session_approved_dirs: Callable[[], list[str]] | None = None
     request_host_bash_approval: HostBashApprovalCallback | None = None
+    register_session_rule: Callable[[str, str], None] | None = None
 
 
 @dataclass
 class AgentSession:
-    """A long-lived SDK client associated with a chat scope."""
+    """A long-lived backend client associated with a chat scope."""
 
-    client: ClaudeSDKClient
+    client: BackendClient
     session_id: str | None = None
     context_name: str = ""
     callback_context: CallbackContext = field(default_factory=CallbackContext)
     sandbox: Sandbox | None = None
+    runtime: AgentRuntime | None = None
     mcp_proxy: Any | None = None
     wrapper_cleanup_paths: list[str] = field(default_factory=list)
     last_activity: float = field(default_factory=time.monotonic)
+    # Pinned at creation so a config edit mid-turn doesn't shift the policy.
+    backend: Backend | None = None
 
 
 _active_sessions: dict[ChatScope, AgentSession] = {}
+
+# The configured top-level backend; ``None`` until ``run_bot`` calls
+# ``set_default_backend``.  Pre-startup callers (tests, scope-less paths)
+# fall back to ``get_backend({})`` which honours the registry default.
+_default_backend: Backend | None = None
+
+
+def set_default_backend(backend: Backend) -> None:
+    """Install the process-wide default backend (called once at startup)."""
+    global _default_backend
+    _default_backend = backend
+
+
+def resolve_backend(
+    backend: "Backend | None" = None,
+    *,
+    scope: "ChatScope | None" = None,
+    context: "ContextConfig | None" = None,
+) -> Backend:
+    """Resolve which backend should serve a given call site.
+
+    Resolution order:
+    * ``context``: the backend named by ``context.backend`` — declarative
+      per-context override wins over any caller-supplied default. A session
+      pinned to a different backend will be rebuilt downstream.
+    * ``backend``: explicit caller-supplied backend (e.g., a session-pinned
+      one threaded through a reconnect path).
+    * ``scope``: the live session's pinned backend.
+    * Otherwise: the top-level default.
+    """
+    if context is not None and context.backend is not None:
+        return get_backend_by_name(context.backend)
+    if backend is not None:
+        return backend
+    if scope is not None:
+        existing = _active_sessions.get(scope)
+        if existing is not None and existing.backend is not None:
+            return existing.backend
+    return _default_backend or get_backend({})
 
 # Idle session timeout: sessions with no activity for this long are closed.
 _IDLE_TIMEOUT: float = 30 * 60  # 30 minutes
@@ -274,24 +143,37 @@ _idle_sweep_task: asyncio.Task[None] | None = None
 # the same libvirt context don't race on VM boot / virtiofsd / ports.
 _context_locks: dict[str, asyncio.Lock] = {}
 
+# Scopes that have already been warned about degraded (proxy-less) tool
+# availability, so the warning fires at most once per scope per process.
+_tools_degraded_warned: set[ChatScope] = set()
 
-def _is_client_alive(client: ClaudeSDKClient) -> bool:
-    """Check if the CLI subprocess is still running.
 
-    Pokes into the transport's private state to detect a terminated
-    process.  Returns True if the process appears healthy or if the
-    state cannot be determined (fail-open).
+async def _warn_tools_degraded_once(bot: Bot, scope: ChatScope) -> None:
+    """Tell the user once that OpenShrimp tools are unavailable this run.
+
+    Best-effort: never let a failed Telegram send break the turn.
     """
+    if scope in _tools_degraded_warned:
+        return
+    _tools_degraded_warned.add(scope)
     try:
-        transport = client._transport
-        if transport is None:
-            return False
-        process = getattr(transport, "_process", None)
-        if process is None:
-            return False
-        return process.returncode is None
+        kwargs: dict[str, Any] = {}
+        if scope.thread_id is not None:
+            kwargs["message_thread_id"] = scope.thread_id
+        await bot.send_message(
+            chat_id=scope.chat_id,
+            text=(
+                "⚠️ File, topic, schedule, and host tools are unavailable "
+                "this session — the local tool server didn't start. "
+                "Restart OpenShrimp to restore them."
+            ),
+            **kwargs,
+        )
     except Exception:
-        return True
+        logger.debug(
+            "Failed to send degraded-tools warning to %s", scope,
+            exc_info=True,
+        )
 
 
 async def get_or_create_session(
@@ -309,12 +191,14 @@ async def get_or_create_session(
     is_private_chat: bool = True,
     sandbox_manager: SandboxManager | None = None,
     mcp_proxy: Any | None = None,
+    backend: Backend | None = None,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
     If a session already exists for *scope* with the same context,
-    return it (after updating the callback context).  Otherwise create a
-    fresh ``ClaudeSDKClient``, connect, and store it.
+    return it (after updating the callback context).  Otherwise build
+    ``BackendOptions``, call ``backend.make_client(opts)``, connect, and
+    store the resulting ``BackendClient``.
 
     Args:
         scope: ChatScope identifying the chat/thread.
@@ -323,14 +207,20 @@ async def get_or_create_session(
         session_id: Session ID for ``--resume`` (only used when creating
             a new client).
         callback_context: Mutable callback holder to bind into hooks.
+        backend: The agent backend to build the client from.  Optional;
+            falls back to the process-wide default (``set_default_backend``)
+            so existing call sites need not thread it through immediately.
 
     Returns:
         An ``AgentSession`` with a connected client ready for ``query()``.
     """
+    backend = resolve_backend(backend, context=context)
     existing = _active_sessions.get(scope)
     if existing is not None:
-        if existing.context_name == context_name:
-            if _is_client_alive(existing.client):
+        same_context = existing.context_name == context_name
+        same_backend = existing.backend is backend
+        if same_context and same_backend:
+            if existing.client.is_alive():
                 existing.callback_context.request_approval = callback_context.request_approval
                 existing.callback_context.handle_user_questions = callback_context.handle_user_questions
                 existing.callback_context.is_edit_auto_approved = callback_context.is_edit_auto_approved
@@ -338,6 +228,7 @@ async def get_or_create_session(
                 existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
                 existing.callback_context.get_session_approved_dirs = callback_context.get_session_approved_dirs
                 existing.callback_context.request_host_bash_approval = callback_context.request_host_bash_approval
+                existing.callback_context.register_session_rule = callback_context.register_session_rule
                 existing.last_activity = time.monotonic()
                 logger.info(
                     "Reusing live client for scope %s context %s",
@@ -352,7 +243,7 @@ async def get_or_create_session(
                     context_name,
                 )
                 await close_session(scope)
-        else:
+        elif not same_context:
             logger.info(
                 "Context changed for scope %s (%s -> %s), closing old client",
                 scope,
@@ -360,10 +251,20 @@ async def get_or_create_session(
                 context_name,
             )
             await close_session(scope)
+        else:
+            # Session IDs are backend-scoped; drop the resume id on rebuild.
+            logger.info(
+                "Backend changed for scope %s context %s (%s -> %s), "
+                "closing old client",
+                scope,
+                context_name,
+                existing.backend.name if existing.backend else "?",
+                backend.name,
+            )
+            await close_session(scope)
+            session_id = None
 
-    from open_shrimp.hooks import make_can_use_tool
-
-    can_use_tool = make_can_use_tool(
+    can_use_tool = backend.make_can_use_tool(
         request_approval=_make_approval_proxy(callback_context),
         cwd=context.directory,
         additional_directories=context.additional_directories or None,
@@ -375,6 +276,7 @@ async def get_or_create_session(
         is_containerized=is_sandboxed(context),
         get_session_approved_dirs=_make_session_dirs_proxy(callback_context),
         request_host_bash_approval=_make_host_bash_approval_proxy(callback_context),
+        policy=backend.policy,
     )
 
     _last_stderr: list[str] = [""]
@@ -400,32 +302,46 @@ async def get_or_create_session(
         logger.info("CLI stderr: %s", stripped)
 
     # Auto-approve the built-in OpenShrimp MCP tools (send_file, send_photo)
-    # alongside whatever the user configured.
+    # alongside whatever the user configured.  The ``mcp__openshrimp__*``
+    # tools are served by the MCP proxy; when it failed to start
+    # (``mcp_proxy is None``, degraded mode) the ``openshrimp`` server is
+    # not registered, so we must NOT advertise its tools — otherwise the
+    # agent would attempt calls that surface as "unknown tool" errors
+    # mid-conversation.
     allowed_tools = list(context.allowed_tools or [])
-    allowed_tools.append("mcp__openshrimp__send_file")
-    if scope.thread_id is not None:
-        allowed_tools.append("mcp__openshrimp__edit_topic")
-    # Auto-approve scheduling tools when available.
-    if db is not None and config is not None and job_queue is not None:
-        allowed_tools.extend([
-            "mcp__openshrimp__create_schedule",
-            "mcp__openshrimp__list_schedules",
-            "mcp__openshrimp__delete_schedule",
-        ])
+    # Seed the backend's session-start auto-approve list (the backend's
+    # native vocabulary for tools whose interactive default is auto-allow
+    # and which have no user-facing approval value in OpenShrimp's flow:
+    # async task management, mode transitions, MCP discovery).  These
+    # flow through the backend's interactive default and never reach
+    # ``can_use_tool``.
+    allowed_tools.extend(backend.policy.auto_approved_at_session_start())
+    if mcp_proxy is not None:
+        allowed_tools.append("mcp__openshrimp__send_file")
+        if scope.thread_id is not None:
+            allowed_tools.append("mcp__openshrimp__edit_topic")
+        # Auto-approve scheduling tools when available.
+        if db is not None and config is not None and job_queue is not None:
+            allowed_tools.extend([
+                "mcp__openshrimp__create_schedule",
+                "mcp__openshrimp__list_schedules",
+                "mcp__openshrimp__delete_schedule",
+            ])
     # Auto-approve computer use tools when enabled.
     _computer_use_enabled = (
         (context.container is not None and context.container.computer_use)
         or (context.sandbox is not None and context.sandbox.computer_use)
     )
     if _computer_use_enabled:
-        allowed_tools.extend([
-            "mcp__openshrimp__computer_screenshot",
-            "mcp__openshrimp__computer_click",
-            "mcp__openshrimp__computer_type",
-            "mcp__openshrimp__computer_key",
-            "mcp__openshrimp__computer_scroll",
-            "mcp__openshrimp__computer_toplevel",
-        ])
+        if mcp_proxy is not None:
+            allowed_tools.extend([
+                "mcp__openshrimp__computer_screenshot",
+                "mcp__openshrimp__computer_click",
+                "mcp__openshrimp__computer_type",
+                "mcp__openshrimp__computer_key",
+                "mcp__openshrimp__computer_scroll",
+                "mcp__openshrimp__computer_toplevel",
+            ])
         # Auto-approve Playwright MCP browser tools (core + tabs,
         # always enabled).  Tool names from microsoft/playwright-mcp.
         allowed_tools.extend([
@@ -462,13 +378,17 @@ async def get_or_create_session(
             "mcp__playwright__browser_verify_value",
         ])
 
-    # When sandboxed, generate a wrapper script that runs the Claude CLI
-    # in an isolated environment.  The wrapper is pointed at via cli_path;
-    # all other SDK machinery (stdin/stdout streaming, canUseTool, MCP) is
-    # unchanged.
+    # When sandboxed, launch the agent inside an isolated environment.  The
+    # launch fork is the *one* legitimate per-backend branch here: the
+    # wrapped-CLI flavour points ``cli_path`` at a wrapper script; the
+    # served-endpoint flavour returns a host-reachable endpoint that rides in
+    # ``options.extra["endpoint"]``.  Everything downstream (make_client,
+    # make_tool_server, options) stays backend-uniform.
     sandbox: Sandbox | None = None
+    runtime: AgentRuntime | None = None
     cli_path: str | None = None
     wrapper_cleanup_paths: list[str] = []
+    served_endpoint: Any = None  # the served endpoint handle, or None
     is_containerized = is_sandboxed(context)
     if is_containerized:
         assert sandbox_manager is not None, (
@@ -480,7 +400,25 @@ async def get_or_create_session(
         # boot, virtiofsd startup, port allocation, etc.
         ctx_lock = _context_locks.setdefault(context_name, asyncio.Lock())
         async with ctx_lock:
-            sandbox = sandbox_manager.create_sandbox(context_name, context)
+            # Resolved before create_sandbox so the runtime's image bundle +
+            # served-launch home mounts feed the Docker image/run-argv
+            # selection.  ``make_runtime`` is pure/cheap, so computing it
+            # first is safe.
+            _runtime = backend.make_runtime(
+                sandbox_manager.agent_home_dir(context_name),
+                context_name=context_name,
+                model=context.model,
+            )
+            runtime = _runtime
+
+            # The runtime selects the Docker image/run-argv bundle and (for
+            # served launches) the extra host-synced home mounts; VM backends
+            # consume only the served-launch's mounts.
+            sandbox = sandbox_manager.create_sandbox(
+                context_name,
+                context,
+                runtime=_runtime,
+            )
 
             # Check if the environment needs building or the sandbox
             # needs starting — send user feedback before potentially
@@ -527,7 +465,7 @@ async def get_or_create_session(
             _sandbox = sandbox  # capture for closure
             _mgr = sandbox_manager  # capture for closure
 
-            def _ensure_and_build_wrapper() -> tuple[str, list[str]]:
+            def _ensure_and_start_agent() -> "AgentHandle":
                 try:
                     _sandbox.ensure_environment(log_file=log_file)
                     _sandbox.ensure_running(log_file=log_file)
@@ -536,18 +474,42 @@ async def get_or_create_session(
                         assert _mgr is not None
                         _mgr.unregister_build(context_name)
                 _sandbox.provision_workspace()
-                return _sandbox.build_cli_wrapper()
+                return _sandbox.start_agent(_runtime)
 
-            cli_path, wrapper_cleanup_paths = await asyncio.to_thread(
-                _ensure_and_build_wrapper,
-            )
-            logger.info(
-                "Sandbox context '%s': using wrapper %s",
-                context_name,
-                cli_path,
-            )
+            handle = await asyncio.to_thread(_ensure_and_start_agent)
+            # WrappedCLI → cli_path; ServedEndpoint → endpoint.
+            cli_path = handle.cli_path
+            wrapper_cleanup_paths = handle.cleanup_paths
+            served_endpoint = handle.endpoint
+            if served_endpoint is not None:
+                logger.info(
+                    "Sandbox context '%s': using served endpoint %s",
+                    context_name,
+                    served_endpoint.base_url,
+                )
+            else:
+                logger.info(
+                    "Sandbox context '%s': using wrapper %s",
+                    context_name,
+                    cli_path,
+                )
 
-    options = ClaudeAgentOptions(
+    # Backend-specific overflow: the sandbox-provided served endpoint rides in
+    # ``extra`` (it is not an honoured-intersection field).  When no sandbox
+    # supplies one, it stays unset → the client spawns its own host-local
+    # server.  Backends that don't use a served endpoint ignore ``extra``.
+    extra: dict[str, Any] = {}
+    if served_endpoint is not None:
+        extra["endpoint"] = served_endpoint
+    # OpenCode's ``PermissionBridge`` fires this for each
+    # ``permission.asked.always`` pattern it observes so durable allow
+    # choices replayed by OpenCode pre-register into the per-scope session
+    # rules.  SDK ignores ``extra``.
+    extra["register_session_rule"] = _make_register_session_rule_proxy(
+        callback_context,
+    )
+
+    options = BackendOptions(
         cwd=context.directory,
         model=context.model,
         effort=context.effort,
@@ -559,6 +521,7 @@ async def get_or_create_session(
         can_use_tool=can_use_tool,
         cli_path=cli_path,
         max_buffer_size=10 * 1024 * 1024,  # 10MB
+        extra=extra,
     )
 
     system_prompt_parts: list[str] = []
@@ -605,9 +568,13 @@ async def get_or_create_session(
             "append": "\n\n".join(system_prompt_parts),
         }
 
-    # Register in-process MCP tools (send_file, send_photo, etc.) so the
-    # agent can send files directly to the Telegram chat.
+    # Register OpenShrimp's own MCP tools (send_file, edit_topic, schedules,
+    # host_bash, computer use) over the MCP proxy's host-loopback HTTP
+    # endpoint so the agent can reach them.  The handlers run in *this*
+    # process; the HTTP hop is transport only and adds no sandbox boundary.
     if bot is not None:
+        mcp_servers: dict[str, Any] = {}
+
         # Sudo mode (host_bash) is registered only when the context's
         # sandbox config explicitly opts in. Commands run with cwd set to
         # the context's source directory so they operate on the same tree
@@ -619,16 +586,45 @@ async def get_or_create_session(
         ):
             _host_bash_workdir = context.directory
 
-        openshrimp_server = create_openshrimp_mcp_server(
-            bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
-            db=db, config=config, job_queue=job_queue,
-            sandbox=sandbox,
-            context_name=context_name,
-            user_id=user_id,
-            is_private_chat=is_private_chat,
-            host_bash_workdir=_host_bash_workdir,
-        )
-        mcp_servers: dict[str, Any] = {"openshrimp": openshrimp_server}
+        if mcp_proxy is not None:
+            def _tool_factory() -> list[OpenShrimpTool]:
+                return create_openshrimp_tools(
+                    bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
+                    db=db, config=config, job_queue=job_queue,
+                    sandbox=sandbox,
+                    context_name=context_name,
+                    user_id=user_id,
+                    is_private_chat=is_private_chat,
+                    host_bash_workdir=_host_bash_workdir,
+                )
+
+            # Sandboxed CLIs must reach the host proxy via the sandbox's
+            # host address; non-sandboxed CLIs use loopback.
+            host_ip = (
+                sandbox.host_address
+                if is_containerized and sandbox is not None
+                else "127.0.0.1"
+            )
+            # The backend selects the installer; the manager calls it with
+            # the proxy handle and scope identity.
+            install_tools = backend.make_tool_server(_tool_factory)
+            mcp_servers["openshrimp"] = install_tools(
+                mcp_proxy,
+                _tool_factory,
+                context_name=context_name,
+                chat_id=scope.chat_id,
+                thread_id=scope.thread_id,
+                user_id=user_id,
+                host_ip=host_ip,
+            )
+        else:
+            # Degraded mode: the proxy failed to start, so OpenShrimp tools
+            # cannot be served.  Omit the server entirely (the matching
+            # ``allowed_tools`` appends were already skipped above) and warn
+            # the user once.  host_bash hook wiring is also moot here since
+            # the tool is absent.
+            logger.warning("OpenShrimp tools omitted: MCP proxy unavailable.")
+            await _warn_tools_degraded_once(bot, scope)
 
         # Add Playwright MCP for structured browser automation in
         # computer-use contexts.  The CLI runs inside the sandbox,
@@ -649,15 +645,9 @@ async def get_or_create_session(
         # (spawned on the host) and HTTP/SSE MCP servers (reverse-
         # proxied so OAuth tokens stay on the host).
         if is_containerized and mcp_proxy is not None and sandbox is not None:
-            from open_shrimp.mcp_proxy.config_reader import (
-                get_http_mcp_servers_for_directory,
-                get_mcp_servers_for_directory,
-            )
-
-            stdio_servers = get_mcp_servers_for_directory(context.directory)
-            http_servers = get_http_mcp_servers_for_directory(
-                context.directory
-            )
+            mcp_source = backend.mcp_config_source()
+            stdio_servers = mcp_source.stdio_servers(context)
+            http_servers = mcp_source.http_servers(context)
             if stdio_servers or http_servers:
                 token = mcp_proxy.register_context(
                     context_name,
@@ -712,24 +702,28 @@ async def get_or_create_session(
             context.directory,
         )
 
-    client = ClaudeSDKClient(options=options)
-    try:
-        await client.connect()
-    except ProcessError:
-        if not session_id:
-            raise
-        # The session file may no longer exist (e.g. container state was
-        # rebuilt, or the .jsonl was deleted).  Fall back to a fresh
-        # session instead of surfacing a cryptic error.
-        logger.warning(
-            "Failed to resume session %s for scope %s – starting fresh",
-            session_id,
-            scope,
-        )
-        session_id = None
-        options.resume = None
-        client = ClaudeSDKClient(options=options)
-        await client.connect()
+    # The backend builds (does not connect) the client; ``connect()`` owns the
+    # resume-fallback retry.  Backends surface the fallback differently:
+    #
+    # * One rebuilds its inner client with ``resume`` cleared and mutates *this*
+    #   ``options.resume`` to None — so a stale resume reads back as
+    #   ``options.resume is None``.  Its ``client.session_id`` is not populated
+    #   until the first ``receive_response`` (the init message), so we cannot
+    #   rely on it here.
+    # * Another validates the resume target in ``connect()`` and, on a stale
+    #   resume, creates a fresh session — leaving ``client.session_id`` already
+    #   set to the *new* id at connect time (it does not touch ``options.resume``).
+    #
+    # Reconcile both: prefer the client's own post-connect view when it has
+    # one, else fall back to the ``options.resume`` signal.
+    client = backend.make_client(options)
+    await client.connect()
+    if session_id:
+        client_sid = client.session_id
+        if client_sid is not None:
+            session_id = client_sid
+        elif options.resume is None:
+            session_id = None
 
     session = AgentSession(
         client=client,
@@ -737,16 +731,31 @@ async def get_or_create_session(
         context_name=context_name,
         callback_context=callback_context,
         sandbox=sandbox,
-        mcp_proxy=mcp_proxy if is_containerized else None,
+        runtime=runtime,
+        # Always thread the proxy through: it now serves OpenShrimp's own
+        # tools for every context (not just sandboxed ones), so its tool
+        # scope must be unregistered on close regardless of containerisation.
+        mcp_proxy=mcp_proxy,
         wrapper_cleanup_paths=wrapper_cleanup_paths,
+        backend=backend,
     )
 
-    # Register this sandbox for credential syncing (starts the watcher
-    # if not already running).
-    if sandbox is not None and sandbox_manager is not None and _host_creds_available():
-        claude_home = sandbox_manager.claude_home_dir(context_name)
-        if claude_home.exists():
-            _register_cred_sync(context_name, claude_home)
+    # Register this sandbox for host-side credential syncing.  The watcher
+    # only starts when the runtime declares a non-default
+    # ``watch_host_credentials`` body *and* host credentials are present —
+    # a runtime that re-injects per dispatch (or has no host store at all)
+    # is a no-op here.
+    if sandbox is not None and runtime is not None:
+        home_dir = runtime.home_mount.host_dir
+        if home_dir.exists():
+            register_cred_sandbox(
+                runtime.name,
+                context_name,
+                home_dir,
+                write=runtime.write_cred_target,
+                watch=runtime.watch_host_credentials,
+                host_credentials_available=runtime.host_credentials_available,
+            )
 
     _active_sessions[scope] = session
     return session
@@ -765,6 +774,7 @@ async def reconnect_session(
     is_private_chat: bool = True,
     sandbox_manager: SandboxManager | None = None,
     mcp_proxy: Any | None = None,
+    backend: Backend | None = None,
 ) -> AgentSession | None:
     """Reconnect after a mid-session container crash.
 
@@ -779,6 +789,9 @@ async def reconnect_session(
 
     session_id = old_session.session_id
     callback_context = old_session.callback_context
+    # Never cross backends on reconnect; explicit ``backend`` still wins.
+    if backend is None:
+        backend = old_session.backend
 
     # Tear down the dead client (ignore errors — it's already dead).
     await close_session(scope)
@@ -810,6 +823,7 @@ async def reconnect_session(
             is_private_chat=is_private_chat,
             sandbox_manager=sandbox_manager,
             mcp_proxy=mcp_proxy,
+            backend=backend,
         )
     except Exception:
         logger.exception(
@@ -826,14 +840,14 @@ async def close_session(scope: ChatScope) -> None:
     # Unregister from credential syncing if this was a sandboxed session.
     # Check if any other active session still uses the same context before
     # removing the sync target.
-    if session.sandbox is not None:
+    if session.sandbox is not None and session.runtime is not None:
         ctx = session.context_name
         still_used = any(
             s.context_name == ctx and s.sandbox is not None
             for s in _active_sessions.values()
         )
         if not still_used:
-            _unregister_cred_sync(ctx)
+            unregister_cred_sandbox(session.runtime.name, ctx)
     # Unregister proxied MCP servers when no other session needs them.
     if session.mcp_proxy is not None:
         ctx = session.context_name
@@ -952,6 +966,25 @@ def has_session(scope: ChatScope) -> bool:
     return scope in _active_sessions
 
 
+def _reinject_runtime_credentials(session: AgentSession) -> None:
+    """Re-run the runtime's ``inject`` hook against the sandbox home.
+
+    No-op when the runtime declares ``re_inject_on_dispatch=False`` (the
+    default).  See :class:`AgentRuntime` for the refresh model.  Best-effort:
+    a failing inject must not block the query.
+    """
+    runtime = session.runtime
+    if runtime is None or not runtime.re_inject_on_dispatch:
+        return
+    try:
+        runtime.inject(runtime.home_mount.host_dir)
+    except Exception:
+        logger.debug(
+            "Per-dispatch credential re-inject failed for runtime %s",
+            runtime.name, exc_info=True,
+        )
+
+
 async def query_and_stream(
     session: AgentSession,
     prompt: str,
@@ -959,6 +992,7 @@ async def query_and_stream(
     """Send a query on an existing session and yield events."""
     session.last_activity = time.monotonic()
     logger.info("Sending query on live client: %s", prompt[:200])
+    _reinject_runtime_credentials(session)
     await session.client.query(prompt)
     async for message in receive_events(session):
         yield message
@@ -1075,5 +1109,16 @@ def _make_host_bash_approval_proxy(
             )
             return "denied"
         return await ctx.request_host_bash_approval(tool_input, tool_use_id)
+
+    return _proxy
+
+
+def _make_register_session_rule_proxy(
+    ctx: CallbackContext,
+) -> Callable[[str, str], None]:
+    def _proxy(tool_name: str, pattern: str) -> None:
+        if ctx.register_session_rule is None:
+            return
+        ctx.register_session_rule(tool_name, pattern)
 
     return _proxy

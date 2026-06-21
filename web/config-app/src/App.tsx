@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useConfig } from "./hooks/useConfig";
+import { BACKENDS } from "./lib/types";
 import type { AppConfig, ContextConfig } from "./lib/types";
 import ContextList from "./components/ContextList";
 import ContextEditor from "./components/ContextEditor";
@@ -10,7 +11,7 @@ type View = { type: "list" } | { type: "edit"; name: string | null };
 export default function App() {
   const { config, setConfig, loading, saving, error, dirty, save, toast, dismissToast } =
     useConfig();
-  const [tab, setTab] = useState<"contexts" | "users">("contexts");
+  const [tab, setTab] = useState<"contexts" | "users" | "settings">("contexts");
   const [view, setView] = useState<View>({ type: "list" });
 
   // Auto-dismiss toast.
@@ -84,6 +85,12 @@ export default function App() {
         >
           Users
         </button>
+        <button
+          className={`tab${tab === "settings" ? " active" : ""}`}
+          onClick={() => setTab("settings")}
+        >
+          Settings
+        </button>
       </div>
 
       {tab === "contexts" && (
@@ -101,6 +108,33 @@ export default function App() {
             setConfig((prev) => (prev ? { ...prev, allowed_users: users } : prev))
           }
         />
+      )}
+
+      {tab === "settings" && (
+        <div className="form-section">
+          <div className="form-group">
+            <label className="form-label">Default Backend</label>
+            <select
+              className="form-input"
+              value={config.backend ?? "claude_sdk"}
+              onChange={(e) =>
+                setConfig((prev) =>
+                  prev ? { ...prev, backend: e.target.value } : prev,
+                )
+              }
+            >
+              {BACKENDS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+            <span className="form-hint">
+              The agent runtime used by contexts without their own backend
+              override.
+            </span>
+          </div>
+        </div>
       )}
 
       {dirty && (
