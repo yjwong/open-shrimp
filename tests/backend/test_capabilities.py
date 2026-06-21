@@ -34,9 +34,9 @@ class TestClaudeSdkCapabilities:
 
 
 class TestOpenCodeCapabilities:
-    def test_command_capabilities_is_empty(self) -> None:
+    def test_command_capabilities_has_mcp(self) -> None:
         b = OpenCodeBackend()
-        assert b.command_capabilities() == set()
+        assert b.command_capabilities() == {"mcp"}
 
     def test_copy_auth_error_hint_is_none(self) -> None:
         """``None`` means the auth-error rendering site is skipped —
