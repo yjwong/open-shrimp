@@ -18,7 +18,10 @@ logger = logging.getLogger("opencode.sse")
 
 
 _DEFAULT_QUEUE_SIZE = 1024
-_CONNECT_TIMEOUT = 5.0
+# Generous: on a fresh sandbox boot the HTTP server is already up (readiness is
+# checked separately), but the /event stream's first `server.connected` can lag
+# several seconds while the background reader retries. 5s raced and failed.
+_CONNECT_TIMEOUT = 30.0
 _BACKOFF_INITIAL = 1.0
 _BACKOFF_MAX = 30.0
 
