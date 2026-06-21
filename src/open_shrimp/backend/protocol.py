@@ -30,9 +30,13 @@ if TYPE_CHECKING:
     # Import-light: the launch profile type lives in the sandbox package and is
     # only referenced in an annotation, so it stays behind TYPE_CHECKING to keep
     # this protocol module free of sandbox imports (no import cycle at runtime).
+    from telegram import Bot
+
     from open_shrimp.backend.policy import BackendPolicy
-    from open_shrimp.config import ContextConfig
+    from open_shrimp.config import Config, ContextConfig
+    from open_shrimp.db import ChatScope
     from open_shrimp.sandbox.agent_runtime import AgentRuntime
+    from open_shrimp.stream import StreamResult
 
 # The callback the backend invokes before running a non-auto-approved tool.
 # Signature is already uniform across master + opencode (hooks.py builds it).
@@ -337,6 +341,32 @@ class Backend(Protocol):
 
         Backends own their own caching; the handler calls this once per
         ``/usage`` invocation and renders whatever comes back.
+        """
+        ...
+
+    async def on_turn_end(
+        self,
+        *,
+        bot: "Bot",
+        scope: "ChatScope",
+        client: BackendClient,
+        result: "StreamResult",
+        config: "Config",
+        context_name: str,
+        context_config: "ContextConfig",
+    ) -> None:
+        """Post-turn extension point invoked after every Telegram turn.
+
+        Called once after ``stream_response`` returns and the session-id
+        persistence / pinned-status update has happened, so ``result``
+        is fully populated.
+
+        Backends use this for per-turn UI affordances that depend on
+        the just-finished turn (e.g. attaching a prompt-suggestion
+        button to the last finalized message). Implementations should
+        schedule any long-running work as background tasks; the caller
+        does not await indirectly via this hook. Backends without a
+        per-turn affordance return without doing anything.
         """
         ...
 

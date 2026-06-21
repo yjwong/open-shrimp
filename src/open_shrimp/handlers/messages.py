@@ -915,6 +915,26 @@ async def _start_agent_task(
                             todos=latest_todos if latest_todos else None,
                         )
 
+                    # Per-turn backend hook. Runs only on the interactive
+                    # handler path — the scheduler intentionally skips it
+                    # because scheduled tasks have no user waiting on
+                    # any per-turn UI affordance.
+                    try:
+                        await _active_backend.on_turn_end(
+                            bot=context.bot,
+                            scope=scope,
+                            client=session.client,
+                            result=result,
+                            config=config,
+                            context_name=ctx_name,
+                            context_config=ctx_config,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Backend.on_turn_end failed for scope %s",
+                            scope,
+                        )
+
                     if result.num_turns == 0 and result.session_id is None:
                         break
 

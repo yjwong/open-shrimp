@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from open_shrimp.backend.opencode.client import OpenCodeClient
 from open_shrimp.backend.opencode.policy import OpenCodePolicy
 from open_shrimp.backend.protocol import (
+    BackendClient,
     BackendCopy,
     BackendOptions,
     CanUseTool,
@@ -38,7 +39,12 @@ from open_shrimp.backend.tools import serve_tools_over_mcp_http
 from open_shrimp.backend.usage import UsageReport
 
 if TYPE_CHECKING:
+    from telegram import Bot
+
+    from open_shrimp.config import Config, ContextConfig
+    from open_shrimp.db import ChatScope
     from open_shrimp.sandbox.agent_runtime import AgentRuntime
+    from open_shrimp.stream import StreamResult
 
 
 class OpenCodeBackend:
@@ -234,6 +240,20 @@ class OpenCodeBackend:
     async def usage(self) -> UsageReport | None:
         """No usage notion yet; flips on with the auth Mini-App."""
         return None
+
+    async def on_turn_end(
+        self,
+        *,
+        bot: "Bot",
+        scope: "ChatScope",
+        client: BackendClient,
+        result: "StreamResult",
+        config: "Config",
+        context_name: str,
+        context_config: "ContextConfig",
+    ) -> None:
+        """No per-turn affordance on OpenCode."""
+        return
 
 
 __all__ = ["OpenCodeBackend"]

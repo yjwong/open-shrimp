@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from open_shrimp.backend.claude_sdk.client import ClaudeSdkClient
 from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
 from open_shrimp.backend.protocol import (
+    BackendClient,
     BackendCopy,
     BackendOptions,
     CanUseTool,
@@ -31,7 +32,12 @@ from open_shrimp.backend.tools import serve_tools_over_mcp_http
 from open_shrimp.backend.usage import UsageReport
 
 if TYPE_CHECKING:
+    from telegram import Bot
+
+    from open_shrimp.config import Config, ContextConfig
+    from open_shrimp.db import ChatScope
     from open_shrimp.sandbox.agent_runtime import AgentRuntime
+    from open_shrimp.stream import StreamResult
 
 
 class ClaudeSdkBackend:
@@ -48,7 +54,7 @@ class ClaudeSdkBackend:
         # Both calls are idempotent; order matters because
         # ``prompt_suggestion`` overrides ``read_messages`` on the class
         # ``sdk_patches`` subclasses.
-        from open_shrimp.prompt_suggestion import (
+        from open_shrimp.backend.claude_sdk.prompt_suggestion import (
             install_patches as install_suggestion_patches,
         )
         from open_shrimp.sdk_patches import apply as apply_sdk_patches
@@ -232,6 +238,38 @@ class ClaudeSdkBackend:
         from open_shrimp.backend.claude_sdk.usage import fetch
 
         return await fetch()
+
+    async def on_turn_end(
+        self,
+        *,
+        bot: "Bot",
+        scope: "ChatScope",
+        client: BackendClient,
+        result: "StreamResult",
+        config: "Config",
+        context_name: str,
+        context_config: "ContextConfig",
+    ) -> None:
+        """Register a per-turn ``prompt_suggestion`` handler.
+
+        The CLI emits its suggestion frame asynchronously after the
+        result; the registered closure is fired by the SDK transport
+        patch in ``prompt_suggestion.install_patches`` and edits the
+        last finalized message to attach a "💡 <suggestion>" inline
+        button.
+        """
+        if not (result.session_id and result.sent_message_ids):
+            return
+        from open_shrimp.backend.claude_sdk.prompt_suggestion import (
+            register_handler_for_turn,
+        )
+
+        register_handler_for_turn(
+            bot=bot,
+            chat_id=scope.chat_id,
+            message_id=result.sent_message_ids[-1],
+            session_id=result.session_id,
+        )
 
 
 def _to_session_info(row: Any) -> SessionInfo:

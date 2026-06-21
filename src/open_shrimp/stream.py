@@ -97,65 +97,6 @@ BASH_OUTPUT_MAX_CHARS = 1500
 _bash_output_store: dict[str, str] = {}
 
 
-def _register_suggestion_for_turn(
-    *,
-    bot: Bot,
-    chat_id: int,
-    message_id: int,
-    session_id: str,
-) -> None:
-    """Arrange for the next prompt_suggestion frame to add an inline button.
-
-    The CLI emits a ``prompt_suggestion`` frame asynchronously after the
-    result.  When it arrives, the handler edits the supplied
-    ``message_id`` (the last message of the just-finished turn) to add a
-    single inline button labelled with the suggestion.  Tapping the
-    button dispatches the suggestion text as the user's next message.
-    """
-    from open_shrimp.prompt_suggestion import (
-        CALLBACK_PREFIX,
-        register_handler,
-        store_suggestion,
-    )
-
-    async def handler(suggestion: str) -> None:
-        suggestion = suggestion.strip()
-        if not suggestion:
-            return
-        suggest_id = store_suggestion(suggestion)
-        # Telegram caps button labels at 64 bytes UTF-8; truncate with
-        # an ellipsis to stay safely under.
-        encoded = suggestion.encode("utf-8")
-        if len(encoded) > 60:
-            label = encoded[:57].decode("utf-8", errors="ignore") + "…"
-        else:
-            label = suggestion
-        button = InlineKeyboardButton(
-            f"💡 {label}", callback_data=f"{CALLBACK_PREFIX}{suggest_id}",
-        )
-        try:
-            await bot.edit_message_reply_markup(
-                chat_id=chat_id,
-                message_id=message_id,
-                reply_markup=InlineKeyboardMarkup([[button]]),
-            )
-        except BadRequest as e:
-            # Common: "message is not modified" if a previous edit
-            # already attached a keyboard, or "message to edit not
-            # found" if the user deleted the message.  Both are benign.
-            logger.debug(
-                "Skipped suggestion edit for chat %d msg %d: %s",
-                chat_id, message_id, e,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to attach suggestion button for chat %d msg %d",
-                chat_id, message_id,
-            )
-
-    register_handler(session_id, handler)
-
-
 @dataclass
 class StreamResult:
     """Result from stream_response() with session and usage info."""
@@ -168,6 +109,20 @@ class StreamResult:
     turn_usage: dict[str, Any] | None = None
     num_turns: int = 0
     duration_ms: int = 0
+    #: Finalized Telegram message ids for this turn, in send order.
+    #: A snapshot of the slice ``state.sent_message_ids`` grew by during
+    #: the turn — consumers (Backend.on_turn_end) read the last id to
+    #: attach per-turn affordances (e.g. the prompt-suggestion button).
+    sent_message_ids: list[int] = field(default_factory=list)
+    #: True iff this turn emitted an ``AssistantMessage`` with an
+    #: ``error`` field set (auth / billing / invalid_request /
+    #: server_error).  Per-turn affordances may skip work when the turn
+    #: didn't produce a useful assistant reply.
+    last_turn_had_error: bool = False
+    #: Count of ``AssistantMessage`` events observed in this turn.
+    #: ``None`` if no assistant message arrived (e.g. cancelled before
+    #: first reply); otherwise the in-stream count.
+    assistant_turn_count: int | None = None
 
 
 @dataclass
@@ -748,6 +703,10 @@ async def stream_response(
     state = draft_state or _DraftState(chat_id=chat_id)
     auto_set = set(allowed_tools or [])
     result = StreamResult()
+    # Snapshot the sent_message_ids length so the on_turn_end hook gets
+    # only the ids this turn appended (the same ``_DraftState`` is reused
+    # across turns when the caller passes one in).
+    sent_message_start = len(state.sent_message_ids)
     draft_task: asyncio.Task[None] | None = None
     p = _resolve_policy(policy, scope=scope)
 
@@ -773,6 +732,10 @@ async def stream_response(
                 continue
 
             if isinstance(event, AssistantMessage):
+                result.assistant_turn_count = (
+                    (result.assistant_turn_count or 0) + 1
+                )
+
                 # Capture per-turn token usage.
                 turn_usage = event.usage
                 if turn_usage:
@@ -781,6 +744,7 @@ async def stream_response(
                 # Check for SDK-level errors (auth failures, billing,
                 # rate limits, etc.) and surface them to the user.
                 if event.error:
+                    result.last_turn_had_error = True
                     # Extract error detail from content blocks (the SDK
                     # puts the human-readable reason in a TextBlock, e.g.
                     # "Prompt is too long").
@@ -1102,17 +1066,12 @@ async def stream_response(
             msg_ids = await _finalize_message(bot, state, silent=False)
             state.sent_message_ids.extend(msg_ids)
 
-        # Register a prompt_suggestion handler against the last assistant
-        # message of this turn.  The CLI emits the suggestion ~1.5 s after
-        # the result frame, well after this function returns; the handler
-        # is a closure that edits the message-id snapshot we have right now.
-        if state.session_id and state.sent_message_ids:
-            _register_suggestion_for_turn(
-                bot=bot,
-                chat_id=state.chat_id,
-                message_id=state.sent_message_ids[-1],
-                session_id=state.session_id,
-            )
+        # Snapshot the message ids this turn produced for the per-turn
+        # backend hook (Backend.on_turn_end).  The handler reads the
+        # last id to attach the prompt-suggestion button; the slice
+        # bound is recorded at turn start so we ignore ids from prior
+        # turns sharing the same draft state.
+        result.sent_message_ids = state.sent_message_ids[sent_message_start:]
 
         # Reset for the next stream_response() iteration.
         state.raw_text = ""
