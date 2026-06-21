@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { validatePath } from "../lib/api";
+import { BACKENDS } from "../lib/types";
 import type { AppConfig, ContextConfig } from "../lib/types";
 import TagInput from "./TagInput";
 import SandboxForm from "./SandboxForm";
@@ -60,6 +61,7 @@ export default function ContextEditor({
   const [directory, setDirectory] = useState(existing?.directory ?? "");
   const [description, setDescription] = useState(existing?.description ?? "");
   const [model, setModel] = useState(existing?.model ?? "");
+  const [backend, setBackend] = useState(existing?.backend ?? "");
   const [allowedTools, setAllowedTools] = useState<string[]>(
     existing?.allowed_tools ?? [],
   );
@@ -76,6 +78,9 @@ export default function ContextEditor({
   const [isDefault, setIsDefault] = useState(
     contextName === config.default_context,
   );
+
+  const effectiveBackend = backend || config.backend || "claude_sdk";
+  const isOpencode = effectiveBackend === "opencode";
 
   const dirValidation = usePathValidation();
 
@@ -97,6 +102,7 @@ export default function ContextEditor({
       description,
       allowed_tools: allowedTools,
       model: model.trim() || null,
+      backend: backend.trim() || null,
       additional_directories: additionalDirs.filter((d) => d.trim()),
       default_for_chats: parseChatIds(defaultForChats),
       locked_for_chats: parseChatIds(lockedForChats),
@@ -108,6 +114,7 @@ export default function ContextEditor({
     directory,
     description,
     model,
+    backend,
     allowedTools,
     additionalDirs,
     defaultForChats,
@@ -174,18 +181,45 @@ export default function ContextEditor({
         </div>
 
         <div className="form-group">
-          <label className="form-label">Model</label>
+          <label className="form-label">Backend</label>
           <select
             className="form-input"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
+            value={backend}
+            onChange={(e) => setBackend(e.target.value)}
           >
-            {MODELS.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.label}
+            <option value="">
+              Inherit default ({config.backend ?? "claude_sdk"})
+            </option>
+            {BACKENDS.map((b) => (
+              <option key={b} value={b}>
+                {b}
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Model</label>
+          {isOpencode ? (
+            <input
+              className="form-input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="provider/model, e.g. openai/gpt-5.5"
+            />
+          ) : (
+            <select
+              className="form-input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            >
+              {MODELS.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
 
         <div className="form-group">

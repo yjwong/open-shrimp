@@ -20,6 +20,7 @@ export interface ContextConfig {
   description: string;
   allowed_tools: string[];
   model?: string | null;
+  backend?: string | null;
   additional_directories?: string[];
   default_for_chats?: number[];
   locked_for_chats?: number[];
@@ -30,4 +31,7 @@ export interface AppConfig {
   contexts: Record<string, ContextConfig>;
   allowed_users: number[];
   default_context: string;
+  backend?: string | null;
 }
+
+export const BACKENDS = ["claude_sdk", "opencode"] as const;

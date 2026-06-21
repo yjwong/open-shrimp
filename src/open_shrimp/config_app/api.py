@@ -60,14 +60,24 @@ def _patch_raw_yaml(raw: Any, body: dict[str, Any]) -> None:
     """Patch a ruamel.yaml round-trip structure with changes from the API.
 
     Modifies *raw* in-place, replacing only the editable top-level keys
-    (``contexts``, ``allowed_users``, ``default_context``) while leaving
-    everything else (``telegram``, ``review``, comments) untouched.
+    (``contexts``, ``allowed_users``, ``default_context``, ``backend``) while
+    leaving everything else (``telegram``, ``review``, comments) untouched.
     """
     if "allowed_users" in body:
         raw["allowed_users"] = body["allowed_users"]
 
     if "default_context" in body:
         raw["default_context"] = body["default_context"]
+
+    if "backend" in body:
+        # Mirror ``config_to_dict``'s omit-when-default rule: only persist a
+        # non-default backend; clearing it (null/empty/"claude_sdk") removes
+        # the key so we never write the redundant default.
+        value = body["backend"]
+        if isinstance(value, str) and value and value != "claude_sdk":
+            raw["backend"] = value
+        else:
+            raw.pop("backend", None)
 
     if "contexts" in body:
         # Replace the contexts mapping entirely.  We can't do a simple
