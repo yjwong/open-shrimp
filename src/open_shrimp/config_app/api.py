@@ -19,11 +19,13 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from open_shrimp.backend.opencode import _http
 from open_shrimp.client_manager import close_sessions_for_context
 from open_shrimp.config import (
     Config,
     _validate_raw,
     config_to_dict,
+    effective_backend,
     load_config,
     load_raw_yaml,
     write_raw_yaml,
@@ -179,6 +181,100 @@ async def config_put_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+def _normalise_model_options(
+    models: list[dict[str, Any]],
+    extra_values: set[str] | None = None,
+) -> list[dict[str, str]]:
+    """Build deduped ``{value, label}`` model options for the combobox.
+
+    Already-configured ``provider/model`` values are emitted first (so a model
+    the user has set survives even if the live catalog omits it; only values
+    containing ``/`` qualify), then each catalog item, sorted by ``value``.
+    """
+    options: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for value in sorted(extra_values or set()):
+        if "/" not in value or value in seen:
+            continue
+        seen.add(value)
+        options.append({"value": value, "label": value})
+
+    for item in models:
+        provider_id = item.get("providerID")
+        model_id = item.get("id") or item.get("apiID")
+        if not isinstance(provider_id, str) or not isinstance(model_id, str):
+            continue
+        value = f"{provider_id}/{model_id}"
+        if value in seen:
+            continue
+        seen.add(value)
+        name = item.get("name")
+        label = value
+        if isinstance(name, str) and name and name != model_id:
+            label = f"{value} - {name}"
+        options.append({"value": value, "label": label})
+    return sorted(options, key=lambda option: option["value"])
+
+
+async def models_endpoint(request: Request) -> JSONResponse:
+    """GET /api/config/models -- return OpenCode model options.
+
+    Models reflect the *host's* ``opencode auth login`` state and host
+    directory tree.  A sandboxed opencode context whose guest carries
+    different provider auth could diverge from what's listed here; the model
+    field stays free-text, so an unlisted model remains enterable.
+    """
+    try:
+        await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    config: Config = request.app.state.config
+    directory = request.query_params.get("directory") or None
+    if directory is None and config.default_context in config.contexts:
+        directory = config.contexts[config.default_context].directory
+    if directory is None and config.contexts:
+        directory = next(iter(config.contexts.values())).directory
+    if directory is None:
+        directory = "."
+
+    # Safety net: never spin up ``opencode serve`` for a claude_sdk context.
+    # The frontend already gates calls on the effective backend; this guards
+    # the case where a known context's directory resolves to claude_sdk.
+    matched = next(
+        (c for c in config.contexts.values() if c.directory == directory),
+        None,
+    )
+    if matched is not None and effective_backend(matched, config) != "opencode":
+        return JSONResponse({"models": []})
+
+    try:
+        raw = await _http.get_json(
+            "/api/model", params={"location[directory]": directory},
+        )
+    except Exception as e:
+        logger.exception("Failed to fetch OpenCode model catalog")
+        return JSONResponse(
+            {"error": f"Failed to fetch OpenCode models: {e}"},
+            status_code=502,
+        )
+
+    models = (
+        [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    )
+
+    configured_models = {
+        ctx.model
+        for ctx in config.contexts.values()
+        if isinstance(ctx.model, str) and ctx.model
+    }
+
+    return JSONResponse({
+        "models": _normalise_model_options(models, configured_models),
+    })
+
+
 def _resolve_sandbox_manager(
     request: Request, context_name: str,
 ) -> tuple[SandboxManager | None, JSONResponse | None]:
@@ -330,6 +426,7 @@ def create_config_routes() -> list[Route | Mount]:
     routes: list[Route | Mount] = [
         Route("/api/config", config_get_endpoint, methods=["GET"]),
         Route("/api/config", config_put_endpoint, methods=["PUT"]),
+        Route("/api/config/models", models_endpoint, methods=["GET"]),
         Route(
             "/api/config/validate-path",
             validate_path_endpoint,
