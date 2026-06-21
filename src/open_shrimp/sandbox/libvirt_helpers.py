@@ -21,7 +21,7 @@ import stat
 import subprocess
 import tempfile
 import textwrap
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree as ET
 
 from open_shrimp.config import SandboxConfig
@@ -573,6 +573,26 @@ def generate_cloud_init_iso(
     return iso_path
 
 
+def _mkdir_mount_point(mount_path: str) -> str:
+    """Shell snippet (terminated by ``" && "``) that creates ``mount_path``.
+
+    For paths under the sandbox user's home, create them as the user (no
+    ``sudo``) so every intermediate dir is user-owned. Otherwise ``mkdir -p``
+    would create missing ancestors (e.g. ``~/.local``, ``~/.local/share``) as
+    root, leaving the user unable to create sibling dirs like ``~/.local/state``
+    — which breaks opencode/Bun, whose XDG_STATE_HOME lives there.
+
+    Paths outside the home (host project dirs, ``/tmp/...``) aren't writable by
+    the user, so they still need ``sudo mkdir`` + ``chown``.
+    """
+    q = shlex.quote(mount_path)
+    home = PurePosixPath(SANDBOX_HOME)
+    p = PurePosixPath(mount_path)
+    if p != home and home in p.parents:
+        return f"mkdir -p {q} && "
+    return f"sudo mkdir -p {q} && sudo chown {SANDBOX_USER}:{SANDBOX_USER} {q} && "
+
+
 def ensure_mounts(
     ssh_port: int,
     ssh_key: Path,
@@ -689,8 +709,7 @@ def ensure_mounts(
         # hang when multiple callers race on the same mount unit).
         escaped_content = shlex.quote(unit_content)
         _ssh_run(
-            f"sudo mkdir -p {shlex.quote(mount_path)} && "
-            f"sudo chown {SANDBOX_USER}:{SANDBOX_USER} {shlex.quote(mount_path)} && "
+            f"{_mkdir_mount_point(mount_path)}"
             f"printf '%s' {escaped_content} | sudo tee {shlex.quote(unit_file)} > /dev/null && "
             f"sudo systemctl daemon-reload && "
             f"sudo systemctl enable --now {shlex.quote(unit_name)}"
