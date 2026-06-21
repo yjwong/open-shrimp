@@ -133,11 +133,18 @@ def _to_backend_event(msg: Any) -> Any:
             is_error=msg.is_error,
         )
     if isinstance(msg, _SdkStream):
-        return bt.StreamEvent(
-            event=msg.event,
-            session_id=msg.session_id,
-            parent_tool_use_id=getattr(msg, "parent_tool_use_id", None),
-        )
+        raw = msg.event
+        if isinstance(raw, dict) and raw.get("type") == "content_block_delta":
+            delta = raw.get("delta")
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                candidate = delta.get("text", "")
+                if isinstance(candidate, str) and candidate:
+                    return bt.TextDeltaEvent(
+                        text=candidate,
+                        session_id=msg.session_id,
+                        parent_tool_use_id=getattr(msg, "parent_tool_use_id", None),
+                    )
+        return None
     if isinstance(msg, _SdkRateLimit):
         info = msg.rate_limit_info
         return bt.RateLimitEvent(

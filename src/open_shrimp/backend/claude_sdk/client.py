@@ -108,6 +108,8 @@ class ClaudeSdkClient:
         """
         async for message in self._client.receive_response():
             event = _to_backend_event(message)
+            if event is None:
+                continue
             if isinstance(event, bt.SystemMessage):
                 sid = getattr(event, "session_id", None)
                 if sid:

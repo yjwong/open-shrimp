@@ -120,9 +120,20 @@ class ResultMessage:
 
 @dataclass
 class StreamEvent:
-    event: dict[str, Any]
+    """Base class / marker for streamed deltas.
+
+    Subclasses carry typed payloads.  The class is retained as a common
+    ancestor so future typed delta kinds (e.g. tool-input streaming) can
+    share an ``isinstance`` filter.
+    """
+
     session_id: str | None = None
     parent_tool_use_id: str | None = None
+
+
+@dataclass
+class TextDeltaEvent(StreamEvent):
+    text: str = ""
 
 
 # Task* mirror the SDK inheritance (decision 4) so stream.py's nested
@@ -176,6 +187,7 @@ Message = Union[
     SystemMessage,
     ResultMessage,
     StreamEvent,
+    TextDeltaEvent,
     TaskStartedMessage,
     TaskProgressMessage,
     TaskNotificationMessage,
@@ -198,6 +210,7 @@ __all__ = [
     "TaskProgressMessage",
     "TaskStartedMessage",
     "TextBlock",
+    "TextDeltaEvent",
     "ToolPermissionContext",
     "ToolResultBlock",
     "ToolUseBlock",

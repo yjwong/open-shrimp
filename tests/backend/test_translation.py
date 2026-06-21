@@ -72,12 +72,31 @@ def test_system_message_has_no_session_id_attr():
     assert getattr(out, "session_id", None) is None
 
 
-def test_stream_event_carries_event_and_session():
-    msg = sdk.StreamEvent(uuid="u1", session_id="sess-s", event={"type": "delta"})
+def test_text_delta_carries_text_and_session():
+    msg = sdk.StreamEvent(
+        uuid="u1",
+        session_id="sess-s",
+        event={
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "hello"},
+        },
+    )
     out = _to_backend_event(msg)
-    assert isinstance(out, bt.StreamEvent)
-    assert out.event == {"type": "delta"}
+    assert isinstance(out, bt.TextDeltaEvent)
+    assert out.text == "hello"
     assert out.session_id == "sess-s"
+
+
+def test_non_text_stream_event_returns_none():
+    """Non-text ``_SdkStream`` events drop out of the translator.
+
+    The new contract is: only the populated ``content_block_delta`` →
+    ``text_delta`` shape becomes a ``TextDeltaEvent``.  Anything else
+    (pings, tool-use deltas, malformed envelopes) returns ``None`` so
+    consumers can skip without a shape check.
+    """
+    msg = sdk.StreamEvent(uuid="u1", session_id="sess-s", event={"type": "ping"})
+    assert _to_backend_event(msg) is None
 
 
 def test_rate_limit_event_flattens_rate_limit_info():
@@ -221,11 +240,14 @@ def test_parent_tool_use_id_round_trips():
         sdk.StreamEvent(
             uuid="u1",
             session_id="s1",
-            event={"type": "content_block_delta"},
+            event={
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "x"},
+            },
             parent_tool_use_id="parent-3",
         )
     )
-    assert isinstance(stream, bt.StreamEvent)
+    assert isinstance(stream, bt.TextDeltaEvent)
     assert stream.parent_tool_use_id == "parent-3"
 
 

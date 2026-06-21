@@ -12,7 +12,7 @@ OpenCode SSE event                ``backend.types`` emitted
 ================================  ==========================================
 ``session.error``                 raise ``ProcessError``
 ``message.updated`` (finish/err)  ``AssistantMessage`` (usage/error on final)
-``message.part.delta`` text       ``StreamEvent`` + buffer text
+``message.part.delta`` text       ``TextDeltaEvent`` + buffer text
 ``message.part.updated`` tool     ``AssistantMessage([ToolUseBlock])`` (pending/
                                   running) / ``UserMessage([ToolResultBlock])``
                                   (completed/error)
@@ -43,8 +43,8 @@ from open_shrimp.backend.types import (
     AssistantMessage,
     Message,
     ResultMessage,
-    StreamEvent,
     TextBlock,
+    TextDeltaEvent,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -242,7 +242,11 @@ async def _iter_response(
                     text_buffers[part_id] = []
                     part_order.append(part_id)
                 text_buffers[part_id].append(delta)
-            yield StreamEvent(event=evt)
+                if delta:
+                    yield TextDeltaEvent(
+                        text=delta,
+                        session_id=session_id,
+                    )
             continue
 
         if etype == EVT_MESSAGE_PART_UPDATED:

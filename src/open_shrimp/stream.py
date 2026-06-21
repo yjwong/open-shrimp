@@ -24,12 +24,12 @@ from open_shrimp.backend.types import (
     AssistantMessage,
     RateLimitEvent,
     ResultMessage,
-    StreamEvent,
     SystemMessage,
     TaskNotificationMessage,
     TaskProgressMessage,
     TaskStartedMessage,
     TextBlock,
+    TextDeltaEvent,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -869,38 +869,23 @@ async def stream_response(
                                     block.content,
                                 )
 
-            elif isinstance(event, StreamEvent):
-                # Token-level streaming: extract text deltas from raw
-                # Anthropic API stream events.
-                raw = event.event
-                if raw.get("type") == "content_block_delta":
-                    delta = raw.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        text = delta.get("text", "")
-                        if text:
-                            # Insert a newline separator if this is
-                            # the first text from a new assistant turn
-                            # to prevent concatenation with the
-                            # previous turn's text.
-                            if state.turn_complete:
-                                state.raw_text += "\n\n"
-                                state.turn_complete = False
-                            # Ensure a blank line after a tool notification
-                            # blockquote so assistant text isn't swallowed
-                            # into it.  Only trigger for notifications (tracked
-                            # via flag), NOT for Claude's own blockquote lines.
-                            if state.last_was_notification:
-                                stripped = state.raw_text.rstrip()
-                                state.raw_text = stripped + "\n\n"
-                                state.last_was_notification = False
-                            state.raw_text += text
-                            state.dirty = True
+            elif isinstance(event, TextDeltaEvent):
+                text = event.text
+                if text:
+                    if state.turn_complete:
+                        state.raw_text += "\n\n"
+                        state.turn_complete = False
+                    if state.last_was_notification:
+                        stripped = state.raw_text.rstrip()
+                        state.raw_text = stripped + "\n\n"
+                        state.last_was_notification = False
+                    state.raw_text += text
+                    state.dirty = True
 
-                            # Check if we're approaching the message limit
-                            full = _build_full_text(state)
-                            converted = gfm_to_telegram(full)
-                            if len(converted) > 1:
-                                await _finalize_current(bot, state)
+                    full = _build_full_text(state)
+                    converted = gfm_to_telegram(full)
+                    if len(converted) > 1:
+                        await _finalize_current(bot, state)
 
             elif isinstance(event, ResultMessage):
                 result.session_id = event.session_id
