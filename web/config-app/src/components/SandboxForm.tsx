@@ -78,7 +78,7 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
         />
       </div>
 
-      {sandbox.backend === "libvirt" && (
+      {sandbox.backend === "libvirt" && sandbox.computer_use && (
         <div className="form-toggle-row">
           <span className="form-toggle-label">VirGL (3D GPU)</span>
           <button
