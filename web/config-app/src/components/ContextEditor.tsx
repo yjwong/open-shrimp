@@ -269,17 +269,22 @@ export default function ContextEditor({
               )}
             </>
           ) : (
-            <select
-              className="form-input"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-            >
-              {MODELS.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
+            <>
+              <input
+                className="form-input"
+                list="model-options"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="CLI default, or e.g. claude-opus-4-8[1m]"
+              />
+              <datalist id="model-options">
+                {MODELS.filter((m) => m.value !== "").map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </datalist>
+            </>
           )}
         </div>
 
