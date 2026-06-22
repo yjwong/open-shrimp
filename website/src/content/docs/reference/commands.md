@@ -154,6 +154,10 @@ List and manage MCP (Model Context Protocol) servers.
 /mcp disable slack  # disable the slack server
 ```
 
+:::note
+MCP-server management works regardless of the active [agent backend](/guides/backends/) — both `claude_sdk` and `opencode`.
+:::
+
 ### `/restart`
 
 Restart the OpenShrimp process. The bot sends a confirmation message after it comes back online.

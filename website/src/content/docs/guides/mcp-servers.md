@@ -5,18 +5,20 @@ sidebar:
   order: 11
 ---
 
-MCP (Model Context Protocol) servers extend Claude's capabilities with additional tools. OpenShrimp inherits MCP server configuration from your Claude CLI settings and provides commands to manage them.
+MCP (Model Context Protocol) servers extend the agent's capabilities with additional tools. OpenShrimp inherits MCP server configuration from your Claude CLI settings and provides commands to manage them.
+
+MCP-server management is available under both [agent backends](/guides/backends/) — `claude_sdk` and `opencode`.
 
 ## How MCP servers work
 
-MCP servers are external processes that provide tools to Claude via the Model Context Protocol. Examples include:
+MCP servers are external processes that provide tools to the agent via the Model Context Protocol. Examples include:
 
 - GitHub integration (create PRs, read issues)
 - Slack messaging
 - Database access
 - Custom project-specific tools
 
-Claude discovers available tools from connected MCP servers and can call them during conversations.
+The agent discovers available tools from connected MCP servers and can call them during conversations.
 
 ## Viewing MCP servers
 

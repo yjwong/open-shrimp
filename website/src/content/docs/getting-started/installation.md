@@ -9,6 +9,11 @@ sidebar:
 
 OpenShrimp bundles the Claude Code CLI via the Agent SDK, so there's nothing to install separately. You just need to authenticate Claude — either by running `/login` from inside the bot (see [Authenticate Claude](#authenticate-claude) below), or by setting `ANTHROPIC_API_KEY` in your environment.
 
+You need **either** of the following agent runtimes, depending on the `backend` you choose:
+
+- **Claude Code CLI** — bundled, for the default `claude_sdk` backend. Authenticate as described above.
+- **OpenCode** — only if you select the `opencode` backend. Install the `opencode` binary so it's discoverable, then run `opencode auth login` to authenticate. See [Agent Backends](/guides/backends/) for the full preconditions.
+
 ## Download
 
 Grab the latest binary for your platform. No Python or package manager required — just download, configure, and run.

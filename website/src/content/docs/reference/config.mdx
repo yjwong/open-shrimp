@@ -32,6 +32,7 @@ For a guided walkthrough, see [Configuration](/getting-started/configuration/).
 | `allowed_users` | list of int | Yes | — | Telegram user IDs allowed to use the bot |
 | `contexts` | map | Yes | — | Named project contexts |
 | `default_context` | string | Yes | — | Context to use when none is selected |
+| `backend` | string | No | `claude_sdk` | Agent runtime: `claude_sdk` or `opencode`. Distinct from `sandbox.backend` (the sandbox type). See [Agent Backends](/guides/backends/) |
 | `review` | object | No | — | Mini App HTTP server settings |
 | `instance_name` | string | No | `null` | Display name for this instance (shown in status) |
 
@@ -85,11 +86,16 @@ contexts:
 | `additional_directories` | list of string | No | `[]` | Extra directories the agent can access |
 | `default_for_chats` | list of int | No | `[]` | Chat IDs where this context is auto-selected on first use |
 | `locked_for_chats` | list of int | No | `[]` | Chat IDs locked to this context (users cannot switch) |
+| `backend` | string | No | inherits top-level | Per-context override of the agent runtime (`claude_sdk` or `opencode`). Inherits the top-level `backend` when omitted. This is the agent runtime — distinct from `sandbox.backend` (the sandbox type) |
 | `sandbox` | object | No | `null` | Sandbox configuration (see below) |
 | `container` | object or bool | No | `null` | Legacy Docker sandbox config (use `sandbox` instead) |
 
 :::caution
 You cannot specify both `container` and `sandbox` on the same context. The `container` key is a backwards-compatible alias for `sandbox` with `backend: docker`.
+:::
+
+:::note
+The context-level `backend` (agent runtime) is unrelated to `sandbox.backend` (sandbox type). The `opencode` backend has extra preconditions: provider-qualified models (`provider/model`), out-of-band `opencode auth login`, and a discoverable `opencode` binary. See [Agent Backends](/guides/backends/).
 :::
 
 ### `allowed_tools`

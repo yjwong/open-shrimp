@@ -3,7 +3,7 @@ title: OpenShrimp
 description: Your personal Claude, on Telegram.
 template: splash
 hero:
-  tagline: A self-hosted Telegram bot for remote Claude access via the Agent SDK. Full tool approval, sandboxed execution, and multi-project contexts — all from your chat.
+  tagline: A self-hosted Telegram bot for remote coding-agent access. Run the Claude Agent SDK or OpenCode, with full tool approval, sandboxed execution, and multi-project contexts — all from your chat.
   actions:
     - text: Get Started
       link: /getting-started/installation/
@@ -20,6 +20,9 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 ## Features
 
 <CardGrid stagger>
+	<Card title="Pluggable backends" icon="puzzle">
+		Drive your sessions with the [Claude Agent SDK or OpenCode](/guides/backends/) — OpenAI, Anthropic, and Google models — set globally or per context.
+	</Card>
 	<Card title="Multi-project contexts" icon="open-book">
 		Switch between projects with `/context`. Each context has its own working directory, model, allowed tools, and session history.
 	</Card>
@@ -27,7 +30,7 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 		Every tool call goes through path-scoped approval. Read-only tools auto-approve within your project; mutating tools always ask first. You stay in control.
 	</Card>
 	<Card title="Sandboxed execution" icon="seti:docker">
-		Run Claude in a Docker container, a Libvirt VM, or a macOS sandbox. Filesystem isolation means you can safely auto-approve everything.
+		Run the agent in a Docker container, a Libvirt VM, or a macOS sandbox. Filesystem isolation means you can safely auto-approve everything.
 	</Card>
 	<Card title="Computer use" icon="laptop">
 		Enable a headless desktop inside the sandbox. Claude can take screenshots, click, type, and browse the web — viewable live via VNC.

@@ -21,7 +21,7 @@ contexts:
       - AskUserQuestion
       - "Bash(npm *)"
 
-  backend:
+  api:
     directory: /home/you/Documents/backend
     description: "API server"
     allowed_tools:
@@ -53,10 +53,15 @@ default_context: frontend
 | Field | Description |
 |-------|-------------|
 | `model` | Override the model for this context (`sonnet`, `opus`, `haiku`, or a full model ID) |
+| `backend` | Override the agent runtime for this context — `claude_sdk` (default) or `opencode` (see [Agent Backends](/guides/backends/)) |
 | `additional_directories` | Extra directories the agent can access (path-scoped approval extends to these) |
 | `default_for_chats` | Chat IDs where this context is auto-selected on first use |
 | `locked_for_chats` | Chat IDs locked to this context — users cannot switch away |
 | `sandbox` | Run the agent in an isolated environment (see sandbox guides) |
+
+:::caution[Two unrelated `backend` keys]
+A context's `backend:` key selects the **agent runtime** (`claude_sdk` or `opencode`). It is **not** the same as `sandbox.backend:`, which selects the **sandbox type** (`docker`, `libvirt`, or `lima`). A context can set both — for example the `opencode` agent runtime running inside a `docker` sandbox. See [Agent Backends](/guides/backends/).
+:::
 
 ## Switching contexts
 
@@ -69,7 +74,7 @@ List available contexts:
 The current context is marked with a bullet. Switch to a different one:
 
 ```
-/context backend
+/context api
 ```
 
 When you switch contexts, the bot starts a fresh session in the new working directory. If a previous session exists for that context, you'll be asked whether to resume it or start fresh.

@@ -47,7 +47,7 @@ Both are self-hosted and open source. They solve different problems.
 |---|---|---|
 | **Focus** | Code agent — reads, edits, and writes files in your projects | General-purpose assistant — browsing, memory, smart home, 50+ integrations |
 | **Platform** | Telegram | WhatsApp, Telegram, Discord, Slack, Signal, iMessage |
-| **AI model** | Claude only (via Agent SDK) | Claude, GPT, local models |
+| **AI model** | Claude (Agent SDK) or any OpenCode provider — OpenAI, Anthropic, Google | Claude, GPT, local models |
 | **Tool approval** | Interactive — inline keyboard approve/deny per tool call | Autonomous by default |
 | **Project awareness** | Full — CLAUDE.md, working directories, path-scoped permissions | Limited — general shell access |
 
@@ -71,7 +71,8 @@ Both let you use Claude Code from your phone. They take very different approache
 
 You're away from your desk but need Claude to fix a bug, review a diff, or scaffold something quick. OpenShrimp gives you a proper Claude Code session from any Telegram chat — on your phone, your tablet, wherever.
 
-- **Real agent, not a chatbot.** Claude can read, edit, and write files in your actual project directories. Full tool use, not just text completion.
+- **Real agent, not a chatbot.** The agent can read, edit, and write files in your actual project directories. Full tool use, not just text completion.
+- **Pluggable backends.** Run on the Claude Agent SDK (default), or point a context at OpenCode to use GPT, Gemini, or any OpenCode-supported provider.
 - **You stay in control.** Every file mutation requires your explicit approval via inline keyboard buttons. One tap to approve, one tap to deny. Or hit "Accept all edits" when you trust the flow. When you're ready to commit, `/review` opens a swipe-based UI to stage exactly the hunks you want.
 - **Talk to it.** Send a voice note and it gets transcribed automatically as a prompt — no typing needed. Great for quick instructions when you're on the go.
 - **Multiple projects, one bot.** Switch between project contexts on the fly with `/context`. Each context has its own working directory, CLAUDE.md, model, and tool permissions.
@@ -104,11 +105,21 @@ Claude manages schedules via built-in tools. Use `/schedule` to see what's activ
 
 ## Container Isolation
 
-You can run each context inside a Docker container by adding a `container:` block to your context config. The Claude CLI runs inside the container with only the project directory bind-mounted — so it can't touch anything else on the host.
+You can run each context inside an isolated sandbox by adding a `sandbox:` block to your context config. The agent runs inside the sandbox with only the project directory mounted — so it can't touch anything else on the host.
 
-Session state is stored separately per context under `~/.config/openshrimp/containers/`, so containerized contexts don't interfere with each other or your host `~/.claude`.
+```yaml
+contexts:
+  my-project:
+    directory: /home/you/projects/my-project
+    sandbox:
+      backend: docker   # docker (Linux), libvirt (Linux VM), or lima (macOS VM)
+```
 
-On Linux, this uses Docker or libvirt VMs. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework.
+Session state is stored separately per context under `~/.config/openshrimp/containers/`, so sandboxed contexts don't interfere with each other or your host `~/.claude`.
+
+On Linux, use `backend: docker` or `backend: libvirt`. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework.
+
+The sandbox `backend:` (`docker`/`libvirt`/`lima`) is a different setting from the agent `backend:` (`claude_sdk`/`opencode`) — see [Agent Backends](#agent-backends). OpenCode contexts use a separate `openshrimp-opencode:latest` image.
 
 ## macOS App
 
@@ -125,7 +136,7 @@ On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` fr
 
 ### Prerequisites
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated (via `claude` login or an [Anthropic API key](https://console.anthropic.com/))
+- Either the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated (via `claude` login or an [Anthropic API key](https://console.anthropic.com/)) for the default `claude_sdk` backend, **or** [OpenCode](https://github.com/sst/opencode) with `opencode auth login` if you choose the `opencode` backend (see [Agent Backends](#agent-backends))
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) — we strongly recommend enabling **Threaded Mode** (Settings → Bot Settings → Threads Settings → Threaded Mode). This lets each conversation run in its own forum topic with an independent Claude session.
 
 ### Option 1: Download Binary (recommended)
@@ -238,6 +249,24 @@ OpenShrimp enforces a layered permission model:
 - **Paths outside the context directory** — always require manual approval, regardless of tool type
 
 When a tool needs approval, you get three options: **Allow** (once), **Accept all [tool]** (auto-approve that tool for the session), or **Deny**. Edit/Write get the familiar **"Accept all edits"** button instead. All session-level approvals reset on `/clear` or context switch.
+
+## Agent Backends
+
+The top-level `backend:` key picks the agent runtime that drives OpenShrimp. Two ship: `claude_sdk` (the default — the Claude Agent SDK) and `opencode` ([`sst/opencode`](https://github.com/sst/opencode) over its HTTP serve API, supporting OpenAI, Anthropic, and Google models). Any context can override the global choice with its own `backend:` key. Note this agent `backend:` is a different setting from the sandbox `backend:` (`docker`/`libvirt`/`lima`) described under [Container Isolation](#container-isolation).
+
+OpenCode isn't bundled, so satisfy three preconditions on the host first:
+
+- **Provider-qualified models.** Every OpenCode context's `model:` must be `provider/model` (e.g. `openai/gpt-5.5`, `anthropic/claude-opus-4-7`, `google/gemini-2.5-pro`). An unqualified model fails fast at startup.
+- **Pre-authenticate.** Run `opencode auth login` on the host; OpenShrimp reuses the credentials.
+- **Discoverable binary.** Located via `$OPENCODE_BIN`, then `~/.opencode/bin/opencode`, then your `PATH`.
+
+```yaml
+backend: opencode
+contexts:
+  my-project:
+    directory: /home/you/projects/my-project
+    model: openai/gpt-5.5   # provider/model REQUIRED
+```
 
 ## Deployment
 
