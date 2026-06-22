@@ -11,11 +11,13 @@ joins the two shapes by:
    in-flight ``ToolPart`` when needed.
 3. Recovering the full ``tool_input`` dict either from a buffered
    ``ToolPart`` or by fetching the message on cache miss.
-4. Pre-registering any ``permission.asked.always`` patterns into the
-   per-scope session-rules cache via ``register_session_rule`` so durable
-   allow choices replayed by OpenCode take effect immediately for the
-   current turn.
-5. Awaiting ``can_use_tool`` and POSTing the reply.
+4. Awaiting ``can_use_tool`` and POSTing the reply.
+
+The event's ``always`` array carries OpenCode's *candidate* "always allow"
+globs (e.g. ``git *`` for a ``git status`` call) — what OpenCode would
+persist **if** the user chose "always" — not patterns the user has already
+approved. They are surfaced to the approval UI via
+``ToolPermissionContext.suggestions`` but never auto-applied here.
 
 ``hooks.make_can_use_tool`` returns ``backend.types`` permission results
 directly, so this bridge consumes them with no SDK import or further
@@ -47,13 +49,6 @@ CanUseToolCallback = Callable[
     Awaitable[PermissionResult],
 ]
 
-# (tool_name, pattern) — fired for each ``permission.asked.always`` entry the
-# bridge observes.  Bound to a closure that injects the rule into the live
-# ``_tool_approved_sessions`` registry for the bridge's scope.  Synchronous —
-# the bridge calls it inline before the manual-approval flow runs so a
-# subsequent identical tool call inside the same turn auto-resolves.
-RegisterSessionRuleCallback = Callable[[str, str], None]
-
 _TOOLPART_WAIT_TIMEOUT = 1.0  # seconds — bound the race with ToolPart caching.
 _REPLIED_CACHE_MAX = 256  # FIFO eviction cap for the duplicate-asked guard.
 _CALL_APPROVAL_CACHE_MAX = 256  # FIFO cap for same-tool-call permission gates.
@@ -77,13 +72,11 @@ class PermissionBridge:
         can_use_tool: CanUseToolCallback,
         session_id: str,
         directory: str | None = None,
-        register_session_rule: RegisterSessionRuleCallback | None = None,
     ) -> None:
         self._http = http
         self._can_use_tool = can_use_tool
         self._session_id = session_id
         self._directory = directory
-        self._register_session_rule = register_session_rule
         self._tasks: set[asyncio.Task[None]] = set()
         # callID -> (tool_name, input_dict, message_id)
         self._tool_parts: dict[str, tuple[str, dict[str, Any], str]] = {}
@@ -199,21 +192,6 @@ class PermissionBridge:
             session_id=str(session_id),
             metadata=metadata,
         )
-
-        # Pre-register every ``always`` pattern as a session-scoped rule so
-        # the user's earlier "always allow" choice (made through OpenCode's
-        # own UI, or replayed by OpenCode for an already-durable rule) takes
-        # effect immediately — including for sibling tool calls inside the
-        # same turn that haven't yet hit ``can_use_tool``.
-        if always_patterns and self._register_session_rule is not None:
-            for pattern in always_patterns:
-                try:
-                    self._register_session_rule(tool_name, pattern)
-                except Exception:
-                    logger.exception(
-                        "register_session_rule failed for %s(%s)",
-                        tool_name, pattern,
-                    )
 
         cached = self._get_call_approval(str(call_id), tool_name, tool_input)
         if cached is not None:
@@ -450,5 +428,4 @@ class PermissionBridge:
 __all__ = [
     "CanUseToolCallback",
     "PermissionBridge",
-    "RegisterSessionRuleCallback",
 ]

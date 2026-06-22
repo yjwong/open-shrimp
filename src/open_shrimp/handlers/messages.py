@@ -34,7 +34,7 @@ from open_shrimp.handlers.approval import (
     _send_auto_approved_diff,
     _send_host_bash_approval,
 )
-from open_shrimp.hooks import ApprovalRule, matches_approval_rule as _matches_rule
+from open_shrimp.hooks import matches_approval_rule as _matches_rule
 from open_shrimp.handlers.questions import (
     _complete_other_input,
     _handle_ask_user_questions,
@@ -766,24 +766,6 @@ async def _start_agent_task(
                     if (rule.tool_name, rule.pattern) not in existing_set:
                         existing.append(rule)
 
-            def _register_session_rule(tool_name: str, pattern: str) -> None:
-                """Inject an ``ApprovalRule`` into the live session cache.
-
-                Fired by the OpenCode ``PermissionBridge`` for each
-                ``permission.asked.always`` pattern it observes — the
-                user's earlier "always allow" choice (made through
-                OpenCode's own UI, or replayed by OpenCode for an
-                already-durable rule) takes effect immediately inside
-                the current OpenShrimp session.
-                """
-                bucket = _tool_approved_sessions.setdefault(
-                    (scope, ctx_name), [],
-                )
-                existing_keys = {(r.tool_name, r.pattern) for r in bucket}
-                if (tool_name, pattern) in existing_keys:
-                    return
-                bucket.append(ApprovalRule(tool_name=tool_name, pattern=pattern))
-
             cb_ctx = CallbackContext(
                 request_approval=request_approval,
                 handle_user_questions=handle_questions,
@@ -797,7 +779,6 @@ async def _start_agent_task(
                     _session_approved_dirs.get((scope, ctx_name), set())
                 ),
                 request_host_bash_approval=request_host_bash,
-                register_session_rule=_register_session_rule,
             )
 
             session = await get_or_create_session(

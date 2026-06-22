@@ -158,7 +158,6 @@ class OpenCodeClient:
                     can_use_tool=self._options.can_use_tool,
                     session_id=self._session_id,
                     directory=self._options.cwd,
-                    register_session_rule=self._options.register_session_rule,
                 )
         except BaseException:
             await self._http.aclose()
@@ -878,7 +877,6 @@ class OpenCodeClient:
             can_use_tool=self._options.can_use_tool,
             session_id=session_id,
             directory=self._options.cwd,
-            register_session_rule=self._options.register_session_rule,
         )
 
     async def iter_session_response(

@@ -1,18 +1,18 @@
 """Tests for the ``permission.asked.always`` arm in the OpenCode bridge.
 
-When OpenCode emits a ``permission.asked`` event with an ``always`` array
-populated, those patterns represent the user's durable "always allow"
-choice (made through OpenCode's own UI, or replayed by OpenCode for an
-already-durable rule).  The bridge pre-registers each pattern as a
-session-scoped rule via the ``register_session_rule`` callback so the
-choice takes effect immediately inside the current turn — sibling tool
-calls behind the same prefix auto-resolve without prompting the user.
+OpenCode's ``always`` array carries *candidate* "always allow" globs — what
+OpenCode would persist **if** the user chose "always" (e.g. ``git *`` for a
+``git status`` call), not patterns the user has already approved.  The bridge
+must therefore never auto-apply them: every ``permission.asked`` event routes
+through ``can_use_tool`` so the user is actually prompted.  The candidate
+patterns are surfaced to the approval UI via
+``ToolPermissionContext.suggestions`` / ``always_patterns`` so the keyboard
+can offer "always allow" buttons.
 """
 
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -20,15 +20,12 @@ import pytest
 from open_shrimp.backend.opencode.permission import PermissionBridge
 from open_shrimp.backend.types import (
     PermissionResultAllow,
+    PermissionResultDeny,
     ToolPermissionContext,
 )
 
 
-def _make_bridge(
-    *,
-    register_session_rule: Any = None,
-    can_use_tool: Any = None,
-) -> PermissionBridge:
+def _make_bridge(*, can_use_tool: Any = None) -> PermissionBridge:
     http = httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={}),
     ))
@@ -46,7 +43,6 @@ def _make_bridge(
         can_use_tool=can_use_tool,
         session_id="sess-1",
         directory="/work",
-        register_session_rule=register_session_rule,
     )
 
 
@@ -55,7 +51,6 @@ def _make_event(
     request_id: str = "req-1",
     permission: str = "bash",
     always: list[str] | None = None,
-    tool_name: str = "bash",
     tool_input: dict[str, Any] | None = None,
     call_id: str = "call-1",
 ) -> dict[str, Any]:
@@ -72,16 +67,28 @@ def _make_event(
     }
 
 
+def _record_can_use_tool() -> tuple[list[ToolPermissionContext], Any]:
+    """A ``can_use_tool`` that records each ctx and approves once."""
+    seen: list[ToolPermissionContext] = []
+
+    async def _cb(
+        tool_name: str,
+        tool_input: dict[str, Any],
+        ctx: ToolPermissionContext,
+    ) -> Any:
+        seen.append(ctx)
+        return PermissionResultAllow(reply="once")
+
+    return seen, _cb
+
+
 @pytest.mark.asyncio
-async def test_always_pattern_pre_registers_via_callback() -> None:
-    """An ``always: ["git *"]`` arm fires ``register_session_rule`` once
-    per pattern with the resolved native tool name."""
-    seen: list[tuple[str, str]] = []
+async def test_always_pattern_does_not_auto_approve() -> None:
+    """An ``always: ["git *"]`` arm still routes through ``can_use_tool`` —
+    the user is prompted, the pattern is not silently pre-approved."""
+    seen, can_use_tool = _record_can_use_tool()
 
-    def _register(tool_name: str, pattern: str) -> None:
-        seen.append((tool_name, pattern))
-
-    bridge = _make_bridge(register_session_rule=_register)
+    bridge = _make_bridge(can_use_tool=can_use_tool)
     # Seed the ToolPart cache so the resolver returns the bash tool name
     # without touching the network.
     bridge.observe_tool_part({
@@ -92,21 +99,19 @@ async def test_always_pattern_pre_registers_via_callback() -> None:
         "state": {"status": "running", "input": {"command": "git status"}},
     })
 
-    evt = _make_event(always=["git *"], tool_name="bash")
+    evt = _make_event(always=["git *"])
     await bridge._do_handle_permission_asked(evt)
 
-    assert seen == [("bash", "git *")]
+    # can_use_tool was consulted exactly once (no auto-approve shortcut).
+    assert len(seen) == 1
 
 
 @pytest.mark.asyncio
-async def test_multiple_always_patterns_each_fire_callback() -> None:
-    """Every pattern in the ``always`` array hits the callback in order."""
-    seen: list[tuple[str, str]] = []
+async def test_always_patterns_surfaced_as_suggestions() -> None:
+    """Every candidate pattern reaches the approval UI as a suggestion."""
+    seen, can_use_tool = _record_can_use_tool()
 
-    def _register(tool_name: str, pattern: str) -> None:
-        seen.append((tool_name, pattern))
-
-    bridge = _make_bridge(register_session_rule=_register)
+    bridge = _make_bridge(can_use_tool=can_use_tool)
     bridge.observe_tool_part({
         "type": "tool",
         "callID": "call-1",
@@ -118,15 +123,45 @@ async def test_multiple_always_patterns_each_fire_callback() -> None:
     evt = _make_event(always=["git *", "npm *"])
     await bridge._do_handle_permission_asked(evt)
 
-    assert seen == [("bash", "git *"), ("bash", "npm *")]
+    assert len(seen) == 1
+    assert seen[0].suggestions == ["git *", "npm *"]
+    assert seen[0].always_patterns == ["git *", "npm *"]
 
 
 @pytest.mark.asyncio
-async def test_empty_always_does_not_call_register() -> None:
-    """No ``always`` patterns means the callback is never invoked."""
-    register = AsyncMock()
+async def test_deny_is_respected_despite_always_patterns() -> None:
+    """A denial from ``can_use_tool`` stands — candidate ``always`` patterns
+    never override the user's decision."""
+    async def _deny(
+        tool_name: str,
+        tool_input: dict[str, Any],
+        ctx: ToolPermissionContext,
+    ) -> Any:
+        return PermissionResultDeny(message="nope")
 
-    bridge = _make_bridge(register_session_rule=register)
+    bridge = _make_bridge(can_use_tool=_deny)
+    bridge.observe_tool_part({
+        "type": "tool",
+        "callID": "call-1",
+        "tool": "bash",
+        "messageID": "msg-1",
+        "state": {"status": "running", "input": {"command": "rm -rf /"}},
+    })
+
+    evt = _make_event(always=["rm *"])
+    # The cached call approval should reflect the deny, not an allow.
+    await bridge._do_handle_permission_asked(evt)
+    cached = bridge._get_call_approval("call-1", "bash", {"command": "rm -rf /"})
+    assert isinstance(cached, PermissionResultDeny)
+
+
+@pytest.mark.asyncio
+async def test_empty_always_still_prompts() -> None:
+    """No candidate patterns means empty suggestions, but the user is still
+    asked."""
+    seen, can_use_tool = _record_can_use_tool()
+
+    bridge = _make_bridge(can_use_tool=can_use_tool)
     bridge.observe_tool_part({
         "type": "tool",
         "callID": "call-1",
@@ -138,60 +173,17 @@ async def test_empty_always_does_not_call_register() -> None:
     evt = _make_event(always=[])
     await bridge._do_handle_permission_asked(evt)
 
-    register.assert_not_called()
+    assert len(seen) == 1
+    assert seen[0].suggestions == []
 
 
 @pytest.mark.asyncio
-async def test_no_callback_set_silently_skips() -> None:
-    """``register_session_rule=None`` means the arm is dormant — no crash,
-    no log noise, the regular approval flow still runs."""
-    bridge = _make_bridge(register_session_rule=None)
-    bridge.observe_tool_part({
-        "type": "tool",
-        "callID": "call-1",
-        "tool": "bash",
-        "messageID": "msg-1",
-        "state": {"status": "running", "input": {"command": "git status"}},
-    })
+async def test_non_list_always_field_is_discarded() -> None:
+    """A malformed ``always`` field (e.g. a string) yields empty suggestions
+    rather than crashing, and the user is still prompted."""
+    seen, can_use_tool = _record_can_use_tool()
 
-    evt = _make_event(always=["git *"])
-    # Just shouldn't raise.
-    await bridge._do_handle_permission_asked(evt)
-
-
-@pytest.mark.asyncio
-async def test_register_callback_exception_does_not_break_approval() -> None:
-    """A raising ``register_session_rule`` is caught and logged so the
-    approval flow still completes."""
-
-    def _register(tool_name: str, pattern: str) -> None:
-        raise RuntimeError("boom")
-
-    can_use_tool = AsyncMock(return_value=PermissionResultAllow(reply="once"))
-    bridge = _make_bridge(
-        register_session_rule=_register, can_use_tool=can_use_tool,
-    )
-    bridge.observe_tool_part({
-        "type": "tool",
-        "callID": "call-1",
-        "tool": "bash",
-        "messageID": "msg-1",
-        "state": {"status": "running", "input": {"command": "git status"}},
-    })
-
-    evt = _make_event(always=["git *"])
-    await bridge._do_handle_permission_asked(evt)
-
-    # can_use_tool was still invoked despite the register callback crash.
-    can_use_tool.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_non_list_always_field_does_not_call_register() -> None:
-    """A malformed ``always`` field (e.g. a string instead of a list) is
-    discarded — no spurious callback firing."""
-    register = AsyncMock()
-    bridge = _make_bridge(register_session_rule=register)
+    bridge = _make_bridge(can_use_tool=can_use_tool)
     bridge.observe_tool_part({
         "type": "tool",
         "callID": "call-1",
@@ -204,30 +196,5 @@ async def test_non_list_always_field_does_not_call_register() -> None:
     evt["properties"]["always"] = "git *"  # wrong shape
     await bridge._do_handle_permission_asked(evt)
 
-    register.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_register_uses_resolved_native_tool_name() -> None:
-    """The callback receives the native (lowercase) OpenCode tool name,
-    not the permission category — confirming the resolution order."""
-    seen: list[tuple[str, str]] = []
-
-    def _register(tool_name: str, pattern: str) -> None:
-        seen.append((tool_name, pattern))
-
-    bridge = _make_bridge(register_session_rule=_register)
-    bridge.observe_tool_part({
-        "type": "tool",
-        "callID": "call-1",
-        "tool": "edit",  # native OpenCode name
-        "messageID": "msg-1",
-        "state": {"status": "running", "input": {"filePath": "/work/x.py"}},
-    })
-
-    evt = _make_event(
-        permission="edit", always=["/work/**"], call_id="call-1",
-    )
-    await bridge._do_handle_permission_asked(evt)
-
-    assert seen == [("edit", "/work/**")]
+    assert len(seen) == 1
+    assert seen[0].suggestions == []

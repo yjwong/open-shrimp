@@ -74,7 +74,6 @@ class CallbackContext:
     is_tool_auto_approved: Callable[[str, dict[str, Any]], bool] | None = None
     get_session_approved_dirs: Callable[[], list[str]] | None = None
     request_host_bash_approval: HostBashApprovalCallback | None = None
-    register_session_rule: Callable[[str, str], None] | None = None
 
 
 @dataclass
@@ -228,7 +227,6 @@ async def get_or_create_session(
                 existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
                 existing.callback_context.get_session_approved_dirs = callback_context.get_session_approved_dirs
                 existing.callback_context.request_host_bash_approval = callback_context.request_host_bash_approval
-                existing.callback_context.register_session_rule = callback_context.register_session_rule
                 existing.last_activity = time.monotonic()
                 logger.info(
                     "Reusing live client for scope %s context %s",
@@ -501,13 +499,6 @@ async def get_or_create_session(
     extra: dict[str, Any] = {}
     if served_endpoint is not None:
         extra["endpoint"] = served_endpoint
-    # OpenCode's ``PermissionBridge`` fires this for each
-    # ``permission.asked.always`` pattern it observes so durable allow
-    # choices replayed by OpenCode pre-register into the per-scope session
-    # rules.  SDK ignores ``extra``.
-    extra["register_session_rule"] = _make_register_session_rule_proxy(
-        callback_context,
-    )
 
     options = BackendOptions(
         cwd=context.directory,
@@ -1109,16 +1100,5 @@ def _make_host_bash_approval_proxy(
             )
             return "denied"
         return await ctx.request_host_bash_approval(tool_input, tool_use_id)
-
-    return _proxy
-
-
-def _make_register_session_rule_proxy(
-    ctx: CallbackContext,
-) -> Callable[[str, str], None]:
-    def _proxy(tool_name: str, pattern: str) -> None:
-        if ctx.register_session_rule is None:
-            return
-        ctx.register_session_rule(tool_name, pattern)
 
     return _proxy

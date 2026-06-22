@@ -17,20 +17,14 @@ Honoured-intersection mapping:
 * ``mcp_servers`` → carried through; the client registers these server-side
   (the shared HTTP-bridge handle from ``make_tool_server`` is one of them).
 
-Three seams: ``endpoint``, ``handle_questions``, and
-``register_session_rule`` are not ``BackendOptions`` fields, so they all
-ride in ``opts.extra``:
+Two seams: ``endpoint`` and ``handle_questions`` are not ``BackendOptions``
+fields, so they ride in ``opts.extra``:
 
 * ``extra["endpoint"]`` → the sandbox-provided ``OpenCodeEndpoint | None``.
   Unset on non-sandboxed contexts → the client spawns the host-local
   ``OpenCodeServer``.
 * ``extra["handle_questions"]`` → the native ``question.asked`` callback, or
   ``None``.
-* ``extra["register_session_rule"]`` → the per-scope callback the
-  ``PermissionBridge`` fires for each ``permission.asked.always`` entry it
-  observes, or ``None``.  Injects the rule into the live
-  ``_tool_approved_sessions`` registry so durable allow choices replayed by
-  OpenCode take effect immediately inside the current session.
 
 ``split_provider_model`` is kept here — the only surviving piece of the old
 ``opencode_client/options.py``.
@@ -88,7 +82,6 @@ class OpenCodeOptions:
     handle_questions: (
         Callable[[list[dict[str, Any]]], Awaitable[list[list[str]]]] | None
     ) = None
-    register_session_rule: Callable[[str, str], None] | None = None
     system_prompt: str | None = None  # → system on prompt_async
 
     # Accepted-but-ignored fields for older OpenShrimp call sites.
@@ -105,10 +98,10 @@ def to_opencode(opts: BackendOptions) -> OpenCodeOptions:
     """Map a backend-neutral ``BackendOptions`` to ``OpenCodeOptions``.
 
     ``model`` must be provider-qualified (``provider/model``); an unqualified
-    or missing value raises here (fail fast at connect).  ``endpoint``,
-    ``handle_questions``, and ``register_session_rule`` are read from
-    ``extra`` (they are not honoured-intersection fields).  SDK-only fields
-    are carried through but never read.
+    or missing value raises here (fail fast at connect).  ``endpoint`` and
+    ``handle_questions`` are read from ``extra`` (they are not
+    honoured-intersection fields).  SDK-only fields are carried through but
+    never read.
     """
     provider, model = split_provider_model(opts.model)
     extra = opts.extra or {}
@@ -124,7 +117,6 @@ def to_opencode(opts: BackendOptions) -> OpenCodeOptions:
         stderr=opts.stderr,
         can_use_tool=opts.can_use_tool,
         handle_questions=extra.get("handle_questions"),
-        register_session_rule=extra.get("register_session_rule"),
         system_prompt=opts.system_prompt,
         setting_sources=opts.setting_sources,
         include_partial_messages=opts.include_partial_messages,
