@@ -1511,8 +1511,17 @@ async def _mcp_list(message: Any, session: AgentSession) -> None:
 
 
 async def _mcp_reconnect(message: Any, session: AgentSession, server_name: str) -> None:
-    """Reconnect a failed or disconnected MCP server."""
+    """Reconnect a failed or disconnected MCP server.
+
+    Kill the proxy's stdio subprocess first (sandboxed contexts) so the
+    agent's reconnect respawns it fresh instead of re-attaching to a wedged
+    process.
+    """
     try:
+        if session.mcp_proxy is not None:
+            await session.mcp_proxy.restart_stdio_server(
+                session.context_name, server_name
+            )
         await session.client.reconnect_mcp_server(server_name)
     except Exception:
         logger.exception("Failed to reconnect MCP server %s", server_name)

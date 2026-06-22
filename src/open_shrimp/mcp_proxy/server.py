@@ -431,6 +431,18 @@ class McpProxy:
         self._registry.unregister_context(context_name)
         await self._stdio_manager.stop_context(context_name)
 
+    async def restart_stdio_server(
+        self, context_name: str, server_name: str
+    ) -> bool:
+        """Terminate a proxied stdio server so the next request respawns it.
+
+        Returns ``True`` if a subprocess was terminated, ``False`` otherwise
+        (HTTP/SSE servers and not-yet-spawned servers are no-ops).
+        """
+        return await self._stdio_manager.restart_server(
+            context_name, server_name
+        )
+
     def get_proxy_url(
         self,
         context_name: str,

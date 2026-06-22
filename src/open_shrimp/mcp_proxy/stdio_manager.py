@@ -148,6 +148,22 @@ class StdioManager:
                 f"matching response for request id={request_id}"
             )
 
+    async def restart_server(self, context_name: str, server_name: str) -> bool:
+        """Terminate a server's subprocess so the next request respawns it.
+
+        Returns ``True`` if a process was terminated, ``False`` if none existed.
+        """
+        proc = self._processes.pop((context_name, server_name), None)
+        if proc is None:
+            return False
+        logger.info(
+            "Restarting MCP server '%s' for context '%s'",
+            server_name,
+            context_name,
+        )
+        await self._cleanup_process(proc)
+        return True
+
     async def stop_context(self, context_name: str) -> None:
         """Stop all MCP servers for *context_name*."""
         keys = [k for k in self._processes if k[0] == context_name]
