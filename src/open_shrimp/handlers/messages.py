@@ -717,6 +717,7 @@ async def _start_agent_task(
                     context.bot, scope.chat_id, tool_name, tool_input,
                     cwd=ctx_config.directory,
                     thread_id=scope.thread_id,
+                    scope=scope,
                 )
 
             async def request_host_bash(
