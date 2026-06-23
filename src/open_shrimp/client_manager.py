@@ -325,6 +325,11 @@ async def get_or_create_session(
                 "mcp__openshrimp__list_schedules",
                 "mcp__openshrimp__delete_schedule",
             ])
+        # Auto-approve ask_context at the parent session: it renders its
+        # own tailored approval card per call, so the generic can_use_tool
+        # card must not also fire (which would show the raw wire name).
+        if config is not None:
+            allowed_tools.append("mcp__openshrimp__ask_context")
     # Auto-approve computer use tools when enabled.
     _computer_use_enabled = (
         (context.container is not None and context.container.computer_use)

@@ -187,6 +187,10 @@ async def test_happy_path_returns_answer(monkeypatch) -> None:
         "open_shrimp.client_manager.resolve_backend",
         lambda **kwargs: fake_backend,
     )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=True),
+    )
 
     bot = MagicMock()
     sent = SimpleNamespace(message_id=42)
@@ -220,6 +224,39 @@ async def test_happy_path_returns_answer(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_outer_denial_errors_without_running(monkeypatch) -> None:
+    fake_backend = MagicMock()
+    fake_backend.make_client.side_effect = AssertionError(
+        "sub-query must not run when the outer approval is denied",
+    )
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: fake_backend,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=False),
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    bot.edit_message_text = AsyncMock()
+
+    tool = build_ask_context_tool(
+        bot=bot, chat_id=1, thread_id=None, config=_config(),
+        context_name="default",
+    )
+    assert tool is not None
+    result = await tool.handler(
+        {"context": "glints-delta-etl", "question": "row count?"},
+    )
+
+    assert result.get("is_error") is True
+    assert "denied" in result["content"][0]["text"]
+    fake_backend.make_client.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_allowed_tools_inherit_target(monkeypatch) -> None:
     captured = {}
 
@@ -235,6 +272,10 @@ async def test_allowed_tools_inherit_target(monkeypatch) -> None:
     monkeypatch.setattr(
         "open_shrimp.client_manager.resolve_backend",
         lambda **kwargs: fake_backend,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=True),
     )
     # Treat the target as non-sandboxed so Bash is not added.
     monkeypatch.setattr("open_shrimp.config.is_sandboxed", lambda ctx: False)
@@ -268,6 +309,10 @@ async def test_transient_task_unregistered_after_run(monkeypatch) -> None:
     monkeypatch.setattr(
         "open_shrimp.client_manager.resolve_backend",
         lambda **kwargs: fake_backend,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=True),
     )
 
     bot = MagicMock()

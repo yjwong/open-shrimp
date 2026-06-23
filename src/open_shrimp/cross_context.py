@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -288,6 +289,77 @@ class _SubQueryResult:
     outcome: str
     collected: str
     error_detail: str = ""
+    elapsed: float = 0.0
+    tool_count: int = 0
+
+
+async def _request_outer_approval(
+    *,
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    target: str,
+    question: str,
+) -> bool:
+    """Render the tailored Approve/Deny card for the outer ask_context call.
+
+    Reuses the standard ``approve:``/``deny:`` callback prefixes (with a
+    fresh ``tool_use_id``) so the existing ``handle_approval_callback``
+    resolves them and edits the card to ``✅ Approved.`` / ``❌ Denied.``.
+    """
+    from telegram import InlineKeyboardButton
+
+    from open_shrimp.handlers.state import (
+        _approval_futures,
+        _approval_metadata,
+        _approval_tool_names,
+    )
+    from open_shrimp.handlers.utils import _escape_mdv2
+
+    tool_use_id = f"askctx{os.urandom(6).hex()}"
+    approve_data = f"approve:{tool_use_id}"
+    deny_data = f"deny:{tool_use_id}"
+
+    text = (
+        f"🔎 *Ask {_escape_mdv2(target)}?*\n"
+        f"> {_escape_mdv2(_summary_line(question, limit=300))}"
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Approve", callback_data=approve_data),
+        InlineKeyboardButton("Deny", callback_data=deny_data),
+    ]])
+
+    thread_kwargs: dict[str, Any] = {}
+    if thread_id is not None:
+        thread_kwargs["message_thread_id"] = thread_id
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="MarkdownV2",
+        reply_markup=keyboard,
+        **thread_kwargs,
+    )
+
+    _approval_tool_names[tool_use_id] = "ask_context"
+    _approval_metadata[tool_use_id] = {
+        "tool_name": "ask_context",
+        "tool_input": {"context": target, "question": question},
+        "chat_id": chat_id,
+        "message_id": sent.message_id,
+    }
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[bool] = loop.create_future()
+    _approval_futures[approve_data] = future
+    _approval_futures[deny_data] = future
+    try:
+        return await future
+    finally:
+        _approval_futures.pop(approve_data, None)
+        _approval_futures.pop(deny_data, None)
+        _approval_tool_names.pop(tool_use_id, None)
+        _approval_metadata.pop(tool_use_id, None)
 
 
 def _make_parent_routed_approval(
@@ -417,8 +489,11 @@ async def _run_sub_query(
 
     sink.write(f"> {question}\n\n")
     text_parts: list[str] = []
+    tool_count = 0
+    start = time.monotonic()
 
     async def _drain() -> None:
+        nonlocal tool_count
         async for msg in client.receive_response():
             if not isinstance(msg, AssistantMessage):
                 continue
@@ -428,6 +503,7 @@ async def _run_sub_query(
                         text_parts.append(block.text)
                         sink.write(block.text + "\n")
                 elif isinstance(block, ToolUseBlock):
+                    tool_count += 1
                     summary = extract_tool_summary(
                         block.name, block.input, cwd, policy=policy,
                     )
@@ -464,6 +540,8 @@ async def _run_sub_query(
         outcome=outcome,
         collected="\n\n".join(text_parts).strip(),
         error_detail=error_detail,
+        elapsed=time.monotonic() - start,
+        tool_count=tool_count,
     )
 
 
@@ -485,14 +563,13 @@ class _StatusMessage:
         self._message_id: int | None = None
 
     async def start(
-        self, question: str, keyboard: InlineKeyboardMarkup | None,
+        self, keyboard: InlineKeyboardMarkup | None,
     ) -> None:
         from open_shrimp.handlers.utils import _escape_mdv2
 
-        text = (
-            f"🔎 *Asking {_escape_mdv2(self._target)}…*\n"
-            f"> {_escape_mdv2(_summary_line(question, limit=200))}"
-        )
+        # The question is already shown on the approval card above this
+        # message, so don't echo it again here.
+        text = f"🔎 *Asking {_escape_mdv2(self._target)}…*"
         kwargs: dict[str, Any] = {}
         if self._thread_id is not None:
             kwargs["message_thread_id"] = self._thread_id
@@ -517,8 +594,13 @@ class _StatusMessage:
 
         target = _escape_mdv2(self._target)
         if result.outcome == "ok":
-            summary = _escape_mdv2(_summary_line(result.collected) or "done")
-            text = f"✅ *{target} answered*\n> {summary}"
+            tools = (
+                "1 tool" if result.tool_count == 1
+                else f"{result.tool_count} tools"
+            )
+            text = (
+                f"✅ *{target} answered* · {int(result.elapsed)}s · {tools}"
+            )
         elif result.outcome == "timeout":
             text = (
                 f"⏱️ *{target}* — query timed out after "
@@ -595,9 +677,22 @@ async def _run_query(
     is_private_chat: bool,
     terminal_base_url: str | None,
 ) -> dict[str, Any]:
-    """Orchestrate one cross-context query: configure, present, run, report."""
+    """Orchestrate one cross-context query: approve, configure, run, report."""
     from open_shrimp.client_manager import resolve_backend
     from open_shrimp.config import is_sandboxed
+
+    approved = await _request_outer_approval(
+        bot=bot,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        target=target,
+        question=question,
+    )
+    if not approved:
+        return _text_result(
+            f"Cross-context query to {target!r} was denied by the user.",
+            is_error=True,
+        )
 
     backend = resolve_backend(context=ctx)
     sandboxed = is_sandboxed(ctx)
@@ -628,7 +723,6 @@ async def _run_query(
 
     status = _StatusMessage(bot, chat_id, thread_id, target)
     await status.start(
-        question,
         _view_output_keyboard(
             task_id=task_id,
             terminal_base_url=terminal_base_url,
