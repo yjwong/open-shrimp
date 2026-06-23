@@ -252,6 +252,9 @@ class DockerSandboxManager:
         self._ryuk_socket: socket.socket | None = None
         self._ryuk_container_id: str | None = None
         self._sandbox_cache: dict[str, Sandbox] = {}
+        # Name of the agent runtime (backend) each cached sandbox was built
+        # for, so a backend swap invalidates the stale sandbox.
+        self._sandbox_runtime: dict[str, str] = {}
 
         # Build logging state.
         self._active_builds: dict[str, Path] = {}
@@ -424,6 +427,7 @@ class DockerSandboxManager:
     def stop_all(self) -> None:
         """Stop and remove all OpenShrimp-managed containers."""
         self._sandbox_cache.clear()
+        self._sandbox_runtime.clear()
         result = subprocess.run(
             [
                 "docker", "ps", "-a",
@@ -444,6 +448,7 @@ class DockerSandboxManager:
     # -- Invalidation ----------------------------------------------------------
 
     def invalidate_sandbox(self, context_name: str) -> None:
+        self._sandbox_runtime.pop(context_name, None)
         cached = self._sandbox_cache.pop(context_name, None)
         if cached is not None:
             try:
@@ -496,7 +501,19 @@ class DockerSandboxManager:
     ) -> Sandbox:
         cached = self._sandbox_cache.get(context_name)
         if cached is not None:
-            return cached
+            if runtime is None or self._sandbox_runtime.get(context_name) == runtime.name:
+                return cached
+            # The agent backend (runtime) changed for this context.  The
+            # cached sandbox is pinned to the old image/launch, so reusing it
+            # would launch the new agent inside the old backend's container.
+            # Tear it down and rebuild against the new runtime.
+            logger.info(
+                "Runtime changed for context '%s' (%s -> %s); rebuilding sandbox",
+                context_name,
+                self._sandbox_runtime.get(context_name),
+                runtime.name,
+            )
+            self.invalidate_sandbox(context_name)
 
         assert context.container is not None
         from open_shrimp.sandbox.docker import DockerSandbox
@@ -511,6 +528,8 @@ class DockerSandboxManager:
             runtime=runtime,
         )
         self._sandbox_cache[context_name] = sandbox
+        if runtime is not None:
+            self._sandbox_runtime[context_name] = runtime.name
         return sandbox
 
     # -- Build logging --------------------------------------------------------
@@ -580,6 +599,9 @@ class LimaSandboxManager:
         self._container_label = "openshrimp"  # unused, but protocol requires it
         self._limactl_path: str | None = None
         self._sandbox_cache: dict[str, Sandbox] = {}
+        # Name of the agent runtime (backend) each cached sandbox was built
+        # for, so a backend swap invalidates the stale sandbox.
+        self._sandbox_runtime: dict[str, str] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
@@ -620,6 +642,7 @@ class LimaSandboxManager:
         """Stop all OpenShrimp-managed Lima instances."""
         if self._limactl_path is None:
             self._sandbox_cache.clear()
+            self._sandbox_runtime.clear()
             return
 
         from open_shrimp.sandbox.lima_helpers import (
@@ -638,10 +661,12 @@ class LimaSandboxManager:
                 logger.info("Stopped Lima instance %s", name)
 
         self._sandbox_cache.clear()
+        self._sandbox_runtime.clear()
 
     # -- Invalidation ----------------------------------------------------------
 
     def invalidate_sandbox(self, context_name: str) -> None:
+        self._sandbox_runtime.pop(context_name, None)
         cached = self._sandbox_cache.pop(context_name, None)
         if cached is not None:
             try:
@@ -711,7 +736,20 @@ class LimaSandboxManager:
         # backends otherwise ignore the image bundle.
         cached = self._sandbox_cache.get(context_name)
         if cached is not None:
-            return cached
+            if runtime is None or self._sandbox_runtime.get(context_name) == runtime.name:
+                return cached
+            # The agent backend (runtime) changed for this context.  A
+            # served-endpoint launch host-syncs different home mounts than a
+            # wrapped-CLI one, so the cached VM was built for the old launch.
+            # Rebuild against the new runtime (ensure_environment detects the
+            # mount drift and re-provisions; persistent disks are preserved).
+            logger.info(
+                "Runtime changed for context '%s' (%s -> %s); rebuilding sandbox",
+                context_name,
+                self._sandbox_runtime.get(context_name),
+                runtime.name,
+            )
+            self.invalidate_sandbox(context_name)
 
         if self._limactl_path is None:
             raise RuntimeError(
@@ -735,6 +773,8 @@ class LimaSandboxManager:
             runtime=runtime,
         )
         self._sandbox_cache[context_name] = sandbox
+        if runtime is not None:
+            self._sandbox_runtime[context_name] = runtime.name
         return sandbox
 
     # -- Build logging --------------------------------------------------------
@@ -803,6 +843,9 @@ class LibvirtSandboxManager:
         self._container_label = "openshrimp"  # not used, but protocol requires it
         self._conn: "libvirt.virConnect | None" = None  # type: ignore[name-defined]
         self._sandbox_cache: dict[str, Sandbox] = {}
+        # Name of the agent runtime (backend) each cached sandbox was built
+        # for, so a backend swap invalidates the stale sandbox.
+        self._sandbox_runtime: dict[str, str] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
@@ -953,6 +996,7 @@ class LibvirtSandboxManager:
                 pass
 
         self._sandbox_cache.clear()
+        self._sandbox_runtime.clear()
 
         # Kill any orphaned virtiofsd processes whose sockets live under
         # our state directory.
@@ -994,6 +1038,7 @@ class LibvirtSandboxManager:
     # -- Invalidation ----------------------------------------------------------
 
     def invalidate_sandbox(self, context_name: str) -> None:
+        self._sandbox_runtime.pop(context_name, None)
         cached = self._sandbox_cache.pop(context_name, None)
         if cached is not None:
             try:
@@ -1053,7 +1098,20 @@ class LibvirtSandboxManager:
         # backends otherwise ignore the image bundle.
         cached = self._sandbox_cache.get(context_name)
         if cached is not None:
-            return cached
+            if runtime is None or self._sandbox_runtime.get(context_name) == runtime.name:
+                return cached
+            # The agent backend (runtime) changed for this context.  A
+            # served-endpoint launch host-syncs different home mounts than a
+            # wrapped-CLI one, so the cached VM was built for the old launch.
+            # Rebuild against the new runtime (ensure_environment detects the
+            # mount drift and re-provisions; persistent disks are preserved).
+            logger.info(
+                "Runtime changed for context '%s' (%s -> %s); rebuilding sandbox",
+                context_name,
+                self._sandbox_runtime.get(context_name),
+                runtime.name,
+            )
+            self.invalidate_sandbox(context_name)
 
         if self._conn is None:
             raise RuntimeError(
@@ -1077,6 +1135,8 @@ class LibvirtSandboxManager:
             runtime=runtime,
         )
         self._sandbox_cache[context_name] = sandbox
+        if runtime is not None:
+            self._sandbox_runtime[context_name] = runtime.name
         return sandbox
 
     # -- Build logging --------------------------------------------------------

@@ -37,7 +37,7 @@ from open_shrimp.web_app_button import make_web_app_button
 
 from open_shrimp.agent import AgentEvent
 from open_shrimp.config import ContextConfig, is_sandboxed
-from open_shrimp.db import ChatScope
+from open_shrimp.db import ChatScope, delete_session
 from open_shrimp.hooks import (
     ApprovalCallback,
     EditNotifyCallback,
@@ -175,6 +175,35 @@ async def _warn_tools_degraded_once(bot: Bot, scope: ChatScope) -> None:
         )
 
 
+async def _notify_backend_swapped(
+    bot: Bot, scope: ChatScope, old_backend: str, new_backend: str,
+) -> None:
+    """Tell the user a backend change reset the conversation.
+
+    Sessions are backend-scoped, so switching a context's backend can't carry
+    history across — without this notice the conversation would silently reset
+    and the user wouldn't know why.  Best-effort: never break the turn.
+    """
+    try:
+        kwargs: dict[str, Any] = {}
+        if scope.thread_id is not None:
+            kwargs["message_thread_id"] = scope.thread_id
+        await bot.send_message(
+            chat_id=scope.chat_id,
+            text=(
+                f"🔄 Backend changed from {old_backend} to {new_backend} for "
+                "this context — starting a fresh conversation. History from "
+                "the previous backend can't be carried over."
+            ),
+            **kwargs,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to send backend-swap notice to %s", scope,
+            exc_info=True,
+        )
+
+
 async def get_or_create_session(
     scope: ChatScope,
     context_name: str,
@@ -250,17 +279,37 @@ async def get_or_create_session(
             )
             await close_session(scope)
         else:
-            # Session IDs are backend-scoped; drop the resume id on rebuild.
+            # Session IDs are backend-scoped; drop the resume id on rebuild
+            # and clear the persisted mapping so a later turn (or a cold
+            # start after restart) doesn't try to resume the previous
+            # backend's session — that would fail over to a fresh session
+            # with a spurious "failed to resume" warning.
+            old_backend_name = existing.backend.name if existing.backend else "?"
             logger.info(
                 "Backend changed for scope %s context %s (%s -> %s), "
                 "closing old client",
                 scope,
                 context_name,
-                existing.backend.name if existing.backend else "?",
+                old_backend_name,
                 backend.name,
             )
             await close_session(scope)
             session_id = None
+            if db is not None:
+                try:
+                    await delete_session(db, scope, context_name)
+                except Exception:
+                    logger.warning(
+                        "Failed to clear persisted session for scope %s "
+                        "context %s after backend swap",
+                        scope,
+                        context_name,
+                        exc_info=True,
+                    )
+            if bot is not None:
+                await _notify_backend_swapped(
+                    bot, scope, old_backend_name, backend.name,
+                )
 
     can_use_tool = backend.make_can_use_tool(
         request_approval=_make_approval_proxy(callback_context),
