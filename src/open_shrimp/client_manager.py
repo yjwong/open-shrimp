@@ -587,6 +587,7 @@ async def get_or_create_session(
                     user_id=user_id,
                     is_private_chat=is_private_chat,
                     host_bash_workdir=_host_bash_workdir,
+                    terminal_base_url=terminal_base_url,
                 )
 
             # Sandboxed CLIs must reach the host proxy via the sandbox's

@@ -8,6 +8,7 @@ avoids circular imports.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -189,6 +190,43 @@ def is_task_active(task_id: str) -> bool:
         if task_id in scope_tasks:
             return True
     return False
+
+
+def register_transient_task(
+    scope: ChatScope,
+    task_id: str,
+    *,
+    description: str,
+    task_type: str,
+) -> None:
+    """Register a short-lived background task in ``_active_bg_tasks``.
+
+    The interactive stream owns task tracking for agent-driven background
+    tasks (``TaskStartedMessage`` / ``TaskNotificationMessage``).  Producers
+    that synthesise their own tasks (e.g. ``ask_context`` sub-queries) must
+    go through this single owner rather than mutating ``_active_bg_tasks``
+    directly, so the registration/cleanup invariants live in one place.
+    """
+    _active_bg_tasks.setdefault(scope, {})[task_id] = TrackedTask(
+        task_id=task_id,
+        description=description,
+        task_type=task_type,
+        started_at=time.monotonic(),
+    )
+
+
+def unregister_transient_task(scope: ChatScope, task_id: str) -> None:
+    """Remove a task registered via :func:`register_transient_task`.
+
+    Drops the scope entry entirely once its last task is gone, matching the
+    interactive stream's cleanup so ``is_task_active`` stays accurate.
+    """
+    scope_tasks = _active_bg_tasks.get(scope)
+    if scope_tasks is None:
+        return
+    scope_tasks.pop(task_id, None)
+    if not scope_tasks:
+        _active_bg_tasks.pop(scope, None)
 
 
 # ---------------------------------------------------------------------------

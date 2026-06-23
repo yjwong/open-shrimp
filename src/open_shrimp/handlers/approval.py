@@ -100,6 +100,7 @@ async def _send_approval_keyboard(
     scope: ChatScope | None = None,
     context_name: str | None = None,
     policy: "BackendPolicy | None" = None,
+    provenance: str | None = None,
 ) -> bool:
     """Send an inline keyboard for tool approval and wait for response.
 
@@ -109,9 +110,16 @@ async def _send_approval_keyboard(
     the session-approved set so subsequent tool calls in that directory
     auto-approve.  ``scope`` and ``context_name`` are required to scope
     that approval state.
+
+    ``provenance`` is an optional, already-MarkdownV2-escaped header
+    prepended to the prompt text (used by ``ask_context`` to show that an
+    approval originates from a cross-context sub-query rather than the
+    active conversation).
     """
     p = _resolve_policy(policy, scope=scope)
     text = p.format_approval_text(tool_name, tool_input, cwd)
+    if provenance:
+        text = f"{provenance}\n\n{text}"
 
     approve_data = f"approve:{tool_use_id}"
     deny_data = f"deny:{tool_use_id}"

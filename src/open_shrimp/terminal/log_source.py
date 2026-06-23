@@ -44,6 +44,18 @@ class LogSource:
 # ---------------------------------------------------------------------------
 
 
+def transient_task_output_path(project: str, task_id: str) -> Path:
+    """Path a non-CLI producer should write a task transcript to.
+
+    Mirrors the layout :func:`_search_tmp_base` scans
+    (``<base>/<project>/tasks/<task_id>.output``) so the Terminal Mini App
+    discovers and tails it the same way it does real CLI task output.  This
+    is the single source of truth for that convention — producers must not
+    hardcode the path themselves.
+    """
+    return _CLAUDE_TMP_BASE / project / "tasks" / f"{task_id}.output"
+
+
 def _is_file_or_symlink(path: Path) -> bool:
     """Return True if *path* is a regular file or a symlink (even broken)."""
     return path.is_file() or path.is_symlink()
