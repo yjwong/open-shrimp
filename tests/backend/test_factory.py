@@ -65,6 +65,39 @@ def test_make_tool_server_selects_shared_bridge_installer():
     assert installer is serve_tools_over_mcp_http
 
 
+class _FakeProxy:
+    def register_tool_scope(self, **kwargs):
+        return "scope-token"
+
+    def get_tools_url(self, token, host_ip):
+        return f"http://{host_ip}/tools/{token}"
+
+
+_SCOPE = dict(
+    context_name="c", chat_id=1, thread_id=None, user_id=2, host_ip="127.0.0.1",
+)
+
+
+def test_claude_tool_server_omits_request_timeout():
+    """claude_sdk streams slow calls over SSE, so it pins no MCP timeout."""
+    install = ClaudeSdkBackend().make_tool_server(lambda: [])
+    config = install(_FakeProxy(), lambda: [], **_SCOPE)
+    assert config["type"] == "http"
+    assert "timeout" not in config
+
+
+def test_opencode_tool_server_pins_long_request_timeout():
+    """opencode pins a long per-request timeout so slow tools don't -32001."""
+    from open_shrimp.backend.opencode.backend import OpenCodeBackend
+
+    install = OpenCodeBackend().make_tool_server(lambda: [])
+    config = install(_FakeProxy(), lambda: [], **_SCOPE)
+    assert config["type"] == "http"
+    # Comfortably past ask_context's 600s self-bound.
+    assert isinstance(config.get("timeout"), int)
+    assert config["timeout"] >= 600_000
+
+
 # ── get_backend_by_name: memoisation across distinct names ──
 
 

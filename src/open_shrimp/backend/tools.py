@@ -24,6 +24,7 @@ def serve_tools_over_mcp_http(
     thread_id: int | None,
     user_id: int,
     host_ip: str,
+    request_timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     """Register the scope and return ``{"type": "http", "url": ...}``.
 
@@ -31,6 +32,10 @@ def serve_tools_over_mcp_http(
     so the tool list can depend on live state (e.g. forum-thread membership).
     ``host_ip`` is the caller's sandbox/loopback decision; the installer stays
     ignorant of it.
+
+    ``request_timeout_ms`` sets the consuming backend's per-request MCP
+    timeout (a backend-specific config key); omitted unless a backend needs
+    to raise its default to fit OpenShrimp's long-running tools.
     """
     scope_token = mcp_proxy.register_tool_scope(
         context_name=context_name,
@@ -39,7 +44,10 @@ def serve_tools_over_mcp_http(
         user_id=user_id,
         tool_factory=tool_factory,
     )
-    return {
+    config: dict[str, Any] = {
         "type": "http",
         "url": mcp_proxy.get_tools_url(scope_token, host_ip),
     }
+    if request_timeout_ms is not None:
+        config["timeout"] = request_timeout_ms
+    return config

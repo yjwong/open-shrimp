@@ -47,6 +47,15 @@ if TYPE_CHECKING:
     from open_shrimp.stream import StreamResult
 
 
+# OpenCode caps every MCP tool call at the SDK default (~60s, raising
+# ``-32001 Request timed out``) unless the server config carries a ``timeout``
+# (ms).  OpenShrimp tools can legitimately run far longer — ask_context
+# self-bounds at 600s, host_bash at its own timeout — so raise the ceiling
+# comfortably past the longest server-side bound.  (Claude Code doesn't need
+# this: it streams slow calls over SSE, so this stays OpenCode-scoped.)
+_MCP_REQUEST_TIMEOUT_MS = 900_000  # 15 min
+
+
 class OpenCodeBackend:
     """The OpenCode backend.  ``name == "opencode"``."""
 
@@ -89,12 +98,23 @@ class OpenCodeBackend:
         """Select the installer for the OpenShrimp tool surface.
 
         OpenCode reaches the tool surface over the same MCP HTTP bridge every
-        backend uses, so this returns ``serve_tools_over_mcp_http`` unchanged
-        — the feasibility doc's central claim (one installer, all backends).
-        The caller supplies the proxy handle, the tool factory, and the scope
-        args at call time.
+        backend uses (the feasibility doc's central claim — one installer, all
+        backends).  It only differs in pinning a long per-request ``timeout``,
+        since OpenCode's default would otherwise abort long tools at ~60s with
+        ``-32001``.  The caller supplies the proxy handle, the tool factory,
+        and the scope args at call time.
         """
-        return serve_tools_over_mcp_http
+        def install(
+            mcp_proxy: Any, tool_factory: Any, **kwargs: Any
+        ) -> dict[str, Any]:
+            return serve_tools_over_mcp_http(
+                mcp_proxy,
+                tool_factory,
+                request_timeout_ms=_MCP_REQUEST_TIMEOUT_MS,
+                **kwargs,
+            )
+
+        return install
 
     def make_can_use_tool(
         self,
