@@ -53,7 +53,7 @@ _MAX_CONCURRENT = 3
 _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
 
 # Per-call wall-clock budget.
-_DEFAULT_TIMEOUT_SECONDS = 120.0
+_DEFAULT_TIMEOUT_SECONDS = 600.0
 
 
 def _text_result(text: str, is_error: bool = False) -> dict[str, Any]:
