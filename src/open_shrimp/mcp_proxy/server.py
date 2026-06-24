@@ -18,6 +18,7 @@ to minimise attack surface.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import socket
 from typing import TYPE_CHECKING, Any
@@ -43,9 +44,28 @@ from open_shrimp.mcp_proxy.types import (
 from open_shrimp.tools import OpenShrimpTool
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from open_shrimp.backend.protocol import MCPOAuthProvider
 
 logger = logging.getLogger(__name__)
+
+
+# A buffered tool response sends no bytes until the handler returns, so a slow
+# ``tools/call`` can be reaped by a per-request idle timeout on the client or
+# any intermediary (MCP clients commonly abort a POST that produces no
+# response headers within ~60s).  The StreamableHTTP spec lets a server answer
+# a POST with ``text/event-stream`` instead: a ``tools/call`` that doesn't
+# finish within ``_SSE_GRACE_SECONDS`` is upgraded to SSE, flushing headers (and
+# a first byte) immediately — which satisfies the time-to-first-byte deadline,
+# since those timers release on response headers — then delivering the JSON-RPC
+# result as a later SSE event.  Fast tools keep the plain-JSON path, so the
+# common case carries no streaming overhead and stays consumable by clients
+# that don't speak SSE.
+_SSE_GRACE_SECONDS = 2.0
+# Keepalive comments (ignored by the SSE parser) while the tool runs, so any
+# intermediary idle timeout on the path stays reset.
+_SSE_KEEPALIVE_SECONDS = 15.0
 
 
 # Hop-by-hop headers (RFC 7230 §6.1) — never forward.
@@ -186,15 +206,31 @@ def _create_proxy_app(
                 status_code=400,
             )
         if isinstance(body, list):
+            # Batches carry only fast control messages (initialize /
+            # notifications); never a slow tools/call.  Keep them buffered.
             responses = [await _handle_tools_rpc(item, reg) for item in body]
             responses = [r for r in responses if r is not None]
             if not responses:
                 return Response(status_code=202)
             return JSONResponse(responses)
-        response = await _handle_tools_rpc(body, reg)
-        if response is None:
-            return Response(status_code=202)
-        return JSONResponse(response)
+
+        # Single request: race the handler against a short grace window so
+        # fast tools keep the plain-JSON path and only slow ones upgrade to
+        # SSE (whose early headers beat the caller's request idle timeout).
+        task = asyncio.ensure_future(_handle_tools_rpc(body, reg))
+        done, _pending = await asyncio.wait({task}, timeout=_SSE_GRACE_SECONDS)
+        if task in done:
+            response = task.result()
+            if response is None:
+                return Response(status_code=202)
+            return JSONResponse(response)
+
+        request_id = body.get("id") if isinstance(body, dict) else None
+        return StreamingResponse(
+            _sse_tool_stream(task, request_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     routes = [
         Route(
@@ -215,6 +251,50 @@ def _create_proxy_app(
     ]
 
     return Starlette(routes=routes)
+
+
+def _sse_event(message: dict[str, Any]) -> bytes:
+    """Encode a JSON-RPC *message* as a single SSE ``data:`` event."""
+    payload = json.dumps(message, separators=(",", ":"))
+    return f"data: {payload}\n\n".encode("utf-8")
+
+
+async def _sse_tool_stream(
+    task: "asyncio.Future[dict[str, Any] | None]",
+    request_id: Any,
+) -> "AsyncIterator[bytes]":
+    """Stream a slow ``tools/call`` result as Server-Sent Events.
+
+    The first byte is flushed immediately so the response headers reach the
+    caller right away (releasing any request idle timeout, which fires before
+    headers arrive); keepalive comments hold the connection open until the
+    handler finishes, after which the JSON-RPC result is delivered as one
+    ``data:`` event and the stream closes.
+    """
+    # Immediate flush: forces headers + first byte onto the wire now.
+    yield b": open\n\n"
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {task}, timeout=_SSE_KEEPALIVE_SECONDS,
+            )
+            if done:
+                break
+            yield b": keepalive\n\n"
+        result = task.result()
+        if result is not None:
+            yield _sse_event(result)
+    except asyncio.CancelledError:
+        # Client disconnected (or server shutdown) — cancel the orphaned tool
+        # so it doesn't keep running headless.
+        if not task.done():
+            task.cancel()
+        raise
+    except Exception as exc:
+        logger.exception("SSE tool stream failed")
+        yield _sse_event(_rpc_error(
+            request_id, -32603, f"Internal error: {exc}",
+        ))
 
 
 async def _handle_tools_rpc(

@@ -9,16 +9,19 @@ in ``tests/test_tools.py``.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from open_shrimp.mcp_proxy import McpProxy
+from open_shrimp.mcp_proxy import server as proxy_server
 from open_shrimp.mcp_proxy.registry import ProxyRegistry
 from open_shrimp.mcp_proxy.server import _create_proxy_app
 from open_shrimp.mcp_proxy.stdio_manager import StdioManager
-from open_shrimp.tools import create_openshrimp_tools
+from open_shrimp.tools import OpenShrimpTool, create_openshrimp_tools
 
 pytestmark = pytest.mark.asyncio
 
@@ -480,6 +483,99 @@ async def test_proxy_lifecycle_serves_tools_over_loopback() -> None:
         assert "send_file" in names
     finally:
         await proxy.shutdown()
+
+
+# --- Slow-call SSE upgrade --------------------------------------------------
+
+
+async def test_slow_tool_call_upgrades_to_sse(monkeypatch) -> None:
+    """A tools/call slower than the grace window streams its result over SSE.
+
+    Headers must flush immediately (defeating the caller's hard 60s POST
+    abort), keepalives hold the connection, and the JSON-RPC result arrives
+    as a closing ``data:`` event.
+    """
+    monkeypatch.setattr(proxy_server, "_SSE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(proxy_server, "_SSE_KEEPALIVE_SECONDS", 0.05)
+
+    async def slow_handler(args):
+        await asyncio.sleep(0.3)
+        return {"content": [{"type": "text", "text": "slow-done"}]}
+
+    slow_tool = OpenShrimpTool(
+        name="slow", description="", input_schema={"type": "object"},
+        read_only=False, handler=slow_handler,
+    )
+    registry = ProxyRegistry()
+    token = registry.register_tool_scope(
+        context_name="c", chat_id=1, thread_id=None, user_id=5,
+        tool_factory=lambda: [slow_tool],
+    )
+    client, backing = await _client(registry)
+    try:
+        chunks: list[str] = []
+        async with client.stream(
+            "POST",
+            f"/tools/{token}",
+            json={
+                "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": {"name": "slow", "arguments": {}},
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/event-stream")
+            async for chunk in resp.aiter_text():
+                chunks.append(chunk)
+        body = "".join(chunks)
+    finally:
+        await client.aclose()
+        await backing.aclose()
+
+    assert ": open" in body
+    assert ": keepalive" in body  # 0.3s run vs 0.05s keepalive → several
+    data_lines = [
+        line[len("data: "):]
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert data_lines, body
+    payload = json.loads(data_lines[-1])
+    assert payload["id"] == 7
+    assert payload["result"]["content"][0]["text"] == "slow-done"
+
+
+async def test_fast_tool_call_stays_json(monkeypatch) -> None:
+    """A tool that returns within the grace window keeps the plain-JSON path."""
+    monkeypatch.setattr(proxy_server, "_SSE_GRACE_SECONDS", 0.5)
+
+    async def fast_handler(args):
+        return {"content": [{"type": "text", "text": "fast"}]}
+
+    fast_tool = OpenShrimpTool(
+        name="fast", description="", input_schema={"type": "object"},
+        read_only=False, handler=fast_handler,
+    )
+    registry = ProxyRegistry()
+    token = registry.register_tool_scope(
+        context_name="c", chat_id=1, thread_id=None, user_id=5,
+        tool_factory=lambda: [fast_tool],
+    )
+    client, backing = await _client(registry)
+    try:
+        resp = await client.post(
+            f"/tools/{token}",
+            json={
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "fast", "arguments": {}},
+            },
+        )
+    finally:
+        await client.aclose()
+        await backing.aclose()
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json()["result"]["content"][0]["text"] == "fast"
 
 
 # --- Registry unit ----------------------------------------------------------
