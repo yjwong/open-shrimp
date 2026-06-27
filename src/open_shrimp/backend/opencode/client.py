@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -23,10 +24,17 @@ from open_shrimp.backend.types import (
     AssistantMessage,
     Message,
     ResultMessage,
+    TaskStartedMessage,
     TextBlock,
+    ToolUseBlock,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Project bucket for subagent transcript files written by the child drain.
+#: The Terminal Mini App scans every project dir under ``/tmp/claude-<uid>/``
+#: when resolving a task id, so the exact name only needs to be stable.
+_SUBAGENT_TASK_PROJECT = "opencode_subagent"
 
 
 _MUTATING_OPENCODE_PERMS = frozenset({
@@ -374,10 +382,11 @@ class OpenCodeClient:
             rules.append({"permission": permission, "pattern": "*", "action": "ask"})
         rules.extend(self._rules_from_allowed_tools(include=_ASK_BY_DEFAULT_MCP_PERMS))
         rules.extend(self._rules_from_add_dirs())
-        # OpenShrimp provides its own Agent-compatible MCP tool. Keep
-        # OpenCode's built-in task tool out of the model-visible tool list so
-        # the two delegation paths do not compete.
-        rules.append({"permission": "task", "pattern": "*", "action": "deny"})
+        # OpenCode-native subagents (the ``task`` tool) are the delegation
+        # path for the OpenCode backend. The tool inherits the ``*`` ask
+        # baseline above, so each invocation routes through can_use_tool;
+        # the child session is then drained and surfaced (see
+        # ``receive_response``).
         return rules
 
     def _rules_from_allowed_tools(
@@ -825,16 +834,17 @@ class OpenCodeClient:
                 logger.debug("Failed to delete prompt suggestion fork %s", fork_id, exc_info=True)
 
     async def stop_task(self, task_id: str) -> None:
-        """Best-effort background-task stop.
+        """Stop a running subagent.
 
-        OpenCode does not expose a per-task abort endpoint, so this
-        currently falls back to a full-session interrupt.
+        ``task_id`` is the subagent's child session id (what the
+        ``TaskStartedMessage`` carried), so aborting that session stops the
+        specific subagent rather than the whole conversation. Falls back to a
+        full-session interrupt when no task id is given.
         """
-        logger.warning(
-            "stop_task is not implemented for OpenCode (task_id=%s); "
-            "falling back to interrupt()", task_id,
-        )
-        await self.interrupt()
+        if not task_id:
+            await self.interrupt()
+            return
+        await self.abort_session(task_id)
 
     async def interrupt(self) -> None:
         """Abort the in-flight turn for this session.
@@ -918,16 +928,180 @@ class OpenCodeClient:
             raise CLIConnectionError(
                 "OpenCodeClient.receive_response called before connect()"
             )
-        async for msg in _iter_response(
-            self._events,
-            self._session_id,
-            self._http,
-            self._bridge,
-            self._options.handle_questions,
-        ):
-            if isinstance(msg, ResultMessage) and msg.session_id:
-                self._session_id = msg.session_id
-            yield msg
+
+        # Fan-in: the parent session stream plus a drain task per subagent.
+        # Each producer pushes ``("msg", message)`` onto the merge queue and
+        # signals ``("producer_done", task)`` when it ends. We keep yielding
+        # until every producer (parent + all child drains) has finished, so a
+        # foreground subagent's transcript fully drains before the turn ends.
+        merge: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        producers: set[asyncio.Task[None]] = set()
+        seen_children: set[str] = set()
+
+        def _spawn(coro: Any) -> None:
+            task = asyncio.create_task(coro)
+            producers.add(task)
+            task.add_done_callback(
+                lambda t: merge.put_nowait(("producer_done", t))
+            )
+
+        async def _produce_parent() -> None:
+            async for msg in _iter_response(
+                self._events,
+                self._session_id,
+                self._http,
+                self._bridge,
+                self._options.handle_questions,
+            ):
+                await merge.put(("msg", msg))
+
+        _spawn(_produce_parent())
+
+        try:
+            while producers:
+                kind, payload = await merge.get()
+                if kind == "producer_done":
+                    producers.discard(payload)
+                    if not payload.cancelled():
+                        exc = payload.exception()
+                        if exc is not None:
+                            logger.warning(
+                                "OpenCode response producer failed: %r", exc
+                            )
+                    continue
+
+                msg = payload
+                if isinstance(msg, ResultMessage) and msg.session_id:
+                    self._session_id = msg.session_id
+
+                if (
+                    isinstance(msg, TaskStartedMessage)
+                    and msg.task_id
+                    and msg.tool_use_id
+                    and msg.task_id not in seen_children
+                ):
+                    seen_children.add(msg.task_id)
+                    _spawn(
+                        self._drain_child_session(
+                            msg.task_id, msg.tool_use_id, msg.description, merge,
+                        )
+                    )
+
+                yield msg
+        finally:
+            for task in producers:
+                task.cancel()
+
+    async def _drain_child_session(
+        self,
+        child_session_id: str,
+        call_id: str,
+        description: str | None,
+        merge: asyncio.Queue[tuple[str, Any]],
+    ) -> None:
+        """Drain a subagent's child session into the parent's merge queue.
+
+        Every message is stamped with ``parent_tool_use_id = call_id`` so
+        ``stream.py`` suppresses the subagent's chatter from the main chat
+        (it records ``call_id`` in ``bg_task_tool_use_ids`` on the
+        ``TaskStartedMessage``). The child's own ``ResultMessage`` is *not*
+        forwarded — it would otherwise overwrite the parent's session id in
+        ``stream.py``; ending the async-for on it is enough. The rendered
+        turns are also teed to a transcript file for the Terminal Mini App.
+        """
+        queue = self.subscribe_session(child_session_id)
+        bridge = self.create_permission_bridge(child_session_id)
+        sink = _ChildTranscriptSink(child_session_id, description)
+        try:
+            async for msg in self.iter_session_response(
+                child_session_id, queue, bridge=bridge,
+            ):
+                if isinstance(msg, ResultMessage):
+                    break
+                try:
+                    msg.parent_tool_use_id = call_id
+                except (AttributeError, TypeError):
+                    pass
+                sink.write_message(msg)
+                await merge.put(("msg", msg))
+        except Exception:
+            logger.exception(
+                "Subagent drain failed for child session %s", child_session_id,
+            )
+        finally:
+            if bridge is not None:
+                await bridge.stop()
+            self.unsubscribe_session(child_session_id)
+            sink.close()
+
+
+class _ChildTranscriptSink:
+    """Best-effort JSONL transcript of a subagent's child session.
+
+    Writes to the sanctioned :func:`transient_task_output_path` location so the
+    Terminal Mini App's "📺 View output" button discovers and tails it the same
+    way it does Claude-side agent tasks. Emits the JSONL shape
+    ``terminal/jsonl_render.py`` expects (``{"type": "user"|"assistant",
+    "message": {"content": …}}``). Any I/O failure is swallowed — the
+    transcript is an observability nicety, never load-bearing.
+    """
+
+    def __init__(self, child_session_id: str, description: str | None) -> None:
+        self._fh = None
+        try:
+            from open_shrimp.terminal.log_source import (
+                transient_task_output_path,
+            )
+
+            path = transient_task_output_path(
+                _SUBAGENT_TASK_PROJECT, child_session_id,
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = open(path, "a", encoding="utf-8")
+        except OSError:
+            logger.debug("Could not open subagent transcript sink", exc_info=True)
+            return
+        if description:
+            self._write_obj(
+                {"type": "user", "message": {"content": description}}
+            )
+
+    def write_message(self, msg: Message) -> None:
+        if self._fh is None or not isinstance(msg, AssistantMessage):
+            return
+        content: list[dict[str, Any]] = []
+        for block in msg.content:
+            if isinstance(block, TextBlock) and block.text:
+                content.append({"type": "text", "text": block.text})
+            elif isinstance(block, ToolUseBlock):
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+        if content:
+            self._write_obj(
+                {"type": "assistant", "message": {"content": content}}
+            )
+
+    def _write_obj(self, obj: dict[str, Any]) -> None:
+        if self._fh is None:
+            return
+        try:
+            self._fh.write(json.dumps(obj) + "\n")
+            self._fh.flush()
+        except (OSError, TypeError):
+            logger.debug("subagent transcript write failed", exc_info=True)
+
+    def close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
 
 
 def _parse_allowed_tool(entry: str) -> tuple[str | None, str | None]:
@@ -962,6 +1136,8 @@ def _deny_all_permission_rules() -> list[dict[str, Any]]:
     rules = [{"permission": "*", "pattern": "*", "action": "deny"}]
     for category in OPENCODE_PERMISSION_CATEGORIES:
         rules.append({"permission": category, "pattern": "*", "action": "deny"})
+    # Prompt-suggestion forks stay deny-all (including ``task``): a throwaway
+    # fork must never spawn subagents.
     for permission in sorted(
         _MUTATING_OPENCODE_PERMS
         | _ASK_BY_DEFAULT_MCP_PERMS

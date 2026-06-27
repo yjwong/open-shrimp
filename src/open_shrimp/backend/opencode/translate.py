@@ -43,6 +43,8 @@ from open_shrimp.backend.types import (
     AssistantMessage,
     Message,
     ResultMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
     TextBlock,
     TextDeltaEvent,
     ToolResultBlock,
@@ -71,6 +73,14 @@ _TOOL_STATUS_IN_FLIGHT = frozenset({_TOOL_STATUS_PENDING, _TOOL_STATUS_RUNNING})
 
 _PART_TYPE_TOOL = "tool"
 _PART_TYPE_REASONING = "reasoning"
+
+#: OpenCode's native subagent tool (``Tool.define("task", …)``). Its child
+#: session id rides on ``state.metadata.sessionId``.
+_TASK_TOOL = "task"
+#: ``task_type`` stamped on subagent ``TaskStartedMessage``s — both foreground
+#: and background subagents, matching the Claude side (``local_agent`` is in
+#: ``terminal/log_source.py``'s ``_AGENT_TASK_TYPES``).
+_SUBAGENT_TASK_TYPE = "local_agent"
 
 
 def _resolve_part_id(props: dict[str, Any]) -> str | None:
@@ -101,6 +111,9 @@ async def _iter_response(
     part_order: list[str] = []
     tool_use_emitted: set[str] = set()
     tool_result_emitted: set[str] = set()
+    # task callID -> child session id, for subagent (task tool) parts. Lets us
+    # emit a TaskNotificationMessage on completion keyed on the child session.
+    task_started: dict[str, str] = {}
     # Reasoning parts surface as message.part.delta with field="text", same as
     # real text parts (opencode processor.ts emits updatePartDelta with
     # field:"text" for reasoning-delta). The delta payload itself doesn't
@@ -263,6 +276,8 @@ async def _iter_response(
                     for msg in _toolpart_messages(
                         part, tool_use_emitted, tool_result_emitted,
                         flush_text=_flush_text,
+                        task_started=task_started,
+                        parent_session_id=session_id,
                     ):
                         yield msg
             continue
@@ -428,6 +443,8 @@ def _toolpart_messages(
     tool_result_emitted: set[str],
     *,
     flush_text,
+    task_started: dict[str, str] | None = None,
+    parent_session_id: str | None = None,
 ) -> list[Message]:
     """Synthesise ToolUseBlock / ToolResultBlock messages from a ToolPart.
 
@@ -437,6 +454,10 @@ def _toolpart_messages(
     * First sight of ``completed`` → ``UserMessage([ToolResultBlock])``.
     * First sight of ``error`` → ``UserMessage([ToolResultBlock(is_error=True)])``.
     * Anything else is a repeat and dropped.
+
+    The ``task`` tool (subagent) additionally emits a ``TaskStartedMessage``
+    once its child session id is known and a ``TaskNotificationMessage`` on
+    completion — see :func:`_taskpart_messages`.
     """
     raw_call_id = part.get("callID")
     if not raw_call_id:
@@ -446,6 +467,16 @@ def _toolpart_messages(
     if not isinstance(state, dict):
         return []
     status = state.get("status")
+
+    if part.get("tool") == _TASK_TOOL:
+        return _taskpart_messages(
+            call_id, state, status,
+            tool_use_emitted=tool_use_emitted,
+            tool_result_emitted=tool_result_emitted,
+            task_started=task_started if task_started is not None else {},
+            parent_session_id=parent_session_id,
+            flush_text=flush_text,
+        )
 
     if status in _TOOL_STATUS_IN_FLIGHT:
         if call_id in tool_use_emitted:
@@ -505,6 +536,144 @@ def _toolpart_messages(
         ]
 
     return []
+
+
+def _taskpart_messages(
+    call_id: str,
+    state: dict[str, Any],
+    status: Any,
+    *,
+    tool_use_emitted: set[str],
+    tool_result_emitted: set[str],
+    task_started: dict[str, str],
+    parent_session_id: str | None,
+    flush_text,
+) -> list[Message]:
+    """Translate a ``task`` (subagent) ToolPart into backend.types messages.
+
+    On the way up: the usual ``ToolUseBlock`` (so the chat shows the
+    "🤖 Agent (type)" row) plus a ``TaskStartedMessage`` once the child
+    session id appears on ``state.metadata.sessionId``.  On the way down:
+    the usual ``ToolResultBlock`` plus a ``TaskNotificationMessage`` keyed
+    on the child session id.
+
+    ``tool_use_id`` is the task ``callID`` — the lineage key
+    ``stream.py`` records in ``bg_task_tool_use_ids`` to suppress the
+    child's chatter from the main stream.  ``task_id`` is the child session
+    id — what ``/tasks`` and the Terminal Mini App key on.
+    """
+    raw_input = state.get("input")
+    raw_input = raw_input if isinstance(raw_input, dict) else {}
+    metadata = state.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    child_session_id = metadata.get("sessionId")
+    if not isinstance(child_session_id, str):
+        child_session_id = None
+
+    if status in _TOOL_STATUS_IN_FLIGHT:
+        out: list[Message] = []
+        if call_id not in tool_use_emitted and raw_input:
+            out.extend(flush_text())
+            out.append(
+                AssistantMessage(
+                    content=[
+                        ToolUseBlock(id=call_id, name=_TASK_TOOL, input=raw_input)
+                    ]
+                )
+            )
+            tool_use_emitted.add(call_id)
+        if call_id not in task_started and child_session_id:
+            out.append(
+                TaskStartedMessage(
+                    subtype="task_started",
+                    data={},
+                    task_id=child_session_id,
+                    tool_use_id=call_id,
+                    description=_task_description(raw_input),
+                    task_type=_SUBAGENT_TASK_TYPE,
+                    output_file=None,
+                    session_id=parent_session_id,
+                )
+            )
+            task_started[call_id] = child_session_id
+        return out
+
+    if status == _TOOL_STATUS_COMPLETED:
+        if call_id in tool_result_emitted:
+            return []
+        tool_result_emitted.add(call_id)
+        output = state.get("output")
+        msgs: list[Message] = [
+            UserMessage(
+                content=[
+                    ToolResultBlock(
+                        tool_use_id=call_id,
+                        content=output if output is not None else "",
+                        is_error=False,
+                    )
+                ]
+            )
+        ]
+        child = task_started.get(call_id)
+        if child:
+            msgs.append(
+                TaskNotificationMessage(
+                    subtype="task_notification",
+                    data={},
+                    task_id=child,
+                    tool_use_id=call_id,
+                    output_file=None,
+                    status="completed",
+                    summary=_task_description(raw_input),
+                    session_id=parent_session_id,
+                )
+            )
+        return msgs
+
+    if status == _TOOL_STATUS_ERROR:
+        if call_id in tool_result_emitted:
+            return []
+        tool_result_emitted.add(call_id)
+        err = state.get("error")
+        msgs = [
+            UserMessage(
+                content=[
+                    ToolResultBlock(
+                        tool_use_id=call_id,
+                        content=err if err is not None else "tool error",
+                        is_error=True,
+                    )
+                ]
+            )
+        ]
+        child = task_started.get(call_id)
+        if child:
+            msgs.append(
+                TaskNotificationMessage(
+                    subtype="task_notification",
+                    data={},
+                    task_id=child,
+                    tool_use_id=call_id,
+                    output_file=None,
+                    status="error",
+                    summary=_task_description(raw_input) or "subagent failed",
+                    session_id=parent_session_id,
+                )
+            )
+        return msgs
+
+    return []
+
+
+def _task_description(raw_input: dict[str, Any]) -> str:
+    """Build a human label from a task tool's input."""
+    desc = raw_input.get("description")
+    if isinstance(desc, str) and desc:
+        return desc
+    subagent = raw_input.get("subagent_type")
+    if isinstance(subagent, str) and subagent:
+        return subagent
+    return "Subagent"
 
 
 def _extract_error_message(props: dict[str, Any]) -> str:

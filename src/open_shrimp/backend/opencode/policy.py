@@ -269,7 +269,7 @@ def _summarize(
             action, path = files[0]
             return f"{action} {_relative_path(path, cwd)}"
         return f"{len(files)} files"
-    if tool_name == "agent":
+    if tool_name == "task":
         desc = tool_input.get("description", "")
         subagent = tool_input.get("subagent_type", "")
         label = f"({subagent}) " if subagent else ""
@@ -653,7 +653,7 @@ class OpenCodePolicy:
         return tool_name == "todowrite"
 
     def is_subagent_task(self, task_type: str | None) -> bool:
-        return False
+        return task_type in ("local_agent", "remote_agent")
 
     def host_bash_render(self) -> tuple[str, str]:
         return ("\U0001f513", "host_bash")
@@ -674,7 +674,7 @@ class OpenCodePolicy:
             return _format_write_approval(tool_input, cwd=cwd)
         if tool_name == "apply_patch":
             return _format_apply_patch_approval(tool_input, cwd=cwd)
-        if tool_name == "agent":
+        if tool_name == "task":
             return _format_agent_approval(tool_input, expanded=False)
         return _format_generic_approval(tool_name, tool_input)
 
@@ -716,8 +716,8 @@ class OpenCodePolicy:
 
         extras = ApprovalKeyboardExtras()
 
-        # agent: "Show prompt" merged into the primary row.
-        if tool_name == "agent":
+        # task (subagent): "Show prompt" merged into the primary row.
+        if tool_name == "task":
             show_prompt_data = f"show_prompt:{tool_use_id}"
             _pending_agent_inputs[tool_use_id] = tool_input
             extras.primary_row_extras.append(
