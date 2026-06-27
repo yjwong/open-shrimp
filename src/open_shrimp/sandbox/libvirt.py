@@ -558,7 +558,15 @@ class LibvirtSandbox:
         """Install computer-use helpers, runtime CLI binary, and credentials."""
         assert self._ssh_port is not None
         if self._computer_use:
-            self._install_security_key_helper()
+            try:
+                self._install_security_key_helper()
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                logger.warning(
+                    "Security-key helper install failed for libvirt context %s; "
+                    "continuing without security-key forwarding: %s",
+                    self._context_name,
+                    exc,
+                )
 
         if self._runtime is None:
             return
@@ -735,6 +743,11 @@ class LibvirtSandbox:
         )
         if result.returncode != 0:
             error = (result.stderr or result.stdout).strip()
+            if not error:
+                error = (
+                    "openshrimp-security-key-vm-helper is not installed in the VM "
+                    "or passwordless sudo is unavailable"
+                )
             raise RuntimeError(f"security-key helper failed to start: {error}")
 
     def stop(self) -> None:

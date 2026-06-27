@@ -348,7 +348,15 @@ class LimaSandbox:
     def provision_workspace(self) -> None:
         """Install computer-use helpers, runtime CLI binary, and credentials."""
         if self._computer_use:
-            self._install_security_key_helper()
+            try:
+                self._install_security_key_helper()
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                logger.warning(
+                    "Security-key helper install failed for Lima context %s; "
+                    "continuing without security-key forwarding: %s",
+                    self._context_name,
+                    exc,
+                )
 
         if self._runtime is None:
             return
@@ -500,6 +508,11 @@ class LimaSandbox:
         rc, stdout, stderr = self._exec_in_vm_sync(cmd, timeout_secs=10.0)
         if rc != 0:
             error = (stderr or stdout).strip()
+            if not error:
+                error = (
+                    "openshrimp-security-key-vm-helper is not installed in the VM "
+                    "or passwordless sudo is unavailable"
+                )
             raise RuntimeError(f"security-key helper failed to start: {error}")
 
     def stop(self) -> None:
