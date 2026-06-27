@@ -553,6 +553,7 @@ async def get_or_create_session(
     extra: dict[str, Any] = {}
     if served_endpoint is not None:
         extra["endpoint"] = served_endpoint
+    extra["handle_questions"] = _make_opencode_questions_proxy(callback_context)
 
     options = BackendOptions(
         cwd=context.directory,
@@ -1093,6 +1094,32 @@ def _make_questions_proxy(
             logger.warning("No question callback set, returning empty answers")
             return {}
         return await ctx.handle_user_questions(questions)
+
+    return _proxy
+
+
+def _make_opencode_questions_proxy(
+    ctx: CallbackContext,
+) -> Callable[[list[dict[str, Any]]], Any]:
+    async def _proxy(
+        questions: list[dict[str, Any]],
+    ) -> list[list[str]]:
+        if ctx.handle_user_questions is None:
+            logger.warning("No question callback set, returning empty answers")
+            return []
+
+        answers_by_question = await ctx.handle_user_questions(questions)
+        answers: list[list[str]] = []
+        for question in questions:
+            question_text = str(question.get("question", ""))
+            answer = answers_by_question.get(question_text, "")
+            if question.get("multiSelect") and answer != "None selected":
+                answers.append([
+                    part.strip() for part in answer.split(", ") if part.strip()
+                ])
+            else:
+                answers.append([answer] if answer else [])
+        return answers
 
     return _proxy
 
