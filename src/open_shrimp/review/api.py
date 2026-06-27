@@ -905,6 +905,10 @@ def create_review_app(
 
     routes.extend(create_config_routes())
 
+    from open_shrimp.security_key.api import create_security_key_routes
+
+    routes.extend(create_security_key_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db

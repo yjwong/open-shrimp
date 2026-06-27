@@ -96,6 +96,34 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 )
 """
 
+_CREATE_SECURITY_KEY_SESSIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS security_key_sessions (
+    id TEXT PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    message_thread_id INTEGER NOT NULL DEFAULT 0,
+    context_name TEXT NOT NULL,
+    sandbox_id TEXT,
+    device_id TEXT,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    approved_at INTEGER,
+    ended_at INTEGER,
+    end_reason TEXT
+)
+"""
+
+_CREATE_SECURITY_KEY_AUDIT_EVENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS security_key_audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    event TEXT NOT NULL,
+    role TEXT,
+    reason TEXT,
+    created_at INTEGER NOT NULL
+)
+"""
+
 
 async def _migrate_schema(db: aiosqlite.Connection) -> None:
     """Migrate old schema (no message_thread_id) to new schema.
@@ -188,6 +216,8 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_PINNED_MESSAGES_TABLE)
     await db.execute(_CREATE_SCHEDULED_TASKS_TABLE)
     await db.execute(_CREATE_ADDITIONAL_DIRECTORIES_TABLE)
+    await db.execute(_CREATE_SECURITY_KEY_SESSIONS_TABLE)
+    await db.execute(_CREATE_SECURITY_KEY_AUDIT_EVENTS_TABLE)
     await db.commit()
     await _migrate_schema(db)
     await _migrate_scheduled_tasks_disabled(db)
