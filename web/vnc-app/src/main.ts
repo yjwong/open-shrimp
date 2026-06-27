@@ -380,6 +380,8 @@ function chatIdFromAuthToken(authToken: string): number | null {
 function showSecurityKeyModal(data: {
   phone_url: string;
   vm_helper_command: string;
+  vm_helper_started?: boolean;
+  vm_helper_error?: string | null;
   expires_at: number;
 }): void {
   const overlay = document.createElement("div");
@@ -400,11 +402,13 @@ function showSecurityKeyModal(data: {
   const expiry = new Date(data.expires_at * 1000).toLocaleTimeString();
   details.value = [
     `Expires: ${expiry}`,
+    `VM helper: ${data.vm_helper_started ? "started automatically" : "manual start required"}`,
+    ...(data.vm_helper_error ? [`Auto-start error: ${data.vm_helper_error}`] : []),
     "",
     "Android phone WebSocket URL:",
     data.phone_url,
     "",
-    "Run in the VM:",
+    data.vm_helper_started ? "Fallback command:" : "Run in the VM:",
     data.vm_helper_command,
   ].join("\n");
   box.appendChild(details);

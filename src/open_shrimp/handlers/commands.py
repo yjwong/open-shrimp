@@ -54,6 +54,7 @@ from open_shrimp.security_key.api import (
     create_security_key_session,
     get_or_create_registry,
 )
+from open_shrimp.security_key.bootstrap import start_vm_helper
 
 logger = logging.getLogger(__name__)
 
@@ -1431,6 +1432,24 @@ async def security_key_handler(
         f"--session-id {session.id} "
         f"--token {session.vm_token}"
     )
+    helper_result = None
+    if sandbox is not None:
+        helper_result = await start_vm_helper(
+            sandbox,
+            relay_url=relay_base,
+            session_id=session.id,
+            token=session.vm_token,
+            context_name=context_name,
+            logger=logger,
+        )
+    helper_started = helper_result.started if helper_result is not None else False
+    helper_error = helper_result.error if helper_result is not None else None
+
+    helper_status = (
+        "VM helper started automatically\. Fallback command:"
+        if helper_started
+        else "VM helper was not started automatically\. Run this in the computer\-use VM:"
+    )
 
     text = "\n".join(
         [
@@ -1440,8 +1459,16 @@ async def security_key_handler(
             "Open the Android app and paste this phone WebSocket URL:",
             f"`{_escape_mdv2(phone_url)}`",
             "",
-            "Run this in the computer\-use VM:",
+            helper_status,
             f"`{_escape_mdv2(helper_cmd)}`",
+            *(
+                [
+                    "",
+                    f"Auto\-start error: `{_escape_mdv2(helper_error)}`",
+                ]
+                if helper_error
+                else []
+            ),
             "",
             "The Android app must still require fresh local device approval before forwarding\.",
         ]

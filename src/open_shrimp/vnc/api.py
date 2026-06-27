@@ -27,6 +27,7 @@ from open_shrimp.security_key.api import (
     create_security_key_session,
     get_or_create_registry,
 )
+from open_shrimp.security_key.bootstrap import start_vm_helper
 from open_shrimp.sandbox.docker_helpers import (
     get_text_input_active,
     get_text_input_state_path,
@@ -594,6 +595,18 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
         if sandbox is not None
         else phone_base
     )
+    helper_result = None
+    if sandbox is not None:
+        helper_result = await start_vm_helper(
+            sandbox,
+            relay_url=relay_base,
+            session_id=session.id,
+            token=session.vm_token,
+            context_name=context_name,
+            logger=logger,
+        )
+    helper_started = helper_result.started if helper_result is not None else False
+    helper_error = helper_result.error if helper_result is not None else None
 
     return JSONResponse(
         {
@@ -608,6 +621,8 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
                 f"--session-id {session.id} "
                 f"--token {session.vm_token}"
             ),
+            "vm_helper_started": helper_started,
+            "vm_helper_error": helper_error,
         },
         status_code=201,
     )

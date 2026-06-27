@@ -295,6 +295,16 @@ class Sandbox(Protocol):
         """
         ...
 
+    def start_security_key_helper(
+        self,
+        *,
+        relay_url: str,
+        session_id: str,
+        token: str,
+    ) -> None:
+        """Start the security-key UHID bridge inside the computer-use guest."""
+        ...
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files from the host into the sandbox.
 
@@ -348,5 +358,3 @@ class Sandbox(Protocol):
     def cleanup_port_forwards(self, scope_key: str | None = None) -> None:
         """Tear down all forwards, or just those owned by *scope_key*."""
         ...
-
-

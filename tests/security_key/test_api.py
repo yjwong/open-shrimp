@@ -78,11 +78,18 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, object]:
     return TestClient(app), db
 
 
-def _make_computer_use_client(tmp_path: Path) -> tuple[TestClient, object]:
+def _make_computer_use_client(
+    tmp_path: Path,
+    *,
+    sandbox: object | None = None,
+) -> tuple[TestClient, object]:
     db = asyncio.run(init_db(tmp_path / "openshrimp.sqlite3"))
     registry = SecurityKeySessionRegistry()
     app = create_review_app(
-        _make_config(computer_use=True), db, security_key_registry=registry
+        _make_config(computer_use=True),
+        db,
+        sandbox_managers={"docker": _FakeSandboxManager(sandbox)} if sandbox else None,
+        security_key_registry=registry,
     )
     return TestClient(app), db
 
@@ -176,7 +183,8 @@ def test_cancel_session_closes_metadata(tmp_path: Path) -> None:
 
 
 def test_vnc_endpoint_creates_security_key_session(tmp_path: Path) -> None:
-    client, db = _make_computer_use_client(tmp_path)
+    sandbox = _FakeSandbox()
+    client, db = _make_computer_use_client(tmp_path, sandbox=sandbox)
     try:
         response = client.post(
             "/api/vnc/security-key-session"
@@ -190,6 +198,13 @@ def test_vnc_endpoint_creates_security_key_session(tmp_path: Path) -> None:
         assert data["vm_helper_command"].startswith(
             "sudo openshrimp-security-key-vm-helper "
         )
+        assert data["vm_helper_started"] is True
+        assert data["vm_helper_error"] is None
+        assert len(sandbox.started) == 1
+        started = sandbox.started[0]
+        assert started["relay_url"] == "ws://host.docker.internal:8080"
+        assert started["session_id"] == data["id"]
+        assert started["token"]
 
         status = client.get(
             f"/api/security-key/sessions/{data['id']}", headers=_auth_header()
@@ -199,6 +214,58 @@ def test_vnc_endpoint_creates_security_key_session(tmp_path: Path) -> None:
     finally:
         client.close()
         asyncio.run(db.close())
+
+
+def test_vnc_endpoint_reports_security_key_helper_start_failure(
+    tmp_path: Path,
+) -> None:
+    client, db = _make_computer_use_client(
+        tmp_path,
+        sandbox=_FakeSandbox(start_error=RuntimeError("sudo unavailable")),
+    )
+    try:
+        response = client.post(
+            "/api/vnc/security-key-session"
+            f"?context=default&token={quote(_build_init_data())}",
+            json={"chat_id": 123},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["vm_helper_started"] is False
+        assert data["vm_helper_error"] == "sudo unavailable"
+    finally:
+        client.close()
+        asyncio.run(db.close())
+
+
+class _FakeSandboxManager:
+    def __init__(self, sandbox: object | None) -> None:
+        self.sandbox = sandbox
+
+    def create_sandbox(self, context_name: str, ctx: object) -> object | None:
+        return self.sandbox
+
+
+class _FakeSandbox:
+    host_address = "host.docker.internal"
+    container_name = "openshrimp-test"
+
+    def __init__(self, start_error: Exception | None = None) -> None:
+        self.start_error = start_error
+        self.started: list[dict[str, str]] = []
+
+    def start_security_key_helper(
+        self,
+        *,
+        relay_url: str,
+        session_id: str,
+        token: str,
+    ) -> None:
+        if self.start_error is not None:
+            raise self.start_error
+        self.started.append(
+            {"relay_url": relay_url, "session_id": session_id, "token": token}
+        )
 
 
 class _FakeWebSocket:

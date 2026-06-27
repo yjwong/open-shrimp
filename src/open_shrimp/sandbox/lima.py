@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from open_shrimp.config import SandboxConfig
+from open_shrimp.security_key.vm_helper_binary import (
+    BINARY_NAME as SECURITY_KEY_HELPER_BINARY,
+    download_url_for_linux_arch,
+    install_cmd_for_linux_guest,
+)
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     AgentRuntime,
@@ -341,7 +346,10 @@ class LimaSandbox:
                 self._ensure_ssh_tunnels()
 
     def provision_workspace(self) -> None:
-        """Install the bundle's CLI binary and copy credentials into the VM."""
+        """Install computer-use helpers, runtime CLI binary, and credentials."""
+        if self._computer_use:
+            self._install_security_key_helper()
+
         if self._runtime is None:
             return
 
@@ -351,6 +359,26 @@ class LimaSandbox:
 
         if self._runtime.provision_credentials is not None:
             self._runtime.provision_credentials(self._claude_home_dir)
+
+    def _install_security_key_helper(self) -> None:
+        if self._guest_os != "linux":
+            logger.info(
+                "Security-key helper install only supports linux guests; skipping "
+                "guest_os=%s", self._guest_os,
+            )
+            return
+
+        from open_shrimp.sandbox.lima_helpers import install_cli_in_linux_vm
+
+        install_cli_in_linux_vm(
+            self._limactl,
+            self._inst_name,
+            SECURITY_KEY_HELPER_BINARY,
+            url_for=lambda _version, arch: download_url_for_linux_arch(arch),
+            version_resolver=lambda: "latest",
+            install_cmd_for=install_cmd_for_linux_guest,
+            timeout=300,
+        )
 
     def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
         if isinstance(runtime.launch, WrappedCLI):
@@ -444,6 +472,35 @@ class LimaSandbox:
             description=f"reach({guest_port})",
         )
         return f"127.0.0.1:{forward.host_port}"
+
+    def start_security_key_helper(
+        self,
+        *,
+        relay_url: str,
+        session_id: str,
+        token: str,
+    ) -> None:
+        if self._guest_os == "macos":
+            raise NotImplementedError(
+                "security-key helper requires Linux UHID support"
+            )
+        log_path = f"/tmp/openshrimp-security-key-helper-{session_id}.log"
+        helper_cmd = shlex.join([
+            "openshrimp-security-key-vm-helper",
+            "--relay-url", relay_url,
+            "--session-id", session_id,
+            "--token", token,
+        ])
+        cmd = (
+            "command -v openshrimp-security-key-vm-helper >/dev/null && "
+            "sudo -n true && "
+            f"(nohup sudo -n {helper_cmd} > {shlex.quote(log_path)} 2>&1 "
+            "< /dev/null &)"
+        )
+        rc, stdout, stderr = self._exec_in_vm_sync(cmd, timeout_secs=10.0)
+        if rc != 0:
+            error = (stderr or stdout).strip()
+            raise RuntimeError(f"security-key helper failed to start: {error}")
 
     def stop(self) -> None:
         """Stop the Lima instance and any SSH tunnels."""

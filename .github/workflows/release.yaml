@@ -277,6 +277,36 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+  build-security-key-helper:
+    name: Build security-key VM helper
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Build helper
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath \
+            -ldflags "-s -w" \
+            -o openshrimp-security-key-vm-helper-linux-x86_64 \
+            ./src/open_shrimp/security_key/vm_helper_go/main.go
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+            -trimpath \
+            -ldflags "-s -w" \
+            -o openshrimp-security-key-vm-helper-linux-aarch64 \
+            ./src/open_shrimp/security_key/vm_helper_go/main.go
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: security-key-vm-helper
+          path: openshrimp-security-key-vm-helper-linux-*
+
   build-limactl:
     # Builds the bundled `limactl` from upstream Lima at the version
     # pinned by `patches/PIN`, with `patches/lima-vznc-display.patch`
@@ -607,7 +637,7 @@ jobs:
   release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-binary, build-virtiofsd, build-limactl, build-macos-app]
+    needs: [build-binary, build-virtiofsd, build-security-key-helper, build-limactl, build-macos-app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -625,6 +655,7 @@ jobs:
           files: |
             artifacts/openshrimp-*
             artifacts/moonshine-stt-*
+            artifacts/openshrimp-security-key-vm-helper-*
             artifacts/virtiofsd-*
             artifacts/OpenShrimp-*.dmg
             artifacts/*.tar.gz
