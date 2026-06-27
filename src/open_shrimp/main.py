@@ -109,6 +109,7 @@ def _create_http_server(
     db: "aiosqlite.Connection",  # noqa: F821
     sandbox_managers: dict[str, SandboxManager] | None = None,
     config_path: str | None = None,
+    security_key_registry: object | None = None,
 ) -> "uvicorn.Server":  # noqa: F821
     """Create the review API HTTP server (call ``server.serve()`` to run)."""
     import uvicorn
@@ -116,7 +117,11 @@ def _create_http_server(
     from open_shrimp.review.api import create_review_app
 
     app = create_review_app(
-        config, db, sandbox_managers=sandbox_managers, config_path=config_path
+        config,
+        db,
+        sandbox_managers=sandbox_managers,
+        config_path=config_path,
+        security_key_registry=security_key_registry,
     )
 
     server_config = uvicorn.Config(
@@ -204,8 +209,16 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         )
         mcp_proxy = None
 
+    from open_shrimp.security_key.sessions import SecurityKeySessionRegistry
+
+    security_key_registry = SecurityKeySessionRegistry()
+
     http_server = _create_http_server(
-        config, db, sandbox_managers=sandbox_mgrs, config_path=config_path
+        config,
+        db,
+        sandbox_managers=sandbox_mgrs,
+        config_path=config_path,
+        security_key_registry=security_key_registry,
     )
 
     bot_task = asyncio.create_task(
@@ -214,6 +227,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
             config_path=config_path,
             sandbox_managers=sandbox_mgrs,
             mcp_proxy=mcp_proxy,
+            security_key_registry=security_key_registry,
         )
     )
     http_task = asyncio.create_task(http_server.serve())

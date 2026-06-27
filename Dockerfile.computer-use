@@ -23,6 +23,13 @@ ARG BASE_IMAGE=openshrimp-claude:latest
 ARG INSTALL_CLAUDE_CODE=true
 ARG GUEST_HOME=/home/claude
 
+FROM golang:1.26-bookworm AS security-key-helper-builder
+
+COPY src/open_shrimp/security_key/vm_helper_go/main.go /src/security-key-vm-helper.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+    -o /out/openshrimp-security-key-vm-helper \
+    /src/security-key-vm-helper.go
+
 FROM ${BASE_IMAGE}
 
 # Re-declare ARGs after FROM so they're available in RUN/COPY layers.
@@ -91,6 +98,12 @@ COPY computer-use/autostart ${GUEST_HOME}/.config/labwc/autostart
 # Copy entrypoint script.
 COPY computer-use/entrypoint.sh /usr/local/bin/computer-use-entrypoint.sh
 RUN chmod +x /usr/local/bin/computer-use-entrypoint.sh
+
+# Security-key forwarding VM helper. It runs manually with a one-time relay
+# token created by /security_key. The final image gets only the static binary.
+COPY --from=security-key-helper-builder \
+    /out/openshrimp-security-key-vm-helper \
+    /usr/local/bin/openshrimp-security-key-vm-helper
 
 # Node.js 24 LTS for Playwright MCP.
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \

@@ -55,6 +55,7 @@ from open_shrimp.handlers.commands import (
     resume_handler,
     review_handler,
     schedule_handler,
+    security_key_handler,
     start_handler,
     status_handler,
     tasks_handler,
@@ -289,6 +290,7 @@ def build_application(
     app.add_handler(CommandHandler("schedule", schedule_handler))
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CommandHandler("vnc", vnc_handler))
+    app.add_handler(CommandHandler("security_key", security_key_handler))
     app.add_handler(CommandHandler("config", config_handler))
     app.add_handler(CommandHandler("restart", restart_handler))
 
@@ -323,6 +325,7 @@ async def run_bot(
     config_path: str | None = None,
     sandbox_managers: "dict[str, SandboxManager] | None" = None,
     mcp_proxy: "Any | None" = None,
+    security_key_registry: "Any | None" = None,
 ) -> None:
     """Start the bot with long polling."""
     # Resolve the agent backend once at startup and install it as the process
@@ -346,6 +349,9 @@ async def run_bot(
     app = build_application(config, db, backends=backends)
     app.bot_data["config_path"] = config_path
     app.bot_data["mcp_proxy"] = mcp_proxy
+    app.bot_data["sandbox_managers"] = sandbox_managers
+    if security_key_registry is not None:
+        app.bot_data["security_key_registry"] = security_key_registry
     app.bot_data["backend"] = backend
     app.bot_data["backends"] = backends
     logger.info("Using agent backend: %s", backend.name)
@@ -381,6 +387,7 @@ async def run_bot(
         BotCommand("schedule", "List scheduled tasks"),
         BotCommand("tasks", "List or stop background tasks"),
         BotCommand("vnc", "View computer-use desktop"),
+        BotCommand("security_key", "Start security-key forwarding"),
     ]
     if "mcp" in caps:
         common_commands.append(BotCommand("mcp", "List and manage MCP servers"))

@@ -48,6 +48,12 @@ from open_shrimp.handlers.utils import (
     chat_scope_from_message,
     get_backend_for_scope,
 )
+from open_shrimp.security_key.api import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_SESSION_LIFETIME_SECONDS,
+    create_security_key_session,
+    get_or_create_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1330,6 +1336,117 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
     )
+
+
+# ── /security_key ──
+
+
+def _websocket_base(url: str) -> str:
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://") :]
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://") :]
+    return url
+
+
+def _get_sandbox_for_security_key(
+    context_name: str,
+    ctx: ContextConfig,
+    sandbox_managers: dict[str, object] | None,
+) -> object | None:
+    backend: str | None = None
+    if ctx.container is not None and ctx.container.computer_use:
+        backend = "docker"
+    elif ctx.sandbox is not None and ctx.sandbox.computer_use:
+        backend = ctx.sandbox.backend
+    if backend is None:
+        return None
+    manager = (sandbox_managers or {}).get(backend)
+    create = getattr(manager, "create_sandbox", None) if manager is not None else None
+    if create is None:
+        return None
+    return create(context_name, ctx)
+
+
+async def security_key_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /security_key -- create a short-lived manual forwarding session."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if not _is_authorized(update.effective_user.id, config):
+        return
+
+    scope = chat_scope_from_message(update.message)
+    context_name, ctx = await _get_context(scope, config, db)
+    has_computer_use = (
+        (ctx.container is not None and ctx.container.computer_use)
+        or (ctx.sandbox is not None and ctx.sandbox.computer_use)
+    )
+    if not has_computer_use:
+        await update.message.reply_text(
+            f"Context `{_escape_mdv2(context_name)}` does not have computer use enabled\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    registry = get_or_create_registry(context.bot_data)
+    sandbox = await asyncio.to_thread(
+        _get_sandbox_for_security_key,
+        context_name,
+        ctx,
+        context.bot_data.get("sandbox_managers"),
+    )
+    sandbox_id = getattr(sandbox, "container_name", None) or context_name
+    session = await create_security_key_session(
+        db,
+        registry=registry,
+        scope=scope,
+        context_name=context_name,
+        sandbox_id=sandbox_id,
+        lifetime_seconds=DEFAULT_SESSION_LIFETIME_SECONDS,
+        idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
+    )
+
+    if config.review.public_url:
+        public_base = config.review.public_url.rstrip("/")
+    else:
+        public_base = f"https://{config.review.host}:{config.review.port}"
+    phone_base = _websocket_base(public_base)
+    phone_url = (
+        f"{phone_base}/api/security-key/sessions/{session.id}/phone"
+        f"?token={session.phone_token}"
+    )
+
+    if sandbox is not None:
+        relay_base = f"ws://{sandbox.host_address}:{config.review.port}"
+    else:
+        relay_base = _websocket_base(public_base)
+    helper_cmd = (
+        "sudo openshrimp-security-key-vm-helper "
+        f"--relay-url {relay_base} "
+        f"--session-id {session.id} "
+        f"--token {session.vm_token}"
+    )
+
+    text = "\n".join(
+        [
+            f"Security key forwarding for `{_escape_mdv2(context_name)}` is ready\.",
+            "",
+            f"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`\.",
+            "Open the Android app and paste this phone WebSocket URL:",
+            f"`{_escape_mdv2(phone_url)}`",
+            "",
+            "Run this in the computer\-use VM:",
+            f"`{_escape_mdv2(helper_cmd)}`",
+            "",
+            "The Android app must still require fresh local device approval before forwarding\.",
+        ]
+    )
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 
 # ── /login ──

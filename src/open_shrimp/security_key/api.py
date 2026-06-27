@@ -46,6 +46,20 @@ def _registry(request_or_ws: Request | WebSocket) -> SecurityKeySessionRegistry:
     return registry
 
 
+def get_or_create_registry(state: Any) -> SecurityKeySessionRegistry:
+    """Return the shared security-key relay registry from an app/bot state."""
+    registry = getattr(state, "security_key_registry", None)
+    if registry is None and isinstance(state, dict):
+        registry = state.get("security_key_registry")
+    if registry is None:
+        registry = SecurityKeySessionRegistry()
+        if isinstance(state, dict):
+            state["security_key_registry"] = registry
+        else:
+            state.security_key_registry = registry
+    return registry
+
+
 async def _authenticate(request: Request) -> int:
     config: Config = request.app.state.config
     return await authenticate(
@@ -147,9 +161,40 @@ async def create_session_endpoint(request: Request) -> JSONResponse:
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
-    session = await _registry(request).create(
-        chat_id=chat_id,
-        thread_id=thread_id,
+    session = await create_security_key_session(
+        db,
+        registry=_registry(request),
+        scope=scope,
+        context_name=context_name,
+        sandbox_id=sandbox_id,
+        lifetime_seconds=lifetime_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+    )
+
+    return JSONResponse(
+        {
+            **session.public_dict(),
+            "phone_token": session.phone_token,
+            "vm_token": session.vm_token,
+        },
+        status_code=201,
+    )
+
+
+async def create_security_key_session(
+    db: aiosqlite.Connection,
+    *,
+    registry: SecurityKeySessionRegistry,
+    scope: ChatScope,
+    context_name: str,
+    sandbox_id: str | None,
+    lifetime_seconds: int = DEFAULT_SESSION_LIFETIME_SECONDS,
+    idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS,
+) -> SecurityKeyRelaySession:
+    """Create an active relay session and persist audit metadata."""
+    session = await registry.create(
+        chat_id=scope.chat_id,
+        thread_id=scope.thread_id,
         context_name=context_name,
         sandbox_id=sandbox_id,
         lifetime_seconds=lifetime_seconds,
@@ -164,15 +209,7 @@ async def create_session_endpoint(request: Request) -> JSONResponse:
         expires_at=session.expires_at,
     )
     await audit_security_key_event(db, session_id=session.id, event="created")
-
-    return JSONResponse(
-        {
-            **session.public_dict(),
-            "phone_token": session.phone_token,
-            "vm_token": session.vm_token,
-        },
-        status_code=201,
-    )
+    return session
 
 
 async def get_session_endpoint(request: Request) -> JSONResponse:

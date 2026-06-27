@@ -6,12 +6,18 @@ import hmac
 import json
 import time
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import pytest
 from starlette.testclient import TestClient
 
-from open_shrimp.config import Config, ContextConfig, ReviewConfig, TelegramConfig
+from open_shrimp.config import (
+    Config,
+    ContextConfig,
+    ReviewConfig,
+    SandboxConfig,
+    TelegramConfig,
+)
 from open_shrimp.db import init_db
 from open_shrimp.review.api import create_review_app
 from open_shrimp.security_key.api import _relay_loop
@@ -21,7 +27,7 @@ BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 ALLOWED_USER_ID = 111222333
 
 
-def _make_config() -> Config:
+def _make_config(*, computer_use: bool = False) -> Config:
     return Config(
         telegram=TelegramConfig(token=BOT_TOKEN),
         allowed_users=[ALLOWED_USER_ID],
@@ -31,6 +37,11 @@ def _make_config() -> Config:
                 description="Test context",
                 model="claude-sonnet-4-6",
                 allowed_tools=[],
+                sandbox=(
+                    SandboxConfig(backend="docker", computer_use=True)
+                    if computer_use
+                    else None
+                ),
             ),
         },
         default_context="default",
@@ -64,6 +75,15 @@ def _auth_header() -> dict[str, str]:
 def _make_client(tmp_path: Path) -> tuple[TestClient, object]:
     db = asyncio.run(init_db(tmp_path / "openshrimp.sqlite3"))
     app = create_review_app(_make_config(), db)
+    return TestClient(app), db
+
+
+def _make_computer_use_client(tmp_path: Path) -> tuple[TestClient, object]:
+    db = asyncio.run(init_db(tmp_path / "openshrimp.sqlite3"))
+    registry = SecurityKeySessionRegistry()
+    app = create_review_app(
+        _make_config(computer_use=True), db, security_key_registry=registry
+    )
     return TestClient(app), db
 
 
@@ -150,6 +170,32 @@ def test_cancel_session_closes_metadata(tmp_path: Path) -> None:
         )
         assert status.status_code == 200
         assert status.json()["end_reason"] == "cancelled"
+    finally:
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_vnc_endpoint_creates_security_key_session(tmp_path: Path) -> None:
+    client, db = _make_computer_use_client(tmp_path)
+    try:
+        response = client.post(
+            "/api/vnc/security-key-session"
+            f"?context=default&token={quote(_build_init_data())}",
+            json={"chat_id": 123},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] == "created"
+        assert "/api/security-key/sessions/" in data["phone_url"]
+        assert data["vm_helper_command"].startswith(
+            "sudo openshrimp-security-key-vm-helper "
+        )
+
+        status = client.get(
+            f"/api/security-key/sessions/{data['id']}", headers=_auth_header()
+        )
+        assert status.status_code == 200
+        assert status.json()["id"] == data["id"]
     finally:
         client.close()
         asyncio.run(db.close())
