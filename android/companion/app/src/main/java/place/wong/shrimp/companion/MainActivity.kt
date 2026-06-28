@@ -2,6 +2,7 @@ package place.wong.shrimp.companion
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -16,6 +17,7 @@ import android.security.keystore.KeyProperties
 import android.text.InputType
 import android.text.method.ScrollingMovementMethod
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -52,6 +54,12 @@ class MainActivity : Activity() {
     private lateinit var relayUrlLayout: TextInputLayout
     private lateinit var relayUrlInput: TextInputEditText
     private lateinit var deviceNameInput: TextInputEditText
+    private lateinit var pairButton: MaterialButton
+    private lateinit var claimButton: MaterialButton
+    private lateinit var pairingStatusView: TextView
+    private lateinit var sessionStatusView: TextView
+    private lateinit var debugLogButton: MaterialButton
+    private lateinit var logCard: MaterialCardView
     private lateinit var logView: TextView
     private lateinit var prefs: SharedPreferences
 
@@ -116,11 +124,21 @@ class MainActivity : Activity() {
             addView(relayUrlInput, matchWrap())
         }
 
-        val pairButton = MaterialButton(this).apply {
+        pairingStatusView = TextView(this).apply {
+            text = savedPairingStatusText()
+            setTextAppearance(MaterialR.style.TextAppearance_Material3_BodyMedium)
+        }
+
+        pairButton = MaterialButton(this).apply {
             text = "Pair this phone"
             setOnClickListener { pairDevice() }
         }
-        val claimButton = MaterialButton(this).apply {
+        sessionStatusView = TextView(this).apply {
+            text = "No session selected. Start /security_key in OpenShrimp, then tap Find pending session."
+            setTextAppearance(MaterialR.style.TextAppearance_Material3_BodyMedium)
+        }
+
+        claimButton = MaterialButton(this).apply {
             text = "Find pending session"
             setOnClickListener { findAndClaimPendingSession() }
         }
@@ -136,6 +154,11 @@ class MainActivity : Activity() {
                         .setAction(SecurityKeyForwardingService.ACTION_STOP)
                 )
             }
+        }
+
+        debugLogButton = MaterialButton(this, null, MaterialR.attr.materialButtonOutlinedStyle).apply {
+            text = "Show debug log"
+            setOnClickListener { toggleDebugLog() }
         }
 
         logView = TextView(this).apply {
@@ -154,8 +177,9 @@ class MainActivity : Activity() {
             setTextAppearance(MaterialR.style.TextAppearance_Material3_BodyMedium)
         }
 
-        val logCard = MaterialCardView(this).apply {
+        logCard = MaterialCardView(this).apply {
             radius = dp(24).toFloat()
+            visibility = View.GONE
             addView(logView, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
 
@@ -167,10 +191,13 @@ class MainActivity : Activity() {
             addView(pairingCodeLayout, matchWrapWithBottomMargin(16))
             addView(deviceNameLayout, matchWrapWithBottomMargin(16))
             addView(pairButton, matchWrapWithBottomMargin(8))
-            addView(claimButton, matchWrapWithBottomMargin(24))
+            addView(pairingStatusView, matchWrapWithBottomMargin(16))
+            addView(claimButton, matchWrapWithBottomMargin(8))
+            addView(sessionStatusView, matchWrapWithBottomMargin(24))
             addView(relayUrlLayout, matchWrapWithBottomMargin(8))
             addView(manualStartButton, matchWrapWithBottomMargin(8))
-            addView(stopButton, matchWrapWithBottomMargin(24))
+            addView(stopButton, matchWrapWithBottomMargin(8))
+            addView(debugLogButton, matchWrapWithBottomMargin(8))
             addView(logCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }
 
@@ -217,11 +244,13 @@ class MainActivity : Activity() {
         val baseUrl = normalizedBaseUrl() ?: return
         val code = pairingCodeInput.text.toString().trim()
         if (code.isEmpty()) {
-            appendLog("Enter the pairing code from /pair")
+            setPairingStatus("Enter the pairing code from /pair")
             return
         }
         val deviceName = deviceNameInput.text.toString().trim().ifEmpty { Build.MODEL }
         val deviceId = prefs.getString(PREF_DEVICE_ID, null) ?: UUID.randomUUID().toString()
+        setPairingInProgress(true)
+        setPairingStatus("Pairing this phone with OpenShrimp...")
         Thread {
             try {
                 val publicKey = ensureSigningKey().public.encoded.base64Url()
@@ -247,10 +276,18 @@ class MainActivity : Activity() {
                         .putString(PREF_DEVICE_NAME, deviceName)
                         .putString(PREF_SERVER_ID, json.optString("server_id"))
                         .apply()
-                    runOnUiThread { appendLog("Paired with OpenShrimp server ${json.optString("server_id")}") }
+                    runOnUiThread {
+                        setPairingInProgress(false)
+                        setPairingStatus("Paired with OpenShrimp. You can now use Find pending session.")
+                        appendLog("Paired with OpenShrimp server ${json.optString("server_id")}")
+                    }
                 }
             } catch (e: Exception) {
-                runOnUiThread { appendLog(e.message ?: "Pairing failed") }
+                runOnUiThread {
+                    setPairingInProgress(false)
+                    setPairingStatus(e.message ?: "Pairing failed")
+                    appendLog(e.message ?: "Pairing failed")
+                }
             }
         }.start()
     }
@@ -259,9 +296,11 @@ class MainActivity : Activity() {
         val baseUrl = normalizedBaseUrl() ?: return
         val deviceId = prefs.getString(PREF_DEVICE_ID, null)
         if (deviceId.isNullOrEmpty()) {
-            appendLog("Pair this phone before polling pending sessions")
+            setSessionStatus("Pair this phone before looking for a pending session.")
             return
         }
+        setClaimInProgress(true)
+        setSessionStatus("Checking OpenShrimp for pending security-key requests...")
         Thread {
             try {
                 val pendingRequest = signedRequest(
@@ -270,20 +309,65 @@ class MainActivity : Activity() {
                     body = "",
                     deviceId = deviceId,
                 ).get().build()
-                val sessionId = httpClient.newCall(pendingRequest).execute().use { response ->
+                val sessions = httpClient.newCall(pendingRequest).execute().use { response ->
                     val responseBody = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
                         throw IllegalStateException("Pending session poll failed: HTTP ${response.code} $responseBody")
                     }
-                    val sessions = JSONObject(responseBody).getJSONArray("sessions")
-                    if (sessions.length() == 0) {
-                        throw IllegalStateException("No pending security-key sessions found")
+                    val sessionArray = JSONObject(responseBody).getJSONArray("sessions")
+                    if (sessionArray.length() == 0) {
+                        throw IllegalStateException("No pending security-key sessions found. Start /security_key first, then try again.")
                     }
-                    sessions.getJSONObject(0).getString("id")
+                    List(sessionArray.length()) { index ->
+                        val session = sessionArray.getJSONObject(index)
+                        PendingSession(
+                            id = session.getString("id"),
+                            contextName = session.optString("context_name", "unknown"),
+                            status = session.optString("status", "pending"),
+                        )
+                    }
                 }
+                runOnUiThread {
+                    if (sessions.size == 1) {
+                        setSessionStatus("Found one pending session. Claiming it now...")
+                        claimPendingSession(baseUrl, deviceId, sessions[0])
+                    } else {
+                        setClaimInProgress(false)
+                        showPendingSessionMenu(baseUrl, deviceId, sessions)
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    setClaimInProgress(false)
+                    setSessionStatus(e.message ?: "Pending session claim failed")
+                    appendLog(e.message ?: "Pending session claim failed")
+                }
+            }
+        }.start()
+    }
+
+    private fun showPendingSessionMenu(baseUrl: String, deviceId: String, sessions: List<PendingSession>) {
+        setSessionStatus("Choose which OpenShrimp session should use this phone.")
+        val labels = sessions.map { "${it.contextName} (${it.status})" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Pending security-key sessions")
+            .setItems(labels) { _, index ->
+                setClaimInProgress(true)
+                setSessionStatus("Claiming ${sessions[index].contextName}...")
+                claimPendingSession(baseUrl, deviceId, sessions[index])
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                setSessionStatus("No session selected.")
+            }
+            .show()
+    }
+
+    private fun claimPendingSession(baseUrl: String, deviceId: String, session: PendingSession) {
+        Thread {
+            try {
                 val claimRequest = signedRequest(
                     method = "POST",
-                    url = "$baseUrl/api/security-key/android/sessions/${urlEncode(sessionId)}/claim",
+                    url = "$baseUrl/api/security-key/android/sessions/${urlEncode(session.id)}/claim",
                     body = "{}",
                     deviceId = deviceId,
                 ).post("{}".toRequestBody(JSON_MEDIA_TYPE)).build()
@@ -294,12 +378,18 @@ class MainActivity : Activity() {
                     }
                     val phoneUrl = JSONObject(responseBody).getString("phone_url")
                     runOnUiThread {
-                        appendLog("Claimed session $sessionId; asking for local device approval")
+                        setClaimInProgress(false)
+                        setSessionStatus("Session claimed. Confirm device unlock to start forwarding.")
+                        appendLog("Claimed session ${session.id}; asking for local device approval")
                         confirmAndStart(phoneUrl)
                     }
                 }
             } catch (e: Exception) {
-                runOnUiThread { appendLog(e.message ?: "Pending session claim failed") }
+                runOnUiThread {
+                    setClaimInProgress(false)
+                    setSessionStatus(e.message ?: "Pending session claim failed")
+                    appendLog(e.message ?: "Pending session claim failed")
+                }
             }
         }.start()
     }
@@ -334,13 +424,14 @@ class MainActivity : Activity() {
         }
         relayUrlLayout.error = null
         pendingRelayUrl = relayUrl
+        setSessionStatus("Waiting for device unlock confirmation...")
         val keyguardManager = getSystemService(KEYGUARD_SERVICE) as? KeyguardManager
         val confirmIntent = keyguardManager?.createConfirmDeviceCredentialIntent(
             "Approve security-key forwarding",
             "Forward this USB security key to the active OpenShrimp VM for this short-lived session."
         )
         if (confirmIntent == null) {
-            appendLog("No secure lock screen is available; forwarding not started")
+            setSessionStatus("No secure lock screen is available; forwarding was not started.")
             return
         }
         startActivityForResult(confirmIntent, REQUEST_CONFIRM_DEVICE_CREDENTIAL)
@@ -358,16 +449,51 @@ class MainActivity : Activity() {
             startService(intent)
         }
         appendLog("Foreground forwarding service requested")
+        setSessionStatus("Forwarding service requested. Attach your USB security key if prompted.")
     }
 
     private fun normalizedBaseUrl(): String? {
         val raw = serverUrlInput.text.toString().trim().trimEnd('/')
         if (!raw.startsWith("https://") && !raw.startsWith("http://")) {
             serverUrlLayout.error = "Server URL must start with https:// or http://"
+            setPairingStatus("Enter the OpenShrimp server URL before pairing.")
             return null
         }
         serverUrlLayout.error = null
         return raw
+    }
+
+    private fun savedPairingStatusText(): String {
+        val serverId = prefs.getString(PREF_SERVER_ID, "").orEmpty()
+        return if (serverId.isNotEmpty()) {
+            "Paired with OpenShrimp. Use Find pending session when a request is waiting."
+        } else {
+            "Not paired yet. Enter the server URL and code from /pair."
+        }
+    }
+
+    private fun setPairingInProgress(inProgress: Boolean) {
+        pairButton.isEnabled = !inProgress
+        pairButton.text = if (inProgress) "Pairing..." else "Pair this phone"
+    }
+
+    private fun setPairingStatus(message: String) {
+        pairingStatusView.text = message
+    }
+
+    private fun setClaimInProgress(inProgress: Boolean) {
+        claimButton.isEnabled = !inProgress
+        claimButton.text = if (inProgress) "Checking..." else "Find pending session"
+    }
+
+    private fun setSessionStatus(message: String) {
+        sessionStatusView.text = message
+    }
+
+    private fun toggleDebugLog() {
+        val showing = logCard.visibility == View.VISIBLE
+        logCard.visibility = if (showing) View.GONE else View.VISIBLE
+        debugLogButton.text = if (showing) "Show debug log" else "Hide debug log"
     }
 
     private fun ensureSigningKey(): java.security.KeyPair {
@@ -454,4 +580,10 @@ class MainActivity : Activity() {
 
         private fun urlEncode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
     }
+
+    private data class PendingSession(
+        val id: String,
+        val contextName: String,
+        val status: String,
+    )
 }
