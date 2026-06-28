@@ -21,6 +21,7 @@ from open_shrimp.config import (
     Config,
     ContextConfig,
     ReviewConfig,
+    SandboxConfig,
     TelegramConfig,
 )
 from open_shrimp.cross_context import build_ask_context_tool
@@ -175,6 +176,44 @@ class _FakeClient:
         self.disconnected = True
 
 
+class _FakeSandbox:
+    def __init__(self) -> None:
+        self.started = False
+
+    def ensure_environment(self) -> None:
+        pass
+
+    def ensure_running(self) -> None:
+        pass
+
+    def provision_workspace(self) -> None:
+        pass
+
+    def start_agent(self, runtime):
+        self.started = True
+        return SimpleNamespace(
+            cli_path="/tmp/ask-context-wrapper",
+            endpoint=None,
+            cleanup_paths=[],
+        )
+
+
+class _FakeSandboxManager:
+    def __init__(self) -> None:
+        self.sandbox = _FakeSandbox()
+
+    def agent_home_dir(self, context_name: str):
+        from pathlib import Path
+
+        return Path("/tmp") / f"agent-home-{context_name}"
+
+    def create_sandbox(self, context_name, context, *, runtime):
+        self.context_name = context_name
+        self.context = context
+        self.runtime = runtime
+        return self.sandbox
+
+
 @pytest.mark.asyncio
 async def test_happy_path_returns_answer(monkeypatch) -> None:
     fake_client = _FakeClient("~2.4M rows in staging.")
@@ -295,6 +334,90 @@ async def test_allowed_tools_inherit_target(monkeypatch) -> None:
     assert "Read" in captured["allowed"]
     assert "mcp__etldb__run_query" in captured["allowed"]
     assert "Bash" not in captured["allowed"]
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_target_uses_sandbox_launch(monkeypatch) -> None:
+    cfg = _config()
+    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="docker")
+    captured = {}
+
+    def _make_client(options):
+        captured["cli_path"] = options.cli_path
+        captured["allowed"] = list(options.allowed_tools or [])
+        return _FakeClient("inside sandbox")
+
+    fake_backend = MagicMock()
+    fake_backend.make_client.side_effect = _make_client
+    fake_backend.make_can_use_tool.return_value = AsyncMock()
+    fake_backend.make_runtime.return_value = SimpleNamespace(name="fake-runtime")
+    fake_backend.policy = MagicMock()
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: fake_backend,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=True),
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    bot.edit_message_text = AsyncMock()
+    manager = _FakeSandboxManager()
+
+    tool = build_ask_context_tool(
+        bot=bot,
+        chat_id=1,
+        thread_id=None,
+        config=cfg,
+        context_name="default",
+        sandbox_managers={"docker": manager},
+    )
+    assert tool is not None
+    result = await tool.handler({"context": "glints-delta-etl", "question": "q"})
+
+    assert result.get("is_error") is None
+    assert manager.sandbox.started is True
+    assert captured["cli_path"] == "/tmp/ask-context-wrapper"
+    assert "Bash" in captured["allowed"]
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_target_without_manager_fails_closed(monkeypatch) -> None:
+    cfg = _config()
+    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="docker")
+
+    fake_backend = MagicMock()
+    fake_backend.make_client.side_effect = AssertionError(
+        "must not create a host client for sandboxed ask_context target",
+    )
+    fake_backend.make_can_use_tool.return_value = AsyncMock()
+    fake_backend.policy = MagicMock()
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: fake_backend,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=True),
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    bot.edit_message_text = AsyncMock()
+
+    tool = build_ask_context_tool(
+        bot=bot, chat_id=1, thread_id=None, config=cfg,
+        context_name="default",
+    )
+    assert tool is not None
+    result = await tool.handler({"context": "glints-delta-etl", "question": "q"})
+
+    assert result.get("is_error") is True
+    text = result["content"][0]["text"]
+    assert "Refusing to run ask_context outside the sandbox" in text
+    fake_backend.make_client.assert_not_called()
 
 
 @pytest.mark.asyncio

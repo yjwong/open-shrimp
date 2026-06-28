@@ -796,6 +796,7 @@ async def _start_agent_task(
                 user_id=user_id,
                 is_private_chat=is_private_chat,
                 sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
+                sandbox_managers=context.bot_data.get("sandbox_managers"),
                 mcp_proxy=context.bot_data.get("mcp_proxy"),
                 backend=context.bot_data.get("backend"),
             )

@@ -21,7 +21,8 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from telegram import Bot, InlineKeyboardMarkup
@@ -217,6 +218,7 @@ def build_ask_context_tool(
     user_id: int = 0,
     is_private_chat: bool = True,
     terminal_base_url: str | None = None,
+    sandbox_managers: dict[str, Any] | None = None,
 ) -> "OpenShrimpTool | None":
     """Build the ``ask_context`` tool descriptor, or ``None`` if no targets.
 
@@ -265,6 +267,7 @@ def build_ask_context_tool(
                 user_id=user_id,
                 is_private_chat=is_private_chat,
                 terminal_base_url=terminal_base_url,
+                sandbox_managers=sandbox_managers,
             )
 
     return OpenShrimpTool(
@@ -291,6 +294,62 @@ class _SubQueryResult:
     error_detail: str = ""
     elapsed: float = 0.0
     tool_count: int = 0
+
+
+@dataclass
+class _SandboxLaunch:
+    """Sandbox launch details needed by a transient ask_context client."""
+
+    cli_path: str | None = None
+    endpoint: Any = None
+    cleanup_paths: list[str] = field(default_factory=list)
+
+
+async def _launch_target_sandbox(
+    *,
+    backend: "Backend",
+    ctx: "ContextConfig",
+    target: str,
+    sandbox_managers: dict[str, Any] | None,
+) -> _SandboxLaunch:
+    """Start the target context's sandbox and return backend launch options.
+
+    This intentionally fails closed: if a target context is configured as
+    sandboxed but no matching manager is available, the sub-query must not fall
+    back to a host-local client while permissions think it is isolated.
+    """
+    from open_shrimp.client_manager import _context_locks
+
+    backend_name = ctx.sandbox.backend if ctx.sandbox is not None else "docker"
+    manager = (sandbox_managers or {}).get(backend_name)
+    if manager is None:
+        raise RuntimeError(
+            f"Context {target!r} is sandboxed with backend {backend_name!r}, "
+            "but no sandbox manager is available. Refusing to run ask_context "
+            "outside the sandbox."
+        )
+
+    lock = _context_locks.setdefault(target, asyncio.Lock())
+    async with lock:
+        runtime = backend.make_runtime(
+            manager.agent_home_dir(target),
+            context_name=target,
+            model=ctx.model,
+        )
+        sandbox = manager.create_sandbox(target, ctx, runtime=runtime)
+
+        def _start() -> Any:
+            sandbox.ensure_environment()
+            sandbox.ensure_running()
+            sandbox.provision_workspace()
+            return sandbox.start_agent(runtime)
+
+        handle = await asyncio.to_thread(_start)
+        return _SandboxLaunch(
+            cli_path=handle.cli_path,
+            endpoint=handle.endpoint,
+            cleanup_paths=list(handle.cleanup_paths),
+        )
 
 
 async def _request_outer_approval(
@@ -420,6 +479,7 @@ def _build_sub_query_options(
     sandboxed: bool,
     chat_id: int,
     approval_cb: "CanUseTool",
+    launch: _SandboxLaunch | None = None,
 ) -> "BackendOptions":
     """Assemble the fresh, read-only sub-query's runtime configuration.
 
@@ -442,6 +502,10 @@ def _build_sub_query_options(
         policy=backend.policy,
     )
 
+    extra: dict[str, Any] = {}
+    if launch is not None and launch.endpoint is not None:
+        extra["endpoint"] = launch.endpoint
+
     return BackendOptions(
         cwd=ctx.directory,
         model=ctx.model,
@@ -450,8 +514,10 @@ def _build_sub_query_options(
         add_dirs=ctx.additional_directories,
         setting_sources=["project", "user", "local"],
         include_partial_messages=True,
+        cli_path=launch.cli_path if launch is not None else None,
         max_buffer_size=10 * 1024 * 1024,
         can_use_tool=can_use_tool,
+        extra=extra,
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
@@ -676,6 +742,7 @@ async def _run_query(
     user_id: int,
     is_private_chat: bool,
     terminal_base_url: str | None,
+    sandbox_managers: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Orchestrate one cross-context query: approve, configure, run, report."""
     from open_shrimp.client_manager import resolve_backend
@@ -697,6 +764,17 @@ async def _run_query(
     backend = resolve_backend(context=ctx)
     sandboxed = is_sandboxed(ctx)
 
+    try:
+        launch = await _launch_target_sandbox(
+            backend=backend,
+            ctx=ctx,
+            target=target,
+            sandbox_managers=sandbox_managers,
+        ) if sandboxed else None
+    except Exception as exc:
+        logger.exception("ask_context sandbox launch failed")
+        return _text_result(str(exc), is_error=True)
+
     approval_cb = _make_parent_routed_approval(
         bot=bot,
         chat_id=chat_id,
@@ -716,6 +794,7 @@ async def _run_query(
         sandboxed=sandboxed,
         chat_id=chat_id,
         approval_cb=approval_cb,
+        launch=launch,
     )
 
     task_id = f"askctx{os.urandom(6).hex()}"
@@ -733,14 +812,26 @@ async def _run_query(
         ),
     )
 
-    result = await _run_sub_query(
-        client=backend.make_client(options),
-        sink=sink,
-        question=question,
-        cwd=ctx.directory,
-        policy=backend.policy,
-        timeout=_DEFAULT_TIMEOUT_SECONDS,
-    )
+    try:
+        result = await _run_sub_query(
+            client=backend.make_client(options),
+            sink=sink,
+            question=question,
+            cwd=ctx.directory,
+            policy=backend.policy,
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+        )
+    finally:
+        if launch is not None:
+            for path in launch.cleanup_paths:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except Exception:
+                    logger.debug(
+                        "Failed to remove ask_context wrapper %s",
+                        path,
+                        exc_info=True,
+                    )
 
     await status.finish(result)
     return _format_tool_result(target, result)
