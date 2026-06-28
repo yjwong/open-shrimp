@@ -27,8 +27,10 @@ from open_shrimp.security_key.api import (
     DEFAULT_SESSION_LIFETIME_SECONDS,
     create_security_key_session,
     get_or_create_registry,
+    security_key_destination_label,
 )
 from open_shrimp.security_key.bootstrap import start_vm_helper
+from open_shrimp.security_key.db import get_security_key_session_record
 from open_shrimp.sandbox.docker_helpers import (
     get_text_input_active,
     get_text_input_state_path,
@@ -610,14 +612,26 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
         )
     helper_started = helper_result.started if helper_result is not None else False
     helper_error = helper_result.error if helper_result is not None else None
+    record = await get_security_key_session_record(
+        request.app.state.db, session_id=session.id
+    )
+    phone_url = (
+        f"{phone_base}/api/security-key/sessions/{session.id}/phone"
+        f"?token={session.phone_token}"
+    )
 
     return JSONResponse(
         {
             **session.public_dict(),
-            "phone_url": (
-                f"{phone_base}/api/security-key/sessions/{session.id}/phone"
-                f"?token={session.phone_token}"
+            "destination_label": security_key_destination_label(
+                config, context_name, sandbox_id
             ),
+            "push_status": record["push_status"] if record is not None else None,
+            "requested_device_id": (
+                record["requested_device_id"] if record is not None else None
+            ),
+            "manual_fallback": {"phone_url": phone_url},
+            "phone_url": phone_url,
             "vm_helper_command": (
                 "sudo openshrimp-security-key-vm-helper "
                 f"--relay-url {relay_base} "

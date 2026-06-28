@@ -20,6 +20,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -68,6 +69,7 @@ class MainActivity : Activity() {
 
     private val httpClient = OkHttpClient.Builder().build()
     private var pendingRelayUrl: String? = null
+    private var pendingDestinationLabel: String = "desktop"
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -122,8 +124,9 @@ class MainActivity : Activity() {
         }
         relayUrlLayout = TextInputLayout(this).apply {
             hint = "Manual one-time phone WebSocket URL"
-            helperText = "Advanced fallback while pairing is being rolled out."
+            helperText = "Advanced/debug fallback when pairing or push cannot be used."
             boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            visibility = View.GONE
             addView(relayUrlInput, matchWrap())
         }
 
@@ -147,7 +150,17 @@ class MainActivity : Activity() {
         }
         val manualStartButton = MaterialButton(this, null, MaterialR.attr.materialButtonOutlinedStyle).apply {
             text = "Use manual URL fallback"
+            visibility = View.GONE
             setOnClickListener { confirmAndStart(relayUrlInput.text.toString().trim()) }
+        }
+        val advancedFallbackButton = MaterialButton(this, null, MaterialR.attr.materialButtonOutlinedStyle).apply {
+            text = "Advanced/debug manual URL"
+            setOnClickListener {
+                val showing = relayUrlLayout.visibility == View.VISIBLE
+                relayUrlLayout.visibility = if (showing) View.GONE else View.VISIBLE
+                manualStartButton.visibility = if (showing) View.GONE else View.VISIBLE
+                text = if (showing) "Advanced/debug manual URL" else "Hide manual URL fallback"
+            }
         }
         val stopButton = MaterialButton(this, null, MaterialR.attr.materialButtonOutlinedStyle).apply {
             text = "Stop forwarding"
@@ -197,17 +210,28 @@ class MainActivity : Activity() {
             addView(pairingStatusView, matchWrapWithBottomMargin(16))
             addView(claimButton, matchWrapWithBottomMargin(8))
             addView(sessionStatusView, matchWrapWithBottomMargin(24))
+            addView(advancedFallbackButton, matchWrapWithBottomMargin(8))
             addView(relayUrlLayout, matchWrapWithBottomMargin(8))
             addView(manualStartButton, matchWrapWithBottomMargin(8))
             addView(stopButton, matchWrapWithBottomMargin(8))
             addView(debugLogButton, matchWrapWithBottomMargin(8))
-            addView(logCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(
+                logCard,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)).apply {
+                    bottomMargin = dp(8)
+                },
+            )
+        }
+
+        val scrollView = ScrollView(this).apply {
+            isFillViewport = false
+            addView(content, matchWrap())
         }
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(toolbar, matchWrap())
-            addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             gravity = Gravity.CENTER_HORIZONTAL
         }
         setContentView(layout)
@@ -343,9 +367,17 @@ class MainActivity : Activity() {
                     }
                     List(sessionArray.length()) { index ->
                         val session = sessionArray.getJSONObject(index)
+                        val contextName = session.optString("context_name", "unknown")
                         PendingSession(
                             id = session.getString("id"),
-                            contextName = session.optString("context_name", "unknown"),
+                            contextName = contextName,
+                            destinationLabel = session.optString(
+                                "target_label",
+                                forwardingTargetLabel(
+                                    contextName,
+                                    session.optString("sandbox_id", ""),
+                                ),
+                            ),
                             status = session.optString("status", "pending"),
                         )
                     }
@@ -371,12 +403,12 @@ class MainActivity : Activity() {
 
     private fun showPendingSessionMenu(baseUrl: String, deviceId: String, sessions: List<PendingSession>) {
         setSessionStatus("Choose which OpenShrimp session should use this phone.")
-        val labels = sessions.map { "${it.contextName} (${it.status})" }.toTypedArray()
+        val labels = sessions.map { "${it.destinationLabel} (${it.status})" }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("Pending security-key sessions")
             .setItems(labels) { _, index ->
                 setClaimInProgress(true)
-                setSessionStatus("Claiming ${sessions[index].contextName}...")
+                setSessionStatus("Claiming ${sessions[index].destinationLabel}...")
                 claimPendingSession(baseUrl, deviceId, sessions[index])
             }
             .setNegativeButton("Cancel") { _, _ ->
@@ -399,11 +431,22 @@ class MainActivity : Activity() {
                     if (!response.isSuccessful) {
                         throw IllegalStateException("Session claim failed: HTTP ${response.code} $responseBody")
                     }
-                    val phoneUrl = JSONObject(responseBody).getString("phone_url")
+                    val json = JSONObject(responseBody)
+                    val phoneUrl = json.getString("phone_url")
+                    val sessionJson = json.optJSONObject("session")
+                    val destinationLabel = if (sessionJson != null) {
+                        forwardingTargetLabel(
+                            sessionJson.optString("context_name", session.contextName),
+                            sessionJson.optString("sandbox_id", ""),
+                        )
+                    } else {
+                        session.destinationLabel
+                    }
                     runOnUiThread {
                         setClaimInProgress(false)
-                        setSessionStatus("Session claimed. Confirm device unlock to start forwarding.")
-                        appendLog("Claimed session ${session.id}; asking for local device approval")
+                        pendingDestinationLabel = destinationLabel
+                        setSessionStatus("Session claimed for $destinationLabel. Confirm device unlock to start forwarding.")
+                        appendLog("Claimed session ${session.id} for $destinationLabel; asking for local device approval")
                         confirmAndStart(phoneUrl)
                     }
                 }
@@ -430,7 +473,12 @@ class MainActivity : Activity() {
         claimPendingSession(
             baseUrl,
             deviceId,
-            PendingSession(id = sessionId, contextName = "push", status = "pending"),
+            PendingSession(
+                id = sessionId,
+                contextName = "push",
+                destinationLabel = "desktop from push notification",
+                status = "pending",
+            ),
         )
         intent.removeExtra(EXTRA_PUSH_SESSION_ID)
     }
@@ -478,7 +526,7 @@ class MainActivity : Activity() {
         val keyguardManager = getSystemService(KEYGUARD_SERVICE) as? KeyguardManager
         val confirmIntent = keyguardManager?.createConfirmDeviceCredentialIntent(
             "Approve security-key forwarding",
-            "Forward this USB security key to the active OpenShrimp VM for this short-lived session."
+            "Forward this USB security key to $pendingDestinationLabel for this short-lived session."
         )
         if (confirmIntent == null) {
             setSessionStatus("No secure lock screen is available; forwarding was not started.")
@@ -499,7 +547,7 @@ class MainActivity : Activity() {
             startService(intent)
         }
         appendLog("Foreground forwarding service requested")
-        setSessionStatus("Forwarding service requested. Attach your USB security key if prompted.")
+        setSessionStatus("Forwarding to $pendingDestinationLabel. Attach your USB security key if prompted.")
     }
 
     private fun normalizedBaseUrl(): String? {
@@ -538,6 +586,11 @@ class MainActivity : Activity() {
 
     private fun setSessionStatus(message: String) {
         sessionStatusView.text = message
+    }
+
+    private fun forwardingTargetLabel(contextName: String, sandboxId: String?): String {
+        val sandbox = sandboxId?.takeIf { it.isNotBlank() && it != "null" && it != contextName }
+        return if (sandbox == null) "desktop: $contextName" else "desktop: $contextName ($sandbox)"
     }
 
     private fun toggleDebugLog() {
@@ -636,6 +689,7 @@ class MainActivity : Activity() {
     private data class PendingSession(
         val id: String,
         val contextName: String,
+        val destinationLabel: String,
         val status: String,
     )
 }

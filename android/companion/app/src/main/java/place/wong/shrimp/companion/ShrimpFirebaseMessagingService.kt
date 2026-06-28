@@ -47,7 +47,7 @@ class ShrimpFirebaseMessagingService : FirebaseMessagingService() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("OpenShrimp security-key request")
-            .setContentText("Tap to approve forwarding on this phone.")
+            .setContentText("Tap to review destination and approve forwarding on this phone.")
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)

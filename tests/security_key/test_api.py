@@ -23,7 +23,7 @@ from open_shrimp.config import (
 )
 from open_shrimp.db import init_db
 from open_shrimp.review.api import create_review_app
-from open_shrimp.security_key.api import _relay_loop
+from open_shrimp.security_key.api import _relay_loop, security_key_destination_label
 from open_shrimp.security_key.sessions import SecurityKeySessionRegistry
 
 BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
@@ -49,6 +49,22 @@ def _make_config(*, computer_use: bool = False) -> Config:
         },
         default_context="default",
         review=ReviewConfig(host="127.0.0.1", port=8080),
+    )
+
+
+def test_destination_label_ignores_wildcard_bind_host() -> None:
+    config = _make_config()
+    config.review.host = "0.0.0.0"
+    assert security_key_destination_label(config, "default") == "OpenShrimp desktop: default"
+
+
+def test_destination_label_prefers_public_url_hostname() -> None:
+    config = _make_config()
+    config.review.host = "0.0.0.0"
+    config.review.public_url = "https://shrimp.example.com"
+    assert (
+        security_key_destination_label(config, "default")
+        == "shrimp.example.com desktop: default"
     )
 
 
@@ -256,6 +272,9 @@ def test_android_pair_poll_and_claim_session(tmp_path: Path) -> None:
         )
         assert pending_response.status_code == 200
         assert pending_response.json()["sessions"][0]["id"] == session_id
+        assert pending_response.json()["sessions"][0]["destination_label"].endswith(
+            "desktop: default"
+        )
 
         claim_path = f"/api/security-key/android/sessions/{session_id}/claim"
         claim_response = client.post(
@@ -274,6 +293,7 @@ def test_android_pair_poll_and_claim_session(tmp_path: Path) -> None:
             },
         )
         assert claim_response.status_code == 200
+        assert claim_response.json()["destination_label"].endswith("desktop: default")
         assert claim_response.json()["phone_url"].endswith(
             session_response.json()["phone_url"].split("/phone", 1)[1]
         )
@@ -464,6 +484,9 @@ def test_vnc_endpoint_creates_security_key_session(tmp_path: Path) -> None:
         assert response.status_code == 201
         data = response.json()
         assert data["status"] == "created"
+        assert "desktop: default" in data["destination_label"]
+        assert data["push_status"] == "no_device"
+        assert data["manual_fallback"]["phone_url"] == data["phone_url"]
         assert "/api/security-key/sessions/" in data["phone_url"]
         assert data["vm_helper_command"].startswith(
             "sudo openshrimp-security-key-vm-helper "

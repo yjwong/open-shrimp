@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import aiosqlite
 from starlette.requests import Request
@@ -116,6 +117,31 @@ def _phone_url(config: Config, session: SecurityKeyRelaySession) -> str:
     )
 
 
+def _is_displayable_host(host: str | None) -> bool:
+    return bool(host and host not in {"0.0.0.0", "::", "*"})
+
+
+def openshrimp_server_label(config: Config) -> str:
+    if config.instance_name:
+        return config.instance_name
+    if config.review.public_url:
+        parsed = urlparse(config.review.public_url)
+        if _is_displayable_host(parsed.hostname):
+            return parsed.hostname or "OpenShrimp"
+    if _is_displayable_host(config.review.host):
+        return config.review.host
+    return "OpenShrimp"
+
+
+def security_key_destination_label(
+    config: Config, context_name: str, sandbox_id: str | None = None
+) -> str:
+    server_label = openshrimp_server_label(config)
+    if sandbox_id and sandbox_id != context_name:
+        return f"{server_label} desktop: {context_name} ({sandbox_id})"
+    return f"{server_label} desktop: {context_name}"
+
+
 def _bounded_seconds(
     raw: object,
     *,
@@ -213,6 +239,9 @@ async def create_session_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             **session.public_dict(),
+            "destination_label": security_key_destination_label(
+                config, context_name, sandbox_id
+            ),
             "phone_url": _phone_url(config, session),
             "phone_token": session.phone_token,
             "vm_token": session.vm_token,
@@ -282,7 +311,7 @@ async def _send_android_security_key_push(
 
     device = devices[0]
     server_id = await get_or_create_server_id(db)
-    server_label = config.instance_name or config.review.host or "OpenShrimp"
+    server_label = openshrimp_server_label(config)
     try:
         result = await push_sender.send_security_key_request(
             device=device,
@@ -328,6 +357,11 @@ async def get_session_endpoint(request: Request) -> JSONResponse:
                 "claimed_device_id": record["claimed_device_id"],
                 "push_sent_at": record["push_sent_at"],
                 "push_status": record["push_status"],
+                "destination_label": security_key_destination_label(
+                    request.app.state.config,
+                    record["context_name"],
+                    record["sandbox_id"],
+                ),
             }
             if record is not None
             else {}
@@ -337,7 +371,16 @@ async def get_session_endpoint(request: Request) -> JSONResponse:
     record = await get_security_key_session_record(db, session_id=session_id)
     if record is None:
         return JSONResponse({"error": "Session not found"}, status_code=404)
-    return JSONResponse(record)
+    return JSONResponse(
+        {
+            **record,
+            "destination_label": security_key_destination_label(
+                request.app.state.config,
+                record["context_name"],
+                record["sandbox_id"],
+            ),
+        }
+    )
 
 
 async def cancel_session_endpoint(request: Request) -> JSONResponse:
@@ -380,7 +423,7 @@ async def create_pairing_code_endpoint(request: Request) -> JSONResponse:
         {
             **pairing,
             "server_id": server_id,
-            "server_label": config.review.host or "OpenShrimp",
+            "server_label": openshrimp_server_label(config),
             "base_url": _public_base(config),
             "pairing_url": f"openshrimp://pair?base_url={_public_base(config)}&code={pairing['code']}",
         },
@@ -479,11 +522,15 @@ async def android_pending_sessions_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
     sessions = await list_pending_android_security_key_sessions(request.app.state.db)
+    config: Config = request.app.state.config
     public_sessions = [
         {
             "id": session["id"],
             "context_name": session["context_name"],
             "sandbox_id": session["sandbox_id"],
+            "destination_label": security_key_destination_label(
+                config, session["context_name"], session["sandbox_id"]
+            ),
             "status": session["status"],
             "created_at": session["created_at"],
             "expires_at": session["expires_at"],
@@ -527,6 +574,9 @@ async def android_claim_session_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "session": session.public_dict(),
+            "destination_label": security_key_destination_label(
+                request.app.state.config, record["context_name"], record["sandbox_id"]
+            ),
             "phone_url": _phone_url(request.app.state.config, session),
         }
     )

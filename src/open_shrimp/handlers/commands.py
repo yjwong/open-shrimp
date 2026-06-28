@@ -60,8 +60,10 @@ from open_shrimp.security_key.api import (
     DEFAULT_SESSION_LIFETIME_SECONDS,
     create_security_key_session,
     get_or_create_registry,
+    security_key_destination_label,
 )
 from open_shrimp.security_key.bootstrap import start_vm_helper
+from open_shrimp.security_key.db import get_security_key_session_record
 
 logger = logging.getLogger(__name__)
 
@@ -1376,6 +1378,28 @@ def _get_sandbox_for_security_key(
     return create(context_name, ctx)
 
 
+def _push_status_text(push_status: object) -> str:
+    status = push_status if isinstance(push_status, str) else None
+    if status == "sent":
+        return "Push notification sent to the paired Android device\."
+    if status == "no_device":
+        return (
+            "No paired Android device with push is available; open the Android app "
+            "and use Find pending session\."
+        )
+    if status == "not_configured":
+        return "Push is not configured; open the Android app and use Find pending session\."
+    if status in {"failed", "missing_token", "unsupported_provider"}:
+        return (
+            f"Push delivery failed \(`{_escape_mdv2(status)}`\); open the Android app "
+            "and use Find pending session\."
+        )
+    return (
+        "Push status is pending; open the Android app and use Find pending session "
+        "if no notification arrives\."
+    )
+
+
 async def security_key_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1387,6 +1411,10 @@ async def security_key_handler(
     db: aiosqlite.Connection = context.bot_data["db"]
     if not _is_authorized(update.effective_user.id, config):
         return
+    show_manual_fallback = any(
+        arg.lower() in {"debug", "advanced", "manual"}
+        for arg in (context.args or [])
+    )
 
     scope = chat_scope_from_message(update.message)
     context_name, ctx = await _get_context(scope, config, db)
@@ -1459,16 +1487,28 @@ async def security_key_handler(
         if helper_started
         else "VM helper was not started automatically\. Run this in the computer\-use VM:"
     )
+    record = await get_security_key_session_record(db, session_id=session.id)
+    destination_label = security_key_destination_label(config, context_name, sandbox_id)
+    manual_fallback_lines = (
+        [
+            "Manual phone URL \(advanced debug fallback\):",
+            f"`{_escape_mdv2(phone_url)}`",
+        ]
+        if show_manual_fallback
+        else [
+            "Manual phone URL is hidden by default\. Use `/security_key debug` "
+            "only if paired Android claim is unavailable\.",
+        ]
+    )
 
     text = "\n".join(
         [
-            f"Security key forwarding for `{_escape_mdv2(context_name)}` is ready\.",
+            "Security key forwarding request created\.",
+            f"Destination: `{_escape_mdv2(destination_label)}`",
             "",
             f"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`\.",
-            "A request was sent to the paired Android app if push is configured\.",
-            "Open the app and use Find pending session if no notification arrives\.",
-            "Advanced manual fallback phone WebSocket URL:",
-            f"`{_escape_mdv2(phone_url)}`",
+            _push_status_text(record["push_status"] if record is not None else None),
+            *manual_fallback_lines,
             "",
             helper_status,
             f"`{_escape_mdv2(helper_cmd)}`",
@@ -1530,18 +1570,44 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
         lines = ["Android companion devices:", ""]
         for device in devices:
-            status = "active" if device["active"] and device["revoked_at"] is None else "inactive"
-            lines.append(
-                f"• `{_escape_mdv2(device['device_id'])}` — {_escape_mdv2(device['display_name'])} \({_escape_mdv2(status)}\)"
+            if device["revoked_at"] is not None:
+                status = "revoked"
+            elif device["active"]:
+                status = "active"
+            else:
+                status = "inactive"
+            push = device["push_provider"] or "no push"
+            last_seen = (
+                datetime.fromtimestamp(
+                    device["last_seen_at"], tz=timezone.utc
+                ).strftime("%Y-%m-%d %H:%M UTC")
+                if device["last_seen_at"] is not None
+                else "never"
             )
-        lines.extend(["", "Revoke with `/pair revoke <device_id>`\."])
+            lines.append(
+                f"• `{_escape_mdv2(device['device_id'])}` — "
+                f"{_escape_mdv2(device['display_name'])} "
+                f"\({_escape_mdv2(status)}, {_escape_mdv2(push)}, "
+                f"last seen {_escape_mdv2(last_seen)}\)"
+            )
+        lines.extend(
+            [
+                "",
+                "Only one Android companion can be active in this release; "
+                "pairing a new phone deactivates the previous one\.",
+                "Revoke with `/pair revoke <device_id>`\.",
+            ]
+        )
         await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
         return
 
     if action == "revoke" and len(args) >= 2:
         device_id = args[1]
         if await revoke_android_device(db, device_id):
-            await update.message.reply_text("Android companion device revoked\.", parse_mode="MarkdownV2")
+            await update.message.reply_text(
+                "Android companion device revoked\. It can no longer claim pending sessions or receive new push requests\.",
+                parse_mode="MarkdownV2",
+            )
         else:
             await update.message.reply_text("No matching active Android companion device found\.", parse_mode="MarkdownV2")
         return

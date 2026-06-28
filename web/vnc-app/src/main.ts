@@ -378,7 +378,11 @@ function chatIdFromAuthToken(authToken: string): number | null {
 }
 
 function showSecurityKeyModal(data: {
-  phone_url: string;
+  destination_label?: string;
+  push_status?: string | null;
+  requested_device_id?: string | null;
+  manual_fallback?: { phone_url?: string };
+  phone_url?: string;
   vm_helper_command: string;
   vm_helper_started?: boolean;
   vm_helper_error?: string | null;
@@ -397,16 +401,26 @@ function showSecurityKeyModal(data: {
 
   const details = document.createElement("textarea");
   details.className = "paste-modal-input";
-  details.rows = 8;
+  details.rows = 7;
   details.readOnly = true;
   const expiry = new Date(data.expires_at * 1000).toLocaleTimeString();
+  const pushStatus = data.push_status ?? "pending";
+  const pushText =
+    pushStatus === "sent"
+      ? "Push notification sent to paired Android device"
+      : pushStatus === "no_device"
+        ? "No paired push device; open Android app and find pending session"
+        : pushStatus === "not_configured"
+          ? "Push not configured; open Android app and find pending session"
+          : ["failed", "missing_token", "unsupported_provider"].includes(pushStatus)
+            ? `Push failed (${pushStatus}); open Android app and find pending session`
+            : "Push pending; open Android app if no notification arrives";
   details.value = [
+    `Destination: ${data.destination_label ?? "OpenShrimp desktop"}`,
     `Expires: ${expiry}`,
+    `Android push: ${pushText}`,
     `VM helper: ${data.vm_helper_started ? "started automatically" : "manual start required"}`,
     ...(data.vm_helper_error ? [`Auto-start error: ${data.vm_helper_error}`] : []),
-    "",
-    "Android phone WebSocket URL:",
-    data.phone_url,
     "",
     data.vm_helper_started ? "Fallback command:" : "Run in the VM:",
     data.vm_helper_command,
@@ -425,6 +439,20 @@ function showSecurityKeyModal(data: {
   closeBtn.textContent = "Close";
   closeBtn.addEventListener("click", () => overlay.remove());
 
+  const advancedBtn = document.createElement("button");
+  advancedBtn.textContent = "Show advanced fallback";
+  advancedBtn.addEventListener("click", () => {
+    const phoneUrl = data.manual_fallback?.phone_url ?? data.phone_url ?? "";
+    details.value = [
+      details.value,
+      "",
+      "Advanced/debug manual Android phone WebSocket URL:",
+      phoneUrl || "Unavailable",
+    ].join("\n");
+    advancedBtn.disabled = true;
+    advancedBtn.textContent = "Advanced fallback shown";
+  });
+
   const copyBtn = document.createElement("button");
   copyBtn.className = "primary";
   copyBtn.textContent = "Copy";
@@ -437,6 +465,7 @@ function showSecurityKeyModal(data: {
   });
 
   buttons.appendChild(closeBtn);
+  buttons.appendChild(advancedBtn);
   buttons.appendChild(copyBtn);
   box.appendChild(buttons);
   overlay.appendChild(box);
