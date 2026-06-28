@@ -23,6 +23,7 @@ dependencies = [
     "watchfiles>=1.0",
     "ruamel.yaml>=0.18",
     "json5>=0.9",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

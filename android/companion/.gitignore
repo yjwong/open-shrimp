@@ -1,0 +1,25 @@
+# Built application files
+/build
+/app/build
+/captures
+
+# Gradle
+.gradle/
+
+# Kotlin compiler working state
+.kotlin/
+
+# Local configuration (machine-specific SDK path, secrets)
+local.properties
+
+# Firebase config (per-deployment, contains project keys)
+google-services.json
+app/google-services.json
+
+# Crash / heap dumps
+*.hprof
+
+# IDE
+*.iml
+.idea/
+.DS_Store

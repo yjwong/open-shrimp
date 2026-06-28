@@ -416,6 +416,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "claude-agent-sdk" },
+    { name = "cryptography" },
     { name = "json5" },
     { name = "mistune" },
     { name = "platformdirs" },
@@ -450,6 +451,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite" },
     { name = "claude-agent-sdk" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "json5", specifier = ">=0.9" },
     { name = "libvirt-python", marker = "extra == 'libvirt'", specifier = ">=10.0" },
     { name = "mistune", specifier = ">=3.0,<4.0" },

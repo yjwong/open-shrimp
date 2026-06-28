@@ -20,6 +20,17 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 
 from open_shrimp.config import Config, ContextConfig
+from open_shrimp.db import ChatScope
+from open_shrimp.android_push import get_push_sender
+from open_shrimp.security_key.api import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_SESSION_LIFETIME_SECONDS,
+    create_security_key_session,
+    get_or_create_registry,
+    security_key_destination_label,
+)
+from open_shrimp.security_key.bootstrap import start_vm_helper
+from open_shrimp.security_key.db import get_security_key_session_record
 from open_shrimp.sandbox.docker_helpers import (
     get_text_input_active,
     get_text_input_state_path,
@@ -522,6 +533,118 @@ async def clipboard_set_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def security_key_session_endpoint(request: Request) -> JSONResponse:
+    """POST /api/vnc/security-key-session — create a forwarding session."""
+    config: Config = request.app.state.config
+    token = request.query_params.get("token", "")
+    context_name = request.query_params.get("context", "")
+
+    try:
+        await validate_token_param(
+            token, config.telegram.token, config.allowed_users,
+        )
+    except AuthError:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if not context_name or context_name not in config.contexts:
+        return JSONResponse({"error": "Unknown context"}, status_code=400)
+
+    ctx = config.contexts[context_name]
+    if not _is_computer_use_context(ctx):
+        return JSONResponse(
+            {"error": "Not a computer_use context"}, status_code=400,
+        )
+
+    try:
+        body = await request.json()
+        chat_id = int(body["chat_id"])
+        raw_thread_id = body.get("thread_id")
+        thread_id = int(raw_thread_id) if raw_thread_id is not None else None
+    except KeyError:
+        return JSONResponse({"error": "chat_id is required"}, status_code=400)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"error": "chat_id and thread_id must be integers"}, status_code=400,
+        )
+
+    sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
+    sandbox = await asyncio.to_thread(
+        _get_sandbox_for_context, context_name, ctx, sandbox_managers,
+    )
+    sandbox_id = getattr(sandbox, "container_name", None) or context_name
+    session = await create_security_key_session(
+        request.app.state.db,
+        registry=get_or_create_registry(request.app.state),
+        config=config,
+        push_sender=get_push_sender(request.app.state, config),
+        scope=ChatScope(chat_id=chat_id, thread_id=thread_id),
+        context_name=context_name,
+        sandbox_id=sandbox_id,
+        lifetime_seconds=DEFAULT_SESSION_LIFETIME_SECONDS,
+        idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
+    )
+
+    public_base = (
+        config.review.public_url.rstrip("/")
+        if config.review.public_url
+        else f"https://{config.review.host}:{config.review.port}"
+    )
+    if public_base.startswith("https://"):
+        phone_base = "wss://" + public_base[len("https://") :]
+    elif public_base.startswith("http://"):
+        phone_base = "ws://" + public_base[len("http://") :]
+    else:
+        phone_base = public_base
+    relay_base = (
+        f"ws://{sandbox.host_address}:{config.review.port}"
+        if sandbox is not None
+        else phone_base
+    )
+    helper_result = None
+    if sandbox is not None:
+        helper_result = await start_vm_helper(
+            sandbox,
+            relay_url=relay_base,
+            session_id=session.id,
+            token=session.vm_token,
+            context_name=context_name,
+            logger=logger,
+        )
+    helper_started = helper_result.started if helper_result is not None else False
+    helper_error = helper_result.error if helper_result is not None else None
+    record = await get_security_key_session_record(
+        request.app.state.db, session_id=session.id
+    )
+    phone_url = (
+        f"{phone_base}/api/security-key/sessions/{session.id}/phone"
+        f"?token={session.phone_token}"
+    )
+
+    return JSONResponse(
+        {
+            **session.public_dict(),
+            "destination_label": security_key_destination_label(
+                config, context_name, sandbox_id
+            ),
+            "push_status": record["push_status"] if record is not None else None,
+            "requested_device_id": (
+                record["requested_device_id"] if record is not None else None
+            ),
+            "manual_fallback": {"phone_url": phone_url},
+            "phone_url": phone_url,
+            "vm_helper_command": (
+                "sudo openshrimp-security-key-vm-helper "
+                f"--relay-url {relay_base} "
+                f"--session-id {session.id} "
+                f"--token {session.vm_token}"
+            ),
+            "vm_helper_started": helper_started,
+            "vm_helper_error": helper_error,
+        },
+        status_code=201,
+    )
+
+
 def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
     """Create the routes for the VNC API and Mini App frontend.
 
@@ -540,6 +663,11 @@ def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
         WebSocketRoute("/api/vnc/ws", vnc_ws_endpoint),
         Route("/api/vnc/clipboard", clipboard_get_endpoint, methods=["GET"]),
         Route("/api/vnc/clipboard", clipboard_set_endpoint, methods=["POST"]),
+        Route(
+            "/api/vnc/security-key-session",
+            security_key_session_endpoint,
+            methods=["POST"],
+        ),
         Route("/api/vnc/text-input-state", text_input_state_endpoint),
         Route(
             "/api/vnc/text-input-state/stream",

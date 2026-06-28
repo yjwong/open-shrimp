@@ -433,6 +433,35 @@ class DockerSandbox:
         if result.returncode != 0:
             raise RuntimeError(f"wl-copy failed: {result.stderr.strip()}")
 
+    def start_security_key_helper(
+        self,
+        *,
+        relay_url: str,
+        session_id: str,
+        token: str,
+    ) -> None:
+        if not self._computer_use:
+            raise NotImplementedError("security-key helper requires computer use")
+        name = self.container_name
+        if not name:
+            raise RuntimeError("Cannot start security-key helper: container unknown")
+        result = subprocess.run(
+            [
+                "docker", "exec", "-d", "-u", "0", name,
+                "openshrimp-security-key-vm-helper",
+                "--relay-url", relay_url,
+                "--session-id", session_id,
+                "--token", token,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"security-key helper failed to start: {result.stderr.strip()}"
+            )
+
     # -- Port forwarding ------------------------------------------------------
 
     def supports_port_forwarding(self) -> bool:

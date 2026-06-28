@@ -45,6 +45,10 @@ from open_shrimp.sandbox.skill_paths import (
 )
 
 from open_shrimp.config import SandboxConfig
+from open_shrimp.security_key.vm_helper_binary import (
+    BINARY_NAME as SECURITY_KEY_HELPER_BINARY,
+    ensure_security_key_vm_helper,
+)
 from open_shrimp.sandbox.libvirt_helpers import (
     _fs_tag_for_dir,
     build_cli_wrapper as _build_cli_wrapper,
@@ -551,8 +555,19 @@ class LibvirtSandbox:
             )
 
     def provision_workspace(self) -> None:
-        """Install the bundle's CLI binary and copy credentials into the VM."""
+        """Install computer-use helpers, runtime CLI binary, and credentials."""
         assert self._ssh_port is not None
+        if self._computer_use:
+            try:
+                self._install_security_key_helper()
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                logger.warning(
+                    "Security-key helper install failed for libvirt context %s; "
+                    "continuing without security-key forwarding: %s",
+                    self._context_name,
+                    exc,
+                )
+
         if self._runtime is None:
             return
 
@@ -567,6 +582,56 @@ class LibvirtSandbox:
 
         if self._runtime.provision_credentials is not None:
             self._runtime.provision_credentials(self._claude_home_dir)
+
+    def _install_security_key_helper(self) -> None:
+        from open_shrimp.security_key.guest_setup import setup_security_key_guest_cmd
+        from open_shrimp.sandbox.libvirt_helpers import (
+            _ssh_common_opts,
+            install_cli_via_ssh,
+        )
+
+        assert self._ssh_port is not None
+        ssh_opts = _ssh_common_opts(self._sdir / "ssh_key", self._ssh_port)
+        result = subprocess.run(
+            [
+                "ssh", *ssh_opts, f"{SANDBOX_USER}@localhost",
+                "uname", "-m",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout).strip()
+            raise RuntimeError(
+                f"Failed to detect VM architecture for {SECURITY_KEY_HELPER_BINARY}: "
+                f"{error}"
+            )
+
+        setup_result = subprocess.run(
+            [
+                "ssh", *ssh_opts, f"{SANDBOX_USER}@localhost",
+                "bash", "-c", setup_security_key_guest_cmd(),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300.0,
+        )
+        if setup_result.returncode != 0:
+            error = (setup_result.stderr or setup_result.stdout).strip()
+            raise RuntimeError(
+                f"Failed to provision UHID support for {SECURITY_KEY_HELPER_BINARY}: "
+                f"{error}"
+            )
+
+        helper_path = ensure_security_key_vm_helper(result.stdout.strip())
+        install_cli_via_ssh(
+            SECURITY_KEY_HELPER_BINARY,
+            helper_path,
+            ssh_key=self._sdir / "ssh_key",
+            ssh_port=self._ssh_port,
+            ssh_user=SANDBOX_USER,
+        )
 
     def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
         if isinstance(runtime.launch, WrappedCLI):
@@ -662,6 +727,46 @@ class LibvirtSandbox:
             description=f"reach({guest_port})",
         )
         return f"127.0.0.1:{forward.host_port}"
+
+    def start_security_key_helper(
+        self,
+        *,
+        relay_url: str,
+        session_id: str,
+        token: str,
+    ) -> None:
+        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
+
+        if self._ssh_port is None:
+            raise RuntimeError("Cannot start security-key helper: VM is not running")
+        log_path = f"/tmp/openshrimp-security-key-helper-{session_id}.log"
+        helper_cmd = shlex.join([
+            "openshrimp-security-key-vm-helper",
+            "--relay-url", relay_url,
+            "--session-id", session_id,
+            "--token", token,
+        ])
+        remote_cmd = (
+            "command -v openshrimp-security-key-vm-helper >/dev/null && "
+            "sudo -n true && "
+            f"(nohup sudo -n {helper_cmd} > {shlex.quote(log_path)} 2>&1 "
+            "< /dev/null &)"
+        )
+        ssh_opts = _ssh_common_opts(self._sdir / "ssh_key", self._ssh_port)
+        result = subprocess.run(
+            ["ssh", *ssh_opts, f"{SANDBOX_USER}@localhost", remote_cmd],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout).strip()
+            if not error:
+                error = (
+                    "openshrimp-security-key-vm-helper is not installed in the VM "
+                    "or passwordless sudo is unavailable"
+                )
+            raise RuntimeError(f"security-key helper failed to start: {error}")
 
     def stop(self) -> None:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""

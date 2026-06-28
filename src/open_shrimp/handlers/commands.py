@@ -23,6 +23,12 @@ from open_shrimp.client_manager import (
 )
 from open_shrimp.config import Config, ContextConfig, effective_backend
 from open_shrimp.db import ChatScope, delete_session, get_session_id, set_session_id
+from open_shrimp.android_companion import (
+    create_pairing_code,
+    get_or_create_server_id,
+    list_android_devices,
+    revoke_android_device,
+)
 from open_shrimp.handlers.state import (
     _MCP_STATUS_EMOJI,
     _RESUME_LIST_LIMIT,
@@ -48,6 +54,16 @@ from open_shrimp.handlers.utils import (
     chat_scope_from_message,
     get_backend_for_scope,
 )
+from open_shrimp.android_push import get_push_sender
+from open_shrimp.security_key.api import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_SESSION_LIFETIME_SECONDS,
+    create_security_key_session,
+    get_or_create_registry,
+    security_key_destination_label,
+)
+from open_shrimp.security_key.bootstrap import start_vm_helper
+from open_shrimp.security_key.db import get_security_key_session_record
 
 logger = logging.getLogger(__name__)
 
@@ -1329,6 +1345,276 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"Desktop for *{escaped_context}*",
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
+    )
+
+
+# ── /security_key ──
+
+
+def _websocket_base(url: str) -> str:
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://") :]
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://") :]
+    return url
+
+
+def _get_sandbox_for_security_key(
+    context_name: str,
+    ctx: ContextConfig,
+    sandbox_managers: dict[str, object] | None,
+) -> object | None:
+    backend: str | None = None
+    if ctx.container is not None and ctx.container.computer_use:
+        backend = "docker"
+    elif ctx.sandbox is not None and ctx.sandbox.computer_use:
+        backend = ctx.sandbox.backend
+    if backend is None:
+        return None
+    manager = (sandbox_managers or {}).get(backend)
+    create = getattr(manager, "create_sandbox", None) if manager is not None else None
+    if create is None:
+        return None
+    return create(context_name, ctx)
+
+
+def _push_status_text(push_status: object) -> str:
+    status = push_status if isinstance(push_status, str) else None
+    if status == "sent":
+        return "Push notification sent to the paired Android device\."
+    if status == "no_device":
+        return (
+            "No paired Android device with push is available; open the Android app "
+            "and use Find pending session\."
+        )
+    if status == "not_configured":
+        return "Push is not configured; open the Android app and use Find pending session\."
+    if status in {"failed", "missing_token", "unsupported_provider"}:
+        return (
+            f"Push delivery failed \(`{_escape_mdv2(status)}`\); open the Android app "
+            "and use Find pending session\."
+        )
+    return (
+        "Push status is pending; open the Android app and use Find pending session "
+        "if no notification arrives\."
+    )
+
+
+async def security_key_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /security_key -- create a short-lived manual forwarding session."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if not _is_authorized(update.effective_user.id, config):
+        return
+    show_manual_fallback = any(
+        arg.lower() in {"debug", "advanced", "manual"}
+        for arg in (context.args or [])
+    )
+
+    scope = chat_scope_from_message(update.message)
+    context_name, ctx = await _get_context(scope, config, db)
+    has_computer_use = (
+        (ctx.container is not None and ctx.container.computer_use)
+        or (ctx.sandbox is not None and ctx.sandbox.computer_use)
+    )
+    if not has_computer_use:
+        await update.message.reply_text(
+            f"Context `{_escape_mdv2(context_name)}` does not have computer use enabled\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    registry = get_or_create_registry(context.bot_data)
+    sandbox = await asyncio.to_thread(
+        _get_sandbox_for_security_key,
+        context_name,
+        ctx,
+        context.bot_data.get("sandbox_managers"),
+    )
+    sandbox_id = getattr(sandbox, "container_name", None) or context_name
+    session = await create_security_key_session(
+        db,
+        registry=registry,
+        config=config,
+        push_sender=get_push_sender(context.bot_data, config),
+        scope=scope,
+        context_name=context_name,
+        sandbox_id=sandbox_id,
+        lifetime_seconds=DEFAULT_SESSION_LIFETIME_SECONDS,
+        idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
+    )
+
+    if config.review.public_url:
+        public_base = config.review.public_url.rstrip("/")
+    else:
+        public_base = f"https://{config.review.host}:{config.review.port}"
+    phone_base = _websocket_base(public_base)
+    phone_url = (
+        f"{phone_base}/api/security-key/sessions/{session.id}/phone"
+        f"?token={session.phone_token}"
+    )
+
+    if sandbox is not None:
+        relay_base = f"ws://{sandbox.host_address}:{config.review.port}"
+    else:
+        relay_base = _websocket_base(public_base)
+    helper_cmd = (
+        "sudo openshrimp-security-key-vm-helper "
+        f"--relay-url {relay_base} "
+        f"--session-id {session.id} "
+        f"--token {session.vm_token}"
+    )
+    helper_result = None
+    if sandbox is not None:
+        helper_result = await start_vm_helper(
+            sandbox,
+            relay_url=relay_base,
+            session_id=session.id,
+            token=session.vm_token,
+            context_name=context_name,
+            logger=logger,
+        )
+    helper_started = helper_result.started if helper_result is not None else False
+    helper_error = helper_result.error if helper_result is not None else None
+
+    helper_status = (
+        "VM helper started automatically\. Fallback command:"
+        if helper_started
+        else "VM helper was not started automatically\. Run this in the computer\-use VM:"
+    )
+    record = await get_security_key_session_record(db, session_id=session.id)
+    destination_label = security_key_destination_label(config, context_name, sandbox_id)
+    manual_fallback_lines = (
+        [
+            "Manual phone URL \(advanced debug fallback\):",
+            f"`{_escape_mdv2(phone_url)}`",
+        ]
+        if show_manual_fallback
+        else [
+            "Manual phone URL is hidden by default\. Use `/security_key debug` "
+            "only if paired Android claim is unavailable\.",
+        ]
+    )
+
+    text = "\n".join(
+        [
+            "Security key forwarding request created\.",
+            f"Destination: `{_escape_mdv2(destination_label)}`",
+            "",
+            f"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`\.",
+            _push_status_text(record["push_status"] if record is not None else None),
+            *manual_fallback_lines,
+            "",
+            helper_status,
+            f"`{_escape_mdv2(helper_cmd)}`",
+            *(
+                [
+                    "",
+                    f"Auto\-start error: `{_escape_mdv2(helper_error)}`",
+                ]
+                if helper_error
+                else []
+            ),
+            "",
+            "The Android app must still require fresh local device approval before forwarding\.",
+        ]
+    )
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
+
+
+async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /pair -- manage Android companion pairing."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if not _is_authorized(update.effective_user.id, config):
+        return
+
+    args = context.args or []
+    action = args[0].lower() if args else "code"
+    if action in {"code", "new"}:
+        pairing = await create_pairing_code(db)
+        server_id = await get_or_create_server_id(db)
+        public_base = (
+            config.review.public_url.rstrip("/")
+            if config.review.public_url
+            else f"https://{config.review.host}:{config.review.port}"
+        )
+        pairing_url = f"openshrimp://pair?base_url={public_base}&code={pairing['code']}"
+        text = "\n".join(
+            [
+                "Android companion pairing code created\.",
+                "",
+                f"Code: `{_escape_mdv2(pairing['code'])}`",
+                f"Server: `{_escape_mdv2(server_id)}`",
+                f"Base URL: `{_escape_mdv2(public_base)}`",
+                f"Deep link: `{_escape_mdv2(pairing_url)}`",
+                "",
+                "The code expires in `10 minutes` and can be used once\.",
+            ]
+        )
+        await update.message.reply_text(text, parse_mode="MarkdownV2")
+        return
+
+    if action in {"list", "devices"}:
+        devices = await list_android_devices(db)
+        if not devices:
+            await update.message.reply_text("No Android companion devices are paired\.", parse_mode="MarkdownV2")
+            return
+        lines = ["Android companion devices:", ""]
+        for device in devices:
+            if device["revoked_at"] is not None:
+                status = "revoked"
+            elif device["active"]:
+                status = "active"
+            else:
+                status = "inactive"
+            push = device["push_provider"] or "no push"
+            last_seen = (
+                datetime.fromtimestamp(
+                    device["last_seen_at"], tz=timezone.utc
+                ).strftime("%Y-%m-%d %H:%M UTC")
+                if device["last_seen_at"] is not None
+                else "never"
+            )
+            lines.append(
+                f"• `{_escape_mdv2(device['device_id'])}` — "
+                f"{_escape_mdv2(device['display_name'])} "
+                f"\({_escape_mdv2(status)}, {_escape_mdv2(push)}, "
+                f"last seen {_escape_mdv2(last_seen)}\)"
+            )
+        lines.extend(
+            [
+                "",
+                "Only one Android companion can be active in this release; "
+                "pairing a new phone deactivates the previous one\.",
+                "Revoke with `/pair revoke <device_id>`\.",
+            ]
+        )
+        await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+        return
+
+    if action == "revoke" and len(args) >= 2:
+        device_id = args[1]
+        if await revoke_android_device(db, device_id):
+            await update.message.reply_text(
+                "Android companion device revoked\. It can no longer claim pending sessions or receive new push requests\.",
+                parse_mode="MarkdownV2",
+            )
+        else:
+            await update.message.reply_text("No matching active Android companion device found\.", parse_mode="MarkdownV2")
+        return
+
+    await update.message.reply_text(
+        "Usage: `/pair`, `/pair list`, or `/pair revoke <device_id>`\.",
+        parse_mode="MarkdownV2",
     )
 
 

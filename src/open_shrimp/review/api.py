@@ -848,6 +848,7 @@ def create_review_app(
     db: aiosqlite.Connection,
     sandbox_managers: "dict[str, SandboxManager] | None" = None,
     config_path: str | None = None,
+    security_key_registry: object | None = None,
 ) -> Starlette:
     """Create the Starlette application for the review API.
 
@@ -905,10 +906,16 @@ def create_review_app(
 
     routes.extend(create_config_routes())
 
+    from open_shrimp.security_key.api import create_security_key_routes
+
+    routes.extend(create_security_key_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db
     app.state.sandbox_managers = sandbox_managers
     app.state.config_path = config_path
+    if security_key_registry is not None:
+        app.state.security_key_registry = security_key_registry
 
     return app

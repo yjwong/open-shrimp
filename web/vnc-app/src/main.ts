@@ -356,6 +356,148 @@ function setupClipboard(context: string, authToken: string, rfb: RFBType): {
   };
 }
 
+// ── Security-key forwarding ──
+
+function chatIdFromAuthToken(authToken: string): number | null {
+  const hmacParts = authToken.split(":");
+  if (hmacParts.length === 4) {
+    const chatId = Number(hmacParts[1]);
+    return Number.isFinite(chatId) ? chatId : null;
+  }
+
+  const params = new URLSearchParams(authToken);
+  const userJson = params.get("user");
+  if (!userJson) return null;
+  try {
+    const user = JSON.parse(userJson) as { id?: unknown };
+    const userId = Number(user.id);
+    return Number.isFinite(userId) ? userId : null;
+  } catch {
+    return null;
+  }
+}
+
+function showSecurityKeyModal(data: {
+  destination_label?: string;
+  push_status?: string | null;
+  requested_device_id?: string | null;
+  manual_fallback?: { phone_url?: string };
+  phone_url?: string;
+  vm_helper_command: string;
+  vm_helper_started?: boolean;
+  vm_helper_error?: string | null;
+  expires_at: number;
+}): void {
+  const overlay = document.createElement("div");
+  overlay.className = "paste-modal-overlay";
+
+  const box = document.createElement("div");
+  box.className = "paste-modal security-key-modal";
+
+  const label = document.createElement("div");
+  label.className = "paste-modal-label";
+  label.textContent = "Security key forwarding session";
+  box.appendChild(label);
+
+  const details = document.createElement("textarea");
+  details.className = "paste-modal-input";
+  details.rows = 7;
+  details.readOnly = true;
+  const expiry = new Date(data.expires_at * 1000).toLocaleTimeString();
+  const pushStatus = data.push_status ?? "pending";
+  const pushText =
+    pushStatus === "sent"
+      ? "Push notification sent to paired Android device"
+      : pushStatus === "no_device"
+        ? "No paired push device; open Android app and find pending session"
+        : pushStatus === "not_configured"
+          ? "Push not configured; open Android app and find pending session"
+          : ["failed", "missing_token", "unsupported_provider"].includes(pushStatus)
+            ? `Push failed (${pushStatus}); open Android app and find pending session`
+            : "Push pending; open Android app if no notification arrives";
+  details.value = [
+    `Destination: ${data.destination_label ?? "OpenShrimp desktop"}`,
+    `Expires: ${expiry}`,
+    `Android push: ${pushText}`,
+    `VM helper: ${data.vm_helper_started ? "started automatically" : "manual start required"}`,
+    ...(data.vm_helper_error ? [`Auto-start error: ${data.vm_helper_error}`] : []),
+    "",
+    data.vm_helper_started ? "Fallback command:" : "Run in the VM:",
+    data.vm_helper_command,
+  ].join("\n");
+  box.appendChild(details);
+
+  const note = document.createElement("div");
+  note.className = "paste-modal-label security-key-note";
+  note.textContent = "Open the Android app and approve locally before using the key.";
+  box.appendChild(note);
+
+  const buttons = document.createElement("div");
+  buttons.className = "paste-modal-buttons";
+
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "Close";
+  closeBtn.addEventListener("click", () => overlay.remove());
+
+  const advancedBtn = document.createElement("button");
+  advancedBtn.textContent = "Show advanced fallback";
+  advancedBtn.addEventListener("click", () => {
+    const phoneUrl = data.manual_fallback?.phone_url ?? data.phone_url ?? "";
+    details.value = [
+      details.value,
+      "",
+      "Advanced/debug manual Android phone WebSocket URL:",
+      phoneUrl || "Unavailable",
+    ].join("\n");
+    advancedBtn.disabled = true;
+    advancedBtn.textContent = "Advanced fallback shown";
+  });
+
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "primary";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(details.value);
+    copyBtn.textContent = "Copied";
+    setTimeout(() => {
+      copyBtn.textContent = "Copy";
+    }, 1200);
+  });
+
+  buttons.appendChild(closeBtn);
+  buttons.appendChild(advancedBtn);
+  buttons.appendChild(copyBtn);
+  box.appendChild(buttons);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  details.select();
+}
+
+async function startSecurityKeyForwarding(
+  context: string,
+  authToken: string,
+): Promise<void> {
+  const chatId = chatIdFromAuthToken(authToken);
+  if (chatId === null) {
+    throw new Error("Cannot infer Telegram chat for this Mini App session");
+  }
+
+  const url =
+    `${window.location.origin}/api/vnc/security-key-session` +
+    `?context=${encodeURIComponent(context)}` +
+    `&token=${encodeURIComponent(authToken)}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Failed to create security-key session");
+  }
+  showSecurityKeyModal(data);
+}
+
 // ── Main ──
 
 main().catch((e) => showError(`Fatal: ${e}`));
@@ -933,6 +1075,14 @@ function buildToolbar(
     .paste-modal-buttons button.primary:hover {
       background: #89b4fa;
     }
+    .security-key-modal {
+      max-width: 520px;
+    }
+    .security-key-note {
+      color: #e0af68;
+      font-size: 12px;
+      line-height: 1.4;
+    }
   `;
   document.head.appendChild(style);
 
@@ -991,6 +1141,24 @@ function buildToolbar(
   });
   interactiveOnly.push(pasteBtn);
   toolbar.appendChild(pasteBtn);
+
+  const securityKeyBtn = document.createElement("button");
+  securityKeyBtn.textContent = "Security key";
+  securityKeyBtn.addEventListener("click", async () => {
+    securityKeyBtn.disabled = true;
+    const original = securityKeyBtn.textContent;
+    securityKeyBtn.textContent = "Starting...";
+    try {
+      await startSecurityKeyForwarding(context, initData);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err));
+    } finally {
+      securityKeyBtn.disabled = false;
+      securityKeyBtn.textContent = original;
+    }
+  });
+  interactiveOnly.push(securityKeyBtn);
+  toolbar.appendChild(securityKeyBtn);
 
   updateInteractiveButtons();
 

@@ -218,6 +218,7 @@ async def get_or_create_session(
     user_id: int = 0,
     is_private_chat: bool = True,
     sandbox_manager: SandboxManager | None = None,
+    sandbox_managers: dict[str, SandboxManager] | None = None,
     mcp_proxy: Any | None = None,
     backend: Backend | None = None,
 ) -> AgentSession:
@@ -643,6 +644,7 @@ async def get_or_create_session(
                     is_private_chat=is_private_chat,
                     host_bash_workdir=_host_bash_workdir,
                     terminal_base_url=terminal_base_url,
+                    sandbox_managers=sandbox_managers,
                 )
 
             # Sandboxed CLIs must reach the host proxy via the sandbox's
@@ -820,6 +822,7 @@ async def reconnect_session(
     user_id: int = 0,
     is_private_chat: bool = True,
     sandbox_manager: SandboxManager | None = None,
+    sandbox_managers: dict[str, SandboxManager] | None = None,
     mcp_proxy: Any | None = None,
     backend: Backend | None = None,
 ) -> AgentSession | None:
@@ -869,6 +872,7 @@ async def reconnect_session(
             user_id=user_id,
             is_private_chat=is_private_chat,
             sandbox_manager=sandbox_manager,
+            sandbox_managers=sandbox_managers,
             mcp_proxy=mcp_proxy,
             backend=backend,
         )

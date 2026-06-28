@@ -81,6 +81,7 @@ def create_openshrimp_tools(
     is_private_chat: bool = True,
     host_bash_workdir: str | None = None,
     terminal_base_url: str | None = None,
+    sandbox_managers: dict[str, Any] | None = None,
 ) -> list[OpenShrimpTool]:
     """Build the transport-neutral OpenShrimp tool descriptors.
 
@@ -1245,6 +1246,7 @@ def create_openshrimp_tools(
             user_id=user_id,
             is_private_chat=is_private_chat,
             terminal_base_url=terminal_base_url,
+            sandbox_managers=sandbox_managers,
         )
         if ask_tool is not None:
             tools_list.append(ask_tool)
