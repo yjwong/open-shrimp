@@ -584,6 +584,7 @@ class LibvirtSandbox:
             self._runtime.provision_credentials(self._claude_home_dir)
 
     def _install_security_key_helper(self) -> None:
+        from open_shrimp.security_key.guest_setup import setup_security_key_guest_cmd
         from open_shrimp.sandbox.libvirt_helpers import (
             _ssh_common_opts,
             install_cli_via_ssh,
@@ -606,6 +607,23 @@ class LibvirtSandbox:
                 f"Failed to detect VM architecture for {SECURITY_KEY_HELPER_BINARY}: "
                 f"{error}"
             )
+
+        setup_result = subprocess.run(
+            [
+                "ssh", *ssh_opts, f"{SANDBOX_USER}@localhost",
+                "bash", "-c", setup_security_key_guest_cmd(),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300.0,
+        )
+        if setup_result.returncode != 0:
+            error = (setup_result.stderr or setup_result.stdout).strip()
+            raise RuntimeError(
+                f"Failed to provision UHID support for {SECURITY_KEY_HELPER_BINARY}: "
+                f"{error}"
+            )
+
         helper_path = ensure_security_key_vm_helper(result.stdout.strip())
         install_cli_via_ssh(
             SECURITY_KEY_HELPER_BINARY,

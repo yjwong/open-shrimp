@@ -376,7 +376,29 @@ class LimaSandbox:
             )
             return
 
+        from open_shrimp.security_key.guest_setup import setup_security_key_guest_cmd
         from open_shrimp.sandbox.lima_helpers import install_cli_in_linux_vm
+
+        setup_result = subprocess.run(
+            [
+                self._limactl,
+                "shell",
+                self._inst_name,
+                "--",
+                "bash",
+                "-c",
+                setup_security_key_guest_cmd(),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if setup_result.returncode != 0:
+            error = (setup_result.stderr or setup_result.stdout).strip()
+            raise RuntimeError(
+                f"Failed to provision UHID support for {SECURITY_KEY_HELPER_BINARY}: "
+                f"{error}"
+            )
 
         install_cli_in_linux_vm(
             self._limactl,

@@ -32,10 +32,10 @@ from open_shrimp.security_key.sessions import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SESSION_LIFETIME_SECONDS = 120
-DEFAULT_IDLE_TIMEOUT_SECONDS = 60
+DEFAULT_SESSION_LIFETIME_SECONDS = 300
+DEFAULT_IDLE_TIMEOUT_SECONDS = 300
 MAX_SESSION_LIFETIME_SECONDS = 300
-MAX_IDLE_TIMEOUT_SECONDS = 120
+MAX_IDLE_TIMEOUT_SECONDS = 300
 
 
 def _registry(request_or_ws: Request | WebSocket) -> SecurityKeySessionRegistry:
