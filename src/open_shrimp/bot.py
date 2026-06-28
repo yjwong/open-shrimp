@@ -390,6 +390,7 @@ async def run_bot(
         BotCommand("tasks", "List or stop background tasks"),
         BotCommand("vnc", "View computer-use desktop"),
         BotCommand("security_key", "Start security-key forwarding"),
+        BotCommand("pair", "Pair Android companion app"),
     ]
     if "mcp" in caps:
         common_commands.append(BotCommand("mcp", "List and manage MCP servers"))
