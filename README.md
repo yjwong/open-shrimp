@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <strong>Claude Code in your pocket. No laptop required.</strong>
+  <strong>Claude Code and OpenCode in your pocket. No laptop required.</strong>
 </p>
 
 ---
 
-OpenShrimp puts a full Claude coding agent in Telegram — complete with file editing, tool use, and project awareness. It's the shrimp 🦐 to [OpenClaw](https://openclaw.ai/)'s lobster.
+OpenShrimp puts a full coding agent in Telegram — complete with file editing, tool use, and project awareness. It's the shrimp 🦐 to [OpenClaw](https://openclaw.ai/)'s lobster.
 
 Small, personal, gets the job done.
 
@@ -59,7 +59,7 @@ Both let you use Claude Code from your phone. They take very different approache
 
 | | **OpenShrimp** | **Claude Code Remote Control** |
 |---|---|---|
-| **How it works** | Standalone bot — talks to Agent SDK directly | Remote view into a running Claude Code terminal session |
+| **How it works** | Standalone bot — talks to the agent backend directly | Remote view into a running Claude Code terminal session |
 | **Interface** | Telegram — no extra app needed | claude.ai/code or Claude mobile app |
 | **Always on** | Yes — runs as a systemd service, message it anytime | No — requires a Claude Code session to be started first |
 | **Code review** | Mobile-first review UI — swipe through hunks to stage or skip | No dedicated review UI |
@@ -69,20 +69,20 @@ Both let you use Claude Code from your phone. They take very different approache
 
 ## Why OpenShrimp?
 
-You're away from your desk but need Claude to fix a bug, review a diff, or scaffold something quick. OpenShrimp gives you a proper Claude Code session from any Telegram chat — on your phone, your tablet, wherever.
+You're away from your desk but need the agent to fix a bug, review a diff, or scaffold something quick. OpenShrimp gives you a proper coding-agent session from any Telegram chat — on your phone, your tablet, wherever.
 
 - **Real agent, not a chatbot.** The agent can read, edit, and write files in your actual project directories. Full tool use, not just text completion.
 - **Pluggable backends.** Run on the Claude Agent SDK (default), or point a context at OpenCode to use GPT, Gemini, or any OpenCode-supported provider.
-- **You stay in control.** Every file mutation requires your explicit approval via inline keyboard buttons. One tap to approve, one tap to deny. Or hit "Accept all edits" when you trust the flow. When you're ready to commit, `/review` opens a swipe-based UI to stage exactly the hunks you want.
+- **You stay in control.** Every file mutation needs your explicit approval — one tap to approve or deny. See [How Tool Approval Works](#how-tool-approval-works). When you're ready to commit, `/review` opens a swipe-based staging UI.
 - **Talk to it.** Send a voice note and it gets transcribed automatically as a prompt — no typing needed. Great for quick instructions when you're on the go.
 - **Multiple projects, one bot.** Switch between project contexts on the fly with `/context`. Each context has its own working directory, CLAUDE.md, model, and tool permissions.
 - **Persistent sessions.** Pick up where you left off. Sessions survive restarts, and you can `/resume` any previous conversation.
-- **Forum topic support.** Use Telegram forum channels to organize conversations — each topic thread gets its own independent Claude session. Run parallel tasks in the same chat without them stepping on each other. Claude auto-titles each topic for easy navigation.
-- **Container isolation.** Run each context inside a Docker container with only the project directory mounted. On macOS, use Lima for full VM isolation via Apple's Virtualization.framework.
-- **Computer use.** Enable a headless desktop inside the container — Claude can launch Chromium, click around, take screenshots, and interact with GUIs. Watch live via VNC.
+- **Forum topic support.** Use Telegram forum channels to organize conversations — each topic thread gets its own independent agent session. Run parallel tasks in the same chat without them stepping on each other. The agent auto-titles each topic for easy navigation.
+- **Container isolation.** Run each context inside a sandbox — Docker or a full VM — with only the project directory exposed.
+- **Computer use.** Enable a headless desktop inside the container — the agent can launch Chromium, click around, take screenshots, and interact with GUIs. Watch live via VNC.
 - **Group chat ready.** Add the bot to a team chat. It responds to @mentions and replies, so it stays out of the way until you need it.
-- **Schedule recurring tasks.** Tell Claude to check your repo every morning, monitor a CI pipeline, or run a one-shot task later — all via natural language. Tasks run in isolated sessions automatically.
-- **Watch background tasks.** When Claude runs a long command in the background, tap "View output" to open a live terminal viewer right in Telegram.
+- **Schedule recurring tasks.** Tell the agent to check your repo every morning, monitor a CI pipeline, or run a one-shot task later — all via natural language. Tasks run in isolated sessions automatically.
+- **Watch background tasks.** When the agent runs a long command in the background, tap "View output" to open a live terminal viewer right in Telegram.
 - **Locked down by default.** User allowlist, path-scoped file access, and granular tool approval. The agent can't silently read your `~/.ssh` or write outside your project.
 
 ## Code Review
@@ -93,15 +93,15 @@ It works like Tinder for diffs — each hunk is a card. Swipe right to stage, le
 
 ## Voice Notes
 
-Send a voice message instead of typing. OpenShrimp automatically transcribes it using [Moonshine](https://github.com/usefulsensors/moonshine) — a fast, lightweight speech-to-text model that runs locally. The transcribed text is sent to Claude as a prompt, prefixed with `[Transcribed from voice note]` so it knows the input came from speech.
+Send a voice message instead of typing. OpenShrimp automatically transcribes it using [Moonshine](https://github.com/usefulsensors/moonshine) — a fast, lightweight speech-to-text model that runs locally. The transcribed text is sent to the agent as a prompt, prefixed with `[Transcribed from voice note]` so it knows the input came from speech.
 
 The `moonshine-stt` binary is auto-downloaded on first use. No setup required.
 
 ## Scheduled Tasks
 
-Set up recurring or one-shot tasks that Claude runs automatically. Just describe what you want in natural language — "check for broken tests every morning at 9am", "summarize the git log every Friday", or "run this migration in 30 minutes".
+Set up recurring or one-shot tasks that the agent runs automatically. Just describe what you want in natural language — "check for broken tests every morning at 9am", "summarize the git log every Friday", or "run this migration in 30 minutes".
 
-Claude manages schedules via built-in tools. Use `/schedule` to see what's active or remove tasks. Scheduled tasks run in isolated sessions with read-only access, so they can report but not modify your code without a follow-up conversation.
+The agent manages schedules via built-in tools. Use `/schedule` to see what's active or remove tasks. Scheduled tasks run in isolated sessions with read-only access, so they can report but not modify your code without a follow-up conversation.
 
 ## Container Isolation
 
@@ -115,11 +115,11 @@ contexts:
       backend: docker   # docker (Linux), libvirt (Linux VM), or lima (macOS VM)
 ```
 
-Session state is stored separately per context under `~/.config/openshrimp/containers/`, so sandboxed contexts don't interfere with each other or your host `~/.claude`.
+Session state is stored separately per context under `~/.config/openshrimp/containers/`, so sandboxed contexts don't interfere with each other or your host agent state (e.g. `~/.claude`).
 
 On Linux, use `backend: docker` or `backend: libvirt`. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework.
 
-The sandbox `backend:` (`docker`/`libvirt`/`lima`) is a different setting from the agent `backend:` (`claude_sdk`/`opencode`) — see [Agent Backends](#agent-backends). OpenCode contexts use a separate `openshrimp-opencode:latest` image.
+OpenCode contexts use a separate `openshrimp-opencode:latest` image — see [Agent Backends](#agent-backends).
 
 ## macOS App
 
@@ -137,7 +137,7 @@ On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` fr
 ### Prerequisites
 
 - Either the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated (via `claude` login or an [Anthropic API key](https://console.anthropic.com/)) for the default `claude_sdk` backend, **or** [OpenCode](https://github.com/sst/opencode) with `opencode auth login` if you choose the `opencode` backend (see [Agent Backends](#agent-backends))
-- A Telegram bot token from [@BotFather](https://t.me/BotFather) — we strongly recommend enabling **Threaded Mode** (Settings → Bot Settings → Threads Settings → Threaded Mode). This lets each conversation run in its own forum topic with an independent Claude session.
+- A Telegram bot token from [@BotFather](https://t.me/BotFather) — we strongly recommend enabling **Threaded Mode** (Settings → Bot Settings → Threads Settings → Threaded Mode). This lets each conversation run in its own forum topic with an independent agent session.
 
 ### Option 1: Download Binary (recommended)
 
@@ -199,7 +199,7 @@ contexts:
   my-project:
     directory: /home/you/projects/my-project
     description: "My awesome project"
-    model: claude-sonnet-4-6
+    model: claude-sonnet-4-6   # claude_sdk backend; OpenCode needs provider/model — see Agent Backends
 
 default_context: my-project
 ```
@@ -219,8 +219,6 @@ uv run openshrimp
 ANTHROPIC_API_KEY=sk-ant-... ./openshrimp
 ```
 
-If no config file exists, OpenShrimp starts an interactive setup wizard that walks you through creating one — no need to copy or edit YAML manually.
-
 Or deploy as a systemd service for always-on access — see [Deployment](#deployment).
 
 ## Commands
@@ -230,7 +228,7 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 | `/context [name]` | List available contexts or switch to one |
 | `/clear` | Start a fresh session in the current context |
 | `/status` | Show current context, session, and running state |
-| `/cancel` | Abort a running Claude invocation |
+| `/cancel` | Abort a running agent invocation |
 | `/model [name]` | Show or override the model for this chat |
 | `/effort [level]` | Show or override the thinking effort level (low/medium/high/xhigh/max) |
 | `/resume` | List and resume a previous session |
@@ -240,7 +238,7 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 | `/schedule` | List and manage scheduled tasks |
 | `/tasks` | List or stop background tasks |
 | `/vnc` | View the computer-use desktop |
-| `/usage` | Show Claude quota/usage statistics |
+| `/usage` | Show agent quota/usage statistics |
 | `/security_key` | Start a short-lived manual key-forwarding session |
 | `/pair` | Manage Android companion pairing |
 | `/config` | Open the config Mini App |
