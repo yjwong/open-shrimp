@@ -12,12 +12,6 @@ wheels/
 # Frontend
 node_modules/
 
-# Android
-.gradle/
-*/.gradle/
-**/app/build/
-**/google-services.json
-
 # Secrets
 config.yaml
 .env
