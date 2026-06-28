@@ -54,6 +54,7 @@ from open_shrimp.handlers.utils import (
     chat_scope_from_message,
     get_backend_for_scope,
 )
+from open_shrimp.android_push import get_push_sender
 from open_shrimp.security_key.api import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_SESSION_LIFETIME_SECONDS,
@@ -1411,6 +1412,8 @@ async def security_key_handler(
     session = await create_security_key_session(
         db,
         registry=registry,
+        config=config,
+        push_sender=get_push_sender(context.bot_data, config),
         scope=scope,
         context_name=context_name,
         sandbox_id=sandbox_id,
@@ -1462,7 +1465,9 @@ async def security_key_handler(
             f"Security key forwarding for `{_escape_mdv2(context_name)}` is ready\.",
             "",
             f"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`\.",
-            "Open the Android app and paste this phone WebSocket URL:",
+            "A request was sent to the paired Android app if push is configured\.",
+            "Open the app and use Find pending session if no notification arrives\.",
+            "Advanced manual fallback phone WebSocket URL:",
             f"`{_escape_mdv2(phone_url)}`",
             "",
             helper_status,

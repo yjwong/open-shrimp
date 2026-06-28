@@ -21,6 +21,7 @@ from starlette.websockets import WebSocket
 
 from open_shrimp.config import Config, ContextConfig
 from open_shrimp.db import ChatScope
+from open_shrimp.android_push import get_push_sender
 from open_shrimp.security_key.api import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_SESSION_LIFETIME_SECONDS,
@@ -572,6 +573,8 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
     session = await create_security_key_session(
         request.app.state.db,
         registry=get_or_create_registry(request.app.state),
+        config=config,
+        push_sender=get_push_sender(request.app.state, config),
         scope=ChatScope(chat_id=chat_id, thread_id=thread_id),
         context_name=context_name,
         sandbox_id=sandbox_id,

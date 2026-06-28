@@ -16,6 +16,7 @@ node_modules/
 .gradle/
 */.gradle/
 **/app/build/
+**/google-services.json
 
 # Secrets
 config.yaml

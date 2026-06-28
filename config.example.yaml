@@ -130,3 +130,14 @@ default_context: default
 #                        # Downloads cloudflared automatically if not installed.
 #                        # Sets public_url from the assigned trycloudflare.com URL.
 #                        # Ignored if public_url is already set.
+
+# Android companion settings (optional)
+# android_companion:
+#   push_provider: fcm
+#   # Firebase Cloud Messaging HTTP v1 credentials. You may use either config
+#   # fields or environment variables:
+#   #   OPENSHRIMP_FCM_PROJECT_ID
+#   #   OPENSHRIMP_FCM_SERVICE_ACCOUNT_FILE
+#   #   OPENSHRIMP_FCM_SERVICE_ACCOUNT_JSON
+#   fcm_project_id: your-firebase-project-id
+#   fcm_service_account_file: /path/to/firebase-service-account.json

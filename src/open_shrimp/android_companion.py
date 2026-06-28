@@ -80,6 +80,33 @@ async def list_android_devices(db: aiosqlite.Connection) -> list[dict[str, Any]]
     ]
 
 
+async def list_active_android_push_devices(db: aiosqlite.Connection) -> list[dict[str, Any]]:
+    cursor = await db.execute(
+        """
+        SELECT device_id, display_name, push_provider, push_token,
+               push_endpoint, push_auth_secret, push_p256dh
+        FROM android_companion_devices
+        WHERE active = 1
+          AND revoked_at IS NULL
+          AND push_provider IS NOT NULL
+        ORDER BY created_at DESC
+        """
+    )
+    rows = await cursor.fetchall()
+    return [
+        {
+            "device_id": row[0],
+            "display_name": row[1],
+            "push_provider": row[2],
+            "push_token": row[3],
+            "push_endpoint": row[4],
+            "push_auth_secret": row[5],
+            "push_p256dh": row[6],
+        }
+        for row in rows
+    ]
+
+
 async def revoke_android_device(db: aiosqlite.Connection, device_id: str) -> bool:
     cursor = await db.execute(
         """
@@ -91,6 +118,36 @@ async def revoke_android_device(db: aiosqlite.Connection, device_id: str) -> boo
     )
     await db.commit()
     return cursor.rowcount > 0
+
+
+async def update_android_device_push_registration(
+    db: aiosqlite.Connection,
+    *,
+    device_id: str,
+    push_provider: str | None,
+    push_token: str | None,
+    push_endpoint: str | None = None,
+    push_auth_secret: str | None = None,
+    push_p256dh: str | None = None,
+) -> None:
+    await db.execute(
+        """
+        UPDATE android_companion_devices
+        SET push_provider = ?, push_token = ?, push_endpoint = ?,
+            push_auth_secret = ?, push_p256dh = ?, last_seen_at = ?
+        WHERE device_id = ? AND active = 1 AND revoked_at IS NULL
+        """,
+        (
+            push_provider,
+            push_token,
+            push_endpoint,
+            push_auth_secret,
+            push_p256dh,
+            int(time.time()),
+            device_id,
+        ),
+    )
+    await db.commit()
 
 
 async def pair_android_device(

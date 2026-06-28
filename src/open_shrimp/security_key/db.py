@@ -170,6 +170,24 @@ async def mark_security_key_session_claimed(
     await db.commit()
 
 
+async def update_security_key_session_push_status(
+    db: aiosqlite.Connection,
+    *,
+    session_id: str,
+    requested_device_id: str | None,
+    push_status: str,
+) -> None:
+    await db.execute(
+        """
+        UPDATE security_key_sessions
+        SET requested_device_id = ?, push_sent_at = ?, push_status = ?
+        WHERE id = ?
+        """,
+        (requested_device_id, int(time.time()), push_status, session_id),
+    )
+    await db.commit()
+
+
 async def audit_security_key_event(
     db: aiosqlite.Connection,
     *,

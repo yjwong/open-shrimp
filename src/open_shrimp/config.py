@@ -105,12 +105,21 @@ class ReviewConfig:
 
 
 @dataclass
+class AndroidCompanionConfig:
+    push_provider: str | None = None
+    fcm_project_id: str | None = None
+    fcm_service_account_file: str | None = None
+    fcm_service_account_json: str | None = None
+
+
+@dataclass
 class Config:
     telegram: TelegramConfig
     allowed_users: list[int]
     contexts: dict[str, ContextConfig]
     default_context: str
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    android_companion: AndroidCompanionConfig = field(default_factory=AndroidCompanionConfig)
     instance_name: str | None = None
     auto_update: bool = True
     # The agent backend, selected once at startup (resolved via
@@ -455,11 +464,28 @@ def _parse(raw: dict) -> Config:
             f"(supported: 'cloudflared')"
         )
 
+    android_companion_raw = raw.get("android_companion", {})
+    if not isinstance(android_companion_raw, dict):
+        raise ValueError("android_companion must be a mapping")
+    push_provider = android_companion_raw.get("push_provider")
+    if push_provider is not None and push_provider not in ("fcm",):
+        raise ValueError(
+            f"Unsupported android_companion.push_provider value: {push_provider!r} "
+            f"(supported: 'fcm')"
+        )
+
     review = ReviewConfig(
         host=str(review_raw.get("host", "127.0.0.1")),
         port=int(review_raw.get("port", 8080)),
         public_url=review_raw.get("public_url"),
         tunnel=tunnel_raw,
+    )
+
+    android_companion = AndroidCompanionConfig(
+        push_provider=push_provider,
+        fcm_project_id=android_companion_raw.get("fcm_project_id"),
+        fcm_service_account_file=android_companion_raw.get("fcm_service_account_file"),
+        fcm_service_account_json=android_companion_raw.get("fcm_service_account_json"),
     )
 
     return Config(
@@ -468,6 +494,7 @@ def _parse(raw: dict) -> Config:
         contexts=contexts,
         default_context=raw["default_context"],
         review=review,
+        android_companion=android_companion,
         instance_name=raw.get("instance_name"),
         auto_update=bool(raw.get("auto_update", True)),
         backend=str(raw.get("backend", "claude_sdk")),
@@ -593,6 +620,22 @@ def config_to_dict(config: Config) -> dict[str, Any]:
         review_dict["tunnel"] = config.review.tunnel
     if review_dict:
         result["review"] = review_dict
+
+    android_companion_dict: dict[str, Any] = {}
+    if config.android_companion.push_provider is not None:
+        android_companion_dict["push_provider"] = config.android_companion.push_provider
+    if config.android_companion.fcm_project_id is not None:
+        android_companion_dict["fcm_project_id"] = config.android_companion.fcm_project_id
+    if config.android_companion.fcm_service_account_file is not None:
+        android_companion_dict["fcm_service_account_file"] = (
+            config.android_companion.fcm_service_account_file
+        )
+    if config.android_companion.fcm_service_account_json is not None:
+        android_companion_dict["fcm_service_account_json"] = (
+            config.android_companion.fcm_service_account_json
+        )
+    if android_companion_dict:
+        result["android_companion"] = android_companion_dict
 
     if config.instance_name is not None:
         result["instance_name"] = config.instance_name

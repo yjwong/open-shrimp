@@ -30,6 +30,8 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.color.DynamicColors
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
+import com.google.android.gms.tasks.Tasks
+import com.google.firebase.messaging.FirebaseMessaging
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.KeyPairGenerator
@@ -40,6 +42,7 @@ import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 import java.util.Base64
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -212,6 +215,13 @@ class MainActivity : Activity() {
 
         requestNotificationPermissionIfNeeded()
         appendLog("Ready. Pair with /pair, then use Find pending session when OpenShrimp is waiting for a security key.")
+        handlePushIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handlePushIntent(intent)
     }
 
     override fun onStart() {
@@ -254,11 +264,18 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val publicKey = ensureSigningKey().public.encoded.base64Url()
+                val pushToken = fcmTokenOrNull()
                 val body = JSONObject()
                     .put("code", code)
                     .put("device_id", deviceId)
                     .put("display_name", deviceName)
                     .put("public_key", publicKey)
+                    .apply {
+                        if (!pushToken.isNullOrEmpty()) {
+                            put("push_provider", "fcm")
+                            put("push_token", pushToken)
+                        }
+                    }
                     .toString()
                 val request = Request.Builder()
                     .url("$baseUrl/api/android-companion/pair")
@@ -278,7 +295,13 @@ class MainActivity : Activity() {
                         .apply()
                     runOnUiThread {
                         setPairingInProgress(false)
-                        setPairingStatus("Paired with OpenShrimp. You can now use Find pending session.")
+                        setPairingStatus(
+                            if (pushToken.isNullOrEmpty()) {
+                                "Paired with OpenShrimp. FCM is not configured; use Find pending session."
+                            } else {
+                                "Paired with OpenShrimp. Push notifications are registered."
+                            }
+                        )
                         appendLog("Paired with OpenShrimp server ${json.optString("server_id")}")
                     }
                 }
@@ -392,6 +415,33 @@ class MainActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    private fun handlePushIntent(intent: Intent?) {
+        val sessionId = intent?.getStringExtra(EXTRA_PUSH_SESSION_ID) ?: return
+        val baseUrl = normalizedBaseUrl() ?: return
+        val deviceId = prefs.getString(PREF_DEVICE_ID, null)
+        if (deviceId.isNullOrEmpty()) {
+            setSessionStatus("Pair this phone before claiming pushed sessions.")
+            return
+        }
+        setClaimInProgress(true)
+        setSessionStatus("Claiming pushed security-key request...")
+        claimPendingSession(
+            baseUrl,
+            deviceId,
+            PendingSession(id = sessionId, contextName = "push", status = "pending"),
+        )
+        intent.removeExtra(EXTRA_PUSH_SESSION_ID)
+    }
+
+    private fun fcmTokenOrNull(): String? {
+        return try {
+            Tasks.await(FirebaseMessaging.getInstance().token, 5, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            runOnUiThread { appendLog("FCM token unavailable: ${e.message}") }
+            null
+        }
     }
 
     private fun signedRequest(method: String, url: String, body: String, deviceId: String): Request.Builder {
@@ -572,6 +622,8 @@ class MainActivity : Activity() {
         private const val PREF_DEVICE_ID = "device_id"
         private const val PREF_DEVICE_NAME = "device_name"
         private const val PREF_SERVER_ID = "server_id"
+        const val EXTRA_PUSH_SESSION_ID = "place.wong.shrimp.companion.PUSH_SESSION_ID"
+        const val EXTRA_PUSH_SERVER_ID = "place.wong.shrimp.companion.PUSH_SERVER_ID"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "openshrimp_companion_signing"
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()

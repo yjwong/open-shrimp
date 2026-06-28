@@ -287,6 +287,132 @@ def test_android_pair_poll_and_claim_session(tmp_path: Path) -> None:
         asyncio.run(db.close())
 
 
+def test_security_key_session_sends_minimal_android_push(tmp_path: Path) -> None:
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    device_id = "android-push-device"
+    sender = _FakePushSender()
+    client.app.state.android_push_sender = sender
+    try:
+        code_response = client.post(
+            "/api/android-companion/pairing-codes", headers=_auth_header()
+        )
+        pair_response = client.post(
+            "/api/android-companion/pair",
+            json={
+                "code": code_response.json()["code"],
+                "device_id": device_id,
+                "display_name": "Pixel Push",
+                "public_key": _b64url(public_key),
+                "push_provider": "fcm",
+                "push_token": "fcm-token",
+            },
+        )
+        assert pair_response.status_code == 201
+
+        session_response = client.post(
+            "/api/security-key/sessions",
+            headers=_auth_header(),
+            json={"chat_id": 123, "context_name": "default"},
+        )
+        assert session_response.status_code == 201
+        session_id = session_response.json()["id"]
+        assert sender.sent[0]["device"]["device_id"] == device_id
+        assert sender.sent[0]["device"]["push_token"] == "fcm-token"
+        assert sender.sent[0]["server_id"] == pair_response.json()["server_id"]
+        assert sender.sent[0]["session_id"] == session_id
+        assert "phone_url" not in sender.sent[0]
+        assert "phone_token" not in sender.sent[0]
+        assert "vm_token" not in sender.sent[0]
+
+        status = client.get(
+            f"/api/security-key/sessions/{session_id}", headers=_auth_header()
+        )
+        assert status.json()["requested_device_id"] == device_id
+        assert status.json()["push_status"] == "sent"
+    finally:
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_android_signed_push_registration_update(tmp_path: Path) -> None:
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    device_id = "android-refresh-device"
+    sender = _FakePushSender()
+    client.app.state.android_push_sender = sender
+    try:
+        code_response = client.post(
+            "/api/android-companion/pairing-codes", headers=_auth_header()
+        )
+        client.post(
+            "/api/android-companion/pair",
+            json={
+                "code": code_response.json()["code"],
+                "device_id": device_id,
+                "display_name": "Pixel Refresh",
+                "public_key": _b64url(public_key),
+            },
+        )
+
+        path = "/api/android-companion/push-registration"
+        body = b'{"push_provider":"fcm","push_token":"rotated-token"}'
+        update_response = client.post(
+            path,
+            content=body,
+            headers={
+                "content-type": "application/json",
+                **_android_headers(
+                    private_key,
+                    device_id=device_id,
+                    method="POST",
+                    path=path,
+                    body=body,
+                    nonce="nonce-push-update",
+                ),
+            },
+        )
+        assert update_response.status_code == 200
+
+        session_response = client.post(
+            "/api/security-key/sessions",
+            headers=_auth_header(),
+            json={"chat_id": 123, "context_name": "default"},
+        )
+        assert session_response.status_code == 201
+        assert sender.sent[0]["device"]["push_token"] == "rotated-token"
+    finally:
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_security_key_session_records_no_push_device(tmp_path: Path) -> None:
+    client, db = _make_client(tmp_path)
+    try:
+        response = client.post(
+            "/api/security-key/sessions",
+            headers=_auth_header(),
+            json={"chat_id": 123, "context_name": "default"},
+        )
+        assert response.status_code == 201
+        status = client.get(
+            f"/api/security-key/sessions/{response.json()['id']}", headers=_auth_header()
+        )
+        assert status.json()["requested_device_id"] is None
+        assert status.json()["push_status"] == "no_device"
+    finally:
+        client.close()
+        asyncio.run(db.close())
+
+
 def test_android_signed_request_rejects_nonce_replay(tmp_path: Path) -> None:
     client, db = _make_client(tmp_path)
     private_key = ec.generate_private_key(ec.SECP256R1())
@@ -410,6 +536,19 @@ class _FakeSandbox:
         self.started.append(
             {"relay_url": relay_url, "session_id": session_id, "token": token}
         )
+
+
+class _FakePushResult:
+    status = "sent"
+
+
+class _FakePushSender:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, object]] = []
+
+    async def send_security_key_request(self, **kwargs: object) -> _FakePushResult:
+        self.sent.append(kwargs)
+        return _FakePushResult()
 
 
 class _FakeWebSocket:

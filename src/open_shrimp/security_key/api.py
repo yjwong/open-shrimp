@@ -21,10 +21,13 @@ from open_shrimp.android_companion import (
     authenticate_android_request,
     create_pairing_code,
     get_or_create_server_id,
+    list_active_android_push_devices,
     list_android_devices,
     pair_android_device,
     revoke_android_device,
+    update_android_device_push_registration,
 )
+from open_shrimp.android_push import FcmPushSender, get_push_sender
 from open_shrimp.security_key.db import (
     audit_security_key_event,
     create_security_key_session_record,
@@ -32,6 +35,7 @@ from open_shrimp.security_key.db import (
     list_pending_android_security_key_sessions,
     mark_security_key_session_claimed,
     mark_security_key_session_approved,
+    update_security_key_session_push_status,
     update_security_key_session_status,
 )
 from open_shrimp.security_key.sessions import (
@@ -197,6 +201,8 @@ async def create_session_endpoint(request: Request) -> JSONResponse:
     session = await create_security_key_session(
         db,
         registry=_registry(request),
+        config=config,
+        push_sender=get_push_sender(request.app.state, config),
         scope=scope,
         context_name=context_name,
         sandbox_id=sandbox_id,
@@ -219,6 +225,8 @@ async def create_security_key_session(
     db: aiosqlite.Connection,
     *,
     registry: SecurityKeySessionRegistry,
+    config: Config | None = None,
+    push_sender: FcmPushSender | None = None,
     scope: ChatScope,
     context_name: str,
     sandbox_id: str | None,
@@ -243,7 +251,63 @@ async def create_security_key_session(
         expires_at=session.expires_at,
     )
     await audit_security_key_event(db, session_id=session.id, event="created")
+    if config is not None and push_sender is not None:
+        await _send_android_security_key_push(
+            db,
+            config=config,
+            push_sender=push_sender,
+            session=session,
+            context_name=context_name,
+        )
     return session
+
+
+async def _send_android_security_key_push(
+    db: aiosqlite.Connection,
+    *,
+    config: Config,
+    push_sender: FcmPushSender,
+    session: SecurityKeyRelaySession,
+    context_name: str,
+) -> None:
+    devices = await list_active_android_push_devices(db)
+    if not devices:
+        await update_security_key_session_push_status(
+            db,
+            session_id=session.id,
+            requested_device_id=None,
+            push_status="no_device",
+        )
+        return
+
+    device = devices[0]
+    server_id = await get_or_create_server_id(db)
+    server_label = config.instance_name or config.review.host or "OpenShrimp"
+    try:
+        result = await push_sender.send_security_key_request(
+            device=device,
+            server_id=server_id,
+            session_id=session.id,
+            server_label=server_label,
+            context_name=context_name,
+        )
+    except Exception:
+        logger.exception("Failed to send Android companion push")
+        result_status = "failed"
+    else:
+        result_status = result.status
+    await update_security_key_session_push_status(
+        db,
+        session_id=session.id,
+        requested_device_id=device["device_id"],
+        push_status=result_status,
+    )
+    await audit_security_key_event(
+        db,
+        session_id=session.id,
+        event="push_sent" if result_status == "sent" else "push_failed",
+        reason=result_status,
+    )
 
 
 async def get_session_endpoint(request: Request) -> JSONResponse:
@@ -373,6 +437,37 @@ async def delete_android_device_endpoint(request: Request) -> JSONResponse:
     )
     if not ok:
         return JSONResponse({"error": "Device not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+async def update_android_push_registration_endpoint(request: Request) -> JSONResponse:
+    """POST /api/android-companion/push-registration."""
+    try:
+        device = await authenticate_android_request(request)
+        body = await _json_body(request)
+        push_provider = body.get("push_provider")
+        push_token = body.get("push_token")
+        if push_provider is not None and not isinstance(push_provider, str):
+            raise AuthError(400, "push_provider must be a string")
+        if push_token is not None and not isinstance(push_token, str):
+            raise AuthError(400, "push_token must be a string")
+        await update_android_device_push_registration(
+            request.app.state.db,
+            device_id=device["device_id"],
+            push_provider=push_provider,
+            push_token=push_token,
+            push_endpoint=(
+                body.get("push_endpoint") if isinstance(body.get("push_endpoint"), str) else None
+            ),
+            push_auth_secret=(
+                body.get("push_auth_secret")
+                if isinstance(body.get("push_auth_secret"), str)
+                else None
+            ),
+            push_p256dh=(body.get("push_p256dh") if isinstance(body.get("push_p256dh"), str) else None),
+        )
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
     return JSONResponse({"ok": True})
 
 
@@ -600,6 +695,11 @@ def create_security_key_routes() -> list[Route | WebSocketRoute]:
             "/api/android-companion/devices/{device_id}",
             delete_android_device_endpoint,
             methods=["DELETE"],
+        ),
+        Route(
+            "/api/android-companion/push-registration",
+            update_android_push_registration_endpoint,
+            methods=["POST"],
         ),
         Route(
             "/api/security-key/android/pending-sessions",
