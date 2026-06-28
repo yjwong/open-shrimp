@@ -13,15 +13,24 @@ import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.text.method.ScrollingMovementMethod
+import android.view.Gravity
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import com.google.android.material.R as MaterialR
+import com.google.android.material.appbar.MaterialToolbar
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.color.DynamicColors
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 
 class MainActivity : Activity() {
-    private lateinit var relayUrlInput: EditText
-    private lateinit var deviceIdInput: EditText
+    private lateinit var relayUrlLayout: TextInputLayout
+    private lateinit var relayUrlInput: TextInputEditText
+    private lateinit var deviceIdInput: TextInputEditText
     private lateinit var logView: TextView
     private lateinit var prefs: SharedPreferences
 
@@ -32,29 +41,41 @@ class MainActivity : Activity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
 
-        relayUrlInput = EditText(this).apply {
-            hint = "wss://server/api/security-key/sessions/.../phone?token=..."
+        relayUrlInput = TextInputEditText(this).apply {
             setSingleLine(false)
-            minLines = 2
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            minLines = 3
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        }
+        relayUrlLayout = TextInputLayout(this).apply {
+            hint = "One-time phone WebSocket URL"
+            helperText = "Paste the URL from /security_key or the VNC Mini App."
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            addView(relayUrlInput, matchWrap())
         }
 
-        deviceIdInput = EditText(this).apply {
-            hint = "Device name for audit log"
+        deviceIdInput = TextInputEditText(this).apply {
             setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
             setText(prefs.getString(PREF_DEVICE_ID, Build.MODEL))
         }
+        val deviceIdLayout = TextInputLayout(this).apply {
+            hint = "Device name for audit log"
+            helperText = "Used only for server-side audit records."
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            addView(deviceIdInput, matchWrap())
+        }
 
-        val startButton = Button(this).apply {
-            text = "Approve And Start Forwarding"
+        val startButton = MaterialButton(this).apply {
+            text = "Approve and start forwarding"
             setOnClickListener { confirmAndStart() }
         }
 
-        val stopButton = Button(this).apply {
-            text = "Stop Forwarding"
+        val stopButton = MaterialButton(this, null, MaterialR.attr.materialButtonOutlinedStyle).apply {
+            text = "Stop forwarding"
             setOnClickListener {
                 startService(
                     Intent(this@MainActivity, SecurityKeyForwardingService::class.java)
@@ -66,23 +87,49 @@ class MainActivity : Activity() {
         logView = TextView(this).apply {
             setTextIsSelectable(true)
             movementMethod = ScrollingMovementMethod()
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+
+        val toolbar = MaterialToolbar(this).apply {
+            title = "OpenShrimp Security Key"
+            subtitle = "Forward one approved FIDO session"
         }
 
         val intro = TextView(this).apply {
-            text = "Paste the one-time phone WebSocket URL from /security_key or the VNC Mini App, plug in a USB FIDO key, then approve forwarding locally. HID payloads and relay URLs are not logged or stored."
+            text = "Paste a short-lived relay URL, plug in a USB FIDO key, then approve forwarding locally. HID payloads and relay URLs are not logged or stored."
+            setTextAppearance(MaterialR.style.TextAppearance_Material3_BodyMedium)
+        }
+
+        val logCard = MaterialCardView(this).apply {
+            radius = dp(24).toFloat()
+            addView(
+                logView,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
+        }
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+            addView(intro, matchWrapWithBottomMargin(24))
+            addView(relayUrlLayout, matchWrapWithBottomMargin(16))
+            addView(deviceIdLayout, matchWrapWithBottomMargin(24))
+            addView(startButton, matchWrapWithBottomMargin(8))
+            addView(stopButton, matchWrapWithBottomMargin(24))
+            addView(logCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
-            addView(intro, matchWrap())
-            addView(relayUrlInput, matchWrap())
-            addView(deviceIdInput, matchWrap())
-            addView(startButton, matchWrap())
-            addView(stopButton, matchWrap())
-            addView(logView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(toolbar, matchWrap())
+            addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            gravity = Gravity.CENTER_HORIZONTAL
         }
         setContentView(layout)
+        applySystemBarInsets(toolbar, content)
 
         requestNotificationPermissionIfNeeded()
         appendLog("Ready. This app forwards only an attached USB HID security key for one approved relay session.")
@@ -118,9 +165,11 @@ class MainActivity : Activity() {
         val relayUrl = relayUrlInput.text.toString().trim()
         var deviceId = deviceIdInput.text.toString().trim()
         if (!relayUrl.startsWith("ws://") && !relayUrl.startsWith("wss://")) {
+            relayUrlLayout.error = "Relay URL must start with ws:// or wss://"
             appendLog("Relay URL must start with ws:// or wss://")
             return
         }
+        relayUrlLayout.error = null
         if (deviceId.isEmpty()) {
             deviceId = Build.MODEL
             deviceIdInput.setText(deviceId)
@@ -162,6 +211,44 @@ class MainActivity : Activity() {
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.WRAP_CONTENT,
     )
+
+    private fun matchWrapWithBottomMargin(bottomMarginDp: Int) = matchWrap().apply {
+        bottomMargin = dp(bottomMarginDp)
+    }
+
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    private fun applySystemBarInsets(toolbar: MaterialToolbar, content: LinearLayout) {
+        val toolbarStart = toolbar.paddingStart
+        val toolbarTop = toolbar.paddingTop
+        val toolbarEnd = toolbar.paddingEnd
+        val toolbarBottom = toolbar.paddingBottom
+        val contentStart = content.paddingStart
+        val contentTop = content.paddingTop
+        val contentEnd = content.paddingEnd
+        val contentBottom = content.paddingBottom
+
+        ViewCompat.setOnApplyWindowInsetsListener(toolbar) { view, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPaddingRelative(
+                toolbarStart + systemBars.left,
+                toolbarTop + systemBars.top,
+                toolbarEnd + systemBars.right,
+                toolbarBottom,
+            )
+            insets
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPaddingRelative(
+                contentStart + systemBars.left,
+                contentTop,
+                contentEnd + systemBars.right,
+                contentBottom + systemBars.bottom,
+            )
+            insets
+        }
+    }
 
     private fun appendLog(message: String) {
         logView.append("$message\n")
