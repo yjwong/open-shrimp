@@ -232,12 +232,20 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 | `/status` | Show current context, session, and running state |
 | `/cancel` | Abort a running Claude invocation |
 | `/model [name]` | Show or override the model for this chat |
+| `/effort [level]` | Show or override the thinking effort level (low/medium/high/xhigh/max) |
 | `/resume` | List and resume a previous session |
+| `/add_dir [path]` | Add, remove, or list extra working directories for the context |
 | `/review` | Open the mobile code review UI |
 | `/mcp` | List and manage MCP servers |
 | `/schedule` | List and manage scheduled tasks |
 | `/tasks` | List or stop background tasks |
 | `/vnc` | View the computer-use desktop |
+| `/usage` | Show Claude quota/usage statistics |
+| `/security_key` | Start a short-lived manual key-forwarding session |
+| `/pair` | Manage Android companion pairing |
+| `/config` | Open the config Mini App |
+| `/login` | Re-authenticate the Mini Apps |
+| `/restart` | Restart the bot process |
 
 ## How Tool Approval Works
 
