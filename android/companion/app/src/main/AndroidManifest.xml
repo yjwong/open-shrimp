@@ -9,7 +9,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="OpenShrimp Security Key"
+        android:label="OpenShrimp Companion"
         android:theme="@style/AppTheme">
         <activity
             android:name=".MainActivity"

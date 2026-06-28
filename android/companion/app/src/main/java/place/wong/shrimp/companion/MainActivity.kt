@@ -1,4 +1,4 @@
-package dev.openshrimp.securitykey
+package place.wong.shrimp.companion
 
 import android.Manifest
 import android.app.Activity
@@ -91,7 +91,7 @@ class MainActivity : Activity() {
         }
 
         val toolbar = MaterialToolbar(this).apply {
-            title = "OpenShrimp Security Key"
+            title = "OpenShrimp Companion"
             subtitle = "Forward one approved FIDO session"
         }
 
@@ -132,7 +132,7 @@ class MainActivity : Activity() {
         applySystemBarInsets(toolbar, content)
 
         requestNotificationPermissionIfNeeded()
-        appendLog("Ready. This app forwards only an attached USB HID security key for one approved relay session.")
+        appendLog("Ready. Use this app to connect Android-side OpenShrimp features. Security-key forwarding requires an attached USB HID key and one approved relay session.")
     }
 
     override fun onStart() {

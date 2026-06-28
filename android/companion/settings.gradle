@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "OpenShrimpSecurityKeyCompanion"
+rootProject.name = "OpenShrimpCompanion"
 include ":app"

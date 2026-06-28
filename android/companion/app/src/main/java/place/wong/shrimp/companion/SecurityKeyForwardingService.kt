@@ -1,4 +1,4 @@
-package dev.openshrimp.securitykey
+package place.wong.shrimp.companion
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -348,7 +348,7 @@ class SecurityKeyForwardingService : Service() {
             Notification.Builder(this)
         }
         return builder
-            .setContentTitle("OpenShrimp security key")
+            .setContentTitle("OpenShrimp Companion")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentIntent(pendingIntent)
@@ -370,14 +370,14 @@ class SecurityKeyForwardingService : Service() {
     }
 
     companion object {
-        const val ACTION_START = "dev.openshrimp.securitykey.START"
-        const val ACTION_STOP = "dev.openshrimp.securitykey.STOP"
-        const val ACTION_STATUS = "dev.openshrimp.securitykey.STATUS"
+        const val ACTION_START = "place.wong.shrimp.companion.securitykey.START"
+        const val ACTION_STOP = "place.wong.shrimp.companion.securitykey.STOP"
+        const val ACTION_STATUS = "place.wong.shrimp.companion.securitykey.STATUS"
         const val EXTRA_RELAY_URL = "relay_url"
         const val EXTRA_DEVICE_ID = "device_id"
         const val EXTRA_MESSAGE = "message"
 
-        private const val ACTION_USB_PERMISSION = "dev.openshrimp.securitykey.USB_PERMISSION"
+        private const val ACTION_USB_PERMISSION = "place.wong.shrimp.companion.securitykey.USB_PERMISSION"
         private const val CHANNEL_ID = "security_key_forwarding"
         private const val NOTIFICATION_ID = 44
         private const val PACKET_SIZE = 64

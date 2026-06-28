@@ -1,8 +1,8 @@
-# OpenShrimp Security Key Companion
+# OpenShrimp Companion
 
-Production Android companion app for Phase 4 of `docs/security-key-forwarding-plan.md`.
+Production Android companion app for OpenShrimp.
 
-The app forwards opaque USB HID reports between a locally attached USB FIDO security key and an OpenShrimp security-key relay session. It does not implement WebAuthn or CTAP, does not access Android Credential Manager, and does not log HID payloads.
+Its first feature forwards opaque USB HID reports between a locally attached USB FIDO security key and an OpenShrimp security-key relay session. It does not implement WebAuthn or CTAP, does not access Android Credential Manager, and does not log HID payloads.
 
 ## Flow
 
