@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -9,6 +10,8 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
 from open_shrimp.config import (
@@ -70,6 +73,31 @@ def _build_init_data() -> str:
 
 def _auth_header() -> dict[str, str]:
     return {"authorization": f"tg-init-data {_build_init_data()}"}
+
+
+def _b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _android_headers(
+    private_key: ec.EllipticCurvePrivateKey,
+    *,
+    device_id: str,
+    method: str,
+    path: str,
+    body: bytes = b"",
+    nonce: str = "nonce-1",
+) -> dict[str, str]:
+    timestamp = str(int(time.time()))
+    body_hash = _b64url(hashlib.sha256(body).digest())
+    payload = "\n".join([method, path, timestamp, nonce, body_hash]).encode("utf-8")
+    signature = private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
+    return {
+        "X-OpenShrimp-Device-Id": device_id,
+        "X-OpenShrimp-Timestamp": timestamp,
+        "X-OpenShrimp-Nonce": nonce,
+        "X-OpenShrimp-Signature": _b64url(signature),
+    }
 
 
 def _make_client(tmp_path: Path) -> tuple[TestClient, object]:
@@ -177,6 +205,122 @@ def test_cancel_session_closes_metadata(tmp_path: Path) -> None:
         )
         assert status.status_code == 200
         assert status.json()["end_reason"] == "cancelled"
+    finally:
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_android_pair_poll_and_claim_session(tmp_path: Path) -> None:
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    device_id = "android-test-device"
+    try:
+        code_response = client.post(
+            "/api/android-companion/pairing-codes", headers=_auth_header()
+        )
+        assert code_response.status_code == 201
+
+        pair_response = client.post(
+            "/api/android-companion/pair",
+            json={
+                "code": code_response.json()["code"],
+                "device_id": device_id,
+                "display_name": "Pixel Test",
+                "public_key": _b64url(public_key),
+            },
+        )
+        assert pair_response.status_code == 201
+
+        session_response = client.post(
+            "/api/security-key/sessions",
+            headers=_auth_header(),
+            json={"chat_id": 123, "context_name": "default"},
+        )
+        assert session_response.status_code == 201
+        session_id = session_response.json()["id"]
+
+        pending_path = "/api/security-key/android/pending-sessions"
+        pending_response = client.get(
+            pending_path,
+            headers=_android_headers(
+                private_key,
+                device_id=device_id,
+                method="GET",
+                path=pending_path,
+                nonce="nonce-pending",
+            ),
+        )
+        assert pending_response.status_code == 200
+        assert pending_response.json()["sessions"][0]["id"] == session_id
+
+        claim_path = f"/api/security-key/android/sessions/{session_id}/claim"
+        claim_response = client.post(
+            claim_path,
+            content=b"{}",
+            headers={
+                "content-type": "application/json",
+                **_android_headers(
+                    private_key,
+                    device_id=device_id,
+                    method="POST",
+                    path=claim_path,
+                    body=b"{}",
+                    nonce="nonce-claim",
+                ),
+            },
+        )
+        assert claim_response.status_code == 200
+        assert claim_response.json()["phone_url"].endswith(
+            session_response.json()["phone_url"].split("/phone", 1)[1]
+        )
+
+        status = client.get(
+            f"/api/security-key/sessions/{session_id}", headers=_auth_header()
+        )
+        assert status.json()["claimed_device_id"] == device_id
+    finally:
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_android_signed_request_rejects_nonce_replay(tmp_path: Path) -> None:
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    device_id = "android-test-device"
+    try:
+        code_response = client.post(
+            "/api/android-companion/pairing-codes", headers=_auth_header()
+        )
+        client.post(
+            "/api/android-companion/pair",
+            json={
+                "code": code_response.json()["code"],
+                "device_id": device_id,
+                "display_name": "Pixel Test",
+                "public_key": _b64url(public_key),
+            },
+        )
+
+        path = "/api/security-key/android/pending-sessions"
+        headers = _android_headers(
+            private_key,
+            device_id=device_id,
+            method="GET",
+            path=path,
+            nonce="replayed-nonce",
+        )
+        assert client.get(path, headers=headers).status_code == 200
+        replay = client.get(path, headers=headers)
+        assert replay.status_code == 401
+        assert "nonce" in replay.json()["error"]
     finally:
         client.close()
         asyncio.run(db.close())

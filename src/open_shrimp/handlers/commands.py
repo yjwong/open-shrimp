@@ -23,6 +23,12 @@ from open_shrimp.client_manager import (
 )
 from open_shrimp.config import Config, ContextConfig, effective_backend
 from open_shrimp.db import ChatScope, delete_session, get_session_id, set_session_id
+from open_shrimp.android_companion import (
+    create_pairing_code,
+    get_or_create_server_id,
+    list_android_devices,
+    revoke_android_device,
+)
 from open_shrimp.handlers.state import (
     _MCP_STATUS_EMOJI,
     _RESUME_LIST_LIMIT,
@@ -1474,6 +1480,71 @@ async def security_key_handler(
         ]
     )
     await update.message.reply_text(text, parse_mode="MarkdownV2")
+
+
+async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /pair -- manage Android companion pairing."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if not _is_authorized(update.effective_user.id, config):
+        return
+
+    args = context.args or []
+    action = args[0].lower() if args else "code"
+    if action in {"code", "new"}:
+        pairing = await create_pairing_code(db)
+        server_id = await get_or_create_server_id(db)
+        public_base = (
+            config.review.public_url.rstrip("/")
+            if config.review.public_url
+            else f"https://{config.review.host}:{config.review.port}"
+        )
+        pairing_url = f"openshrimp://pair?base_url={public_base}&code={pairing['code']}"
+        text = "\n".join(
+            [
+                "Android companion pairing code created\.",
+                "",
+                f"Code: `{_escape_mdv2(pairing['code'])}`",
+                f"Server: `{_escape_mdv2(server_id)}`",
+                f"Base URL: `{_escape_mdv2(public_base)}`",
+                f"Deep link: `{_escape_mdv2(pairing_url)}`",
+                "",
+                "The code expires in `10 minutes` and can be used once\.",
+            ]
+        )
+        await update.message.reply_text(text, parse_mode="MarkdownV2")
+        return
+
+    if action in {"list", "devices"}:
+        devices = await list_android_devices(db)
+        if not devices:
+            await update.message.reply_text("No Android companion devices are paired\.", parse_mode="MarkdownV2")
+            return
+        lines = ["Android companion devices:", ""]
+        for device in devices:
+            status = "active" if device["active"] and device["revoked_at"] is None else "inactive"
+            lines.append(
+                f"• `{_escape_mdv2(device['device_id'])}` — {_escape_mdv2(device['display_name'])} \({_escape_mdv2(status)}\)"
+            )
+        lines.extend(["", "Revoke with `/pair revoke <device_id>`\."])
+        await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+        return
+
+    if action == "revoke" and len(args) >= 2:
+        device_id = args[1]
+        if await revoke_android_device(db, device_id):
+            await update.message.reply_text("Android companion device revoked\.", parse_mode="MarkdownV2")
+        else:
+            await update.message.reply_text("No matching active Android companion device found\.", parse_mode="MarkdownV2")
+        return
+
+    await update.message.reply_text(
+        "Usage: `/pair`, `/pair list`, or `/pair revoke <device_id>`\.",
+        parse_mode="MarkdownV2",
+    )
 
 
 # ── /login ──

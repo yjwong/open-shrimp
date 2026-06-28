@@ -51,6 +51,7 @@ from open_shrimp.handlers.commands import (
     login_handler,
     mcp_handler,
     model_handler,
+    pair_handler,
     restart_handler,
     resume_handler,
     review_handler,
@@ -291,6 +292,7 @@ def build_application(
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CommandHandler("vnc", vnc_handler))
     app.add_handler(CommandHandler("security_key", security_key_handler))
+    app.add_handler(CommandHandler("pair", pair_handler))
     app.add_handler(CommandHandler("config", config_handler))
     app.add_handler(CommandHandler("restart", restart_handler))
 

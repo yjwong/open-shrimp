@@ -113,6 +113,50 @@ CREATE TABLE IF NOT EXISTS security_key_sessions (
 )
 """
 
+_CREATE_ANDROID_COMPANION_INSTANCE_TABLE = """
+CREATE TABLE IF NOT EXISTS android_companion_instance (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    server_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+)
+"""
+
+_CREATE_ANDROID_COMPANION_PAIRING_CODES_TABLE = """
+CREATE TABLE IF NOT EXISTS android_companion_pairing_codes (
+    code TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    used_at INTEGER
+)
+"""
+
+_CREATE_ANDROID_COMPANION_DEVICES_TABLE = """
+CREATE TABLE IF NOT EXISTS android_companion_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    push_provider TEXT,
+    push_token TEXT,
+    push_endpoint TEXT,
+    push_auth_secret TEXT,
+    push_p256dh TEXT,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER,
+    revoked_at INTEGER
+)
+"""
+
+_CREATE_ANDROID_COMPANION_NONCES_TABLE = """
+CREATE TABLE IF NOT EXISTS android_companion_nonces (
+    device_id TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (device_id, nonce)
+)
+"""
+
 _CREATE_SECURITY_KEY_AUDIT_EVENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS security_key_audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,6 +249,25 @@ async def _migrate_scheduled_tasks_disabled(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _migrate_security_key_android_columns(db: aiosqlite.Connection) -> None:
+    """Add Android companion columns to security_key_sessions when needed."""
+    cursor = await db.execute("PRAGMA table_info(security_key_sessions)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    migrations = {
+        "requested_device_id": "ALTER TABLE security_key_sessions ADD COLUMN requested_device_id TEXT",
+        "claimed_device_id": "ALTER TABLE security_key_sessions ADD COLUMN claimed_device_id TEXT",
+        "push_sent_at": "ALTER TABLE security_key_sessions ADD COLUMN push_sent_at INTEGER",
+        "push_status": "ALTER TABLE security_key_sessions ADD COLUMN push_status TEXT",
+    }
+    changed = False
+    for column, sql in migrations.items():
+        if column not in columns:
+            await db.execute(sql)
+            changed = True
+    if changed:
+        await db.commit()
+
+
 async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     """Create the database and tables, return the connection."""
     if db_path is None:
@@ -218,9 +281,14 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_ADDITIONAL_DIRECTORIES_TABLE)
     await db.execute(_CREATE_SECURITY_KEY_SESSIONS_TABLE)
     await db.execute(_CREATE_SECURITY_KEY_AUDIT_EVENTS_TABLE)
+    await db.execute(_CREATE_ANDROID_COMPANION_INSTANCE_TABLE)
+    await db.execute(_CREATE_ANDROID_COMPANION_PAIRING_CODES_TABLE)
+    await db.execute(_CREATE_ANDROID_COMPANION_DEVICES_TABLE)
+    await db.execute(_CREATE_ANDROID_COMPANION_NONCES_TABLE)
     await db.commit()
     await _migrate_schema(db)
     await _migrate_scheduled_tasks_disabled(db)
+    await _migrate_security_key_android_columns(db)
     logger.info("Database initialized at %s", db_path)
     return db
 

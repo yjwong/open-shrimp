@@ -18,6 +18,27 @@ def _thread_id_to_db(thread_id: int | None) -> int:
     return thread_id if thread_id is not None else 0
 
 
+def _session_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "chat_id": row[1],
+        "thread_id": None if row[2] == 0 else row[2],
+        "context_name": row[3],
+        "sandbox_id": row[4],
+        "device_id": row[5],
+        "status": row[6],
+        "created_at": row[7],
+        "expires_at": row[8],
+        "approved_at": row[9],
+        "ended_at": row[10],
+        "end_reason": row[11],
+        "requested_device_id": row[12],
+        "claimed_device_id": row[13],
+        "push_sent_at": row[14],
+        "push_status": row[15],
+    }
+
+
 async def create_security_key_session_record(
     db: aiosqlite.Connection,
     *,
@@ -101,7 +122,8 @@ async def get_security_key_session_record(
         """
         SELECT id, chat_id, message_thread_id, context_name, sandbox_id,
                device_id, status, created_at, expires_at, approved_at,
-               ended_at, end_reason
+               ended_at, end_reason, requested_device_id, claimed_device_id,
+               push_sent_at, push_status
         FROM security_key_sessions
         WHERE id = ?
         """,
@@ -110,20 +132,42 @@ async def get_security_key_session_record(
     row = await cursor.fetchone()
     if row is None:
         return None
-    return {
-        "id": row[0],
-        "chat_id": row[1],
-        "thread_id": None if row[2] == 0 else row[2],
-        "context_name": row[3],
-        "sandbox_id": row[4],
-        "device_id": row[5],
-        "status": row[6],
-        "created_at": row[7],
-        "expires_at": row[8],
-        "approved_at": row[9],
-        "ended_at": row[10],
-        "end_reason": row[11],
-    }
+    return _session_row_to_dict(row)
+
+
+async def list_pending_android_security_key_sessions(
+    db: aiosqlite.Connection,
+) -> list[dict[str, Any]]:
+    now = int(time.time())
+    cursor = await db.execute(
+        """
+        SELECT id, chat_id, message_thread_id, context_name, sandbox_id,
+               device_id, status, created_at, expires_at, approved_at,
+               ended_at, end_reason, requested_device_id, claimed_device_id,
+               push_sent_at, push_status
+        FROM security_key_sessions
+        WHERE ended_at IS NULL
+          AND expires_at > ?
+        ORDER BY created_at DESC
+        LIMIT 20
+        """,
+        (now,),
+    )
+    rows = await cursor.fetchall()
+    return [_session_row_to_dict(row) for row in rows]
+
+
+async def mark_security_key_session_claimed(
+    db: aiosqlite.Connection,
+    *,
+    session_id: str,
+    device_id: str,
+) -> None:
+    await db.execute(
+        "UPDATE security_key_sessions SET claimed_device_id = ? WHERE id = ?",
+        (device_id, session_id),
+    )
+    await db.commit()
 
 
 async def audit_security_key_event(
