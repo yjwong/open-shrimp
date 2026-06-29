@@ -219,6 +219,7 @@ def build_ask_context_tool(
     is_private_chat: bool = True,
     terminal_base_url: str | None = None,
     sandbox_managers: dict[str, Any] | None = None,
+    mcp_proxy: Any | None = None,
 ) -> "OpenShrimpTool | None":
     """Build the ``ask_context`` tool descriptor, or ``None`` if no targets.
 
@@ -268,6 +269,7 @@ def build_ask_context_tool(
                 is_private_chat=is_private_chat,
                 terminal_base_url=terminal_base_url,
                 sandbox_managers=sandbox_managers,
+                mcp_proxy=mcp_proxy,
             )
 
     return OpenShrimpTool(
@@ -303,6 +305,7 @@ class _SandboxLaunch:
     cli_path: str | None = None
     endpoint: Any = None
     cleanup_paths: list[str] = field(default_factory=list)
+    host_address: str | None = None
 
 
 async def _launch_target_sandbox(
@@ -349,7 +352,66 @@ async def _launch_target_sandbox(
             cli_path=handle.cli_path,
             endpoint=handle.endpoint,
             cleanup_paths=list(handle.cleanup_paths),
+            host_address=sandbox.host_address,
         )
+
+
+def _proxied_mcp_servers(
+    *,
+    backend: "Backend",
+    ctx: "ContextConfig",
+    target: str,
+    mcp_proxy: Any,
+    host_ip: str,
+) -> dict[str, Any]:
+    """Register the target context's MCP servers with the proxy.
+
+    Mirrors the sandboxed-context branch in ``client_manager`` (lines that
+    inject proxied stdio/HTTP MCP servers): a sandboxed sub-query's CLI runs
+    under an isolated home that doesn't carry the user's ``~/.claude.json``
+    declarations, so without this the answering context would see no MCP
+    servers at all. Returns the sandbox-reachable HTTP endpoint map keyed by
+    server name.
+
+    Registration is keyed by the *real* context name and is intentionally not
+    torn down afterward: ``register_context`` merges idempotently, so a
+    concurrent live session for the same context shares the registration, and
+    unregistering here would kill that session's MCP servers.
+    """
+    mcp_source = backend.mcp_config_source()
+    stdio_servers = mcp_source.stdio_servers(ctx)
+    http_servers = mcp_source.http_servers(ctx)
+    if not stdio_servers and not http_servers:
+        return {}
+
+    token = mcp_proxy.register_context(
+        target,
+        servers=stdio_servers or None,
+        http_servers=http_servers or None,
+    )
+    servers: dict[str, Any] = {}
+    for name in stdio_servers:
+        servers[name] = {
+            "type": "http",
+            "url": mcp_proxy.get_proxy_url(target, name, host_ip),
+            "headers": {"Authorization": f"Bearer {token}"},
+        }
+    for name, http_cfg in http_servers.items():
+        servers[name] = {
+            "type": http_cfg.transport,
+            "url": mcp_proxy.get_http_proxy_url(target, name, host_ip),
+            "headers": {"Authorization": f"Bearer {token}"},
+        }
+    logger.info(
+        "ask_context: injected %d stdio + %d HTTP proxied MCP server(s) "
+        "for sandboxed context '%s': stdio=[%s] http=[%s]",
+        len(stdio_servers),
+        len(http_servers),
+        target,
+        ", ".join(stdio_servers),
+        ", ".join(http_servers),
+    )
+    return servers
 
 
 async def _request_outer_approval(
@@ -480,6 +542,7 @@ def _build_sub_query_options(
     chat_id: int,
     approval_cb: "CanUseTool",
     launch: _SandboxLaunch | None = None,
+    mcp_servers: dict[str, Any] | None = None,
 ) -> "BackendOptions":
     """Assemble the fresh, read-only sub-query's runtime configuration.
 
@@ -517,6 +580,7 @@ def _build_sub_query_options(
         cli_path=launch.cli_path if launch is not None else None,
         max_buffer_size=10 * 1024 * 1024,
         can_use_tool=can_use_tool,
+        mcp_servers=mcp_servers or None,
         extra=extra,
         system_prompt={
             "type": "preset",
@@ -743,6 +807,7 @@ async def _run_query(
     is_private_chat: bool,
     terminal_base_url: str | None,
     sandbox_managers: dict[str, Any] | None,
+    mcp_proxy: Any | None,
 ) -> dict[str, Any]:
     """Orchestrate one cross-context query: approve, configure, run, report."""
     from open_shrimp.client_manager import resolve_backend
@@ -775,6 +840,26 @@ async def _run_query(
         logger.exception("ask_context sandbox launch failed")
         return _text_result(str(exc), is_error=True)
 
+    # Sandboxed targets run under an isolated home, so their MCP servers must
+    # be reached through the host proxy (same as the live-session path in
+    # client_manager). Non-sandboxed targets load them from ~/.claude.json via
+    # setting_sources, so no injection is needed.
+    mcp_servers: dict[str, Any] | None = None
+    if sandboxed and mcp_proxy is not None and launch is not None:
+        try:
+            mcp_servers = _proxied_mcp_servers(
+                backend=backend,
+                ctx=ctx,
+                target=target,
+                mcp_proxy=mcp_proxy,
+                host_ip=launch.host_address or "127.0.0.1",
+            )
+        except Exception:
+            logger.exception(
+                "ask_context: failed to inject proxied MCP servers for %r",
+                target,
+            )
+
     approval_cb = _make_parent_routed_approval(
         bot=bot,
         chat_id=chat_id,
@@ -795,6 +880,7 @@ async def _run_query(
         chat_id=chat_id,
         approval_cb=approval_cb,
         launch=launch,
+        mcp_servers=mcp_servers,
     )
 
     task_id = f"askctx{os.urandom(6).hex()}"

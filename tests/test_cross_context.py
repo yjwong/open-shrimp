@@ -180,6 +180,10 @@ class _FakeSandbox:
     def __init__(self) -> None:
         self.started = False
 
+    @property
+    def host_address(self) -> str:
+        return "host.docker.internal"
+
     def ensure_environment(self) -> None:
         pass
 
@@ -381,6 +385,80 @@ async def test_sandboxed_target_uses_sandbox_launch(monkeypatch) -> None:
     assert manager.sandbox.started is True
     assert captured["cli_path"] == "/tmp/ask-context-wrapper"
     assert "Bash" in captured["allowed"]
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_target_injects_proxied_mcp_servers(monkeypatch) -> None:
+    from open_shrimp.mcp_proxy.types import HttpServerConfig, StdioServerConfig
+
+    cfg = _config()
+    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="docker")
+    captured = {}
+
+    def _make_client(options):
+        captured["mcp_servers"] = options.mcp_servers
+        return _FakeClient("inside sandbox")
+
+    mcp_source = MagicMock()
+    mcp_source.stdio_servers.return_value = {
+        "db": StdioServerConfig(command="db-mcp", args=[], env={}),
+    }
+    mcp_source.http_servers.return_value = {
+        "figma": HttpServerConfig(url="https://figma", transport="sse", headers={}),
+    }
+
+    fake_backend = MagicMock()
+    fake_backend.make_client.side_effect = _make_client
+    fake_backend.make_can_use_tool.return_value = AsyncMock()
+    fake_backend.make_runtime.return_value = SimpleNamespace(name="fake-runtime")
+    fake_backend.mcp_config_source.return_value = mcp_source
+    fake_backend.policy = MagicMock()
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: fake_backend,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=True),
+    )
+
+    mcp_proxy = MagicMock()
+    mcp_proxy.register_context.return_value = "tok123"
+    mcp_proxy.get_proxy_url.side_effect = (
+        lambda ctx, name, ip: f"http://{ip}/mcp/{ctx}/{name}"
+    )
+    mcp_proxy.get_http_proxy_url.side_effect = (
+        lambda ctx, name, ip: f"http://{ip}/http/{ctx}/{name}"
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    bot.edit_message_text = AsyncMock()
+    manager = _FakeSandboxManager()
+
+    tool = build_ask_context_tool(
+        bot=bot,
+        chat_id=1,
+        thread_id=None,
+        config=cfg,
+        context_name="default",
+        sandbox_managers={"docker": manager},
+        mcp_proxy=mcp_proxy,
+    )
+    assert tool is not None
+    result = await tool.handler({"context": "glints-delta-etl", "question": "q"})
+
+    assert result.get("is_error") is None
+    mcp_proxy.register_context.assert_called_once()
+    servers = captured["mcp_servers"]
+    assert servers is not None
+    assert servers["db"]["url"] == "http://host.docker.internal/mcp/glints-delta-etl/db"
+    assert servers["db"]["headers"]["Authorization"] == "Bearer tok123"
+    assert servers["figma"]["type"] == "sse"
+    assert (
+        servers["figma"]["url"]
+        == "http://host.docker.internal/http/glints-delta-etl/figma"
+    )
 
 
 @pytest.mark.asyncio
