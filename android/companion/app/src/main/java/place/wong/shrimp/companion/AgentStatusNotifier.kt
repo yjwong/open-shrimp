@@ -20,13 +20,13 @@ import androidx.annotation.RequiresApi
  * todo) and an "x/y" status-bar chip.  When no todos exist the bar is omitted
  * and the chip reads "Running".
  *
- * Awaiting a tool approval is *not* a phase — it is an overlay on a running
- * notification (``awaiting=1``): it adds inline approve/deny actions, swaps the
- * chip to "Approve?", and requests promotion to the status-bar chip (the most
- * time-sensitive, only actionable moment).  Each ChatScope keeps a single,
- * stable notification id so repeated events update in place rather than
- * stacking, and the done event dismisses exactly the right one.  All
- * notifications share a group + summary so the shade does not fill with chips.
+ * Every running turn requests promotion to a status-bar chip; awaiting a tool
+ * approval is *not* a phase but an overlay on the running notification
+ * (``awaiting=1``) that adds inline approve/deny actions and swaps the chip to
+ * "Approve?".  Each ChatScope keeps a single, stable notification id so
+ * repeated events update in place rather than stacking, and the done event
+ * dismisses exactly the right one.  All notifications share a group + summary
+ * so the shade does not fill with chips.
  */
 object AgentStatusNotifier {
     const val CHANNEL_ID = "agent_status"
@@ -111,9 +111,9 @@ object AgentStatusNotifier {
                     else -> "Running"
                 },
             )
-            if (awaiting) {
-                requestPromotion(builder)
-            }
+            // Every running turn requests promotion to the status-bar chip;
+            // build() is only reached for the running phase (done dismisses).
+            requestPromotion(builder)
         }
         return builder.build()
     }
