@@ -313,9 +313,9 @@ def build_application(
         filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler
     ))
 
-    # Message handler (text, photos, documents, locations, and voice notes, non-command)
+    # Message handler (text, photos, documents, audio, locations, and voice notes, non-command)
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.LOCATION | filters.VOICE | filters.VIDEO_NOTE) & ~filters.COMMAND, message_handler
+        (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.AUDIO | filters.LOCATION | filters.VOICE | filters.VIDEO_NOTE) & ~filters.COMMAND, message_handler
     ))
 
     return app

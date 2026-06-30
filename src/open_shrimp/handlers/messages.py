@@ -136,6 +136,23 @@ async def _download_telegram_documents(
     return attachments
 
 
+async def _download_telegram_audio(
+    messages: list[Any], bot: Bot
+) -> list[FileAttachment]:
+    """Download Telegram audio messages and return as FileAttachments."""
+    attachments: list[FileAttachment] = []
+    for message in messages:
+        if not message.audio:
+            continue
+        audio = message.audio
+        file = await bot.get_file(audio.file_id)
+        audio_bytes = bytes(await file.download_as_bytearray())
+        mime_type = audio.mime_type or "audio/mpeg"
+        filename = audio.file_name
+        attachments.append(FileAttachment(data=audio_bytes, mime_type=mime_type, filename=filename))
+    return attachments
+
+
 async def _download_telegram_voice(
     message: Any, bot: Bot
 ) -> bytes | None:
@@ -153,12 +170,13 @@ async def _download_telegram_voice(
 async def _download_all_attachments(
     messages: list[Any], bot: Bot
 ) -> list[FileAttachment]:
-    """Download all photos and documents from messages concurrently."""
-    photos, docs = await asyncio.gather(
+    """Download all photos, documents, and audio files from messages concurrently."""
+    photos, docs, audio = await asyncio.gather(
         _download_telegram_photos(messages, bot),
         _download_telegram_documents(messages, bot),
+        _download_telegram_audio(messages, bot),
     )
-    return photos + docs
+    return photos + docs + audio
 
 
 # ---------------------------------------------------------------------------
@@ -178,21 +196,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not message:
         return
 
-    # Must have text, caption, photo, document, location, or voice
+    # Must have text, caption, photo, document, audio, location, or voice
     has_text = bool(message.text)
     has_photo = bool(message.photo)
     has_document = bool(message.document)
+    has_audio = bool(message.audio)
     has_caption = bool(message.caption)
     has_location = bool(message.location)
     has_voice = bool(message.voice or message.video_note)
 
     logger.info(
-        "message_handler: chat=%s has_text=%s has_photo=%s has_document=%s has_caption=%s has_location=%s has_voice=%s media_group_id=%s",
-        message.chat_id, has_text, has_photo, has_document, has_caption, has_location, has_voice, message.media_group_id,
+        "message_handler: chat=%s has_text=%s has_photo=%s has_document=%s has_audio=%s has_caption=%s has_location=%s has_voice=%s media_group_id=%s",
+        message.chat_id, has_text, has_photo, has_document, has_audio, has_caption, has_location, has_voice, message.media_group_id,
     )
 
-    if not has_text and not has_photo and not has_document and not has_location and not has_voice:
-        logger.info("message_handler: no text, photo, document, location, or voice, ignoring")
+    if not has_text and not has_photo and not has_document and not has_audio and not has_location and not has_voice:
+        logger.info("message_handler: no text, photo, document, audio, location, or voice, ignoring")
         return
 
     if not _is_authorized(update.effective_user and update.effective_user.id, config):
@@ -221,7 +240,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     # If this message is part of a media group (album), batch it.
-    if message.media_group_id and (has_photo or has_document):
+    if message.media_group_id and (has_photo or has_document or has_audio):
         await _handle_media_group_message(update, context, message)
         return
 
@@ -279,12 +298,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         prompt = "What's in this image?"
     elif not prompt and has_document:
         prompt = "What's in this file?"
+    elif not prompt and has_audio:
+        prompt = "What's in this audio file?"
     elif not prompt:
         return
 
-    # Download photo and document attachments if present
+    # Download photo, document, and audio attachments if present
     attachments: list[FileAttachment] = []
-    if has_photo or has_document:
+    if has_photo or has_document or has_audio:
         attachments = await _download_all_attachments([message], context.bot)
         logger.info(
             "Downloaded %d attachment(s) for scope %s (%d bytes)",
@@ -391,12 +412,16 @@ async def _handle_media_group_message(
         if not prompt:
             has_any_photo = any(msg.photo for msg in messages)
             has_any_doc = any(msg.document for msg in messages)
-            if has_any_photo and not has_any_doc:
+            has_any_audio = any(msg.audio for msg in messages)
+            if has_any_photo and not has_any_doc and not has_any_audio:
                 count = len(messages)
                 prompt = f"What's in {'this image' if count == 1 else 'these images'}?"
-            elif has_any_doc and not has_any_photo:
+            elif has_any_doc and not has_any_photo and not has_any_audio:
                 count = sum(1 for msg in messages if msg.document)
                 prompt = f"What's in {'this file' if count == 1 else 'these files'}?"
+            elif has_any_audio and not has_any_photo and not has_any_doc:
+                count = sum(1 for msg in messages if msg.audio)
+                prompt = f"What's in {'this audio file' if count == 1 else 'these audio files'}?"
             else:
                 prompt = "What's in these files?"
 
