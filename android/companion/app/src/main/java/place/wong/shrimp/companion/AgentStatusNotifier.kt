@@ -35,6 +35,10 @@ object AgentStatusNotifier {
     private const val STATE_PERMISSION = "permission_required"
     private const val STATE_DONE = "done"
 
+    // Value of the (API 36.1) Notification.EXTRA_REQUEST_PROMOTED_ONGOING constant,
+    // hardcoded because the app compiles against API 36.0 where it is absent.
+    private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
+
     /** Dispatch an ``agent_status`` FCM data message to the notification shade. */
     fun handle(context: Context, data: Map<String, String>) {
         val state = data["state"] ?: return
@@ -89,15 +93,31 @@ object AgentStatusNotifier {
         }
         if (Build.VERSION.SDK_INT >= 36) {
             applyProgressStyle(builder, permission)
+            // Glanceable label rendered inside the status-bar chip when promoted.
+            builder.setShortCriticalText(if (permission) "Approve?" else "Running")
+            if (permission) {
+                requestPromotion(builder)
+            }
         }
-        val notification = builder.build()
-        if (Build.VERSION.SDK_INT >= 36 && permission) {
-            // System-discretionary promotion to the status-bar chip: request it
-            // only for the actionable permission segment (the most time-
-            // sensitive one).  Promotion may still be declined/demoted by the OS.
-            notification.flags = notification.flags or Notification.FLAG_PROMOTED_ONGOING
-        }
-        return notification
+        return builder.build()
+    }
+
+    /**
+     * Ask the system to promote this notification to a status-bar chip (a "Live
+     * Update").  The full builder API ([Notification.Builder.setRequestPromotedOngoing])
+     * ships in Android 16 QPR1 (API 36.1), but this app compiles against API 36.0,
+     * which lacks it; the runtime instead reads the [EXTRA_REQUEST_PROMOTED_ONGOING]
+     * extra, whose value is the stable string below (matches
+     * NotificationCompat.EXTRA_REQUEST_PROMOTED_ONGOING).  Setting it is what makes
+     * the OS treat the notification as promotable — without it the notification is
+     * posted normally and never becomes a chip.  Promotion also requires the
+     * POST_PROMOTED_NOTIFICATIONS manifest permission and remains system-discretionary.
+     */
+    @RequiresApi(36)
+    private fun requestPromotion(builder: Notification.Builder) {
+        builder.addExtras(
+            android.os.Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) },
+        )
     }
 
     private fun baseBuilder(context: Context, title: String, text: String): Notification.Builder {
