@@ -106,6 +106,26 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
             }
         }
 
+    /**
+     * Resolve a pending agent tool approval. Converges on the same server-side
+     * future as the Telegram approve/deny buttons — no bot token on the phone.
+     * Returns true if the server accepted the decision (resolved or already
+     * expired); false on transport/HTTP error.
+     */
+    suspend fun approveAgentTool(
+        baseUrl: String,
+        deviceId: String,
+        toolUseId: String,
+        decision: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val url = "$baseUrl/api/agent/approvals/${urlEncode(toolUseId)}"
+        val body = JSONObject().put("decision", decision).toString()
+        val request = SigningKeys.sign(Request.Builder().url(url), "POST", url, body, deviceId)
+            .post(body.toRequestBody(JSON))
+            .build()
+        http.newCall(request).execute().use { response -> response.isSuccessful }
+    }
+
     companion object {
         private val JSON = "application/json".toMediaType()
 

@@ -910,6 +910,11 @@ def create_review_app(
 
     routes.extend(create_security_key_routes())
 
+    # Android companion agent-status approve/deny endpoint.
+    from open_shrimp.agent_status_api import create_agent_status_routes
+
+    routes.extend(create_agent_status_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db

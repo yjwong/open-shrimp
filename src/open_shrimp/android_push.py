@@ -112,21 +112,14 @@ class FcmPushSender:
         self._access_token_expires_at = now + expires_in
         return access_token
 
-    async def send_security_key_request(
+    async def _post_fcm_message(
         self,
         *,
-        device: dict[str, Any],
-        server_id: str,
-        session_id: str,
-        server_label: str,
-        context_name: str,
+        token: str,
+        data: dict[str, str],
+        high_priority: bool,
     ) -> PushDeliveryResult:
-        if device.get("push_provider") != "fcm":
-            return PushDeliveryResult(status="unsupported_provider")
-        token = device.get("push_token")
-        if not isinstance(token, str) or not token:
-            return PushDeliveryResult(status="missing_token")
-
+        """POST a single FCM data message, resolving credentials and token."""
         service_account = self._service_account()
         if service_account is None:
             return PushDeliveryResult(status="not_configured")
@@ -139,12 +132,8 @@ class FcmPushSender:
         payload = {
             "message": {
                 "token": token,
-                "data": {
-                    "type": "security_key_request",
-                    "server_id": server_id,
-                    "session_id": session_id,
-                },
-                "android": {"priority": "HIGH"},
+                "data": data,
+                "android": {"priority": "HIGH" if high_priority else "NORMAL"},
             }
         }
         async with httpx.AsyncClient(timeout=10) as client:
@@ -160,6 +149,54 @@ class FcmPushSender:
         return PushDeliveryResult(
             status="sent",
             message_id=message_id if isinstance(message_id, str) else None,
+        )
+
+    async def send_security_key_request(
+        self,
+        *,
+        device: dict[str, Any],
+        server_id: str,
+        session_id: str,
+        server_label: str,
+        context_name: str,
+    ) -> PushDeliveryResult:
+        if device.get("push_provider") != "fcm":
+            return PushDeliveryResult(status="unsupported_provider")
+        token = device.get("push_token")
+        if not isinstance(token, str) or not token:
+            return PushDeliveryResult(status="missing_token")
+        return await self._post_fcm_message(
+            token=token,
+            data={
+                "type": "security_key_request",
+                "server_id": server_id,
+                "session_id": session_id,
+            },
+            high_priority=True,
+        )
+
+    async def send_agent_status(
+        self,
+        *,
+        device: dict[str, Any],
+        data: dict[str, str],
+        high_priority: bool = False,
+    ) -> PushDeliveryResult:
+        """Send an ``agent_status`` FCM data message to an Android device.
+
+        ``data`` is the per-ChatScope event payload (see
+        :mod:`open_shrimp.agent_status`).  The permission-required event is
+        sent ``high_priority`` so the OS does not defer the time-sensitive one.
+        """
+        if device.get("push_provider") != "fcm":
+            return PushDeliveryResult(status="unsupported_provider")
+        token = device.get("push_token")
+        if not isinstance(token, str) or not token:
+            return PushDeliveryResult(status="missing_token")
+        return await self._post_fcm_message(
+            token=token,
+            data={k: str(v) for k, v in data.items()},
+            high_priority=high_priority,
         )
 
 

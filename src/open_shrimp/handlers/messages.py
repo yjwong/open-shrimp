@@ -18,6 +18,7 @@ from open_shrimp.agent import (
     cleanup_attachments,
     save_attachments,
 )
+from open_shrimp.agent_status import notify_agent_status
 from open_shrimp.stt import transcribe as stt_transcribe
 from open_shrimp.backend.errors import CLIConnectionError, ProcessError
 from open_shrimp.client_manager import (
@@ -57,6 +58,7 @@ from open_shrimp.handlers.state import (
 from open_shrimp.handlers.utils import (
     _cancel_running,
     _get_context,
+    _get_context_name,
     _is_authorized,
     _is_bot_addressed,
     _strip_mention,
@@ -496,6 +498,12 @@ async def _dispatch_to_agent(
                 await _inject_message(
                     session, prompt, attachments, scope, context.bot, config,
                 )
+                # The running loop emits the matching "done" once this
+                # injected turn completes.
+                await notify_agent_status(
+                    context.bot_data, config, db, scope, "started",
+                    title=await _get_context_name(scope, config, db),
+                )
             except _DeadTransport:
                 # Transport is dead — the existing task is stuck in
                 # receive_response() against a closed subprocess. Tear it
@@ -689,18 +697,33 @@ async def _start_agent_task(
                 suggested_session_dir: str | None = None,
             ) -> bool:
                 await finalize_and_reset(context.bot, draft_state)
-                return await _send_approval_keyboard(
-                    context.bot, scope.chat_id, tool_name, tool_input, tool_use_id,
-                    cwd=ctx_config.directory,
-                    thread_id=scope.thread_id,
-                    base_url=_base_url,
-                    user_id=user_id,
-                    is_private_chat=is_private_chat,
-                    bot_token=config.telegram.token,
-                    suggested_session_dir=suggested_session_dir,
-                    scope=scope,
-                    context_name=ctx_name,
+                await notify_agent_status(
+                    context.bot_data, config, db, scope, "permission_required",
+                    title=ctx_name,
+                    text=f"{tool_name} needs your approval",
+                    tool_use_id=tool_use_id,
+                    tool_name=tool_name,
                 )
+                try:
+                    return await _send_approval_keyboard(
+                        context.bot, scope.chat_id, tool_name, tool_input, tool_use_id,
+                        cwd=ctx_config.directory,
+                        thread_id=scope.thread_id,
+                        base_url=_base_url,
+                        user_id=user_id,
+                        is_private_chat=is_private_chat,
+                        bot_token=config.telegram.token,
+                        suggested_session_dir=suggested_session_dir,
+                        scope=scope,
+                        context_name=ctx_name,
+                    )
+                finally:
+                    # Leave the permission segment: return the Live Update to
+                    # the running state once the decision is in.
+                    await notify_agent_status(
+                        context.bot_data, config, db, scope, "started",
+                        title=ctx_name,
+                    )
 
             async def handle_questions(
                 questions: list[dict[str, Any]],
@@ -818,6 +841,10 @@ async def _start_agent_task(
             _reinject_runtime_credentials(session)
             await session.client.query(actual_prompt)
 
+            await notify_agent_status(
+                context.bot_data, config, db, scope, "started", title=ctx_name,
+            )
+
             # Mark session as injectable so concurrent messages are
             # injected via client.query() instead of queued.
             _injectable_sessions[scope] = session
@@ -918,6 +945,15 @@ async def _start_agent_task(
                             scope,
                         )
 
+                    # A real turn just completed and the agent is idle again
+                    # (the persistent client keeps _run alive across messages,
+                    # so this — not the finally block — is the per-turn "done").
+                    if result.session_id is not None:
+                        await notify_agent_status(
+                            context.bot_data, config, db, scope, "done",
+                            title=ctx_name,
+                        )
+
                     if result.num_turns == 0 and result.session_id is None:
                         break
 
@@ -1005,6 +1041,11 @@ async def _start_agent_task(
             except Exception:
                 logger.exception("Failed to send error message")
         finally:
+            # Safety-net "done" for teardown paths (cancel/error) where no
+            # per-turn "done" fired; notify_agent_status swallows its own errors.
+            await notify_agent_status(
+                context.bot_data, config, db, scope, "done", title=ctx_name,
+            )
             # Collect injected attachment paths and clean up everything.
             all_attachment_paths.extend(
                 _injected_attachment_paths.pop(scope, [])

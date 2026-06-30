@@ -61,6 +61,16 @@ _injected_attachment_paths: dict[ChatScope, list[Path]] = {}
 _approval_futures: dict[str, asyncio.Future[bool]] = {}
 
 # ---------------------------------------------------------------------------
+# Resolution source for pending approvals: tool_use_id -> "android".
+# Set by the authenticated Android approve/deny endpoint just before it
+# resolves the future, so the keyboard sender knows to clean up the Telegram
+# message itself (the Telegram CallbackQuery path edits the message inline,
+# but the phone path has no query to do so).  Popped by _send_approval_keyboard.
+# ---------------------------------------------------------------------------
+RESOLVED_VIA_ANDROID = "android"
+_approval_resolved_via: dict[str, str] = {}
+
+# ---------------------------------------------------------------------------
 # Pending Agent tool inputs for "Show prompt" expansion: tool_use_id -> tool_input
 # ---------------------------------------------------------------------------
 _pending_agent_inputs: dict[str, dict[str, Any]] = {}

@@ -22,10 +22,12 @@ from open_shrimp.db import ChatScope
 from open_shrimp.handlers.state import (
     _approval_futures,
     _approval_metadata,
+    _approval_resolved_via,
     _approval_tool_names,
     _pending_agent_inputs,
     _pending_session_dirs,
     _pending_tool_approvals,
+    RESOLVED_VIA_ANDROID,
 )
 from open_shrimp.handlers.utils import _escape_mdv2
 from open_shrimp.hooks import ApprovalRule, HostBashOutcome
@@ -222,8 +224,33 @@ async def _send_approval_keyboard(
         _approval_futures[accept_dir_data] = future
 
     try:
-        return await future
+        result = await future
+        # If the decision came from the Android companion's notification
+        # action (not a Telegram CallbackQuery), the Telegram message still
+        # shows its live buttons — collapse it here to mirror the inline path.
+        if _approval_resolved_via.pop(tool_use_id, None) == RESOLVED_VIA_ANDROID:
+            icon = "✅" if result else "❌"
+            action = "Approved on phone" if result else "Denied on phone"
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=sent_msg.message_id,
+                    text=f"{text}\n\n{icon} *{_escape_mdv2(action)}\\.*",
+                    parse_mode="MarkdownV2",
+                    reply_markup=None,
+                )
+            except Exception:
+                try:
+                    await bot.edit_message_reply_markup(
+                        chat_id=chat_id,
+                        message_id=sent_msg.message_id,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    logger.exception("Failed to edit phone-resolved approval message")
+        return result
     finally:
+        _approval_resolved_via.pop(tool_use_id, None)
         _approval_futures.pop(approve_data, None)
         _approval_futures.pop(deny_data, None)
         for cb_data in extras.future_callback_data:

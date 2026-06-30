@@ -25,7 +25,13 @@ class ShrimpFirebaseMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val data = message.data
-        if (data["type"] != "security_key_request") return
+        when (data["type"]) {
+            "security_key_request" -> handleSecurityKeyRequest(data)
+            "agent_status" -> AgentStatusNotifier.handle(this, data)
+        }
+    }
+
+    private fun handleSecurityKeyRequest(data: Map<String, String>) {
         val sessionId = data["session_id"] ?: return
         val serverId = data["server_id"].orEmpty()
         ensureChannel()
