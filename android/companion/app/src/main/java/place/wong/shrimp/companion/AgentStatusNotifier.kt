@@ -11,29 +11,30 @@ import android.os.Build
 import androidx.annotation.RequiresApi
 
 /**
- * Renders the per-ChatScope agent-status Live Update.
+ * Renders the per-ChatScope agent-status Live Update (FCM data contract v2).
  *
- * The bot pushes three discrete transitions per turn — started,
- * permission_required, done — as FCM data messages.  On Android 16 (API 36)
- * the running/permission notification is an ongoing [Notification.ProgressStyle]
- * that requests promotion to the status-bar chip; on older devices it degrades
- * to a plain ongoing notification.  Each ChatScope keeps a single, stable
- * notification id so repeated events update the existing notification rather
- * than stacking, and the done event dismisses exactly the right one.
+ * The turn lifecycle has two phases: ``running`` keeps an ongoing notification
+ * live; ``done`` dismisses it.  Progress is driven by the agent's TodoWrite
+ * list — ``running`` events carry ``todo_done``/``todo_total`` counts that
+ * render as a segmented [Notification.ProgressStyle] bar (one segment per
+ * todo) and an "x/y" status-bar chip.  When no todos exist the bar is omitted
+ * and the chip reads "Running".
  *
- * Promotion is system-discretionary and realistically only one chip shows, so
- * only the permission-required segment requests promotion (it is the most
- * time-sensitive and the only actionable one).  All notifications share a
- * group + summary so the shade does not fill with chips.
+ * Awaiting a tool approval is *not* a phase — it is an overlay on a running
+ * notification (``awaiting=1``): it adds inline approve/deny actions, swaps the
+ * chip to "Approve?", and requests promotion to the status-bar chip (the most
+ * time-sensitive, only actionable moment).  Each ChatScope keeps a single,
+ * stable notification id so repeated events update in place rather than
+ * stacking, and the done event dismisses exactly the right one.  All
+ * notifications share a group + summary so the shade does not fill with chips.
  */
 object AgentStatusNotifier {
     const val CHANNEL_ID = "agent_status"
     private const val GROUP_KEY = "place.wong.shrimp.companion.AGENT_STATUS"
     private const val SUMMARY_ID = 0x5A0001
 
-    private const val STATE_STARTED = "started"
-    private const val STATE_PERMISSION = "permission_required"
-    private const val STATE_DONE = "done"
+    private const val PHASE_RUNNING = "running"
+    private const val PHASE_DONE = "done"
 
     // Value of the (API 36.1) Notification.EXTRA_REQUEST_PROMOTED_ONGOING constant,
     // hardcoded because the app compiles against API 36.0 where it is absent.
@@ -41,26 +42,28 @@ object AgentStatusNotifier {
 
     /** Dispatch an ``agent_status`` FCM data message to the notification shade. */
     fun handle(context: Context, data: Map<String, String>) {
-        val state = data["state"] ?: return
+        val phase = data["phase"] ?: return
         val notificationId = notificationId(data) ?: return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
 
-        if (state == STATE_DONE) {
+        if (phase == PHASE_DONE) {
             manager.cancel(notificationId)
             val remaining = agentNotificationCount(manager, exceptId = notificationId)
             if (remaining == 0) manager.cancel(SUMMARY_ID)
             return
         }
+        if (phase != PHASE_RUNNING) return
 
         ensureChannel(manager)
-        val permission = state == STATE_PERMISSION
         val notification = build(
             context = context,
             notificationId = notificationId,
             title = data["title"].orEmpty().ifEmpty { "OpenShrimp" },
             text = data["text"].orEmpty(),
-            permission = permission,
+            awaiting = data["awaiting"] == "1",
             toolUseId = data["tool_use_id"],
+            todoDone = data["todo_done"]?.toIntOrNull(),
+            todoTotal = data["todo_total"]?.toIntOrNull(),
         )
         manager.notify(notificationId, notification)
         manager.notify(SUMMARY_ID, buildSummary(context))
@@ -68,7 +71,8 @@ object AgentStatusNotifier {
 
     /**
      * Optimistically reflect a tapped approve/deny action before the bot's
-     * follow-up ``started`` event arrives, so the buttons disappear at once.
+     * follow-up ``running`` event (overlay dropped) arrives, so the buttons
+     * disappear at once.
      */
     fun markResolved(context: Context, notificationId: Int, decision: String) {
         if (notificationId == 0) return
@@ -83,19 +87,31 @@ object AgentStatusNotifier {
         notificationId: Int,
         title: String,
         text: String,
-        permission: Boolean,
+        awaiting: Boolean,
         toolUseId: String?,
+        todoDone: Int?,
+        todoTotal: Int?,
     ): Notification {
         val builder = baseBuilder(context, title, text)
-        if (permission && !toolUseId.isNullOrEmpty()) {
+        if (awaiting && !toolUseId.isNullOrEmpty()) {
             builder.addAction(action(context, notificationId, toolUseId, "approve", "Approve"))
             builder.addAction(action(context, notificationId, toolUseId, "deny", "Deny"))
         }
+        val hasProgress = todoTotal != null && todoTotal >= 1 && todoDone != null
         if (Build.VERSION.SDK_INT >= 36) {
-            applyProgressStyle(builder, permission)
+            if (hasProgress) {
+                applyProgressStyle(builder, todoDone!!, todoTotal!!)
+            }
             // Glanceable label rendered inside the status-bar chip when promoted.
-            builder.setShortCriticalText(if (permission) "Approve?" else "Running")
-            if (permission) {
+            // Permission wins; otherwise show "x/y" progress, else a plain label.
+            builder.setShortCriticalText(
+                when {
+                    awaiting -> "Approve?"
+                    hasProgress -> "$todoDone/$todoTotal"
+                    else -> "Running"
+                },
+            )
+            if (awaiting) {
                 requestPromotion(builder)
             }
         }
@@ -139,17 +155,17 @@ object AgentStatusNotifier {
     }
 
     @RequiresApi(36)
-    private fun applyProgressStyle(builder: Notification.Builder, permission: Boolean) {
-        // Three phased segments: started -> awaiting-approval -> finishing.
+    private fun applyProgressStyle(builder: Notification.Builder, done: Int, total: Int) {
+        // One segment per todo; the marker sits at the boundary after the
+        // completed ones.  Each segment spans 100 points, so the bar's total
+        // span is total*100 and the marker lands at done*100.  done is clamped
+        // to [0, total] in case counts ever arrive out of range.
+        val clampedDone = done.coerceIn(0, total)
         val style = Notification.ProgressStyle()
         style.setProgressSegments(
-            listOf(
-                Notification.ProgressStyle.Segment(100),
-                Notification.ProgressStyle.Segment(100),
-                Notification.ProgressStyle.Segment(100),
-            ),
+            (0 until total).map { Notification.ProgressStyle.Segment(100) },
         )
-        style.setProgress(if (permission) 150 else 50)
+        style.setProgress(clampedDone * 100)
         builder.setStyle(style)
     }
 

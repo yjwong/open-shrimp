@@ -1,18 +1,22 @@
 """Per-ChatScope agent-status push notifications for the Android companion.
 
 The companion app renders an Android 16 *Live Update* for each active
-conversation, modelling the turn lifecycle as three discrete transitions:
+conversation.  The turn lifecycle is just two phases:
 
-- ``started``             — the agent began working on a turn
-- ``permission_required`` — a tool needs the user's approval
-- ``done``                — the agent went idle
+- ``running`` — the agent is working on a turn (the notification is live)
+- ``done``    — the agent went idle (the notification is dismissed)
+
+Progress is driven by the agent's TodoWrite list: ``running`` events carry
+``todo_done``/``todo_total`` counts that render as a segmented bar and an
+"x/y" chip.  Awaiting a tool approval is *not* a phase — it is an overlay on
+the running notification (``awaiting=1``), adding inline approve/deny actions
+and bumping the push to high priority.  The overlay carries the
+``tool_use_id`` so those actions resolve the right server-side future (see
+``/api/agent/approvals/{tool_use_id}``).
 
 Events are delivered as FCM data messages, one stable notification per
-:class:`~open_shrimp.db.ChatScope`.  The permission-required event is sent
-high-priority so the OS does not defer the time-sensitive one; it also
-carries the ``tool_use_id`` so the notification's inline approve/deny
-actions resolve the right server-side future (see
-``/api/agent/approvals/{tool_use_id}``).
+:class:`~open_shrimp.db.ChatScope`.  See the v2 contract in
+``AgentStatusNotifier.kt`` for the full field set and rendering rules.
 """
 
 from __future__ import annotations
@@ -30,9 +34,24 @@ from open_shrimp.db import ChatScope
 
 logger = logging.getLogger(__name__)
 
-AgentStatusState = Literal["started", "permission_required", "done"]
+AgentStatusPhase = Literal["running", "done"]
 
-_DEFAULT_STATUS_TEXT: dict[str, str] = {"started": "Working…", "done": "Done"}
+_DEFAULT_STATUS_TEXT: dict[str, str] = {"running": "Working…", "done": "Done"}
+
+
+def todo_counts(todos: list[dict[str, Any]] | None) -> tuple[int, int] | None:
+    """Reduce a TodoWrite list to ``(done, total)`` for the progress bar.
+
+    Returns ``None`` when there are no todos, so the phone falls back to the
+    indeterminate "Working…" bar.  Progress is modelled as ``done/total``
+    regardless of completion order: the marker may jump if items finish out
+    of order, but the count is never misreported.
+    """
+    if not todos:
+        return None
+    total = len(todos)
+    done = sum(1 for t in todos if t.get("status") == "completed")
+    return done, total
 
 
 def scope_notification_id(scope: ChatScope) -> int:
@@ -51,14 +70,21 @@ async def notify_agent_status(
     config: Config,
     db: aiosqlite.Connection,
     scope: ChatScope,
-    state: AgentStatusState,
+    phase: AgentStatusPhase,
     *,
     title: str,
     text: str | None = None,
+    awaiting: bool = False,
     tool_use_id: str | None = None,
     tool_name: str | None = None,
+    todos: list[dict[str, Any]] | None = None,
 ) -> None:
     """Push an agent-status event to every active FCM companion device.
+
+    ``phase`` is ``running`` or ``done``.  ``awaiting`` overlays an approval
+    request on a running notification (it carries ``tool_use_id`` and bumps
+    the push to high priority).  ``todos`` is the latest TodoWrite list, used
+    to attach ``done/total`` progress counts on running events.
 
     Best-effort: any failure (no devices, FCM not configured, network) is
     swallowed so the agent turn is never blocked on notification delivery.
@@ -66,7 +92,7 @@ async def notify_agent_status(
     if config.android_companion.push_provider != "fcm":
         return
     if text is None:
-        text = _DEFAULT_STATUS_TEXT.get(state, "")
+        text = _DEFAULT_STATUS_TEXT.get(phase, "")
     try:
         devices = await list_active_android_push_devices(db)
     except Exception:
@@ -80,7 +106,7 @@ async def notify_agent_status(
     sender = get_push_sender(bot_data, config)
     data: dict[str, str] = {
         "type": "agent_status",
-        "state": state,
+        "phase": phase,
         "scope_key": scope.key,
         "chat_id": str(scope.chat_id),
         "thread_id": "" if scope.thread_id is None else str(scope.thread_id),
@@ -88,12 +114,21 @@ async def notify_agent_status(
         "title": title,
         "text": text,
     }
-    if tool_use_id:
-        data["tool_use_id"] = tool_use_id
-    if tool_name:
-        data["tool_name"] = tool_name
+    # Progress counts ride only on running events (a done event dismisses).
+    if phase == "running":
+        counts = todo_counts(todos)
+        if counts is not None:
+            done, total = counts
+            data["todo_done"] = str(done)
+            data["todo_total"] = str(total)
+    if awaiting:
+        data["awaiting"] = "1"
+        if tool_use_id:
+            data["tool_use_id"] = tool_use_id
+        if tool_name:
+            data["tool_name"] = tool_name
 
-    high_priority = state == "permission_required"
+    high_priority = awaiting
     for device in fcm_devices:
         try:
             await sender.send_agent_status(

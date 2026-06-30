@@ -53,6 +53,7 @@ from open_shrimp.handlers.state import (
     _pending_other_input,
     _question_states,
     _running_tasks,
+    _scope_todos,
     _setup_queues,
 )
 from open_shrimp.handlers.utils import (
@@ -73,6 +74,20 @@ from open_shrimp.stream import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _permission_text(tool_name: str, tool_input: dict[str, Any]) -> str:
+    """One-line approval prompt for the Android notification's ``text``.
+
+    Surfaces the actionable detail (the Bash command) where we have it, so the
+    phone shows "Approve Bash: git push?" rather than a generic tool name.
+    """
+    if tool_name == "Bash":
+        command = str(tool_input.get("command", "")).strip()
+        if command:
+            short = command if len(command) <= 60 else command[:59] + "…"
+            return f"Approve Bash: {short}?"
+    return f"Approve {tool_name}?"
 
 
 def _select_sandbox_manager(
@@ -526,8 +541,9 @@ async def _dispatch_to_agent(
                 # The running loop emits the matching "done" once this
                 # injected turn completes.
                 await notify_agent_status(
-                    context.bot_data, config, db, scope, "started",
+                    context.bot_data, config, db, scope, "running",
                     title=await _get_context_name(scope, config, db),
+                    todos=_scope_todos.get(scope),
                 )
             except _DeadTransport:
                 # Transport is dead — the existing task is stuck in
@@ -723,11 +739,13 @@ async def _start_agent_task(
             ) -> bool:
                 await finalize_and_reset(context.bot, draft_state)
                 await notify_agent_status(
-                    context.bot_data, config, db, scope, "permission_required",
+                    context.bot_data, config, db, scope, "running",
                     title=ctx_name,
-                    text=f"{tool_name} needs your approval",
+                    text=_permission_text(tool_name, tool_input),
+                    awaiting=True,
                     tool_use_id=tool_use_id,
                     tool_name=tool_name,
+                    todos=_scope_todos.get(scope),
                 )
                 try:
                     return await _send_approval_keyboard(
@@ -743,11 +761,12 @@ async def _start_agent_task(
                         context_name=ctx_name,
                     )
                 finally:
-                    # Leave the permission segment: return the Live Update to
-                    # the running state once the decision is in.
+                    # Drop the approval overlay: return the Live Update to the
+                    # plain running state once the decision is in.
                     await notify_agent_status(
-                        context.bot_data, config, db, scope, "started",
+                        context.bot_data, config, db, scope, "running",
                         title=ctx_name,
+                        todos=_scope_todos.get(scope),
                     )
 
             async def handle_questions(
@@ -789,9 +808,18 @@ async def _start_agent_task(
             async def on_todo_update(todos: list[dict[str, Any]]) -> None:
                 latest_todos.clear()
                 latest_todos.extend(todos)
+                # Mirror to module state so agent-status pushes (including the
+                # ones fired outside _run) can attach x-of-y progress, and push
+                # the refreshed count to the live notification.
+                _scope_todos[scope] = list(todos)
                 await _update_pinned_status(
                     context.bot, scope, ctx_name, ctx_config, db,
                     todos=todos if todos else None,
+                )
+                await notify_agent_status(
+                    context.bot_data, config, db, scope, "running",
+                    title=ctx_name,
+                    todos=todos,
                 )
 
             # Load durable approval rules through the active backend's
@@ -867,7 +895,8 @@ async def _start_agent_task(
             await session.client.query(actual_prompt)
 
             await notify_agent_status(
-                context.bot_data, config, db, scope, "started", title=ctx_name,
+                context.bot_data, config, db, scope, "running",
+                title=ctx_name, todos=_scope_todos.get(scope),
             )
 
             # Mark session as injectable so concurrent messages are
@@ -978,6 +1007,11 @@ async def _start_agent_task(
                             context.bot_data, config, db, scope, "done",
                             title=ctx_name,
                         )
+                        # Turn finished: the next turn starts a fresh task
+                        # list, so drop the notification's progress counts.
+                        # (latest_todos is left intact — the pinned Telegram
+                        # message keeps showing the list across usage updates.)
+                        _scope_todos.pop(scope, None)
 
                     if result.num_turns == 0 and result.session_id is None:
                         break
@@ -1078,6 +1112,7 @@ async def _start_agent_task(
             cleanup_attachments(all_attachment_paths)
             _injectable_sessions.pop(scope, None)
             _setup_queues.pop(scope, None)
+            _scope_todos.pop(scope, None)
             if draft_state.session_id:
                 try:
                     await set_session_id(db, scope, ctx_name, draft_state.session_id)
