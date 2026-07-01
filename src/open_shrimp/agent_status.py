@@ -8,7 +8,9 @@ conversation.  The turn lifecycle is just two phases:
 
 Progress is driven by the agent's TodoWrite list: ``running`` events carry
 ``todo_done``/``todo_total`` counts that render as a segmented bar and an
-"x/y" chip.  Awaiting a tool approval is *not* a phase — it is an overlay on
+"x/y" chip, and the ``text`` body reflects the active todo's label (the
+``in_progress`` item's ``activeForm``) instead of a generic "Working…".
+Awaiting a tool approval is *not* a phase — it is an overlay on
 the running notification (``awaiting=1``), adding inline approve/deny actions
 and bumping the push to high priority.  The overlay carries the
 ``tool_use_id`` so those actions resolve the right server-side future (see
@@ -37,6 +39,32 @@ logger = logging.getLogger(__name__)
 AgentStatusPhase = Literal["running", "done"]
 
 _DEFAULT_STATUS_TEXT: dict[str, str] = {"running": "Working…", "done": "Done"}
+
+
+def current_todo_text(todos: list[dict[str, Any]] | None) -> str | None:
+    """Return a label for the todo the agent is actively working on.
+
+    Prefers the ``in_progress`` item's ``activeForm`` ("Running tests") so the
+    notification body reads as a live status line; falls back to the first
+    not-yet-finished item, and to ``content`` when ``activeForm`` is absent.
+    Returns ``None`` when nothing is actionable, so the caller keeps the
+    default "Working…" text.
+    """
+    if not todos:
+        return None
+    active = next((t for t in todos if t.get("status") == "in_progress"), None)
+    if active is None:
+        active = next(
+            (
+                t
+                for t in todos
+                if t.get("status") not in ("completed", "cancelled")
+            ),
+            None,
+        )
+    if active is None:
+        return None
+    return active.get("activeForm") or active.get("content") or None
 
 
 def todo_counts(todos: list[dict[str, Any]] | None) -> tuple[int, int] | None:
@@ -92,7 +120,10 @@ async def notify_agent_status(
     if config.android_companion.push_provider != "fcm":
         return
     if text is None:
-        text = _DEFAULT_STATUS_TEXT.get(phase, "")
+        if phase == "running":
+            text = current_todo_text(todos) or _DEFAULT_STATUS_TEXT["running"]
+        else:
+            text = _DEFAULT_STATUS_TEXT.get(phase, "")
     try:
         devices = await list_active_android_push_devices(db)
     except Exception:
