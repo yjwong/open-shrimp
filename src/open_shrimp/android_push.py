@@ -175,6 +175,32 @@ class FcmPushSender:
             high_priority=True,
         )
 
+    async def send_port_forward_request(
+        self,
+        *,
+        device: dict[str, Any],
+        server_id: str,
+        session_id: str,
+        label: str,
+        host_port: int,
+    ) -> PushDeliveryResult:
+        if device.get("push_provider") != "fcm":
+            return PushDeliveryResult(status="unsupported_provider")
+        token = device.get("push_token")
+        if not isinstance(token, str) or not token:
+            return PushDeliveryResult(status="missing_token")
+        return await self._post_fcm_message(
+            token=token,
+            data={
+                "type": "port_forward_request",
+                "server_id": server_id,
+                "session_id": session_id,
+                "label": label,
+                "host_port": str(host_port),
+            },
+            high_priority=True,
+        )
+
     async def send_agent_status(
         self,
         *,

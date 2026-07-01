@@ -27,8 +27,8 @@ fun rememberApprover(
     return { label ->
         val keyguard = context.getSystemService(KeyguardManager::class.java)
         val intent = keyguard?.createConfirmDeviceCredentialIntent(
-            "Approve security-key forwarding",
-            "Forward this USB security key to $label for this short-lived session.",
+            "Approve OpenShrimp forwarding",
+            "Confirm to start forwarding to $label for this short-lived session.",
         )
         if (intent != null) launcher.launch(intent) else onNoSecureLock()
     }

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import place.wong.shrimp.companion.PortForwardProxyService
 import place.wong.shrimp.companion.SecurityKeyForwardingService
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -46,6 +47,29 @@ object Forwarding {
         context.startService(
             Intent(context, SecurityKeyForwardingService::class.java)
                 .setAction(SecurityKeyForwardingService.ACTION_STOP),
+        )
+    }
+}
+
+/** Starts and stops the local TCP port-forward proxy foreground service. */
+object PortForwarding {
+    fun start(context: Context, relayUrl: String, localPort: Int, label: String) {
+        val intent = Intent(context, PortForwardProxyService::class.java)
+            .setAction(PortForwardProxyService.ACTION_START)
+            .putExtra(PortForwardProxyService.EXTRA_RELAY_URL, relayUrl)
+            .putExtra(PortForwardProxyService.EXTRA_LOCAL_PORT, localPort)
+            .putExtra(PortForwardProxyService.EXTRA_LABEL, label)
+        if (Build.VERSION.SDK_INT >= 26) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
+    }
+
+    fun stop(context: Context) {
+        context.startService(
+            Intent(context, PortForwardProxyService::class.java)
+                .setAction(PortForwardProxyService.ACTION_STOP),
         )
     }
 }

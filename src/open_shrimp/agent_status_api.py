@@ -21,8 +21,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from open_shrimp.android_companion import authenticate_android_request
-from open_shrimp.review.auth import AuthError
-from open_shrimp.security_key.api import _json_body
+from open_shrimp.review.auth import AuthError, read_json_body
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ async def resolve_agent_approval_endpoint(request: Request) -> JSONResponse:
     """
     try:
         await authenticate_android_request(request)
-        body = await _json_body(request)
+        body = await read_json_body(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 

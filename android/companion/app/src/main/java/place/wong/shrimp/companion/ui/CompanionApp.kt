@@ -25,6 +25,8 @@ object Routes {
 fun CompanionApp(
     pushSessionId: StateFlow<String?>,
     onConsumePush: () -> Unit,
+    pushPortForwardSessionId: StateFlow<String?>,
+    onConsumePortForwardPush: () -> Unit,
 ) {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = Routes.HOME) {
@@ -32,6 +34,8 @@ fun CompanionApp(
             HomeScreen(
                 pushSessionId = pushSessionId,
                 onConsumePush = onConsumePush,
+                pushPortForwardSessionId = pushPortForwardSessionId,
+                onConsumePortForwardPush = onConsumePortForwardPush,
                 onOpenPairing = { navController.navigate(Routes.PAIRING) },
                 onOpenSettings = { navController.navigate(Routes.SETTINGS) },
             )

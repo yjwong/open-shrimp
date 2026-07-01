@@ -7,7 +7,6 @@ import json
 import logging
 import time
 from typing import Any
-from urllib.parse import urlparse
 
 import aiosqlite
 from starlette.requests import Request
@@ -17,7 +16,13 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from open_shrimp.config import Config
 from open_shrimp.db import ChatScope, get_active_context
-from open_shrimp.review.auth import AuthError, authenticate
+from open_shrimp.review.auth import (
+    AuthError,
+    authenticate_request,
+    bounded_int,
+    read_json_body,
+)
+from open_shrimp.web_url import openshrimp_server_label, phone_websocket_base, public_base
 from open_shrimp.android_companion import (
     authenticate_android_request,
     create_pairing_code,
@@ -76,61 +81,11 @@ def get_or_create_registry(state: Any) -> SecurityKeySessionRegistry:
     return registry
 
 
-async def _authenticate(request: Request) -> int:
-    config: Config = request.app.state.config
-    return await authenticate(
-        request.headers.get("authorization", ""),
-        config.telegram.token,
-        config.allowed_users,
-    )
-
-
-async def _json_body(request: Request) -> dict[str, Any]:
-    try:
-        body = await request.json()
-    except json.JSONDecodeError as exc:
-        raise AuthError(400, "Invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise AuthError(400, "JSON body must be an object")
-    return body
-
-
-def _public_base(config: Config) -> str:
-    if config.review.public_url:
-        return config.review.public_url.rstrip("/")
-    return f"https://{config.review.host}:{config.review.port}"
-
-
-def _phone_websocket_base(config: Config) -> str:
-    public_base = _public_base(config)
-    if public_base.startswith("https://"):
-        return "wss://" + public_base[len("https://") :]
-    if public_base.startswith("http://"):
-        return "ws://" + public_base[len("http://") :]
-    return public_base
-
-
 def _phone_url(config: Config, session: SecurityKeyRelaySession) -> str:
     return (
-        f"{_phone_websocket_base(config)}/api/security-key/sessions/{session.id}/phone"
+        f"{phone_websocket_base(config)}/api/security-key/sessions/{session.id}/phone"
         f"?token={session.phone_token}"
     )
-
-
-def _is_displayable_host(host: str | None) -> bool:
-    return bool(host and host not in {"0.0.0.0", "::", "*"})
-
-
-def openshrimp_server_label(config: Config) -> str:
-    if config.instance_name:
-        return config.instance_name
-    if config.review.public_url:
-        parsed = urlparse(config.review.public_url)
-        if _is_displayable_host(parsed.hostname):
-            return parsed.hostname or "OpenShrimp"
-    if _is_displayable_host(config.review.host):
-        return config.review.host
-    return "OpenShrimp"
 
 
 def security_key_destination_label(
@@ -140,25 +95,6 @@ def security_key_destination_label(
     if sandbox_id and sandbox_id != context_name:
         return f"{server_label} desktop: {context_name} ({sandbox_id})"
     return f"{server_label} desktop: {context_name}"
-
-
-def _bounded_seconds(
-    raw: object,
-    *,
-    default: int,
-    minimum: int,
-    maximum: int,
-    field: str,
-) -> int:
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise AuthError(400, f"{field} must be an integer") from exc
-    if value < minimum or value > maximum:
-        raise AuthError(400, f"{field} must be between {minimum} and {maximum}")
-    return value
 
 
 async def _resolve_context(
@@ -184,21 +120,21 @@ async def _resolve_context(
 async def create_session_endpoint(request: Request) -> JSONResponse:
     """POST /api/security-key/sessions."""
     try:
-        await _authenticate(request)
-        body = await _json_body(request)
+        await authenticate_request(request)
+        body = await read_json_body(request)
         chat_id = int(body["chat_id"])
         raw_thread_id = body.get("thread_id")
         thread_id = int(raw_thread_id) if raw_thread_id is not None else None
         sandbox_id_raw = body.get("sandbox_id")
         sandbox_id = sandbox_id_raw if isinstance(sandbox_id_raw, str) else None
-        lifetime_seconds = _bounded_seconds(
+        lifetime_seconds = bounded_int(
             body.get("lifetime_seconds"),
             default=DEFAULT_SESSION_LIFETIME_SECONDS,
             minimum=10,
             maximum=MAX_SESSION_LIFETIME_SECONDS,
             field="lifetime_seconds",
         )
-        idle_timeout_seconds = _bounded_seconds(
+        idle_timeout_seconds = bounded_int(
             body.get("idle_timeout_seconds"),
             default=DEFAULT_IDLE_TIMEOUT_SECONDS,
             minimum=10,
@@ -342,7 +278,7 @@ async def _send_android_security_key_push(
 async def get_session_endpoint(request: Request) -> JSONResponse:
     """GET /api/security-key/sessions/{session_id}."""
     try:
-        await _authenticate(request)
+        await authenticate_request(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
@@ -386,7 +322,7 @@ async def get_session_endpoint(request: Request) -> JSONResponse:
 async def cancel_session_endpoint(request: Request) -> JSONResponse:
     """POST /api/security-key/sessions/{session_id}/cancel."""
     try:
-        await _authenticate(request)
+        await authenticate_request(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
@@ -411,7 +347,7 @@ async def cancel_session_endpoint(request: Request) -> JSONResponse:
 async def create_pairing_code_endpoint(request: Request) -> JSONResponse:
     """POST /api/android-companion/pairing-codes."""
     try:
-        await _authenticate(request)
+        await authenticate_request(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
@@ -424,8 +360,8 @@ async def create_pairing_code_endpoint(request: Request) -> JSONResponse:
             **pairing,
             "server_id": server_id,
             "server_label": openshrimp_server_label(config),
-            "base_url": _public_base(config),
-            "pairing_url": f"openshrimp://pair?base_url={_public_base(config)}&code={pairing['code']}",
+            "base_url": public_base(config),
+            "pairing_url": f"openshrimp://pair?base_url={public_base(config)}&code={pairing['code']}",
         },
         status_code=201,
     )
@@ -434,7 +370,7 @@ async def create_pairing_code_endpoint(request: Request) -> JSONResponse:
 async def pair_android_endpoint(request: Request) -> JSONResponse:
     """POST /api/android-companion/pair."""
     try:
-        body = await _json_body(request)
+        body = await read_json_body(request)
         result = await pair_android_device(
             request.app.state.db,
             code=str(body.get("code", "")),
@@ -463,7 +399,7 @@ async def pair_android_endpoint(request: Request) -> JSONResponse:
 async def list_android_devices_endpoint(request: Request) -> JSONResponse:
     """GET /api/android-companion/devices."""
     try:
-        await _authenticate(request)
+        await authenticate_request(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
     return JSONResponse({"devices": await list_android_devices(request.app.state.db)})
@@ -472,7 +408,7 @@ async def list_android_devices_endpoint(request: Request) -> JSONResponse:
 async def delete_android_device_endpoint(request: Request) -> JSONResponse:
     """DELETE /api/android-companion/devices/{device_id}."""
     try:
-        await _authenticate(request)
+        await authenticate_request(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
     ok = await revoke_android_device(
@@ -487,7 +423,7 @@ async def update_android_push_registration_endpoint(request: Request) -> JSONRes
     """POST /api/android-companion/push-registration."""
     try:
         device = await authenticate_android_request(request)
-        body = await _json_body(request)
+        body = await read_json_body(request)
         push_provider = body.get("push_provider")
         push_token = body.get("push_token")
         if push_provider is not None and not isinstance(push_provider, str):

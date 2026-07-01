@@ -9,7 +9,10 @@ import hashlib
 import hmac
 import json
 import time
+from typing import Any
 from urllib.parse import parse_qs, unquote
+
+from starlette.requests import Request
 
 
 class AuthError(Exception):
@@ -226,3 +229,44 @@ async def validate_token_param(
     return await validate_init_data(
         f"tg-init-data {token}", bot_token, allowed_users
     )
+
+
+# ---------------------------------------------------------------------------
+# Request-level helpers (shared by the review/security-key/port-forward APIs)
+# ---------------------------------------------------------------------------
+
+
+async def authenticate_request(request: Request) -> int:
+    """Authenticate a Starlette request's Authorization header."""
+    config = request.app.state.config
+    return await authenticate(
+        request.headers.get("authorization", ""),
+        config.telegram.token,
+        config.allowed_users,
+    )
+
+
+async def read_json_body(request: Request) -> dict[str, Any]:
+    """Parse a request body as a JSON object, raising AuthError on failure."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise AuthError(400, "Invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise AuthError(400, "JSON body must be an object")
+    return body
+
+
+def bounded_int(
+    raw: object, *, default: int, minimum: int, maximum: int, field: str
+) -> int:
+    """Coerce *raw* to an int within ``[minimum, maximum]`` or return *default*."""
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise AuthError(400, f"{field} must be an integer") from exc
+    if value < minimum or value > maximum:
+        raise AuthError(400, f"{field} must be between {minimum} and {maximum}")
+    return value

@@ -48,12 +48,15 @@ import place.wong.shrimp.companion.ui.rememberApprover
 fun HomeScreen(
     pushSessionId: StateFlow<String?>,
     onConsumePush: () -> Unit,
+    pushPortForwardSessionId: StateFlow<String?>,
+    onConsumePortForwardPush: () -> Unit,
     onOpenPairing: () -> Unit,
     onOpenSettings: () -> Unit,
     vm: HomeViewModel = viewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val push by pushSessionId.collectAsStateWithLifecycle()
+    val portForwardPush by pushPortForwardSessionId.collectAsStateWithLifecycle()
 
     LifecycleResumeEffect(Unit) {
         vm.refresh()
@@ -76,6 +79,12 @@ fun HomeScreen(
         push?.let {
             vm.claimPushedSession(it)
             onConsumePush()
+        }
+    }
+    LaunchedEffect(portForwardPush) {
+        portForwardPush?.let {
+            vm.claimPushedPortForward(it)
+            onConsumePortForwardPush()
         }
     }
 
@@ -124,6 +133,18 @@ fun HomeScreen(
                 if (state.forwardingActive) {
                     OutlinedButton(onClick = vm::stopForwarding, modifier = Modifier.fillMaxWidth()) {
                         Text("Stop forwarding")
+                    }
+                }
+                OutlinedButton(
+                    onClick = vm::findPendingPortForward,
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Forward pending port")
+                }
+                if (state.portForwardActive) {
+                    OutlinedButton(onClick = vm::stopPortForward, modifier = Modifier.fillMaxWidth()) {
+                        Text("Stop port forward")
                     }
                 }
             }

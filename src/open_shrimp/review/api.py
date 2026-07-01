@@ -849,6 +849,7 @@ def create_review_app(
     sandbox_managers: "dict[str, SandboxManager] | None" = None,
     config_path: str | None = None,
     security_key_registry: object | None = None,
+    port_relay_registry: object | None = None,
 ) -> Starlette:
     """Create the Starlette application for the review API.
 
@@ -910,6 +911,10 @@ def create_review_app(
 
     routes.extend(create_security_key_routes())
 
+    from open_shrimp.port_relay.api import create_port_relay_routes
+
+    routes.extend(create_port_relay_routes())
+
     # Android companion agent-status approve/deny endpoint.
     from open_shrimp.agent_status_api import create_agent_status_routes
 
@@ -922,5 +927,7 @@ def create_review_app(
     app.state.config_path = config_path
     if security_key_registry is not None:
         app.state.security_key_registry = security_key_registry
+    if port_relay_registry is not None:
+        app.state.port_relay_registry = port_relay_registry
 
     return app

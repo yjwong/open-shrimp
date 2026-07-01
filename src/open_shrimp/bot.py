@@ -328,6 +328,7 @@ async def run_bot(
     sandbox_managers: "dict[str, SandboxManager] | None" = None,
     mcp_proxy: "Any | None" = None,
     security_key_registry: "Any | None" = None,
+    port_relay_registry: "Any | None" = None,
 ) -> None:
     """Start the bot with long polling."""
     # Resolve the agent backend once at startup and install it as the process
@@ -354,6 +355,8 @@ async def run_bot(
     app.bot_data["sandbox_managers"] = sandbox_managers
     if security_key_registry is not None:
         app.bot_data["security_key_registry"] = security_key_registry
+    if port_relay_registry is not None:
+        app.bot_data["port_relay_registry"] = port_relay_registry
     app.bot_data["backend"] = backend
     app.bot_data["backends"] = backends
     logger.info("Using agent backend: %s", backend.name)

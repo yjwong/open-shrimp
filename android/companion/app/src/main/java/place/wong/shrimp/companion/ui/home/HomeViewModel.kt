@@ -14,8 +14,14 @@ import kotlinx.coroutines.launch
 import place.wong.shrimp.companion.data.Forwarding
 import place.wong.shrimp.companion.data.LogStore
 import place.wong.shrimp.companion.data.PendingSession
+import place.wong.shrimp.companion.data.PortForwardSession
+import place.wong.shrimp.companion.data.PortForwarding
 import place.wong.shrimp.companion.data.Prefs
 import place.wong.shrimp.companion.data.ServerApi
+
+private const val DEFAULT_LOCAL_PORT = 8080
+
+private enum class PendingAction { SECURITY_KEY, PORT_FORWARD }
 
 data class HomeUiState(
     val paired: Boolean = false,
@@ -23,6 +29,7 @@ data class HomeUiState(
     val busy: Boolean = false,
     val chooser: List<PendingSession>? = null,
     val forwardingActive: Boolean = false,
+    val portForwardActive: Boolean = false,
 ) {
     companion object {
         const val NO_SESSION =
@@ -44,8 +51,10 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private val _events = MutableSharedFlow<HomeEvent>(extraBufferCapacity = 1)
     val events: SharedFlow<HomeEvent> = _events.asSharedFlow()
 
+    private var pendingAction = PendingAction.SECURITY_KEY
     private var pendingPhoneUrl: String? = null
     private var pendingLabel: String = "desktop"
+    private var pendingLocalPort: Int = DEFAULT_LOCAL_PORT
 
     fun refresh() = _state.update { it.copy(paired = prefs.isPaired) }
 
@@ -111,6 +120,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(busy = false, statusText = "Relay URL must start with ws:// or wss://") }
             return
         }
+        pendingAction = PendingAction.SECURITY_KEY
         pendingPhoneUrl = result.phoneUrl
         pendingLabel = result.destinationLabel
         LogStore.add("Claimed session ${session.id} for ${result.destinationLabel}; asking for local device approval")
@@ -123,16 +133,89 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         _events.tryEmit(HomeEvent.RequestApproval(result.destinationLabel))
     }
 
-    fun onForwardingApproved() {
-        val url = pendingPhoneUrl ?: return
-        Forwarding.start(getApplication(), url, prefs.deviceId ?: Build.MODEL)
-        LogStore.add("Foreground forwarding service requested")
+    fun findPendingPortForward() {
+        val baseUrl = prefs.baseUrl
+        if (baseUrl.isEmpty() || prefs.deviceId.isNullOrEmpty()) {
+            return setStatus("Pair this phone before looking for a pending port forward.")
+        }
+        _state.update { it.copy(busy = true, statusText = "Checking OpenShrimp for pending port forwards...") }
+        viewModelScope.launch {
+            try {
+                val sessions = api.pendingPortForwardSessions(baseUrl, prefs.deviceId!!)
+                if (sessions.size == 1) {
+                    claimPortForward(sessions[0])
+                } else {
+                    setStatus("Multiple pending port forwards. Tap the notification for the one you want.")
+                }
+            } catch (e: Exception) {
+                fail(e)
+            }
+        }
+    }
+
+    fun claimPushedPortForward(sessionId: String) {
+        val baseUrl = prefs.baseUrl
+        if (baseUrl.isEmpty() || prefs.deviceId.isNullOrEmpty()) {
+            return setStatus("Pair this phone before claiming pushed port forwards.")
+        }
+        _state.update { it.copy(busy = true, statusText = "Claiming pushed port forward...") }
+        viewModelScope.launch {
+            try {
+                claimPortForward(PortForwardSession(sessionId, "desktop from push", DEFAULT_LOCAL_PORT))
+            } catch (e: Exception) {
+                fail(e)
+            }
+        }
+    }
+
+    private suspend fun claimPortForward(session: PortForwardSession) {
+        val result = api.claimPortForward(prefs.baseUrl, prefs.deviceId ?: Build.MODEL, session)
+        if (!result.phoneUrl.startsWith("ws://") && !result.phoneUrl.startsWith("wss://")) {
+            return setStatus("Relay URL must start with ws:// or wss://")
+        }
+        pendingAction = PendingAction.PORT_FORWARD
+        pendingPhoneUrl = result.phoneUrl
+        pendingLabel = result.label
+        pendingLocalPort = DEFAULT_LOCAL_PORT
+        LogStore.add("Claimed port forward for ${result.label}; asking for local device approval")
         _state.update {
             it.copy(
-                forwardingActive = true,
-                statusText = "Forwarding to $pendingLabel. Attach your USB security key if prompted.",
+                busy = false,
+                statusText = "Port forward claimed for ${result.label}. Confirm device unlock to start.",
             )
         }
+        _events.tryEmit(HomeEvent.RequestApproval(result.label))
+    }
+
+    fun onForwardingApproved() {
+        val url = pendingPhoneUrl ?: return
+        when (pendingAction) {
+            PendingAction.SECURITY_KEY -> {
+                Forwarding.start(getApplication(), url, prefs.deviceId ?: Build.MODEL)
+                LogStore.add("Foreground forwarding service requested")
+                _state.update {
+                    it.copy(
+                        forwardingActive = true,
+                        statusText = "Forwarding to $pendingLabel. Attach your USB security key if prompted.",
+                    )
+                }
+            }
+            PendingAction.PORT_FORWARD -> {
+                PortForwarding.start(getApplication(), url, pendingLocalPort, pendingLabel)
+                LogStore.add("Port-forward proxy service requested")
+                _state.update {
+                    it.copy(
+                        portForwardActive = true,
+                        statusText = "Forwarding 127.0.0.1:$pendingLocalPort -> $pendingLabel. Open it in your browser.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun stopPortForward() {
+        PortForwarding.stop(getApplication())
+        _state.update { it.copy(portForwardActive = false, statusText = "Stopped port forward.") }
     }
 
     fun onForwardingDenied() {

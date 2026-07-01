@@ -220,6 +220,8 @@ async def get_or_create_session(
     sandbox_manager: SandboxManager | None = None,
     sandbox_managers: dict[str, SandboxManager] | None = None,
     mcp_proxy: Any | None = None,
+    port_relay_registry: Any | None = None,
+    push_sender: Any | None = None,
     backend: Backend | None = None,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
@@ -646,6 +648,8 @@ async def get_or_create_session(
                     terminal_base_url=terminal_base_url,
                     sandbox_managers=sandbox_managers,
                     mcp_proxy=mcp_proxy,
+                    port_relay_registry=port_relay_registry,
+                    push_sender=push_sender,
                 )
 
             # Sandboxed CLIs must reach the host proxy via the sandbox's
@@ -825,6 +829,8 @@ async def reconnect_session(
     sandbox_manager: SandboxManager | None = None,
     sandbox_managers: dict[str, SandboxManager] | None = None,
     mcp_proxy: Any | None = None,
+    port_relay_registry: Any | None = None,
+    push_sender: Any | None = None,
     backend: Backend | None = None,
 ) -> AgentSession | None:
     """Reconnect after a mid-session container crash.
@@ -875,6 +881,8 @@ async def reconnect_session(
             sandbox_manager=sandbox_manager,
             sandbox_managers=sandbox_managers,
             mcp_proxy=mcp_proxy,
+            port_relay_registry=port_relay_registry,
+            push_sender=push_sender,
             backend=backend,
         )
     except Exception:

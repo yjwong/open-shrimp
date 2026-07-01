@@ -19,6 +19,7 @@ from open_shrimp.agent import (
     save_attachments,
 )
 from open_shrimp.agent_status import notify_agent_status
+from open_shrimp.android_push import get_push_sender
 from open_shrimp.stt import transcribe as stt_transcribe
 from open_shrimp.backend.errors import CLIConnectionError, ProcessError
 from open_shrimp.client_manager import (
@@ -874,6 +875,8 @@ async def _start_agent_task(
                 sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
                 sandbox_managers=context.bot_data.get("sandbox_managers"),
                 mcp_proxy=context.bot_data.get("mcp_proxy"),
+                port_relay_registry=context.bot_data.get("port_relay_registry"),
+                push_sender=get_push_sender(context.bot_data, config),
                 backend=context.bot_data.get("backend"),
             )
 
@@ -1042,6 +1045,8 @@ async def _start_agent_task(
                         is_private_chat=is_private_chat,
                         sandbox_manager=_select_sandbox_manager(context.bot_data, ctx_config),
                         mcp_proxy=context.bot_data.get("mcp_proxy"),
+                        port_relay_registry=context.bot_data.get("port_relay_registry"),
+                        push_sender=get_push_sender(context.bot_data, config),
                         backend=context.bot_data.get("backend"),
                     )
                     if new_session is None:

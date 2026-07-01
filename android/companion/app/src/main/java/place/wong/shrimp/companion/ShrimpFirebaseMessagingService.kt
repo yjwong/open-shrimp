@@ -27,8 +27,35 @@ class ShrimpFirebaseMessagingService : FirebaseMessagingService() {
         val data = message.data
         when (data["type"]) {
             "security_key_request" -> handleSecurityKeyRequest(data)
+            "port_forward_request" -> handlePortForwardRequest(data)
             "agent_status" -> AgentStatusNotifier.handle(this, data)
         }
+    }
+
+    private fun handlePortForwardRequest(data: Map<String, String>) {
+        val sessionId = data["session_id"] ?: return
+        val serverId = data["server_id"].orEmpty()
+        val label = data["label"].orEmpty().ifEmpty { "desktop" }
+        ensureChannel()
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            .putExtra(MainActivity.EXTRA_PUSH_PORT_FORWARD_SESSION_ID, sessionId)
+            .putExtra(MainActivity.EXTRA_PUSH_SERVER_ID, serverId)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            sessionId.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setContentTitle("OpenShrimp port forward")
+            .setContentText("Tap to forward $label to this phone.")
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(sessionId.hashCode(), notification)
     }
 
     private fun handleSecurityKeyRequest(data: Map<String, String>) {

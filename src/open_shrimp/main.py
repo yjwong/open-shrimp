@@ -110,6 +110,7 @@ def _create_http_server(
     sandbox_managers: dict[str, SandboxManager] | None = None,
     config_path: str | None = None,
     security_key_registry: object | None = None,
+    port_relay_registry: object | None = None,
 ) -> "uvicorn.Server":  # noqa: F821
     """Create the review API HTTP server (call ``server.serve()`` to run)."""
     import uvicorn
@@ -122,6 +123,7 @@ def _create_http_server(
         sandbox_managers=sandbox_managers,
         config_path=config_path,
         security_key_registry=security_key_registry,
+        port_relay_registry=port_relay_registry,
     )
 
     server_config = uvicorn.Config(
@@ -210,8 +212,10 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         mcp_proxy = None
 
     from open_shrimp.security_key.sessions import SecurityKeySessionRegistry
+    from open_shrimp.port_relay.sessions import PortRelaySessionRegistry
 
     security_key_registry = SecurityKeySessionRegistry()
+    port_relay_registry = PortRelaySessionRegistry()
 
     http_server = _create_http_server(
         config,
@@ -219,6 +223,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         sandbox_managers=sandbox_mgrs,
         config_path=config_path,
         security_key_registry=security_key_registry,
+        port_relay_registry=port_relay_registry,
     )
 
     bot_task = asyncio.create_task(
@@ -228,6 +233,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
             sandbox_managers=sandbox_mgrs,
             mcp_proxy=mcp_proxy,
             security_key_registry=security_key_registry,
+            port_relay_registry=port_relay_registry,
         )
     )
     http_task = asyncio.create_task(http_server.serve())

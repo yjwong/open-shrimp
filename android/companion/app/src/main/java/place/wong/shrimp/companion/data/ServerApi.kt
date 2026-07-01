@@ -22,6 +22,18 @@ data class ClaimResult(
     val destinationLabel: String,
 )
 
+data class PortForwardSession(
+    val id: String,
+    val label: String,
+    val hostPort: Int,
+)
+
+data class PortForwardClaim(
+    val phoneUrl: String,
+    val label: String,
+    val hostPort: Int,
+)
+
 /** Thin coroutine wrapper over the OpenShrimp HTTP endpoints used by the companion app. */
 class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build()) {
 
@@ -57,53 +69,49 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
 
     suspend fun pendingSessions(baseUrl: String, deviceId: String): List<PendingSession> =
         withContext(Dispatchers.IO) {
-            val url = "$baseUrl/api/security-key/android/pending-sessions"
-            val request = SigningKeys.sign(Request.Builder().url(url), "GET", url, "", deviceId).get().build()
-            http.newCall(request).execute().use { response ->
-                val text = response.body?.string().orEmpty()
-                if (!response.isSuccessful) error("Pending session poll failed: HTTP ${response.code} $text")
-                val sessions = JSONObject(text).getJSONArray("sessions")
-                if (sessions.length() == 0) {
-                    error("No pending security-key sessions found. Start /security_key first, then try again.")
-                }
-                List(sessions.length()) { index ->
-                    val session = sessions.getJSONObject(index)
-                    val contextName = session.optString("context_name", "unknown")
-                    PendingSession(
-                        id = session.getString("id"),
-                        contextName = contextName,
-                        destinationLabel = session.optString(
-                            "target_label",
-                            targetLabel(contextName, session.optString("sandbox_id", "")),
-                        ),
-                        status = session.optString("status", "pending"),
-                    )
-                }
+            val text = signedGet(
+                "$baseUrl/api/security-key/android/pending-sessions",
+                deviceId,
+                "Pending session poll failed",
+            )
+            val sessions = JSONObject(text).getJSONArray("sessions")
+            if (sessions.length() == 0) {
+                error("No pending security-key sessions found. Start /security_key first, then try again.")
+            }
+            List(sessions.length()) { index ->
+                val session = sessions.getJSONObject(index)
+                val contextName = session.optString("context_name", "unknown")
+                PendingSession(
+                    id = session.getString("id"),
+                    contextName = contextName,
+                    destinationLabel = session.optString(
+                        "target_label",
+                        targetLabel(contextName, session.optString("sandbox_id", "")),
+                    ),
+                    status = session.optString("status", "pending"),
+                )
             }
         }
 
     suspend fun claim(baseUrl: String, deviceId: String, session: PendingSession): ClaimResult =
         withContext(Dispatchers.IO) {
-            val url = "$baseUrl/api/security-key/android/sessions/${urlEncode(session.id)}/claim"
-            val request = SigningKeys.sign(Request.Builder().url(url), "POST", url, "{}", deviceId)
-                .post("{}".toRequestBody(JSON))
-                .build()
-            http.newCall(request).execute().use { response ->
-                val text = response.body?.string().orEmpty()
-                if (!response.isSuccessful) error("Session claim failed: HTTP ${response.code} $text")
-                val json = JSONObject(text)
-                val phoneUrl = json.getString("phone_url")
-                val sessionJson = json.optJSONObject("session")
-                val label = if (sessionJson != null) {
-                    targetLabel(
-                        sessionJson.optString("context_name", session.contextName),
-                        sessionJson.optString("sandbox_id", ""),
-                    )
-                } else {
-                    session.destinationLabel
-                }
-                ClaimResult(phoneUrl, label)
+            val text = signedPost(
+                "$baseUrl/api/security-key/android/sessions/${urlEncode(session.id)}/claim",
+                deviceId,
+                "Session claim failed",
+            )
+            val json = JSONObject(text)
+            val phoneUrl = json.getString("phone_url")
+            val sessionJson = json.optJSONObject("session")
+            val label = if (sessionJson != null) {
+                targetLabel(
+                    sessionJson.optString("context_name", session.contextName),
+                    sessionJson.optString("sandbox_id", ""),
+                )
+            } else {
+                session.destinationLabel
             }
+            ClaimResult(phoneUrl, label)
         }
 
     /**
@@ -118,12 +126,86 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
         toolUseId: String,
         decision: String,
     ): Boolean = withContext(Dispatchers.IO) {
-        val url = "$baseUrl/api/agent/approvals/${urlEncode(toolUseId)}"
-        val body = JSONObject().put("decision", decision).toString()
+        signedPostSuccess(
+            "$baseUrl/api/agent/approvals/${urlEncode(toolUseId)}",
+            deviceId,
+            JSONObject().put("decision", decision).toString(),
+        )
+    }
+
+    suspend fun pendingPortForwardSessions(
+        baseUrl: String,
+        deviceId: String,
+    ): List<PortForwardSession> = withContext(Dispatchers.IO) {
+        val text = signedGet(
+            "$baseUrl/api/port-forward/android/pending-sessions",
+            deviceId,
+            "Pending port-forward poll failed",
+        )
+        val sessions = JSONObject(text).getJSONArray("sessions")
+        if (sessions.length() == 0) {
+            error("No pending port-forward sessions. Start /port_forward in OpenShrimp first.")
+        }
+        List(sessions.length()) { index ->
+            val session = sessions.getJSONObject(index)
+            PortForwardSession(
+                id = session.getString("id"),
+                label = session.optString("label", "desktop"),
+                hostPort = session.optInt("host_port", 0),
+            )
+        }
+    }
+
+    suspend fun claimPortForward(
+        baseUrl: String,
+        deviceId: String,
+        session: PortForwardSession,
+    ): PortForwardClaim = withContext(Dispatchers.IO) {
+        val text = signedPost(
+            "$baseUrl/api/port-forward/android/sessions/${urlEncode(session.id)}/claim",
+            deviceId,
+            "Port-forward claim failed",
+        )
+        val json = JSONObject(text)
+        PortForwardClaim(
+            phoneUrl = json.getString("phone_url"),
+            label = json.optString("label", session.label),
+            hostPort = session.hostPort,
+        )
+    }
+
+    private fun signedGet(url: String, deviceId: String, errPrefix: String): String {
+        val request = SigningKeys.sign(Request.Builder().url(url), "GET", url, "", deviceId)
+            .get()
+            .build()
+        return executeForBody(request, errPrefix)
+    }
+
+    private fun signedPost(
+        url: String,
+        deviceId: String,
+        errPrefix: String,
+        body: String = "{}",
+    ): String {
         val request = SigningKeys.sign(Request.Builder().url(url), "POST", url, body, deviceId)
             .post(body.toRequestBody(JSON))
             .build()
-        http.newCall(request).execute().use { response -> response.isSuccessful }
+        return executeForBody(request, errPrefix)
+    }
+
+    private fun signedPostSuccess(url: String, deviceId: String, body: String): Boolean {
+        val request = SigningKeys.sign(Request.Builder().url(url), "POST", url, body, deviceId)
+            .post(body.toRequestBody(JSON))
+            .build()
+        return http.newCall(request).execute().use { it.isSuccessful }
+    }
+
+    private fun executeForBody(request: Request, errPrefix: String): String {
+        http.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) error("$errPrefix: HTTP ${response.code} $text")
+            return text
+        }
     }
 
     companion object {

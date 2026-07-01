@@ -83,6 +83,8 @@ def create_openshrimp_tools(
     terminal_base_url: str | None = None,
     sandbox_managers: dict[str, Any] | None = None,
     mcp_proxy: Any | None = None,
+    port_relay_registry: Any | None = None,
+    push_sender: Any | None = None,
 ) -> list[OpenShrimpTool]:
     """Build the transport-neutral OpenShrimp tool descriptors.
 
@@ -969,6 +971,55 @@ def create_openshrimp_tools(
         from open_shrimp.db import ChatScope
         _scope_key = ChatScope(chat_id=chat_id, thread_id=thread_id).key
 
+        async def _expose_forward_to_phone(
+            host_port: int, description: str | None,
+        ) -> str:
+            """Create a phone relay session for an open host port and push it."""
+            if port_relay_registry is None or config is None or db is None:
+                return "Phone exposure unavailable: companion relay not configured."
+            from open_shrimp.android_push import FcmPushSender
+            from open_shrimp.port_relay.api import (
+                DEFAULT_IDLE_TIMEOUT_SECONDS,
+                DEFAULT_SESSION_LIFETIME_SECONDS,
+                notify_paired_device,
+                port_forward_label,
+            )
+            from open_shrimp.port_relay.sessions import PortRelaySessionError
+
+            ctx = context_name or config.default_context
+            label = description or port_forward_label(config, ctx, host_port)
+            try:
+                session = await port_relay_registry.create(
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    context_name=ctx,
+                    host_port=host_port,
+                    label=label,
+                    lifetime_seconds=DEFAULT_SESSION_LIFETIME_SECONDS,
+                    idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
+                )
+            except PortRelaySessionError as exc:
+                return f"Phone exposure failed: {exc}"
+
+            # Reuse the process-shared, token-caching sender when threaded in;
+            # only fall back to a fresh one if the caller had none.
+            sender = push_sender or FcmPushSender(config)
+            push_status = await notify_paired_device(db, config, sender, session)
+            if push_status == "sent":
+                return (
+                    f"Pushed to your phone — tap the notification to forward "
+                    f"'{label}' to your device."
+                )
+            if push_status == "no_device":
+                return (
+                    "No paired phone with push found. Open the companion app "
+                    "and tap 'Forward pending port' to claim it."
+                )
+            return (
+                f"Phone relay session created (push: {push_status}). Open the "
+                "companion app and tap 'Forward pending port' to claim it."
+            )
+
         _port_forward_schema = {
             "type": "object",
             "properties": {
@@ -1004,6 +1055,19 @@ def create_openshrimp_tools(
                         "[create only] Short human-readable label "
                         "shown to the user in the approval prompt "
                         "(e.g. 'Next.js dev server')."
+                    ),
+                },
+                "expose": {
+                    "type": "string",
+                    "enum": ["host", "phone"],
+                    "description": (
+                        "[create only] Where to expose the forwarded "
+                        "port. 'host' (default) binds it to the host's "
+                        "127.0.0.1 only. 'phone' additionally streams it "
+                        "to the user's paired Android companion over an "
+                        "authenticated relay, so they can open the "
+                        "service in their phone browser while away from "
+                        "the host."
                     ),
                 },
                 "forward_id": {
@@ -1091,11 +1155,19 @@ def create_openshrimp_tools(
                     if host_port is not None and host_port != forward.host_port
                     else ""
                 )
-                return _text_result(
+                base = (
                     f"Port forward opened: guest:{forward.guest_port} -> "
                     f"http://127.0.0.1:{forward.host_port}{fallback}\n"
                     f"id: {forward.id}"
                 )
+
+                if args.get("expose") == "phone":
+                    phone_msg = await _expose_forward_to_phone(
+                        forward.host_port, description,
+                    )
+                    return _text_result(f"{base}\n{phone_msg}")
+
+                return _text_result(base)
 
             return _text_result(
                 f"Error: unknown action {action!r}. "
@@ -1114,7 +1186,9 @@ def create_openshrimp_tools(
                 "approval); 'list' shows active forwards in this "
                 "conversation; 'remove' tears down a forward by id. Forwards "
                 "are automatically cleaned up on /clear or when the sandbox "
-                "stops."
+                "stops. Set expose='phone' on create to also stream the port "
+                "to the user's paired Android phone so they can open it in "
+                "their mobile browser."
             ),
             input_schema=_port_forward_schema,
             read_only=False,

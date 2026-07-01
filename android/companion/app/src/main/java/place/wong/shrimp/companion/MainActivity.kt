@@ -18,10 +18,17 @@ import place.wong.shrimp.companion.ui.theme.CompanionTheme
 
 class MainActivity : ComponentActivity() {
     private val pushSessionId = MutableStateFlow<String?>(null)
+    private val pushPortForwardSessionId = MutableStateFlow<String?>(null)
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             intent.getStringExtra(SecurityKeyForwardingService.EXTRA_MESSAGE)?.let { LogStore.add(it) }
+        }
+    }
+
+    private val portForwardStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            intent.getStringExtra(PortForwardProxyService.EXTRA_MESSAGE)?.let { LogStore.add(it) }
         }
     }
 
@@ -39,6 +46,8 @@ class MainActivity : ComponentActivity() {
                 CompanionApp(
                     pushSessionId = pushSessionId,
                     onConsumePush = { pushSessionId.value = null },
+                    pushPortForwardSessionId = pushPortForwardSessionId,
+                    onConsumePortForwardPush = { pushPortForwardSessionId.value = null },
                 )
             }
         }
@@ -52,23 +61,34 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        val filter = IntentFilter(SecurityKeyForwardingService.ACTION_STATUS)
+        register(statusReceiver, SecurityKeyForwardingService.ACTION_STATUS)
+        register(portForwardStatusReceiver, PortForwardProxyService.ACTION_STATUS)
+    }
+
+    private fun register(receiver: BroadcastReceiver, action: String) {
+        val filter = IntentFilter(action)
         if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(statusReceiver, filter)
+            registerReceiver(receiver, filter)
         }
     }
 
     override fun onStop() {
         unregisterReceiver(statusReceiver)
+        unregisterReceiver(portForwardStatusReceiver)
         super.onStop()
     }
 
     private fun readPushIntent(intent: Intent?) {
-        val sessionId = intent?.getStringExtra(EXTRA_PUSH_SESSION_ID) ?: return
-        pushSessionId.value = sessionId
-        intent.removeExtra(EXTRA_PUSH_SESSION_ID)
+        intent?.getStringExtra(EXTRA_PUSH_SESSION_ID)?.let {
+            pushSessionId.value = it
+            intent.removeExtra(EXTRA_PUSH_SESSION_ID)
+        }
+        intent?.getStringExtra(EXTRA_PUSH_PORT_FORWARD_SESSION_ID)?.let {
+            pushPortForwardSessionId.value = it
+            intent.removeExtra(EXTRA_PUSH_PORT_FORWARD_SESSION_ID)
+        }
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -81,6 +101,8 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_PUSH_SESSION_ID = "place.wong.shrimp.companion.PUSH_SESSION_ID"
+        const val EXTRA_PUSH_PORT_FORWARD_SESSION_ID =
+            "place.wong.shrimp.companion.PUSH_PORT_FORWARD_SESSION_ID"
         const val EXTRA_PUSH_SERVER_ID = "place.wong.shrimp.companion.PUSH_SERVER_ID"
     }
 }
