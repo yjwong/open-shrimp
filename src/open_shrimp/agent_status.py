@@ -144,6 +144,10 @@ async def notify_agent_status(
         "notification_id": str(scope_notification_id(scope)),
         "title": title,
         "text": text,
+        # Lets the phone deep-link the notification tap into the Telegram chat:
+        # forum topics/supergroups resolve from chat_id+thread_id; private chats
+        # need the bot username (empty when get_me hasn't been cached yet).
+        "bot_username": str(bot_data.get("bot_username") or ""),
     }
     # Progress counts ride only on running events (a done event dismisses).
     if phase == "running":

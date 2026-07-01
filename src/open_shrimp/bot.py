@@ -364,6 +364,14 @@ async def run_bot(
     logger.info("Starting bot with long polling")
     await app.initialize()
 
+    # Cache the bot username (get_me is memoized post-initialize) so
+    # agent-status pushes can deep-link private-chat notifications to the
+    # bot's Telegram chat via tg://resolve?domain=<username>.
+    try:
+        app.bot_data["bot_username"] = (await app.bot.get_me()).username or ""
+    except Exception:
+        app.bot_data["bot_username"] = ""
+
     # Register the agent dispatch callback so the review API (and other
     # components) can send prompts to the agent without needing a direct
     # reference to the bot Application.

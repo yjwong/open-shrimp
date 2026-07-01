@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Icon
+import android.net.Uri
 import android.os.Build
 import androidx.annotation.RequiresApi
 
@@ -64,6 +65,9 @@ object AgentStatusNotifier {
             toolUseId = data["tool_use_id"],
             todoDone = data["todo_done"]?.toIntOrNull(),
             todoTotal = data["todo_total"]?.toIntOrNull(),
+            chatId = data["chat_id"],
+            threadId = data["thread_id"],
+            botUsername = data["bot_username"],
         )
         manager.notify(notificationId, notification)
         manager.notify(SUMMARY_ID, buildSummary(context))
@@ -91,8 +95,17 @@ object AgentStatusNotifier {
         toolUseId: String?,
         todoDone: Int?,
         todoTotal: Int?,
+        chatId: String?,
+        threadId: String?,
+        botUsername: String?,
     ): Notification {
-        val builder = baseBuilder(context, title, text)
+        val builder = baseBuilder(
+            context, title, text,
+            notificationId = notificationId,
+            chatId = chatId,
+            threadId = threadId,
+            botUsername = botUsername,
+        )
         if (awaiting && !toolUseId.isNullOrEmpty()) {
             builder.addAction(action(context, notificationId, toolUseId, "approve", "Approve"))
             builder.addAction(action(context, notificationId, toolUseId, "deny", "Deny"))
@@ -136,7 +149,15 @@ object AgentStatusNotifier {
         )
     }
 
-    private fun baseBuilder(context: Context, title: String, text: String): Notification.Builder {
+    private fun baseBuilder(
+        context: Context,
+        title: String,
+        text: String,
+        notificationId: Int = 0,
+        chatId: String? = null,
+        threadId: String? = null,
+        botUsername: String? = null,
+    ): Notification.Builder {
         val builder = if (Build.VERSION.SDK_INT >= 26) {
             Notification.Builder(context, CHANNEL_ID)
         } else {
@@ -150,7 +171,9 @@ object AgentStatusNotifier {
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setContentIntent(contentIntent(context))
+            .setContentIntent(
+                contentIntent(context, notificationId, chatId, threadId, botUsername),
+            )
             .setGroup(GROUP_KEY)
     }
 
@@ -215,15 +238,76 @@ object AgentStatusNotifier {
         return Notification.Action.Builder(icon, label, pendingIntent).build()
     }
 
-    private fun contentIntent(context: Context): PendingIntent {
-        val intent = Intent(context, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    /**
+     * The notification's tap target.  The conversation lives in Telegram, not
+     * this companion app, so we deep-link straight to the chat when we can
+     * derive a link (see [telegramDeepLink]); otherwise we fall back to opening
+     * [MainActivity].  The per-scope [notificationId] is used as the request
+     * code so each scope keeps its own PendingIntent instead of colliding.
+     */
+    private fun contentIntent(
+        context: Context,
+        notificationId: Int,
+        chatId: String?,
+        threadId: String?,
+        botUsername: String?,
+    ): PendingIntent {
+        val deepLink = telegramDeepLink(chatId, threadId, botUsername)
+        val intent = if (deepLink != null) {
+            Intent(Intent.ACTION_VIEW, deepLink)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } else {
+            Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
         return PendingIntent.getActivity(
             context,
-            0,
+            notificationId,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+    }
+
+    /**
+     * Build a ``tg://`` link into the originating Telegram chat.
+     *
+     * We use the ``tg://`` scheme rather than ``https://t.me/…`` on purpose:
+     * only Telegram registers ``tg://``, so the tap opens the app directly.
+     * ``t.me`` https links are ordinary web app-links, so the system routes
+     * them through the browser's app-link resolution first — producing a
+     * visible browser flash before Telegram takes over.  A forum topic's id is
+     * the id of the service message that created it, so it maps to ``post``.
+     *
+     * - Private chats (positive ``chat_id``) open the bot by username via
+     *   ``resolve``; Telegram DMs now support forum topics, so ``&post`` jumps
+     *   to the specific topic.
+     * - Supergroups (``chat_id`` like ``-100…``) open the private channel via
+     *   ``privatepost`` with the topic as ``post``.
+     *
+     * The trade-off is no web fallback when Telegram isn't installed — fine
+     * here, since the companion is only ever paired with a Telegram bot chat.
+     * Returns ``null`` for cases we can't map (legacy basic groups, a
+     * supergroup with no topic, or a private chat with no cached bot username),
+     * leaving the caller to open the companion app instead.
+     */
+    private fun telegramDeepLink(
+        chatId: String?,
+        threadId: String?,
+        botUsername: String?,
+    ): Uri? {
+        val id = chatId?.takeIf { it.isNotEmpty() } ?: return null
+        val topic = threadId?.takeIf { it.isNotEmpty() }
+        if (id.startsWith("-100")) {
+            val internal = id.removePrefix("-100")
+            if (internal.isEmpty() || topic == null) return null
+            return Uri.parse("tg://privatepost?channel=$internal&post=$topic")
+        }
+        if (!id.startsWith("-")) {
+            val username = botUsername?.takeIf { it.isNotEmpty() } ?: return null
+            val base = "tg://resolve?domain=$username"
+            return Uri.parse(if (topic != null) "$base&post=$topic" else base)
+        }
+        return null
     }
 
     private fun ensureChannel(manager: NotificationManager) {
