@@ -1295,8 +1295,18 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ── /vnc ──
 
 
-async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /vnc -- open the VNC Mini App for the current context's desktop."""
+async def _open_vnc_viewer(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    phone: bool,
+) -> None:
+    """Shared body for /vnc and /phone: open the VNC Mini App.
+
+    Both open the same whole-desktop viewer; ``phone`` only changes the
+    capability gate (phone_use vs computer_use) and the button/message label,
+    since a phone-use context shows Android inside the same labwc desktop.
+    """
     if not update.effective_user or not update.message:
         return
 
@@ -1309,14 +1319,18 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     context_name, ctx = await _get_context(scope, config, db)
 
-    # Check that the context has computer_use enabled (any backend).
-    _has_cu = (
-        (ctx.container is not None and ctx.container.computer_use)
-        or (ctx.sandbox is not None and ctx.sandbox.computer_use)
-    )
-    if not _has_cu:
+    if phone:
+        enabled = ctx.sandbox is not None and ctx.sandbox.phone_use
+        missing_msg = "does not have phone use enabled"
+    else:
+        enabled = (
+            (ctx.container is not None and ctx.container.computer_use)
+            or (ctx.sandbox is not None and ctx.sandbox.computer_use)
+        )
+        missing_msg = "does not have computer use enabled"
+    if not enabled:
         await update.message.reply_text(
-            f"Context `{_escape_mdv2(context_name)}` does not have computer use enabled\\.",
+            f"Context `{_escape_mdv2(context_name)}` {missing_msg}\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -1329,9 +1343,10 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     chat_type = update.effective_chat.type if update.effective_chat else "private"
     vnc_url = f"{base_url}/vnc/?context={context_name}"
+    label = "View phone" if phone else "View desktop"
     keyboard = InlineKeyboardMarkup([
         [make_web_app_button(
-            text="View desktop",
+            text=label,
             url=vnc_url,
             chat_id=scope.chat_id,
             user_id=update.effective_user.id,
@@ -1341,11 +1356,22 @@ async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ])
 
     escaped_context = _escape_mdv2(context_name)
+    title = "Phone" if phone else "Desktop"
     await update.message.reply_text(
-        f"Desktop for *{escaped_context}*",
+        f"{title} for *{escaped_context}*",
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
     )
+
+
+async def vnc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /vnc -- open the VNC Mini App for the current context's desktop."""
+    await _open_vnc_viewer(update, context, phone=False)
+
+
+async def phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /phone -- open the VNC Mini App for a phone-use context."""
+    await _open_vnc_viewer(update, context, phone=True)
 
 
 # ── /security_key ──

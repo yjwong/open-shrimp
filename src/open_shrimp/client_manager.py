@@ -396,6 +396,7 @@ async def get_or_create_session(
         allowed_tools.extend([
             "mcp__openshrimp__phone_shell",
             "mcp__openshrimp__phone_screenshot",
+            "mcp__openshrimp__phone_install_apk",
         ])
     if _computer_use_enabled:
         if mcp_proxy is not None:

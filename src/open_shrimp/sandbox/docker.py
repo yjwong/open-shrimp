@@ -479,6 +479,11 @@ class DockerSandbox:
             "Phone use (Waydroid) is only supported on the libvirt backend."
         )
 
+    def phone_install_apk(self, apk_path: str) -> str:
+        raise NotImplementedError(
+            "Phone use (Waydroid) is only supported on the libvirt backend."
+        )
+
     # -- Port forwarding ------------------------------------------------------
 
     def supports_port_forwarding(self) -> bool:

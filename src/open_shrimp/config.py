@@ -1,6 +1,7 @@
 """Config loading and validation for OpenShrimp."""
 
 import platform
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -333,11 +334,15 @@ def _validate_raw(raw: dict) -> None:
                     f"of {sorted(_ANDROID_IMAGE_TYPES)}, got: {image_type!r}"
                 )
             resolution = android.get("resolution")
-            if resolution is not None and not isinstance(resolution, str):
-                raise ValueError(
-                    f"Context '{name}': sandbox.android.resolution must be a "
-                    f"string (e.g. '720x1280'), got: {resolution!r}"
-                )
+            if resolution is not None:
+                if not isinstance(resolution, str) or not re.fullmatch(
+                    r"\d+x\d+", resolution,
+                ):
+                    raise ValueError(
+                        f"Context '{name}': sandbox.android.resolution must be a "
+                        f"'WIDTHxHEIGHT' string (e.g. '720x1280'), "
+                        f"got: {resolution!r}"
+                    )
             dpi = android.get("dpi")
             if dpi is not None and not isinstance(dpi, int):
                 raise ValueError(

@@ -73,6 +73,24 @@ contexts:
     #                              # Claude can take screenshots, click, type, scroll,
     #                              # and switch windows via MCP tools. A VNC server
     #                              # is exposed for observability (check /status).
+    #   phone_use: true            # Enable Android "phone use" (libvirt only).
+    #                              # Runs Waydroid (Android in an LXC container) inside
+    #                              # the guest VM; Claude drives it via phone_shell /
+    #                              # phone_screenshot / phone_install_apk MCP tools and
+    #                              # you watch it live with /phone (a /vnc alias).
+    #                              # Implies computer_use (needs the labwc desktop) and
+    #                              # auto-enables virgl for hardware-accelerated GLES.
+    #                              # The Android system images (~2.4 GB) download on
+    #                              # first boot and survive VM rebuilds. Bump `memory`
+    #                              # to >= 6144 — Android + the desktop want headroom.
+    #                              # Requires the guest kernel's binder module (Ubuntu
+    #                              # ships it in linux-modules-extra; installed for you).
+    #   android:                   # Optional phone_use tuning:
+    #     image_type: VANILLA      #   VANILLA (no Google apps) or GAPPS
+    #     resolution: 720x1280     #   WIDTHxHEIGHT applied via `wm size`
+    #     dpi: 320                 #   density applied via `wm density`
+    #     gpu: virgl               #   virgl (host-GPU GLES, default) or software
+    #                              #   (llvmpipe fallback for GPU-less hosts; slow)
     #   # Lima backend (macOS only) — full VM isolation via Apple Virtualization.framework:
     #   # backend: lima
     #   # memory: 4096              # VM memory in MB (default: 2048)

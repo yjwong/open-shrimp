@@ -340,6 +340,16 @@ class Sandbox(Protocol):
         """
         ...
 
+    def phone_install_apk(self, apk_path: str) -> str:
+        """Install a guest-side APK into Android and return the install output.
+
+        *apk_path* is a path in the guest filesystem; runs the guest-side
+        ``waydroid app install`` (unreachable via ``phone_shell``).
+
+        Raises :class:`NotImplementedError` for backends without phone-use.
+        """
+        ...
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files from the host into the sandbox.
 

@@ -95,6 +95,22 @@ _SHUTDOWN_TIMEOUT = 180
 _ANDROID_BOOT_TIMEOUT_S = 120
 _ANDROID_BOOT_POLL_S = 3
 
+# Piped to ``python3 -`` in the guest to force software rendering: merge the
+# swiftshader/gralloc props into waydroid.cfg's [properties] section without
+# disturbing whatever ``waydroid init`` already wrote there.
+_WAYDROID_SOFTWARE_GPU_SCRIPT = (
+    "import configparser, io\n"
+    "p = '/var/lib/waydroid/waydroid.cfg'\n"
+    "c = configparser.ConfigParser()\n"
+    "c.optionxform = str\n"
+    "c.read(p)\n"
+    "if not c.has_section('properties'): c.add_section('properties')\n"
+    "c['properties']['ro.hardware.gralloc'] = 'default'\n"
+    "c['properties']['ro.hardware.egl'] = 'swiftshader'\n"
+    "buf = io.StringIO(); c.write(buf)\n"
+    "open(p, 'w').write(buf.getvalue())\n"
+)
+
 
 def _tail_file(
     source: Path, dest: Path, stop: threading.Event,
@@ -633,6 +649,7 @@ class LibvirtSandbox:
             logger.info(
                 "Waydroid already initialized for context %s", self._context_name,
             )
+            self._apply_android_gpu_config()
             self._ensure_waydroid_session_running(ssh_opts, target)
             return
 
@@ -665,7 +682,32 @@ class LibvirtSandbox:
                 f"{self._context_name}"
             )
         _log(log_file, "Android images ready.")
+        self._apply_android_gpu_config()
         self._start_waydroid_session(ssh_opts, target)
+
+    def _apply_android_gpu_config(self) -> None:
+        """Seed the software-render props when ``android.gpu`` is ``software``.
+
+        The virgl default needs no props (Android drives host-GPU GLES via
+        virglrenderer).  The ``software`` opt-out forces swiftshader/gbm-default
+        for GPU-less hosts; the props live in ``waydroid.cfg`` (which only
+        exists post-``init``) and take effect after ``waydroid upgrade -o``.
+        """
+        gpu = self._config.android.gpu if self._config.android else "virgl"
+        if gpu != "software":
+            return
+        # configparser edit over SSH keeps the [properties] section intact
+        # regardless of what `waydroid init` already wrote there.
+        write = self._ssh_run(
+            "sudo python3 -", input=_WAYDROID_SOFTWARE_GPU_SCRIPT, timeout=60,
+        )
+        if write.returncode != 0:
+            logger.warning(
+                "Failed to write software-GPU props for context %s: %s",
+                self._context_name, (write.stderr or write.stdout).strip(),
+            )
+            return
+        self._ssh_run("sudo waydroid upgrade -o", timeout=120)
 
     def _ensure_waydroid_session_running(
         self, ssh_opts: list[str], target: str,
@@ -989,7 +1031,7 @@ class LibvirtSandbox:
     def get_text_input_active(self) -> bool:
         return False
 
-    # -- Computer-use operations (Phase 4) -----------------------------------
+    # -- Computer-use operations ---------------------------------------------
 
     def take_screenshot(self, output_path: Path) -> None:
         """Take a screenshot of the VM display via QMP ``screendump``.
@@ -1084,7 +1126,7 @@ class LibvirtSandbox:
         if result.returncode != 0:
             raise RuntimeError(f"wl-copy failed: {result.stderr.strip()}")
 
-    # -- Phone-use operations (Waydroid Android; Phase 2) --------------------
+    # -- Phone-use operations (Waydroid Android) -----------------------------
 
     def _waydroid_ssh_ctx(self) -> tuple[list[str], str]:
         """Return ``(ssh_opts, target)`` for driving Waydroid over SSH."""
@@ -1093,6 +1135,19 @@ class LibvirtSandbox:
         assert self._ssh_port is not None
         ssh_opts = _ssh_common_opts(self._sdir / "ssh_key", self._ssh_port)
         return ssh_opts, f"{SANDBOX_USER}@localhost"
+
+    def _ssh_run(
+        self, remote: str, *, timeout: int, input: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a single *remote* command in the guest over SSH (text mode)."""
+        ssh_opts, target = self._waydroid_ssh_ctx()
+        return subprocess.run(
+            ["ssh", *ssh_opts, target, remote],
+            input=input,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
 
     def _android_boot_completed(self, ssh_opts: list[str], target: str) -> bool:
         """Return ``True`` if Android reports ``sys.boot_completed == 1``."""
@@ -1109,7 +1164,7 @@ class LibvirtSandbox:
 
     def _waydroid_desynced(self, ssh_opts: list[str], target: str) -> bool:
         """Return ``True`` for the ``Session: RUNNING`` / ``Container: STOPPED``
-        desync the spike hit after unclean stops (§8.1)."""
+        desync that follows an unclean Waydroid stop."""
         status = subprocess.run(
             ["ssh", *ssh_opts, target, "waydroid status"],
             capture_output=True,
@@ -1172,6 +1227,37 @@ class LibvirtSandbox:
             self._ensure_waydroid_session_running(ssh_opts, target)
 
         self._wait_for_android_boot(ssh_opts, target)
+        self._apply_android_display_config()
+
+    def _apply_android_display_config(self) -> None:
+        """Apply ``android.resolution``/``dpi`` via ``wm size``/``wm density``.
+
+        Runs only after a fresh boot (the steady-state path short-circuits
+        before this), so the single ``wm`` round-trip is a once-per-boot cost.
+        Resolution is pre-validated as ``WIDTHxHEIGHT`` at config load and dpi
+        is an int, so both are safe to interpolate into the shell command.
+        """
+        android = self._config.android
+        if android is None:
+            return
+        cmds: list[str] = []
+        if android.resolution:
+            cmds.append(f"wm size {android.resolution}")
+        if android.dpi:
+            cmds.append(f"wm density {android.dpi}")
+        if not cmds:
+            return
+        inner = "; ".join(cmds)
+        result = self._ssh_run(
+            f"sudo waydroid shell -- sh -c {shlex.quote(inner)}", timeout=30,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to apply Android display config (%s) for context "
+                "%s: %s",
+                inner, self._context_name,
+                (result.stderr or result.stdout).strip(),
+            )
 
     def phone_shell(self, cmd: str) -> str:
         """Run *cmd* in the Android environment via ``waydroid shell``.
@@ -1227,6 +1313,23 @@ class LibvirtSandbox:
             stderr = result.stderr.decode(errors="replace").strip()
             raise RuntimeError(f"phone screenshot failed: {stderr}")
         output_path.write_bytes(result.stdout)
+
+    def phone_install_apk(self, apk_path: str) -> str:
+        """Install a guest-side APK into Android via ``waydroid app install``.
+
+        *apk_path* is a path in the guest filesystem (where the sandboxed
+        ``Bash`` tool, downloads, and mounted project files all live) — not an
+        Android-internal path.  ``waydroid app install`` is a guest-side
+        Waydroid command, so it cannot be reached through ``phone_shell``
+        (which runs *inside* Android); this is the convenience wrapper for it.
+        """
+        install = self._ssh_run(
+            f"sudo waydroid app install {shlex.quote(apk_path)}", timeout=180,
+        )
+        out = (install.stdout or install.stderr).strip()
+        if install.returncode != 0:
+            raise RuntimeError(f"waydroid app install failed: {out}")
+        return out or "Installed."
 
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files into the VM via scp."""

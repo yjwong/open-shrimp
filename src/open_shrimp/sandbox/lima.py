@@ -554,6 +554,11 @@ class LimaSandbox:
             "Phone use (Waydroid) is only supported on the libvirt backend."
         )
 
+    def phone_install_apk(self, apk_path: str) -> str:
+        raise NotImplementedError(
+            "Phone use (Waydroid) is only supported on the libvirt backend."
+        )
+
     def stop(self) -> None:
         """Stop the Lima instance and any SSH tunnels."""
         # Tear down any served process (the ssh -L tunnel is reaped below with

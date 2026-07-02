@@ -433,6 +433,22 @@ def _phone_use_runcmd() -> str:
     )
 
 
+def _phone_use_labwc_window_rules() -> str:
+    """Return the labwc ``<windowRules>`` fragment for a phone-use guest.
+
+    Maximizes the Waydroid ``show-full-ui`` window (app_id "Waydroid") so the
+    Android UI fills the desktop for VNC viewing instead of floating small.
+    Already indented for injection inside the computer-use ``rc.xml`` body.
+    """
+    return (
+        "        <windowRules>\n"
+        '          <windowRule identifier="Waydroid">\n'
+        '            <action name="Maximize" />\n'
+        "          </windowRule>\n"
+        "        </windowRules>\n"
+    )
+
+
 def _build_cloud_init_user_data(
     public_key: str,
     *,
@@ -455,6 +471,8 @@ def _build_cloud_init_user_data(
             content: |
               AcceptEnv ANTHROPIC_API_KEY
     """)
+
+    phone_window_rules = _phone_use_labwc_window_rules() if phone_use else ""
 
     if computer_use:
         # Items appended here are already dedented — use exact indentation
@@ -493,6 +511,7 @@ def _build_cloud_init_user_data(
             "        <theme><name></name><cornerRadius>0</cornerRadius></theme>\n"
             '        <keyboard><default /><keybind key="A-F4"><action name="Close" /></keybind></keyboard>\n'
             "        <mouse><default /></mouse>\n"
+            f"{phone_window_rules}"
             "      </labwc_config>\n"
             "  # Chrome autostart (opens after compositor is up).\n"
             f"  - path: {SANDBOX_HOME}/.config/labwc/autostart\n"

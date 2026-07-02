@@ -68,6 +68,165 @@ def _guess_mime(path: str) -> str | None:
     return mime
 
 
+_PHONE_SHELL_DESCRIPTION = (
+    "Run a shell command inside the Android (Waydroid) environment and return "
+    "its stdout. This is the workhorse for driving the phone.\n\n"
+    "PREFER uiautomator for reliable, semantic targeting over guessing pixel "
+    "coordinates:\n"
+    "  1. `uiautomator dump /data/local/tmp/ui.xml`\n"
+    "  2. `cat /data/local/tmp/ui.xml` and read the tree — each node has "
+    "`resource-id`, `text`, `content-desc`, and `bounds=\"[x1,y1][x2,y2]\"`.\n"
+    "  3. Compute the tap point as the bounds center and `input tap <cx> <cy>`.\n"
+    "Fall back to phone_screenshot when the tree is unhelpful (mid-animation, "
+    "WebView/Compose surfaces).\n\n"
+    "Common commands:\n"
+    "  input tap <x> <y>\n"
+    "  input swipe <x1> <y1> <x2> <y2> [duration_ms]\n"
+    "  input text 'hello'   (ASCII only — see text-entry note)\n"
+    "  input keyevent <KEY>\n"
+    "  wm size / wm density\n"
+    "  pm list packages / am start -n <pkg>/<activity>\n"
+    "  dumpsys / settings / monkey\n\n"
+    "Keyevent cheat-sheet: KEYCODE_HOME, KEYCODE_BACK, KEYCODE_APP_SWITCH "
+    "(recents), KEYCODE_ENTER, KEYCODE_DEL, KEYCODE_DPAD_UP/DOWN/LEFT/RIGHT, "
+    "KEYCODE_TAB, KEYCODE_VOLUME_UP/DOWN, KEYCODE_POWER.\n\n"
+    "Text entry: `input text` handles ASCII only — a space must be written as "
+    "%s, and non-ASCII/Unicode is dropped or mangled. For a literal space use "
+    "`input text 'a%sb'`; for Unicode, prefer per-character `input keyevent` "
+    "where possible, or the target app's own paste/autofill. Install an APK "
+    "with the phone_install_apk tool."
+)
+
+
+def _build_phone_use_tools(
+    *,
+    sandbox: "Sandbox",
+    bot: Bot,
+    chat_id: int,
+    screenshots_dir: str | None,
+    thread_kwargs: dict[str, Any],
+    vnc_button: Callable[[str], InlineKeyboardMarkup | None],
+) -> list[OpenShrimpTool]:
+    """Build the ``phone_*`` MCP tools for a phone-use (Waydroid) context.
+
+    Kept out of ``create_openshrimp_tools`` so each capability's tool set owns
+    its own construction. Every handler lazily ``ensure_phone_running()``s
+    (self-healing session start) before acting.
+    """
+
+    async def phone_shell(args: dict[str, Any]) -> dict[str, Any]:
+        cmd = args.get("cmd", "")
+        if not cmd:
+            return _text_result("Error: cmd is required.", is_error=True)
+        try:
+            await asyncio.to_thread(sandbox.ensure_phone_running)
+            out = await asyncio.to_thread(sandbox.phone_shell, cmd)
+        except Exception as exc:
+            return _text_result(f"Error running phone shell: {exc}", is_error=True)
+        return _text_result(out if out.strip() else "(no output)")
+
+    async def phone_screenshot(args: dict[str, Any]) -> dict[str, Any]:
+        ts = int(time.time() * 1000)
+        host_path = os.path.join(screenshots_dir or "/tmp", f"phone-{ts}.png")
+        try:
+            await asyncio.to_thread(sandbox.ensure_phone_running)
+            await asyncio.to_thread(sandbox.phone_screenshot, Path(host_path))
+        except Exception as exc:
+            return _text_result(
+                f"Error taking phone screenshot: {exc}", is_error=True,
+            )
+        # Send screenshot to Telegram with a "View phone" button (/vnc).
+        try:
+            if os.path.isfile(host_path):
+                with open(host_path, "rb") as f:
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=f,
+                        caption="Phone screenshot",
+                        reply_markup=vnc_button("View phone"),
+                        **thread_kwargs,
+                    )
+        except Exception:
+            logger.debug(
+                "Failed to send phone screenshot to Telegram", exc_info=True,
+            )
+        return _text_result(
+            f"Phone screenshot saved to {host_path}. "
+            f"Use the Read tool to view the image."
+        )
+
+    async def phone_install_apk(args: dict[str, Any]) -> dict[str, Any]:
+        path = args.get("path", "")
+        if not path:
+            return _text_result("Error: path is required.", is_error=True)
+        try:
+            await asyncio.to_thread(sandbox.ensure_phone_running)
+            out = await asyncio.to_thread(sandbox.phone_install_apk, path)
+        except Exception as exc:
+            return _text_result(f"Error installing APK: {exc}", is_error=True)
+        return _text_result(out if out.strip() else "Installed.")
+
+    return [
+        OpenShrimpTool(
+            name="phone_shell",
+            description=_PHONE_SHELL_DESCRIPTION,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "cmd": {
+                        "type": "string",
+                        "description": (
+                            "Android shell command to run (via 'waydroid "
+                            "shell'). Runs inside a headless Android environment."
+                        ),
+                    },
+                },
+                "required": ["cmd"],
+            },
+            read_only=False,
+            handler=phone_shell,
+        ),
+        OpenShrimpTool(
+            name="phone_screenshot",
+            description=(
+                "Capture the Android screen and return the PNG file path. "
+                "Use the Read tool to view it. Take a screenshot to understand "
+                "the current state before interacting. For precise element "
+                "targeting, prefer `uiautomator dump` via phone_shell."
+            ),
+            input_schema={"type": "object", "properties": {}},
+            read_only=True,
+            handler=phone_screenshot,
+        ),
+        OpenShrimpTool(
+            name="phone_install_apk",
+            description=(
+                "Install an APK into the Android environment from a path in the "
+                "guest filesystem (e.g. a file downloaded via Bash or in the "
+                "mounted project directory). Runs the guest-side `waydroid app "
+                "install`, which phone_shell cannot reach. After installing, "
+                "launch with `am start` via phone_shell."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Guest filesystem path to the .apk (e.g. a file you "
+                            "downloaded with Bash or one in the mounted project "
+                            "directory). Not an Android-internal path."
+                        ),
+                    },
+                },
+                "required": ["path"],
+            },
+            read_only=False,
+            handler=phone_install_apk,
+        ),
+    ]
+
+
 def create_openshrimp_tools(
     bot: Bot,
     chat_id: int,
@@ -974,121 +1133,14 @@ def create_openshrimp_tools(
     # the computer_* tools above are registered too (they drive labwc, not
     # Android).  These two tools drive Android's own input/screencap.
     if _cu_sandbox is not None and phone_use:
-
-        _phone_shell_schema = {
-            "type": "object",
-            "properties": {
-                "cmd": {
-                    "type": "string",
-                    "description": (
-                        "Android shell command to run (via 'waydroid shell'). "
-                        "Runs inside a headless Android environment."
-                    ),
-                },
-            },
-            "required": ["cmd"],
-        }
-
-        async def phone_shell(args: dict[str, Any]) -> dict[str, Any]:
-            cmd = args.get("cmd", "")
-            if not cmd:
-                return _text_result("Error: cmd is required.", is_error=True)
-
-            try:
-                await asyncio.to_thread(_cu_sandbox.ensure_phone_running)
-                out = await asyncio.to_thread(_cu_sandbox.phone_shell, cmd)
-            except Exception as exc:
-                return _text_result(
-                    f"Error running phone shell: {exc}", is_error=True,
-                )
-
-            return _text_result(out if out.strip() else "(no output)")
-
-        async def phone_screenshot(args: dict[str, Any]) -> dict[str, Any]:
-            ts = int(time.time() * 1000)
-            host_path = os.path.join(
-                _screenshots_dir or "/tmp", f"phone-{ts}.png",
-            )
-
-            try:
-                await asyncio.to_thread(_cu_sandbox.ensure_phone_running)
-                await asyncio.to_thread(
-                    _cu_sandbox.phone_screenshot, Path(host_path),
-                )
-            except Exception as exc:
-                return _text_result(
-                    f"Error taking phone screenshot: {exc}", is_error=True,
-                )
-
-            # Send screenshot to Telegram with a "View phone" button (/vnc).
-            try:
-                if os.path.isfile(host_path):
-                    with open(host_path, "rb") as f:
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=f,
-                            caption="Phone screenshot",
-                            reply_markup=_vnc_button("View phone"),
-                            **_thread_kwargs,
-                        )
-            except Exception:
-                logger.debug(
-                    "Failed to send phone screenshot to Telegram", exc_info=True
-                )
-
-            return _text_result(
-                f"Phone screenshot saved to {host_path}. "
-                f"Use the Read tool to view the image."
-            )
-
-        tools_list.extend([
-            OpenShrimpTool(
-                name="phone_shell",
-                description=(
-                    "Run a shell command inside the Android (Waydroid) "
-                    "environment and return its stdout. This is the workhorse "
-                    "for driving the phone.\n\n"
-                    "PREFER uiautomator for reliable, semantic targeting over "
-                    "guessing pixel coordinates:\n"
-                    "  1. `uiautomator dump /data/local/tmp/ui.xml`\n"
-                    "  2. `cat /data/local/tmp/ui.xml` and read the tree — each "
-                    "node has `resource-id`, `text`, `content-desc`, and "
-                    "`bounds=\"[x1,y1][x2,y2]\"`.\n"
-                    "  3. Compute the tap point as the bounds center and "
-                    "`input tap <cx> <cy>`.\n"
-                    "Fall back to phone_screenshot when the tree is unhelpful "
-                    "(mid-animation, WebView/Compose surfaces).\n\n"
-                    "Common commands:\n"
-                    "  input tap <x> <y>\n"
-                    "  input swipe <x1> <y1> <x2> <y2> [duration_ms]\n"
-                    "  input text 'hello'   (avoid spaces/unicode; use %s for space)\n"
-                    "  input keyevent <KEY>\n"
-                    "  wm size / wm density\n"
-                    "  pm list packages / am start -n <pkg>/<activity>\n"
-                    "  dumpsys / settings / monkey\n\n"
-                    "Keyevent cheat-sheet: KEYCODE_HOME, KEYCODE_BACK, "
-                    "KEYCODE_APP_SWITCH (recents), KEYCODE_ENTER, KEYCODE_DEL, "
-                    "KEYCODE_DPAD_UP/DOWN/LEFT/RIGHT, KEYCODE_TAB, "
-                    "KEYCODE_VOLUME_UP/DOWN, KEYCODE_POWER."
-                ),
-                input_schema=_phone_shell_schema,
-                read_only=False,
-                handler=phone_shell,
-            ),
-            OpenShrimpTool(
-                name="phone_screenshot",
-                description=(
-                    "Capture the Android screen and return the PNG file path. "
-                    "Use the Read tool to view it. Take a screenshot to "
-                    "understand the current state before interacting. For "
-                    "precise element targeting, prefer `uiautomator dump` via "
-                    "phone_shell."
-                ),
-                input_schema={"type": "object", "properties": {}},
-                read_only=True,
-                handler=phone_screenshot,
-            ),
-        ])
+        tools_list.extend(_build_phone_use_tools(
+            sandbox=_cu_sandbox,
+            bot=bot,
+            chat_id=chat_id,
+            screenshots_dir=_screenshots_dir,
+            thread_kwargs=_thread_kwargs,
+            vnc_button=_vnc_button,
+        ))
 
     # --- Port forwarding (sandboxed contexts that support it) ---
     if sandbox is not None and sandbox.supports_port_forwarding():
