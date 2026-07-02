@@ -1322,13 +1322,30 @@ class LibvirtSandbox:
         Android-internal path.  ``waydroid app install`` is a guest-side
         Waydroid command, so it cannot be reached through ``phone_shell``
         (which runs *inside* Android); this is the convenience wrapper for it.
+
+        Unlike ``waydroid shell`` (root ``lxc-attach``, hence ``sudo`` for the
+        other phone tools), ``waydroid app`` talks to the *SessionManager* on
+        the Waydroid user's DBus **session** bus. So it must run *without*
+        ``sudo`` (as root the session bus is wrong/absent) and needs
+        ``DBUS_SESSION_BUS_ADDRESS`` pointed at that user's bus, which a
+        non-interactive SSH shell does not set. Getting either wrong makes
+        every ``waydroid app`` command abort with "WayDroid session is stopped"
+        regardless of whether the session is actually up.
         """
+        env = (
+            "export XDG_RUNTIME_DIR=/run/user/$(id -u); "
+            "export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus; "
+        )
         install = self._ssh_run(
-            f"sudo waydroid app install {shlex.quote(apk_path)}", timeout=180,
+            f"{env}waydroid app install {shlex.quote(apk_path)}", timeout=180,
         )
         out = (install.stdout or install.stderr).strip()
-        if install.returncode != 0:
-            raise RuntimeError(f"waydroid app install failed: {out}")
+        # ``waydroid app install`` exits 0 even when it fails to reach the
+        # session, printing only "WayDroid session is stopped" — so the
+        # returncode guard alone lets a silent failure look like success. Treat
+        # that sentinel as an error so it surfaces instead of faking a success.
+        if install.returncode != 0 or "session is stopped" in out.lower():
+            raise RuntimeError(f"waydroid app install failed: {out or 'no output'}")
         return out or "Installed."
 
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:

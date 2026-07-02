@@ -3,13 +3,24 @@ window rule, gpu/resolution parsing, and phone_install_apk registration."""
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import MagicMock
 
 import pytest
 
 from open_shrimp.config import _parse, _validate_raw
+from open_shrimp.sandbox.libvirt import LibvirtSandbox
 from open_shrimp.sandbox.libvirt_helpers import _build_cloud_init_user_data
 from open_shrimp.tools import create_openshrimp_tools
+
+
+def _bare_phone_sandbox() -> LibvirtSandbox:
+    """A LibvirtSandbox with only the attributes the phone probes touch."""
+    sb = LibvirtSandbox.__new__(LibvirtSandbox)
+    sb._context_name = "default"
+    sb._phone_booted = False
+    sb._waydroid_ssh_ctx = lambda: ([], "u@localhost")  # type: ignore[method-assign]
+    return sb
 
 
 def _phone_raw(android: dict | None = None):
@@ -104,3 +115,47 @@ def test_no_phone_tools_without_phone_use():
     names = {t.name for t in tools}
     assert "phone_install_apk" not in names
     assert "phone_shell" not in names
+
+
+def test_install_apk_runs_as_session_user_with_dbus_bus(monkeypatch):
+    """``waydroid app`` targets the SessionManager on the Waydroid user's DBus
+    session bus, so the command must NOT use sudo and MUST export the session
+    bus address — otherwise it aborts with "session is stopped" no matter what
+    the session state actually is."""
+    captured: dict[str, str] = {}
+
+    def fake_ssh_run(remote, **kwargs):
+        captured["remote"] = remote
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    sb = _bare_phone_sandbox()
+    monkeypatch.setattr(sb, "_ssh_run", fake_ssh_run)
+    sb.phone_install_apk("/tmp/app.apk")
+    remote = captured["remote"]
+    assert "sudo" not in remote
+    assert "DBUS_SESSION_BUS_ADDRESS=unix:path=" in remote
+    assert "XDG_RUNTIME_DIR=/run/user/$(id -u)" in remote
+    assert "waydroid app install /tmp/app.apk" in remote
+
+
+def test_install_apk_raises_on_session_stopped_despite_exit_zero(monkeypatch):
+    """waydroid app install exits 0 even when it fails to reach the session,
+    printing only the sentinel; that must surface as an error, not fake success."""
+    sb = _bare_phone_sandbox()
+    monkeypatch.setattr(
+        sb, "_ssh_run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            [], 0, stdout="WayDroid session is stopped\n", stderr="",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="session is stopped"):
+        sb.phone_install_apk("/tmp/app.apk")
+
+
+def test_install_apk_succeeds_on_clean_exit(monkeypatch):
+    sb = _bare_phone_sandbox()
+    monkeypatch.setattr(
+        sb, "_ssh_run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+    )
+    assert sb.phone_install_apk("/tmp/app.apk") == "Installed."
