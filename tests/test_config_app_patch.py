@@ -3,6 +3,7 @@ new ``backend`` selector, while leaving everything else untouched."""
 
 from __future__ import annotations
 
+from open_shrimp.config import _validate_raw
 from open_shrimp.config_app.api import _patch_raw_yaml
 
 
@@ -72,3 +73,37 @@ def test_per_context_backend_round_trips_through_contexts():
     _patch_raw_yaml(raw, body)
     assert raw["contexts"]["default"]["backend"] == "opencode"
     assert raw["contexts"]["default"]["model"] == "openai/gpt-5.5"
+
+
+def test_phone_use_context_patches_and_validates():
+    raw = _base_raw()
+    body = {
+        "contexts": {
+            "default": {
+                "directory": "/tmp",
+                "description": "d",
+                "allowed_tools": [],
+            },
+            "phone": {
+                "directory": "/tmp",
+                "description": "d",
+                "allowed_tools": [],
+                "sandbox": {
+                    "backend": "libvirt",
+                    "phone_use": True,
+                    "android": {
+                        "image_type": "GAPPS",
+                        "resolution": "720x1280",
+                        "dpi": 320,
+                        "gpu": "software",
+                    },
+                },
+            }
+        }
+    }
+    _patch_raw_yaml(raw, body)
+    sandbox = raw["contexts"]["phone"]["sandbox"]
+    assert sandbox["phone_use"] is True
+    assert sandbox["android"]["image_type"] == "GAPPS"
+    # Config app accepts the phone-use payload without a validation error.
+    _validate_raw(raw)

@@ -79,16 +79,6 @@ _SANDBOX_GUEST_OS = {"linux", "macos"}
 _ANDROID_IMAGE_TYPES = {"VANILLA", "GAPPS"}
 _ANDROID_GPU_MODES = {"virgl", "software"}
 
-# Guest paths holding the multi-GB Android images and per-user app state.
-# Injected into a phone-use context's persistent_paths so they survive a VM
-# rebuild (only the overlay is wiped).  The home path mirrors the sandbox
-# user's home (see sandbox/skill_paths.py: /home/openshrimp).
-_WAYDROID_PERSISTENT_PATHS = (
-    "/var/lib/waydroid",
-    "/home/openshrimp/.local/share/waydroid",
-)
-
-
 def is_sandboxed(context: "ContextConfig") -> bool:
     """Return True if the context uses any sandbox backend."""
     if context.sandbox is not None and context.sandbox.enabled:
@@ -444,10 +434,8 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
     """Parse a sandbox config dict into a SandboxConfig dataclass.
 
     Applies phone-use derivations: a phone-use context implies the
-    computer-use desktop (labwc + VNC), auto-enables VirGL unless the
-    Android GPU mode is ``software``, and injects the Waydroid image/state
-    paths into ``persistent_paths`` so multi-GB Android images survive a
-    VM rebuild.
+    computer-use desktop (labwc + VNC), and auto-enables VirGL unless the
+    Android GPU mode is ``software``.
     """
     phone_use = bool(raw.get("phone_use", False))
 
@@ -474,9 +462,6 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
         # it when the operator explicitly opts into the software renderer.
         if android.gpu != "software":
             virgl = True
-        for wpath in _WAYDROID_PERSISTENT_PATHS:
-            if wpath not in persistent_paths:
-                persistent_paths.append(wpath)
 
     return SandboxConfig(
         backend=raw["backend"],

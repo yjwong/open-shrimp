@@ -1,3 +1,10 @@
+export interface AndroidConfig {
+  image_type?: "VANILLA" | "GAPPS";
+  resolution?: string | null;
+  dpi?: number | null;
+  gpu?: "virgl" | "software";
+}
+
 export interface SandboxConfig {
   backend: "docker" | "libvirt" | "lima";
   enabled?: boolean;
@@ -6,6 +13,8 @@ export interface SandboxConfig {
   dockerfile?: string | null;
   computer_use?: boolean;
   virgl?: boolean;
+  phone_use?: boolean;
+  android?: AndroidConfig | null;
   memory?: number;
   cpus?: number;
   disk_size?: number;

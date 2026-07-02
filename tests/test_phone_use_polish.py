@@ -57,6 +57,20 @@ def test_phone_use_defaults_gpu_virgl_and_autoenables_virgl():
     assert ctx.sandbox.virgl is True
 
 
+def test_phone_use_does_not_auto_add_persistent_paths():
+    cfg = _parse(_phone_raw())
+    ctx = cfg.contexts["default"]
+    assert ctx.sandbox.persistent_paths == []
+
+
+def test_phone_use_preserves_explicit_persistent_paths():
+    raw = _phone_raw()
+    raw["contexts"]["default"]["sandbox"]["persistent_paths"] = ["/var/lib/example"]
+    cfg = _parse(raw)
+    ctx = cfg.contexts["default"]
+    assert ctx.sandbox.persistent_paths == ["/var/lib/example"]
+
+
 def test_cloud_init_phone_use_adds_maximize_window_rule():
     user_data = _build_cloud_init_user_data(
         "ssh-ed25519 AAAA", computer_use=True, phone_use=True,

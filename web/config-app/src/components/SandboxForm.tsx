@@ -28,6 +28,10 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
     onChange({ ...sandbox, ...patch });
   };
 
+  const updateAndroid = (patch: Partial<NonNullable<SandboxConfig["android"]>>) => {
+    update({ android: { ...(sandbox.android ?? {}), ...patch } });
+  };
+
   const isVM = sandbox.backend === "libvirt" || sandbox.backend === "lima";
 
   return (
@@ -87,6 +91,81 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
             onClick={() => update({ virgl: !sandbox.virgl })}
           />
         </div>
+      )}
+
+      {sandbox.backend === "libvirt" && (
+        <div className="form-toggle-row">
+          <span className="form-toggle-label">Phone Use (Android)</span>
+          <button
+            type="button"
+            className={`toggle${sandbox.phone_use ? " on" : ""}`}
+            onClick={() => update({ phone_use: !sandbox.phone_use })}
+          />
+        </div>
+      )}
+      {sandbox.backend === "libvirt" && sandbox.phone_use && (
+        <>
+          <span className="form-hint">
+            Runs Waydroid (Android) inside the VM, driven via phone_* tools.
+            Implies Computer Use (labwc desktop + VNC) and hardware GPU (VirGL)
+            unless GPU is set to software.
+          </span>
+          <div className="form-group">
+            <label className="form-label">Android Image</label>
+            <select
+              className="form-input"
+              value={sandbox.android?.image_type ?? "VANILLA"}
+              onChange={(e) =>
+                updateAndroid({
+                  image_type: e.target.value as "VANILLA" | "GAPPS",
+                })
+              }
+            >
+              <option value="VANILLA">VANILLA</option>
+              <option value="GAPPS">GAPPS (Google apps)</option>
+            </select>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Resolution</label>
+            <input
+              className="form-input"
+              value={sandbox.android?.resolution ?? ""}
+              onChange={(e) =>
+                updateAndroid({ resolution: e.target.value || null })
+              }
+              placeholder="e.g. 720x1280"
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">DPI</label>
+            <input
+              className="form-input"
+              type="number"
+              value={sandbox.android?.dpi ?? ""}
+              onChange={(e) =>
+                updateAndroid({
+                  dpi: e.target.value ? parseInt(e.target.value) : null,
+                })
+              }
+              placeholder="e.g. 320"
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">GPU</label>
+            <select
+              className="form-input"
+              value={sandbox.android?.gpu ?? "virgl"}
+              onChange={(e) =>
+                updateAndroid({
+                  gpu: e.target.value as "virgl" | "software",
+                })
+              }
+            >
+              <option value="virgl">virgl (hardware GLES)</option>
+              <option value="software">software (llvmpipe, slow)</option>
+            </select>
+          </div>
+        </>
       )}
 
       <div className="form-toggle-row">
