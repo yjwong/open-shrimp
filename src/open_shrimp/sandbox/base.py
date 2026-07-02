@@ -310,6 +310,36 @@ class Sandbox(Protocol):
         """Start the security-key UHID bridge inside the computer-use guest."""
         ...
 
+    # -- Phone use (Waydroid Android; libvirt only) --------------------------
+
+    def ensure_phone_running(self) -> None:
+        """Bring the Waydroid Android session up and wait until it is booted.
+
+        Lazy/self-healing: starts the session if it is down and recovers a
+        desynced ``Session: RUNNING`` / ``Container: STOPPED`` state.  Called
+        before every ``phone_*`` action.
+
+        Raises :class:`NotImplementedError` for backends without phone-use.
+        """
+        ...
+
+    def phone_shell(self, cmd: str) -> str:
+        """Run *cmd* inside the Android environment and return its stdout.
+
+        Executes ``waydroid shell -- sh -c <cmd>`` in the guest, giving access
+        to Android's ``input``/``uiautomator``/``pm``/``am``/``wm`` shell.
+
+        Raises :class:`NotImplementedError` for backends without phone-use.
+        """
+        ...
+
+    def phone_screenshot(self, output_path: Path) -> None:
+        """Capture the Android framebuffer and save as PNG to *output_path*.
+
+        Raises :class:`NotImplementedError` for backends without phone-use.
+        """
+        ...
+
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files from the host into the sandbox.
 

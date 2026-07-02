@@ -90,6 +90,11 @@ logger = logging.getLogger(__name__)
 # Graceful shutdown timeout before falling back to destroy.
 _SHUTDOWN_TIMEOUT = 180
 
+# How long to wait for Android (Waydroid) to report a completed boot, and how
+# often to poll ``getprop sys.boot_completed`` while waiting.
+_ANDROID_BOOT_TIMEOUT_S = 120
+_ANDROID_BOOT_POLL_S = 3
+
 
 def _tail_file(
     source: Path, dest: Path, stop: threading.Event,
@@ -163,6 +168,9 @@ class LibvirtSandbox:
         # Phone-use rides on the computer-use desktop; treat it as also
         # requiring the labwc + VNC plumbing.
         self._phone_use = phone_use
+        # Set once Android has reported a completed boot, so repeated phone_*
+        # calls take a single cheap probe instead of the full self-healing path.
+        self._phone_booted = False
         self._computer_use = computer_use or phone_use
         self._virgl = virgl
         self._virtiofsd_procs: list[subprocess.Popen[bytes]] = []
@@ -1075,6 +1083,150 @@ class LibvirtSandbox:
         )
         if result.returncode != 0:
             raise RuntimeError(f"wl-copy failed: {result.stderr.strip()}")
+
+    # -- Phone-use operations (Waydroid Android; Phase 2) --------------------
+
+    def _waydroid_ssh_ctx(self) -> tuple[list[str], str]:
+        """Return ``(ssh_opts, target)`` for driving Waydroid over SSH."""
+        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
+
+        assert self._ssh_port is not None
+        ssh_opts = _ssh_common_opts(self._sdir / "ssh_key", self._ssh_port)
+        return ssh_opts, f"{SANDBOX_USER}@localhost"
+
+    def _android_boot_completed(self, ssh_opts: list[str], target: str) -> bool:
+        """Return ``True`` if Android reports ``sys.boot_completed == 1``."""
+        probe = subprocess.run(
+            [
+                "ssh", *ssh_opts, target,
+                "sudo waydroid shell -- getprop sys.boot_completed",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return probe.returncode == 0 and probe.stdout.strip() == "1"
+
+    def _waydroid_desynced(self, ssh_opts: list[str], target: str) -> bool:
+        """Return ``True`` for the ``Session: RUNNING`` / ``Container: STOPPED``
+        desync the spike hit after unclean stops (§8.1)."""
+        status = subprocess.run(
+            ["ssh", *ssh_opts, target, "waydroid status"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        fields = {
+            k.strip(): v.strip()
+            for line in status.stdout.splitlines()
+            if ":" in line
+            for k, v in [line.split(":", 1)]
+        }
+        return (
+            fields.get("Session") == "RUNNING"
+            and fields.get("Container") == "STOPPED"
+        )
+
+    def _wait_for_android_boot(self, ssh_opts: list[str], target: str) -> None:
+        deadline = time.monotonic() + _ANDROID_BOOT_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if self._android_boot_completed(ssh_opts, target):
+                self._phone_booted = True
+                return
+            time.sleep(_ANDROID_BOOT_POLL_S)
+        raise RuntimeError(
+            f"Waydroid did not finish booting for context {self._context_name} "
+            f"within {_ANDROID_BOOT_TIMEOUT_S}s"
+        )
+
+    def ensure_phone_running(self) -> None:
+        """Bring the Waydroid session up and wait for Android to finish booting.
+
+        Idempotent and self-healing: once booted, a single cheap probe short-
+        circuits the whole sequence; otherwise it starts a down session and
+        recovers a desynced Session/Container state via a full restart.
+        """
+        ssh_opts, target = self._waydroid_ssh_ctx()
+
+        # Steady state (the model taps many times in a row): one probe instead
+        # of the status + is-active + boot-poll round-trips below.
+        if self._phone_booted and self._android_boot_completed(ssh_opts, target):
+            return
+        self._phone_booted = False
+
+        if self._waydroid_desynced(ssh_opts, target):
+            logger.warning(
+                "Waydroid Session/Container desync for context %s; resetting",
+                self._context_name,
+            )
+            # Stop the orphaned session before restarting the container +
+            # session units, otherwise the new session collides.
+            subprocess.run(
+                ["ssh", *ssh_opts, target, "waydroid session stop"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self._start_waydroid_session(ssh_opts, target)
+        else:
+            self._ensure_waydroid_session_running(ssh_opts, target)
+
+        self._wait_for_android_boot(ssh_opts, target)
+
+    def phone_shell(self, cmd: str) -> str:
+        """Run *cmd* in the Android environment via ``waydroid shell``.
+
+        Wraps the command in Android's ``sh -c`` so pipes, redirects, and
+        multi-token commands (``input``, ``uiautomator``, ``pm``/``am``,
+        ``wm``, …) all work.  ``lxc-attach`` runs argv directly, so the
+        remote-side quoting is a single ``shlex.quote`` for the guest shell.
+        """
+        ssh_opts, target = self._waydroid_ssh_ctx()
+        remote = f"sudo waydroid shell -- sh -c {shlex.quote(cmd)}"
+        result = subprocess.run(
+            ["ssh", *ssh_opts, target, remote],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            self._phone_booted = False
+            stderr = (result.stderr or result.stdout).strip()
+            raise RuntimeError(f"waydroid shell failed: {stderr}")
+        # Android's shell folds warnings into stderr; append them after stdout
+        # so the model sees them without losing the primary output.
+        out = result.stdout
+        if result.stderr:
+            out = f"{out}\n{result.stderr}" if out else result.stderr
+        return out
+
+    def phone_screenshot(self, output_path: Path) -> None:
+        """Capture the Android framebuffer via ``screencap`` and save as PNG.
+
+        ``screencap`` writes a file inside Android's ``/data/local/tmp`` (the
+        same inode as the guest path below); ``cat`` streams the bytes back in
+        the same SSH round-trip.  ``screencap``'s own stdout is discarded so
+        only the PNG reaches ours.  Binary is safe here — only the interactive
+        ``waydroid shell`` pty corrupts it.
+        """
+        ssh_opts, target = self._waydroid_ssh_ctx()
+        android_png = "/data/local/tmp/os_screenshot.png"
+        guest_png = f"{SANDBOX_HOME}/.local/share/waydroid/data/local/tmp/os_screenshot.png"
+
+        result = subprocess.run(
+            [
+                "ssh", *ssh_opts, target,
+                f"sudo waydroid shell -- screencap -p {android_png} >/dev/null "
+                f"&& sudo cat {guest_png}",
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0 or not result.stdout:
+            self._phone_booted = False
+            stderr = result.stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"phone screenshot failed: {stderr}")
+        output_path.write_bytes(result.stdout)
 
     async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
         """Copy files into the VM via scp."""

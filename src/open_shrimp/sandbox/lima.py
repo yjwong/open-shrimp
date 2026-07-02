@@ -537,6 +537,23 @@ class LimaSandbox:
                 )
             raise RuntimeError(f"security-key helper failed to start: {error}")
 
+    # -- Phone use (libvirt only) --------------------------------------------
+
+    def ensure_phone_running(self) -> None:
+        raise NotImplementedError(
+            "Phone use (Waydroid) is only supported on the libvirt backend."
+        )
+
+    def phone_shell(self, cmd: str) -> str:
+        raise NotImplementedError(
+            "Phone use (Waydroid) is only supported on the libvirt backend."
+        )
+
+    def phone_screenshot(self, output_path: Path) -> None:
+        raise NotImplementedError(
+            "Phone use (Waydroid) is only supported on the libvirt backend."
+        )
+
     def stop(self) -> None:
         """Stop the Lima instance and any SSH tunnels."""
         # Tear down any served process (the ssh -L tunnel is reaped below with

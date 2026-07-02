@@ -382,11 +382,21 @@ async def get_or_create_session(
         # card must not also fire (which would show the raw wire name).
         if config is not None:
             allowed_tools.append("mcp__openshrimp__ask_context")
-    # Auto-approve computer use tools when enabled.
+    # Auto-approve computer use tools when enabled.  A phone-use context also
+    # carries the computer-use desktop, so it enables the computer_* tools too.
+    _phone_use_enabled = (
+        context.sandbox is not None and context.sandbox.phone_use
+    )
     _computer_use_enabled = (
         (context.container is not None and context.container.computer_use)
         or (context.sandbox is not None and context.sandbox.computer_use)
+        or _phone_use_enabled
     )
+    if _phone_use_enabled and mcp_proxy is not None:
+        allowed_tools.extend([
+            "mcp__openshrimp__phone_shell",
+            "mcp__openshrimp__phone_screenshot",
+        ])
     if _computer_use_enabled:
         if mcp_proxy is not None:
             allowed_tools.extend([
@@ -645,6 +655,7 @@ async def get_or_create_session(
                     db=db, config=config, job_queue=job_queue,
                     sandbox=sandbox,
                     context_name=context_name,
+                    phone_use=_phone_use_enabled,
                     user_id=user_id,
                     is_private_chat=is_private_chat,
                     host_bash_workdir=_host_bash_workdir,

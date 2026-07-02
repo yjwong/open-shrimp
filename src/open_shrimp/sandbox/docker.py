@@ -462,6 +462,23 @@ class DockerSandbox:
                 f"security-key helper failed to start: {result.stderr.strip()}"
             )
 
+    # -- Phone use (libvirt only) --------------------------------------------
+
+    def ensure_phone_running(self) -> None:
+        raise NotImplementedError(
+            "Phone use (Waydroid) is only supported on the libvirt backend."
+        )
+
+    def phone_shell(self, cmd: str) -> str:
+        raise NotImplementedError(
+            "Phone use (Waydroid) is only supported on the libvirt backend."
+        )
+
+    def phone_screenshot(self, output_path: Path) -> None:
+        raise NotImplementedError(
+            "Phone use (Waydroid) is only supported on the libvirt backend."
+        )
+
     # -- Port forwarding ------------------------------------------------------
 
     def supports_port_forwarding(self) -> bool:
