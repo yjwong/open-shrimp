@@ -1132,6 +1132,7 @@ class LibvirtSandboxManager:
             instance_prefix=self._instance_prefix,
             computer_use=context.sandbox.computer_use,
             virgl=context.sandbox.virgl,
+            phone_use=context.sandbox.phone_use,
             runtime=runtime,
         )
         self._sandbox_cache[context_name] = sandbox

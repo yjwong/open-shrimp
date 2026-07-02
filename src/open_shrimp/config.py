@@ -29,6 +29,16 @@ class ContainerConfig:
 
 
 @dataclass
+class AndroidConfig:
+    """Android/Waydroid options for a phone-use context (libvirt only)."""
+
+    image_type: str = "VANILLA"  # "VANILLA" or "GAPPS"
+    resolution: str | None = None  # e.g. "720x1280"
+    dpi: int | None = None
+    gpu: str = "virgl"  # "virgl" (hardware GLES) or "software" (llvmpipe)
+
+
+@dataclass
 class SandboxConfig:
     """Unified sandbox configuration for all backends."""
 
@@ -41,6 +51,12 @@ class SandboxConfig:
     dockerfile: str | None = None
     computer_use: bool = False
     virgl: bool = False  # VirGL 3D GPU acceleration (requires host GPU)
+
+    # Phone-use (libvirt only): drive Android (Waydroid) via phone_* tools.
+    # Implies the computer-use desktop (labwc + VNC) and auto-enables virgl
+    # unless android.gpu is "software".
+    phone_use: bool = False
+    android: "AndroidConfig | None" = None
 
     # VM-specific (libvirt)
     memory: int = 2048  # MB ceiling (free-page-reporting returns unused to host)
@@ -59,6 +75,17 @@ class SandboxConfig:
 # Valid values for sandbox config fields.
 _SANDBOX_BACKENDS = {"docker", "libvirt", "lima"}
 _SANDBOX_GUEST_OS = {"linux", "macos"}
+_ANDROID_IMAGE_TYPES = {"VANILLA", "GAPPS"}
+_ANDROID_GPU_MODES = {"virgl", "software"}
+
+# Guest paths holding the multi-GB Android images and per-user app state.
+# Injected into a phone-use context's persistent_paths so they survive a VM
+# rebuild (only the overlay is wiped).  The home path mirrors the sandbox
+# user's home (see sandbox/skill_paths.py: /home/openshrimp).
+_WAYDROID_PERSISTENT_PATHS = (
+    "/var/lib/waydroid",
+    "/home/openshrimp/.local/share/waydroid",
+)
 
 
 def is_sandboxed(context: "ContextConfig") -> bool:
@@ -281,6 +308,49 @@ def _validate_raw(raw: dict) -> None:
                 f"boolean, got: {allow_host_escape!r}"
             )
 
+        phone_use = sandbox.get("phone_use")
+        if phone_use is not None and not isinstance(phone_use, bool):
+            raise ValueError(
+                f"Context '{name}': sandbox.phone_use must be a boolean, "
+                f"got: {phone_use!r}"
+            )
+        if phone_use and backend != "libvirt":
+            raise ValueError(
+                f"Context '{name}': sandbox.phone_use requires "
+                f"backend 'libvirt', got: {backend!r}"
+            )
+
+        android = sandbox.get("android")
+        if android is not None:
+            if not isinstance(android, dict):
+                raise ValueError(
+                    f"Context '{name}': sandbox.android must be a mapping"
+                )
+            image_type = android.get("image_type")
+            if image_type is not None and image_type not in _ANDROID_IMAGE_TYPES:
+                raise ValueError(
+                    f"Context '{name}': sandbox.android.image_type must be one "
+                    f"of {sorted(_ANDROID_IMAGE_TYPES)}, got: {image_type!r}"
+                )
+            resolution = android.get("resolution")
+            if resolution is not None and not isinstance(resolution, str):
+                raise ValueError(
+                    f"Context '{name}': sandbox.android.resolution must be a "
+                    f"string (e.g. '720x1280'), got: {resolution!r}"
+                )
+            dpi = android.get("dpi")
+            if dpi is not None and not isinstance(dpi, int):
+                raise ValueError(
+                    f"Context '{name}': sandbox.android.dpi must be an integer, "
+                    f"got: {dpi!r}"
+                )
+            gpu = android.get("gpu")
+            if gpu is not None and gpu not in _ANDROID_GPU_MODES:
+                raise ValueError(
+                    f"Context '{name}': sandbox.android.gpu must be one of "
+                    f"{sorted(_ANDROID_GPU_MODES)}, got: {gpu!r}"
+                )
+
         guest_os = sandbox.get("guest_os", "linux")
         if guest_os not in _SANDBOX_GUEST_OS:
             raise ValueError(
@@ -366,21 +436,59 @@ def _validate_raw(raw: dict) -> None:
 
 
 def _parse_sandbox_config(raw: dict) -> SandboxConfig:
-    """Parse a sandbox config dict into a SandboxConfig dataclass."""
+    """Parse a sandbox config dict into a SandboxConfig dataclass.
+
+    Applies phone-use derivations: a phone-use context implies the
+    computer-use desktop (labwc + VNC), auto-enables VirGL unless the
+    Android GPU mode is ``software``, and injects the Waydroid image/state
+    paths into ``persistent_paths`` so multi-GB Android images survive a
+    VM rebuild.
+    """
+    phone_use = bool(raw.get("phone_use", False))
+
+    android_raw = raw.get("android")
+    android: AndroidConfig | None = None
+    if android_raw is not None:
+        android = AndroidConfig(
+            image_type=str(android_raw.get("image_type", "VANILLA")),
+            resolution=android_raw.get("resolution"),
+            dpi=android_raw.get("dpi"),
+            gpu=str(android_raw.get("gpu", "virgl")),
+        )
+
+    computer_use = bool(raw.get("computer_use", False))
+    virgl = bool(raw.get("virgl", False))
+    persistent_paths = list(raw.get("persistent_paths", []))
+
+    if phone_use:
+        # Phone-use rides on the computer-use desktop + VNC plumbing.
+        computer_use = True
+        if android is None:
+            android = AndroidConfig()
+        # Hardware GLES via virglrenderer is the strong default; only skip
+        # it when the operator explicitly opts into the software renderer.
+        if android.gpu != "software":
+            virgl = True
+        for wpath in _WAYDROID_PERSISTENT_PATHS:
+            if wpath not in persistent_paths:
+                persistent_paths.append(wpath)
+
     return SandboxConfig(
         backend=raw["backend"],
         enabled=bool(raw.get("enabled", True)),
         guest_os=str(raw.get("guest_os", "linux")),
         docker_in_docker=bool(raw.get("docker_in_docker", False)),
         dockerfile=raw.get("dockerfile"),
-        computer_use=bool(raw.get("computer_use", False)),
-        virgl=bool(raw.get("virgl", False)),
+        computer_use=computer_use,
+        virgl=virgl,
+        phone_use=phone_use,
+        android=android,
         memory=int(raw.get("memory", 2048)),
         cpus=int(raw.get("cpus", 2)),
         disk_size=int(raw.get("disk_size", 20)),
         base_image=raw.get("base_image"),
         provision=raw.get("provision"),
-        persistent_paths=raw.get("persistent_paths", []),
+        persistent_paths=persistent_paths,
         allow_host_escape=bool(raw.get("allow_host_escape", False)),
     )
 
@@ -564,6 +672,20 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                 sandbox_dict["computer_use"] = True
             if ctx.sandbox.virgl:
                 sandbox_dict["virgl"] = True
+            if ctx.sandbox.phone_use:
+                sandbox_dict["phone_use"] = True
+            if ctx.sandbox.android is not None:
+                android_dict: dict[str, Any] = {}
+                if ctx.sandbox.android.image_type != "VANILLA":
+                    android_dict["image_type"] = ctx.sandbox.android.image_type
+                if ctx.sandbox.android.resolution is not None:
+                    android_dict["resolution"] = ctx.sandbox.android.resolution
+                if ctx.sandbox.android.dpi is not None:
+                    android_dict["dpi"] = ctx.sandbox.android.dpi
+                if ctx.sandbox.android.gpu != "virgl":
+                    android_dict["gpu"] = ctx.sandbox.android.gpu
+                if android_dict:
+                    sandbox_dict["android"] = android_dict
             if ctx.sandbox.allow_host_escape:
                 sandbox_dict["allow_host_escape"] = True
             # VM fields — only include non-defaults for VM backends.

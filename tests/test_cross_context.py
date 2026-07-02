@@ -190,7 +190,7 @@ class _FakeSandbox:
     def ensure_running(self) -> None:
         pass
 
-    def provision_workspace(self) -> None:
+    def provision_workspace(self, *, log_file=None) -> None:
         pass
 
     def start_agent(self, runtime):

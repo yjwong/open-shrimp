@@ -12,6 +12,7 @@ def test_libvirt_provision_continues_when_security_key_helper_install_fails(
     sandbox = LibvirtSandbox.__new__(LibvirtSandbox)
     sandbox._ssh_port = 12345
     sandbox._computer_use = True
+    sandbox._phone_use = False
     sandbox._runtime = None
     sandbox._context_name = "test-context"
 

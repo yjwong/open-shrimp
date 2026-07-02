@@ -135,7 +135,7 @@ class Sandbox(Protocol):
         """
         ...
 
-    def provision_workspace(self) -> None:
+    def provision_workspace(self, *, log_file: Path | None = None) -> None:
         """Provision the workspace filesystem inside the sandbox.
 
         Called after :meth:`ensure_running` and before
@@ -143,6 +143,11 @@ class Sandbox(Protocol):
         already available (bind mounts, shared filesystems), this is a
         no-op.  VM backends may use this to clone repositories or sync
         files.
+
+        Args:
+            log_file: Optional path where long provisioning steps (e.g. a
+                one-time Waydroid image download) stream output, continuing
+                the build log so the terminal Mini App can tail progress.
 
         Idempotent — safe to call on every session start.
         """

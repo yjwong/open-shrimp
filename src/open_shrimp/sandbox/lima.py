@@ -345,7 +345,7 @@ class LimaSandbox:
             if self._computer_use:
                 self._ensure_ssh_tunnels()
 
-    def provision_workspace(self) -> None:
+    def provision_workspace(self, *, log_file: Path | None = None) -> None:
         """Install computer-use helpers, runtime CLI binary, and credentials."""
         if self._computer_use:
             try:

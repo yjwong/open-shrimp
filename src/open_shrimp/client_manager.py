@@ -524,11 +524,14 @@ async def get_or_create_session(
                 try:
                     _sandbox.ensure_environment(log_file=log_file)
                     _sandbox.ensure_running(log_file=log_file)
+                    # Keep the build log registered through provisioning so
+                    # long steps (e.g. the one-time Waydroid image download)
+                    # stream to the terminal Mini App.
+                    _sandbox.provision_workspace(log_file=log_file)
                 finally:
                     if log_file is not None:
                         assert _mgr is not None
                         _mgr.unregister_build(context_name)
-                _sandbox.provision_workspace()
                 return _sandbox.start_agent(_runtime)
 
             handle = await asyncio.to_thread(_ensure_and_start_agent)

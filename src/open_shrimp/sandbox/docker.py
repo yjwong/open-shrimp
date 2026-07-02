@@ -176,7 +176,7 @@ class DockerSandbox:
             served_guest_port=self._served_guest_port,
         )
 
-    def provision_workspace(self) -> None:
+    def provision_workspace(self, *, log_file: Path | None = None) -> None:
         # Docker uses bind mounts — workspace is already in place.
         pass
 

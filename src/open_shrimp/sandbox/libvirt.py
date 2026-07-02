@@ -151,6 +151,7 @@ class LibvirtSandbox:
         instance_prefix: str = "openshrimp",
         computer_use: bool = False,
         virgl: bool = False,
+        phone_use: bool = False,
         runtime: AgentRuntime | None = None,
     ) -> None:
         self._context_name = context_name
@@ -159,7 +160,10 @@ class LibvirtSandbox:
         self._additional_directories = additional_directories or []
         self._conn = conn
         self._instance_prefix = instance_prefix
-        self._computer_use = computer_use
+        # Phone-use rides on the computer-use desktop; treat it as also
+        # requiring the labwc + VNC plumbing.
+        self._phone_use = phone_use
+        self._computer_use = computer_use or phone_use
         self._virgl = virgl
         self._virtiofsd_procs: list[subprocess.Popen[bytes]] = []
         self._use_virtiofs: bool = find_virtiofsd() is not None
@@ -182,7 +186,9 @@ class LibvirtSandbox:
         self._ssh_port: int | None = load_ssh_port(self._sdir)
 
         # Screenshots directory for computer-use (host-side).
-        self._screenshots_dir = self._sdir / "screenshots" if computer_use else None
+        self._screenshots_dir = (
+            self._sdir / "screenshots" if self._computer_use else None
+        )
         if self._screenshots_dir:
             self._screenshots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -235,7 +241,9 @@ class LibvirtSandbox:
         # Detect cloud-init config drift.  Cloud-init only runs on first
         # boot, so if any input that affects the user-data has changed
         # (computer_use, provision script, …) the overlay must be rebuilt.
-        desired_fp = cloud_init_fingerprint(self._config, self._computer_use)
+        desired_fp = cloud_init_fingerprint(
+            self._config, self._computer_use, self._phone_use,
+        )
         saved_fp = load_cloud_init_fingerprint(sdir)
         if saved_fp is not None and saved_fp != desired_fp:
             _log(
@@ -278,6 +286,7 @@ class LibvirtSandbox:
             sdir, public_key,
             provision_script=self._config.provision,
             computer_use=self._computer_use,
+            phone_use=self._phone_use,
             persistent_paths=self._config.persistent_paths or None,
         )
 
@@ -554,7 +563,7 @@ class LibvirtSandbox:
                 persistent_paths=self._config.persistent_paths,
             )
 
-    def provision_workspace(self) -> None:
+    def provision_workspace(self, *, log_file: Path | None = None) -> None:
         """Install computer-use helpers, runtime CLI binary, and credentials."""
         assert self._ssh_port is not None
         if self._computer_use:
@@ -567,6 +576,9 @@ class LibvirtSandbox:
                     self._context_name,
                     exc,
                 )
+
+        if self._phone_use:
+            self._ensure_waydroid_initialized(log_file=log_file)
 
         if self._runtime is None:
             return
@@ -582,6 +594,117 @@ class LibvirtSandbox:
 
         if self._runtime.provision_credentials is not None:
             self._runtime.provision_credentials(self._claude_home_dir)
+
+    def _ensure_waydroid_initialized(
+        self, *, log_file: Path | None = None,
+    ) -> None:
+        """Download Android images (once) and start the Waydroid session.
+
+        The ~2.4 GB ``waydroid init`` download is the heavy, one-time cost.
+        It lands on the ``/var/lib/waydroid`` persistent volume, so it
+        survives VM rebuilds and only runs when the system image is absent.
+        Output is streamed to the build log so the terminal Mini App can
+        tail progress.
+        """
+        from open_shrimp.sandbox.libvirt_helpers import _log, _ssh_common_opts
+
+        assert self._ssh_port is not None
+        ssh_key = self._sdir / "ssh_key"
+        ssh_opts = _ssh_common_opts(ssh_key, self._ssh_port)
+        target = f"{SANDBOX_USER}@localhost"
+
+        already = subprocess.run(
+            [
+                "ssh", *ssh_opts, target,
+                "test", "-f", "/var/lib/waydroid/images/system.img",
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+        if already.returncode == 0:
+            logger.info(
+                "Waydroid already initialized for context %s", self._context_name,
+            )
+            self._ensure_waydroid_session_running(ssh_opts, target)
+            return
+
+        # phone_use contexts always carry an AndroidConfig (see config parsing).
+        image_type = self._config.android.image_type if self._config.android else "VANILLA"
+
+        _log(
+            log_file,
+            "Downloading Android system images (waydroid init) — this can "
+            "take several minutes on first boot...",
+        )
+        proc = subprocess.Popen(
+            [
+                "ssh", *ssh_opts, target,
+                "sudo", "waydroid", "init", "-s", image_type,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            logger.info("[waydroid init %s] %s", self._context_name, line)
+            _log(log_file, line)
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(
+                f"waydroid init failed (rc={rc}) for context "
+                f"{self._context_name}"
+            )
+        _log(log_file, "Android images ready.")
+        self._start_waydroid_session(ssh_opts, target)
+
+    def _ensure_waydroid_session_running(
+        self, ssh_opts: list[str], target: str,
+    ) -> None:
+        """Start the Waydroid session only if it is not already up.
+
+        Runs on every session start, so it must be cheap and non-disruptive:
+        a live Android session is left untouched — a blind restart would tear
+        down the running UI mid-use.
+        """
+        active = subprocess.run(
+            [
+                "ssh", *ssh_opts, target,
+                "systemctl", "is-active", "--quiet", "waydroid-session.service",
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+        if active.returncode == 0:
+            return
+        self._start_waydroid_session(ssh_opts, target)
+
+    def _start_waydroid_session(
+        self, ssh_opts: list[str], target: str,
+    ) -> None:
+        """(Re)start the Waydroid container + session services over SSH.
+
+        The units carry ``Restart=on-failure``, so a plain restart is enough
+        to bring the Android UI up now that the images exist; ordering
+        between container and session is handled by the unit dependencies.
+        """
+        for units in (
+            ["waydroid-container.service"],
+            ["waydroid-session.service", "waydroid-show-full-ui.service"],
+        ):
+            result = subprocess.run(
+                ["ssh", *ssh_opts, target, "sudo", "systemctl", "restart", *units],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "Failed to restart %s for context %s: %s",
+                    units, self._context_name,
+                    (result.stderr or result.stdout).strip(),
+                )
 
     def _install_security_key_helper(self) -> None:
         from open_shrimp.security_key.guest_setup import setup_security_key_guest_cmd

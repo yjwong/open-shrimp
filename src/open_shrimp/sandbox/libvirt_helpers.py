@@ -333,11 +333,112 @@ def find_free_port() -> int:
 # ---------------------------------------------------------------------------
 
 
+def _phone_use_write_files() -> str:
+    """Return the ``write_files`` fragment for a phone-use (Waydroid) guest.
+
+    Already dedented to the 2-space indentation of a ``write_files:`` list.
+    Covers the binder module config plus the PulseAudio, Waydroid session,
+    and full-UI systemd units.
+    """
+    return (
+        # binder kernel module for Waydroid's LXC container.  Ubuntu ships
+        # it in linux-modules-extra (installed in runcmd); load it at boot
+        # with the three device nodes Waydroid expects.
+        "  # Waydroid binder module (loaded at boot).\n"
+        "  - path: /etc/modules-load.d/waydroid.conf\n"
+        "    content: |\n"
+        "      binder_linux\n"
+        "  - path: /etc/modprobe.d/waydroid.conf\n"
+        "    content: |\n"
+        "      options binder_linux devices=binder,hwbinder,vndbinder\n"
+        # Waydroid's per-session LXC config bind-mounts the user pulse
+        # socket non-optionally; without an audio server at
+        # /run/user/<uid>/pulse/native the container refuses to start.
+        # A headless PulseAudio daemon just provides the socket.
+        "  # PulseAudio socket for Waydroid's LXC bind-mount.\n"
+        "  - path: /etc/systemd/system/waydroid-pulseaudio.service\n"
+        "    content: |\n"
+        "      [Unit]\n"
+        "      Description=Headless PulseAudio for Waydroid\n"
+        f"      Requires=user-runtime-dir@{SANDBOX_UID}.service\n"
+        f"      After=user-runtime-dir@{SANDBOX_UID}.service\n"
+        "      [Service]\n"
+        f"      User={SANDBOX_USER}\n"
+        f"      Environment=XDG_RUNTIME_DIR=/run/user/{SANDBOX_UID}\n"
+        "      ExecStart=/usr/bin/pulseaudio --daemonize=no --exit-idle-time=-1\n"
+        "      Restart=on-failure\n"
+        "      [Install]\n"
+        "      WantedBy=multi-user.target\n"
+        # The session brings up the Android UI; kept separate from
+        # wayland-compositor.service so a plain computer-use context is
+        # unaffected.  Restart=on-failure lets it come up on its own once
+        # provision_workspace has run `waydroid init` (images downloaded).
+        "  # Waydroid session (Android UI on the labwc Wayland display).\n"
+        "  - path: /etc/systemd/system/waydroid-session.service\n"
+        "    content: |\n"
+        "      [Unit]\n"
+        "      Description=Waydroid session\n"
+        "      After=wayland-compositor.service waydroid-pulseaudio.service waydroid-container.service\n"
+        "      Wants=waydroid-container.service\n"
+        "      [Service]\n"
+        f"      User={SANDBOX_USER}\n"
+        f"      Environment=XDG_RUNTIME_DIR=/run/user/{SANDBOX_UID}\n"
+        "      Environment=WAYLAND_DISPLAY=wayland-0\n"
+        "      ExecStart=/usr/bin/waydroid session start\n"
+        "      Restart=on-failure\n"
+        "      RestartSec=5\n"
+        "      [Install]\n"
+        "      WantedBy=multi-user.target\n"
+        "  # Waydroid full-UI window (rendered into labwc for VNC viewing).\n"
+        "  - path: /etc/systemd/system/waydroid-show-full-ui.service\n"
+        "    content: |\n"
+        "      [Unit]\n"
+        "      Description=Waydroid full UI window\n"
+        "      After=waydroid-session.service\n"
+        "      Requires=waydroid-session.service\n"
+        "      [Service]\n"
+        f"      User={SANDBOX_USER}\n"
+        f"      Environment=XDG_RUNTIME_DIR=/run/user/{SANDBOX_UID}\n"
+        "      Environment=WAYLAND_DISPLAY=wayland-0\n"
+        "      ExecStart=/usr/bin/waydroid show-full-ui\n"
+        "      Restart=on-failure\n"
+        "      RestartSec=5\n"
+        "      [Install]\n"
+        "      WantedBy=multi-user.target\n"
+    )
+
+
+def _phone_use_runcmd() -> str:
+    """Return the ``runcmd`` fragment for a phone-use (Waydroid) guest.
+
+    Installs binder (from linux-modules-extra), the Waydroid apt repo +
+    packages, and enables the session services.  Session/show-full-ui only
+    succeed once ``provision_workspace`` has run ``waydroid init`` (images
+    present); their ``Restart=on-failure`` brings them up automatically.
+    """
+    return (
+        "  - apt-get install -y -qq curl ca-certificates > /dev/null 2>&1\n"
+        # binder ships in linux-modules-extra for the running kernel.
+        "  - apt-get install -y -qq linux-modules-extra-$(uname -r) > /dev/null 2>&1\n"
+        "  - modprobe binder_linux devices=binder,hwbinder,vndbinder || true\n"
+        # Add the Waydroid apt repo + signing key, then install Waydroid
+        # and its runtime deps (pulseaudio provides the LXC pulse socket).
+        "  - curl -s https://repo.waydro.id | bash\n"
+        "  - apt-get update -qq\n"
+        "  - apt-get install -y -qq waydroid lxc python3 dnsmasq-base iptables pulseaudio > /dev/null 2>&1\n"
+        "  - systemctl enable --now waydroid-pulseaudio.service\n"
+        "  - systemctl enable waydroid-container.service || true\n"
+        "  - systemctl enable --now waydroid-session.service || true\n"
+        "  - systemctl enable --now waydroid-show-full-ui.service || true\n"
+    )
+
+
 def _build_cloud_init_user_data(
     public_key: str,
     *,
     provision_script: str | None = None,
     computer_use: bool = False,
+    phone_use: bool = False,
     persistent_paths: list[str] | None = None,
 ) -> str:
     """Build the cloud-init user-data YAML string.
@@ -411,6 +512,9 @@ def _build_cloud_init_user_data(
             "      # Start a foot terminal.\n"
             "      foot &\n"
         )
+
+    if phone_use:
+        write_files += _phone_use_write_files()
 
     # Persistent volume mount units (write_files + bootcmd).
     # These must be set up before runcmd so the provision script (e.g.
@@ -495,6 +599,9 @@ def _build_cloud_init_user_data(
             "  - systemctl enable --now wayland-compositor.service\n"
         )
 
+    if phone_use:
+        runcmd += _phone_use_runcmd()
+
     user_data = textwrap.dedent(f"""\
         #cloud-config
         users:
@@ -519,6 +626,7 @@ def generate_cloud_init_iso(
     *,
     provision_script: str | None = None,
     computer_use: bool = False,
+    phone_use: bool = False,
     persistent_paths: list[str] | None = None,
 ) -> Path:
     """Generate a cloud-init ``cloud-init.iso`` with SSH key + user setup.
@@ -547,6 +655,7 @@ def generate_cloud_init_iso(
         public_key,
         provision_script=provision_script,
         computer_use=computer_use,
+        phone_use=phone_use,
         persistent_paths=persistent_paths,
     )
 
@@ -1579,7 +1688,9 @@ def build_cli_wrapper(
 # ---------------------------------------------------------------------------
 
 
-def cloud_init_fingerprint(config: SandboxConfig, computer_use: bool) -> str:
+def cloud_init_fingerprint(
+    config: SandboxConfig, computer_use: bool, phone_use: bool = False,
+) -> str:
     """Compute a SHA-256 fingerprint of the cloud-init user-data content.
 
     Cloud-init only runs on first boot, so if any of the template content
@@ -1594,6 +1705,7 @@ def cloud_init_fingerprint(config: SandboxConfig, computer_use: bool) -> str:
         "FINGERPRINT_PLACEHOLDER_KEY",
         provision_script=config.provision,
         computer_use=computer_use,
+        phone_use=phone_use,
         persistent_paths=config.persistent_paths or None,
     )
     return hashlib.sha256(user_data.encode()).hexdigest()
