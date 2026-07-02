@@ -95,6 +95,15 @@ _SHUTDOWN_TIMEOUT = 180
 _ANDROID_BOOT_TIMEOUT_S = 120
 _ANDROID_BOOT_POLL_S = 3
 
+# Standard Android shell env vars that `adb shell` gets from init but
+# `lxc-attach` (waydroid shell) does not. Legacy tools like `uiautomator`
+# read these during class init and crash the VM if they're unset. Exported
+# before every phone_shell command.
+_ANDROID_SHELL_ENV = (
+    "export EXTERNAL_STORAGE=/sdcard ANDROID_STORAGE=/storage "
+    "ANDROID_DATA=/data ANDROID_ROOT=/system ANDROID_ASSETS=/system/app; "
+)
+
 # Piped to ``python3 -`` in the guest to force software rendering: merge the
 # swiftshader/gralloc props into waydroid.cfg's [properties] section without
 # disturbing whatever ``waydroid init`` already wrote there.
@@ -1268,7 +1277,12 @@ class LibvirtSandbox:
         remote-side quoting is a single ``shlex.quote`` for the guest shell.
         """
         ssh_opts, target = self._waydroid_ssh_ctx()
-        remote = f"sudo waydroid shell -- sh -c {shlex.quote(cmd)}"
+        # lxc-attach gives a bare env missing the Android shell's standard vars.
+        # Legacy `uiautomator dump` builds new File(getenv("EXTERNAL_STORAGE"))
+        # in DumpCommand's static init; an unset var throws an NPE that fails
+        # class init and crashes the VM (exit 137). Export the vars so it works.
+        wrapped = f"{_ANDROID_SHELL_ENV}{cmd}"
+        remote = f"sudo waydroid shell -- sh -c {shlex.quote(wrapped)}"
         result = subprocess.run(
             ["ssh", *ssh_opts, target, remote],
             capture_output=True,
