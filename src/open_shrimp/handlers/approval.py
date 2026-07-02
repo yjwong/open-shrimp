@@ -268,14 +268,14 @@ async def _send_approval_keyboard(
 
 
 # ---------------------------------------------------------------------------
-# host_bash (sudo mode) approval — dedicated flow with 10s auto-deny + live
+# host_bash (sudo mode) approval — dedicated flow with 30s auto-deny + live
 # countdown. Uses its own callback prefixes (hb_approve:/hb_deny:) so the
 # standard approve/deny handler doesn't fight with the countdown task over
 # message edits.
 # ---------------------------------------------------------------------------
 
 
-_HOST_BASH_TIMEOUT_SECONDS = 10.0
+_HOST_BASH_TIMEOUT_SECONDS = 30.0
 _HOST_BASH_TICK_SECONDS = 2.0
 _HOST_BASH_APPROVE_PREFIX = "hb_approve:"
 _HOST_BASH_DENY_PREFIX = "hb_deny:"
@@ -324,7 +324,7 @@ def _format_host_bash_final(
     verb = {
         "approved": "Approved",
         "denied": "Denied",
-        "timeout": "Auto\\-denied \\(no response within 10s\\)",
+        "timeout": "Auto\\-denied \\(no response within 30s\\)",
     }[outcome]
     block = _render_command_block(tool_input.get("command", ""), 4096 - 200)
     return f"{icon} *HOST shell* — {verb}\n\n{block}"

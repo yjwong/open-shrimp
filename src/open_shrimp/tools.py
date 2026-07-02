@@ -1198,7 +1198,7 @@ def create_openshrimp_tools(
     # --- host_bash (sudo mode): run a shell command on the host, OUTSIDE
     # the sandbox.  Only registered when the context's sandbox config has
     # ``allow_host_escape: true``.  Every invocation routes through a
-    # per-command Telegram approval prompt with a 10-second auto-deny
+    # per-command Telegram approval prompt with a 30-second auto-deny
     # timer; see ``handlers/approval.py``.
     if host_bash_workdir is not None:
         _host_workdir = host_bash_workdir
@@ -1219,7 +1219,7 @@ def create_openshrimp_tools(
                         "Short human-readable explanation shown to the "
                         "user in the approval prompt (e.g. 'install "
                         "system package'). Optional but strongly "
-                        "recommended — the user has 10 seconds to "
+                        "recommended — the user has 30 seconds to "
                         "decide."
                     ),
                 },
