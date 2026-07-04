@@ -172,6 +172,49 @@ def test_android_approval_resolves_pending_future(tmp_path: Path) -> None:
         asyncio.run(db.close())
 
 
+def test_android_approval_resolves_host_escape_future(tmp_path: Path) -> None:
+    from open_shrimp.handlers.state import _approval_futures, _approval_resolved_via
+
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    device_id = "android-hostbash-device"
+    tool_use_id = "tool-hb"
+    future = _FakeFuture()
+    # Host-escape prompts register under the ``hb_approve:``/``hb_deny:`` keys.
+    _approval_futures[f"hb_approve:{tool_use_id}"] = future  # type: ignore[assignment]
+    _approval_futures[f"hb_deny:{tool_use_id}"] = future  # type: ignore[assignment]
+    try:
+        _pair(client, private_key, device_id)
+        path = f"/api/agent/approvals/{tool_use_id}"
+        body = b'{"decision":"approve"}'
+        resp = client.post(
+            path,
+            content=body,
+            headers={
+                "content-type": "application/json",
+                **_android_headers(
+                    private_key,
+                    device_id=device_id,
+                    method="POST",
+                    path=path,
+                    body=body,
+                    nonce="nonce-hostbash",
+                ),
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "resolved", "decision": "approve"}
+        assert future.result_value is True
+        # The host-escape flow edits its own message, so no phone marker is set.
+        assert tool_use_id not in _approval_resolved_via
+    finally:
+        _approval_futures.pop(f"hb_approve:{tool_use_id}", None)
+        _approval_futures.pop(f"hb_deny:{tool_use_id}", None)
+        _approval_resolved_via.pop(tool_use_id, None)
+        client.close()
+        asyncio.run(db.close())
+
+
 def test_android_approval_noops_when_future_missing(tmp_path: Path) -> None:
     client, db = _make_client(tmp_path)
     private_key = ec.generate_private_key(ec.SECP256R1())

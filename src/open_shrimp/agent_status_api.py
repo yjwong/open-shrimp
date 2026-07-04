@@ -46,7 +46,9 @@ async def resolve_agent_approval_endpoint(request: Request) -> JSONResponse:
         )
 
     # The keyboard sender registers the same future under both the
-    # ``approve:`` and ``deny:`` callback keys; either resolves it.
+    # ``approve:`` and ``deny:`` callback keys; either resolves it.  Host-escape
+    # (sudo) prompts use their own ``hb_approve:``/``hb_deny:`` keys, so fall
+    # back to that prefix before giving up.
     from open_shrimp.handlers.state import (
         RESOLVED_VIA_ANDROID,
         _approval_futures,
@@ -54,12 +56,20 @@ async def resolve_agent_approval_endpoint(request: Request) -> JSONResponse:
     )
 
     future = _approval_futures.get(f"approve:{tool_use_id}")
+    is_host_escape = False
+    if future is None:
+        future = _approval_futures.get(f"hb_approve:{tool_use_id}")
+        is_host_escape = future is not None
     if future is None or future.done():
         # Already resolved or never existed — treat as a benign no-op so the
         # phone doesn't surface an error when the user was simply too late.
         return JSONResponse({"status": "expired"})
 
-    _approval_resolved_via[tool_use_id] = RESOLVED_VIA_ANDROID
+    # The host-escape flow edits its own message unconditionally and never
+    # reads ``_approval_resolved_via``, so only the standard path needs the
+    # "resolved on phone" marker (and its cleanup).
+    if not is_host_escape:
+        _approval_resolved_via[tool_use_id] = RESOLVED_VIA_ANDROID
     future.set_result(decision == "approve")
     logger.info(
         "Resolved agent approval %s via Android: %s", tool_use_id, decision,

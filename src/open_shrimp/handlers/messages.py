@@ -794,15 +794,40 @@ async def _start_agent_task(
                 is_monitor: bool = False,
             ) -> Any:
                 await finalize_and_reset(context.bot, draft_state)
-                return await _send_host_bash_approval(
-                    bot=context.bot,
-                    chat_id=scope.chat_id,
-                    context_name=ctx_name,
-                    tool_input=tool_input,
+                label = "host_monitor" if is_monitor else "host_bash"
+                command = str(tool_input.get("command", "")).strip()
+                if command:
+                    short = command if len(command) <= 60 else command[:59] + "…"
+                    status_text = f"Approve {label}: {short}?"
+                else:
+                    status_text = f"Approve {label}?"
+                await notify_agent_status(
+                    context.bot_data, config, db, scope, "running",
+                    title=ctx_name,
+                    text=status_text,
+                    awaiting=True,
                     tool_use_id=tool_use_id,
-                    thread_id=scope.thread_id,
-                    is_monitor=is_monitor,
+                    tool_name=label,
+                    todos=_scope_todos.get(scope),
                 )
+                try:
+                    return await _send_host_bash_approval(
+                        bot=context.bot,
+                        chat_id=scope.chat_id,
+                        context_name=ctx_name,
+                        tool_input=tool_input,
+                        tool_use_id=tool_use_id,
+                        thread_id=scope.thread_id,
+                        is_monitor=is_monitor,
+                    )
+                finally:
+                    # Drop the approval overlay: return the Live Update to the
+                    # plain running state once the decision is in.
+                    await notify_agent_status(
+                        context.bot_data, config, db, scope, "running",
+                        title=ctx_name,
+                        todos=_scope_todos.get(scope),
+                    )
 
             # Mutable container for the latest todo list from TodoWrite.
             # Preserved across stream_response iterations so the pinned
