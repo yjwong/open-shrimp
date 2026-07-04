@@ -72,6 +72,10 @@ _CONTAINER_AUTO_APPROVE_TOOLS: set[str] = {"bash"}
 #: prefix is ``<server>_<tool>`` (no ``mcp__`` prefix).
 HOST_BASH_TOOL_NAME = "openshrimp_host_bash"
 
+#: Fully-qualified name of the host_monitor MCP tool — the streaming
+#: host-escape sibling of host_bash (OpenCode's ``<server>_<tool>`` prefix).
+HOST_MONITOR_TOOL_NAME = "openshrimp_host_monitor"
+
 #: Prefixes to skip when extracting the bash command name.
 _BASH_SKIP_PREFIXES = {"sudo", "env", "nohup", "nice", "ionice", "time", "strace"}
 
@@ -648,6 +652,9 @@ class OpenCodePolicy:
 
     def is_host_bash(self, tool_name: str) -> bool:
         return tool_name == HOST_BASH_TOOL_NAME
+
+    def is_host_escape(self, tool_name: str) -> bool:
+        return tool_name in (HOST_BASH_TOOL_NAME, HOST_MONITOR_TOOL_NAME)
 
     def is_todo_write(self, tool_name: str) -> bool:
         return tool_name == "todowrite"

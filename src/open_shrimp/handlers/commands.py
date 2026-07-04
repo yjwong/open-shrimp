@@ -1982,10 +1982,23 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     scope = chat_scope_from_message(message)
     args = message.text.split() if message.text else []
 
+    from open_shrimp import host_monitor
+
     # ── /tasks stop <id> ──
     if len(args) >= 3 and args[1] == "stop":
         target = args[2]
         scope_tasks = _active_bg_tasks.get(scope, {})
+
+        # Host monitors live in their own registry, invisible to the CLI task
+        # registry, so match them here before the background-task lookup.
+        for mon in host_monitor.list_monitors(scope):
+            if mon.monitor_id == target or mon.monitor_id.startswith(target):
+                await host_monitor.stop_monitor(mon.monitor_id)
+                await message.reply_text(
+                    f"Stopped host monitor `{_escape_mdv2(mon.monitor_id)}`\\.",
+                    parse_mode="MarkdownV2",
+                )
+                return
 
         # Find by exact match or prefix.
         matched_task = None
@@ -2025,30 +2038,44 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # ── /tasks (list) ──
     scope_tasks = _active_bg_tasks.get(scope, {})
-    if not scope_tasks:
+    monitors = host_monitor.list_monitors(scope)
+    if not scope_tasks and not monitors:
         await message.reply_text(
             "No active background tasks\\.", parse_mode="MarkdownV2"
         )
         return
 
     now = time.monotonic()
-    lines = [f"*Active background tasks \\({len(scope_tasks)}\\):*\n"]
-    for task in scope_tasks.values():
-        elapsed = int(now - task.started_at)
-        minutes, seconds = divmod(elapsed, 60)
-        duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
+    lines: list[str] = []
+    if scope_tasks:
+        lines.append(f"*Active background tasks \\({len(scope_tasks)}\\):*\n")
+        for task in scope_tasks.values():
+            elapsed = int(now - task.started_at)
+            minutes, seconds = divmod(elapsed, 60)
+            duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
 
-        tid_short = _escape_mdv2(task.task_id[:12])
-        desc_escaped = _escape_mdv2(task.description or "No description")
-        type_escaped = _escape_mdv2(task.task_type or "unknown")
+            tid_short = _escape_mdv2(task.task_id[:12])
+            desc_escaped = _escape_mdv2(task.description or "No description")
+            type_escaped = _escape_mdv2(task.task_type or "unknown")
 
-        line = (
-            f"• `{tid_short}` \\- {desc_escaped}\n"
-            f"  Type: {type_escaped} \\| Duration: {_escape_mdv2(duration)}"
-        )
-        if task.last_tool_name:
-            line += f" \\| Last tool: {_escape_mdv2(task.last_tool_name)}"
-        lines.append(line)
+            line = (
+                f"• `{tid_short}` \\- {desc_escaped}\n"
+                f"  Type: {type_escaped} \\| Duration: {_escape_mdv2(duration)}"
+            )
+            if task.last_tool_name:
+                line += f" \\| Last tool: {_escape_mdv2(task.last_tool_name)}"
+            lines.append(line)
+
+    if monitors:
+        lines.append(f"*Host monitors \\({len(monitors)}\\):*\n")
+        for mon in monitors:
+            mid = _escape_mdv2(mon.monitor_id)
+            desc_escaped = _escape_mdv2(mon.description or "No description")
+            life = "persistent" if mon.persistent else "timed"
+            lines.append(
+                f"• `{mid}` \\- {desc_escaped}\n"
+                f"  Type: host\\_monitor \\({_escape_mdv2(life)}\\)"
+            )
 
     lines.append(f"\nUse `/tasks stop <id>` to stop a task\\.")
     text = "\n".join(lines)

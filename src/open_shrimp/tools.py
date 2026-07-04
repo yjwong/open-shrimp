@@ -1481,6 +1481,168 @@ def create_openshrimp_tools(
             handler=host_bash,
         ))
 
+        from open_shrimp import host_monitor as _host_monitor
+        from open_shrimp.db import ChatScope as _ChatScope
+        from open_shrimp.sudo_audit import log_sudo as _log_sudo
+
+        _monitor_scope = _ChatScope(chat_id, thread_id)
+        _monitor_context_name = context_name or "?"
+
+        _host_monitor_schema = {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "Shell command or script to run on the HOST. Each "
+                        "stdout line is an event; process exit ends the watch. "
+                        "stderr is merged into stdout. Pipe through "
+                        "grep --line-buffered / awk to keep the event stream "
+                        "tight — un-filtered floods auto-stop the monitor."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Short label shown in the approval prompt and in every "
+                        "event notification."
+                    ),
+                },
+                "timeout_ms": {
+                    "type": "number",
+                    "description": (
+                        "Max monitor lifetime in ms. Default 300000, min 1000, "
+                        "max 3600000. Ignored when persistent is true."
+                    ),
+                },
+                "persistent": {
+                    "type": "boolean",
+                    "description": (
+                        "Run until host_monitor_stop or session end (no "
+                        "timeout). Default false."
+                    ),
+                },
+            },
+            "required": ["command", "description"],
+        }
+
+        async def host_monitor(args: dict[str, Any]) -> dict[str, Any]:
+            command = args.get("command", "")
+            if not command:
+                return _text_result(
+                    "Error: command is required.", is_error=True,
+                )
+            description = args.get("description") or command
+            persistent = bool(args.get("persistent", False))
+
+            timeout_ms = args.get("timeout_ms", _host_monitor.DEFAULT_TIMEOUT_MS)
+            if not isinstance(timeout_ms, (int, float)):
+                timeout_ms = _host_monitor.DEFAULT_TIMEOUT_MS
+            timeout_ms = int(timeout_ms)
+            if not persistent and timeout_ms > _host_monitor.MAX_TIMEOUT_MS:
+                return _text_result(
+                    "Error: timeout_ms must be <= 3600000 unless persistent "
+                    "is true.",
+                    is_error=True,
+                )
+            timeout_ms = max(
+                _host_monitor.MIN_TIMEOUT_MS,
+                min(timeout_ms, _host_monitor.MAX_TIMEOUT_MS),
+            )
+
+            try:
+                mon = await _host_monitor.start_monitor(
+                    scope=_monitor_scope,
+                    command=command,
+                    description=description,
+                    cwd=_host_workdir,
+                    timeout_ms=timeout_ms,
+                    persistent=persistent,
+                )
+            except _host_monitor.HostMonitorLimitError as exc:
+                return _text_result(f"Error: {exc}", is_error=True)
+            except Exception as exc:
+                return _text_result(
+                    f"Error spawning host monitor: {exc}", is_error=True,
+                )
+
+            life = (
+                "persistent — runs until host_monitor_stop or session end"
+                if persistent
+                else f"timeout {timeout_ms}ms"
+            )
+            return _text_result(
+                f"Monitor started (monitor {mon.monitor_id}, {life}). You "
+                "will be notified on each event as a separate turn. Keep "
+                "working — do not poll or sleep. Events may arrive while you "
+                "are waiting for the user — an event is not their reply. Stop "
+                f"with host_monitor_stop {mon.monitor_id} or /tasks."
+            )
+
+        tools_list.append(OpenShrimpTool(
+            name="host_monitor",
+            description=(
+                "Watch a long-running HOST command, outside the sandbox, and "
+                "receive each stdout line as an event delivered into this "
+                "conversation. The streaming sibling of host_bash: use it to "
+                "tail logs, follow a build, or watch a host-only service. "
+                "Every arm prompts the user for approval (host escape has no "
+                "sandbox boundary). Output is throttled and coalesced; a "
+                "sustained flood auto-stops the monitor — always pipe noisy "
+                "sources through grep --line-buffered / awk. Do not poll or "
+                "sleep after arming; events arrive on their own. Stop with "
+                "host_monitor_stop or /tasks."
+            ),
+            input_schema=_host_monitor_schema,
+            read_only=False,
+            handler=host_monitor,
+        ))
+
+        _host_monitor_stop_schema = {
+            "type": "object",
+            "properties": {
+                "monitor_id": {
+                    "type": "string",
+                    "description": (
+                        "The id returned when the monitor was armed."
+                    ),
+                },
+            },
+            "required": ["monitor_id"],
+        }
+
+        async def host_monitor_stop(args: dict[str, Any]) -> dict[str, Any]:
+            monitor_id = args.get("monitor_id", "")
+            if not monitor_id:
+                return _text_result(
+                    "Error: monitor_id is required.", is_error=True,
+                )
+            stopped = await _host_monitor.stop_monitor(monitor_id)
+            await _log_sudo(
+                chat_id=chat_id,
+                context_name=_monitor_context_name,
+                command=f"host_monitor_stop {monitor_id}",
+                outcome="approved",
+            )
+            if not stopped:
+                return _text_result(
+                    f"No active monitor {monitor_id}.", is_error=True,
+                )
+            return _text_result(f"Monitor {monitor_id} stopped.")
+
+        tools_list.append(OpenShrimpTool(
+            name="host_monitor_stop",
+            description=(
+                "Stop a running host_monitor by its id. The host-side "
+                "equivalent of TaskStop (host monitors are invisible to the "
+                "CLI task registry). Auto-approved — it only kills a process "
+                "OpenShrimp owns."
+            ),
+            input_schema=_host_monitor_stop_schema,
+            read_only=False,
+            handler=host_monitor_stop,
+        ))
+
     # --- ask_context (cross-context query) ---
     # Lets the agent ask a focused question of another context and get a
     # synchronous answer.  Requires the full config (for the contexts map)

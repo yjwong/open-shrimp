@@ -382,6 +382,15 @@ async def get_or_create_session(
         # card must not also fire (which would show the raw wire name).
         if config is not None:
             allowed_tools.append("mcp__openshrimp__ask_context")
+        # Auto-approve host_monitor_stop when host escape is enabled: it only
+        # kills a process OpenShrimp owns, so it needs no fresh approval (the
+        # host_monitor arm already got one).  host_monitor and host_bash are
+        # deliberately absent — they route through the sudo approval flow.
+        if (
+            context.sandbox is not None
+            and context.sandbox.allow_host_escape
+        ):
+            allowed_tools.append("mcp__openshrimp__host_monitor_stop")
     # Auto-approve computer use tools when enabled.  A phone-use context also
     # carries the computer-use desktop, so it enables the computer_* tools too.
     _phone_use_enabled = (
@@ -909,6 +918,13 @@ async def reconnect_session(
 
 async def close_session(scope: ChatScope) -> None:
     """Close and remove the session for *scope*, if any."""
+    # Kill any host monitors bound to this scope first: they stream host-side
+    # process output into the session, and a live monitor must not outlive the
+    # session it dispatches into (covers /clear, context switch, shutdown).
+    from open_shrimp import host_monitor
+
+    await host_monitor.stop_scope_monitors(scope)
+
     session = _active_sessions.pop(scope, None)
     if session is None:
         return
@@ -1202,13 +1218,15 @@ def _make_host_bash_approval_proxy(
     ctx: CallbackContext,
 ) -> HostBashApprovalCallback:
     async def _proxy(
-        tool_input: dict[str, Any], tool_use_id: str,
+        tool_input: dict[str, Any], tool_use_id: str, is_monitor: bool,
     ) -> Any:
         if ctx.request_host_bash_approval is None:
             logger.warning(
-                "host_bash invoked but no approval callback set; denying"
+                "host escape invoked but no approval callback set; denying"
             )
             return "denied"
-        return await ctx.request_host_bash_approval(tool_input, tool_use_id)
+        return await ctx.request_host_bash_approval(
+            tool_input, tool_use_id, is_monitor,
+        )
 
     return _proxy

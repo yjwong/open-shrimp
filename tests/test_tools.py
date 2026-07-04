@@ -95,6 +95,39 @@ def test_host_bash_gated_on_workdir() -> None:
     assert "host_bash" in _names(tools)
 
 
+def test_host_monitor_tools_gated_on_workdir() -> None:
+    tools = create_openshrimp_tools(bot=MagicMock(), chat_id=1)
+    assert "host_monitor" not in _names(tools)
+    assert "host_monitor_stop" not in _names(tools)
+
+    tools = create_openshrimp_tools(
+        bot=MagicMock(), chat_id=1, host_bash_workdir="/tmp",
+    )
+    assert "host_monitor" in _names(tools)
+    assert "host_monitor_stop" in _names(tools)
+
+
+@pytest.mark.asyncio
+async def test_host_monitor_schema_validation() -> None:
+    host_monitor = _by_name(
+        create_openshrimp_tools(
+            bot=MagicMock(), chat_id=1, host_bash_workdir="/tmp",
+        )
+    )["host_monitor"].handler
+
+    # Missing command -> error, no process spawned.
+    r = await host_monitor({"description": "x"})
+    assert r["is_error"] is True
+    assert "command is required" in r["content"][0]["text"]
+
+    # Over-max timeout without persistent -> rejected on the timeout_ms path.
+    r = await host_monitor({
+        "command": "true", "description": "x", "timeout_ms": 3_600_001,
+    })
+    assert r["is_error"] is True
+    assert "timeout_ms" in r["content"][0]["text"]
+
+
 # --- read_only flags --------------------------------------------------------
 
 
@@ -119,6 +152,7 @@ def test_read_only_flags() -> None:
         "create_schedule", "delete_schedule", "computer_click",
         "computer_type", "computer_key", "computer_scroll",
         "computer_toplevel", "port_forward", "host_bash",
+        "host_monitor", "host_monitor_stop",
     ):
         assert tools[name].read_only is False, name
 

@@ -59,14 +59,17 @@ contexts:
     #                              # Build context is the Dockerfile's parent dir.
     #                              # The Claude CLI binary is copied in as "claude"
     #                              # (available via CLAUDE_CLI build arg).
-    #   allow_host_escape: false   # Sudo mode. Exposes a `host_bash` MCP tool that
-    #                              # runs shell commands on the HOST (outside the
-    #                              # sandbox). Every invocation prompts the user for
-    #                              # approval via Telegram and auto-denies after 10
-    #                              # seconds. All invocations are logged to
-    #                              # `sudo.log` in the OpenShrimp data directory
-    #                              # (platform-specific; per-instance when
-    #                              # instance_name is set).
+    #   allow_host_escape: false   # Sudo mode. Exposes `host_bash` and
+    #                              # `host_monitor` MCP tools that run shell
+    #                              # commands on the HOST (outside the sandbox).
+    #                              # host_bash is one-shot; host_monitor streams
+    #                              # each stdout line of a long-running command
+    #                              # back as an event. Every arm prompts the user
+    #                              # for approval via Telegram and auto-denies
+    #                              # after 30 seconds. All arms/stops are logged
+    #                              # to `sudo.log` in the OpenShrimp data
+    #                              # directory (platform-specific; per-instance
+    #                              # when instance_name is set).
     #                              # Use sparingly — defeats the sandbox boundary.
     #   computer_use: true         # Enable GUI interaction (computer use).
     #                              # Runs a desktop environment inside the sandbox.

@@ -87,6 +87,11 @@ _AUTO_APPROVED_AT_SESSION_START: list[str] = [
 #: special-case the host-escape path.
 HOST_BASH_TOOL_NAME = "mcp__openshrimp__host_bash"
 
+#: Fully-qualified name of the host_monitor MCP tool — the streaming
+#: host-escape sibling of host_bash.  Routed through the same fresh-approval
+#: pre-check as host_bash.
+HOST_MONITOR_TOOL_NAME = "mcp__openshrimp__host_monitor"
+
 #: Bash commands that are auto-approved when "accept all edits" is active.
 #: Mirrors Claude Code's acceptEdits mode allowlist — these are common
 #: file-manipulation commands that complement Edit/Write auto-approval.
@@ -595,6 +600,9 @@ class ClaudeSdkPolicy:
 
     def is_host_bash(self, tool_name: str) -> bool:
         return tool_name == HOST_BASH_TOOL_NAME
+
+    def is_host_escape(self, tool_name: str) -> bool:
+        return tool_name in (HOST_BASH_TOOL_NAME, HOST_MONITOR_TOOL_NAME)
 
     def is_todo_write(self, tool_name: str) -> bool:
         return tool_name == "TodoWrite"

@@ -176,8 +176,16 @@ class BackendPolicy(Protocol):
     def is_host_bash(self, tool_name: str) -> bool:
         """True for the host-escape MCP tool's backend-specific wire
         name (SDK: ``mcp__openshrimp__host_bash``; OpenCode:
-        ``openshrimp_host_bash``).  Drives the sudo-mode approval flow
-        in ``hooks.py`` and the icon/label render in ``stream.py``."""
+        ``openshrimp_host_bash``).  Drives the icon/label render in
+        ``stream.py``."""
+        ...
+
+    def is_host_escape(self, tool_name: str) -> bool:
+        """True for any host-escape arm tool — ``host_bash`` **or**
+        ``host_monitor`` — in the backend's wire vocabulary.  Drives the
+        sudo-mode fresh-approval pre-check in ``hooks.py``.  Excludes
+        ``host_monitor_stop``, which only kills a process OpenShrimp owns
+        and is auto-approved."""
         ...
 
     def is_todo_write(self, tool_name: str) -> bool:

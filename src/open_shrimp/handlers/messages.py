@@ -789,7 +789,9 @@ async def _start_agent_task(
                 )
 
             async def request_host_bash(
-                tool_input: dict[str, Any], tool_use_id: str,
+                tool_input: dict[str, Any],
+                tool_use_id: str,
+                is_monitor: bool = False,
             ) -> Any:
                 await finalize_and_reset(context.bot, draft_state)
                 return await _send_host_bash_approval(
@@ -799,6 +801,7 @@ async def _start_agent_task(
                     tool_input=tool_input,
                     tool_use_id=tool_use_id,
                     thread_id=scope.thread_id,
+                    is_monitor=is_monitor,
                 )
 
             # Mutable container for the latest todo list from TodoWrite.

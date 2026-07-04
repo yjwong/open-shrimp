@@ -290,14 +290,18 @@ def _render_command_block(command: str, max_len: int) -> str:
 
 
 def _format_host_bash_approval(
-    tool_input: dict[str, Any], remaining: float,
+    tool_input: dict[str, Any], remaining: float, is_monitor: bool = False,
 ) -> str:
-    """Render the host_bash approval prompt with a countdown line."""
+    """Render the host-escape approval prompt with a countdown line."""
     command = tool_input.get("command", "")
     description = tool_input.get("description", "")
     cwd = tool_input.get("cwd", "")
 
-    header = "⚠️ *HOST shell* \\(sudo mode\\)"
+    header = (
+        "⚠️ *Start HOST monitor* \\(sudo mode\\)"
+        if is_monitor
+        else "⚠️ *HOST shell* \\(sudo mode\\)"
+    )
     parts: list[str] = [header]
     if description:
         parts.append(_escape_mdv2(description))
@@ -305,17 +309,25 @@ def _format_host_bash_approval(
     if cwd:
         parts.append(f"_cwd:_ `{_escape_mdv2(cwd)}`")
     secs = max(0, int(round(remaining)))
-    parts.append(
-        f"_Auto\\-deny in {secs}s — this command runs OUTSIDE the "
-        f"sandbox\\._"
-    )
+    if is_monitor:
+        parts.append(
+            f"_Auto\\-deny in {secs}s — this streams each output line as an "
+            f"event and runs OUTSIDE the sandbox\\._"
+        )
+    else:
+        parts.append(
+            f"_Auto\\-deny in {secs}s — this command runs OUTSIDE the "
+            f"sandbox\\._"
+        )
     return "\n\n".join(parts)
 
 
 def _format_host_bash_final(
-    tool_input: dict[str, Any], outcome: HostBashOutcome,
+    tool_input: dict[str, Any],
+    outcome: HostBashOutcome,
+    is_monitor: bool = False,
 ) -> str:
-    """Render the final state of the host_bash approval message."""
+    """Render the final state of the host-escape approval message."""
     icon = {
         "approved": "✅",
         "denied": "❌",
@@ -326,8 +338,9 @@ def _format_host_bash_final(
         "denied": "Denied",
         "timeout": "Auto\\-denied \\(no response within 30s\\)",
     }[outcome]
+    label = "HOST monitor" if is_monitor else "HOST shell"
     block = _render_command_block(tool_input.get("command", ""), 4096 - 200)
-    return f"{icon} *HOST shell* — {verb}\n\n{block}"
+    return f"{icon} *{label}* — {verb}\n\n{block}"
 
 
 async def _host_bash_countdown(
@@ -338,6 +351,7 @@ async def _host_bash_countdown(
     tool_input: dict[str, Any],
     deadline: float,
     future: asyncio.Future[bool],
+    is_monitor: bool = False,
 ) -> None:
     """Edit the approval message every tick with the remaining countdown."""
     loop = asyncio.get_running_loop()
@@ -365,7 +379,9 @@ async def _host_bash_countdown(
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=_format_host_bash_approval(tool_input, remaining),
+                text=_format_host_bash_approval(
+                    tool_input, remaining, is_monitor,
+                ),
                 parse_mode="MarkdownV2",
                 reply_markup=_host_bash_keyboard(tool_use_id),
             )
@@ -394,8 +410,9 @@ async def _send_host_bash_approval(
     tool_input: dict[str, Any],
     tool_use_id: str,
     thread_id: int | None = None,
+    is_monitor: bool = False,
 ) -> HostBashOutcome:
-    """Send a host_bash approval prompt and resolve to approved/denied/timeout."""
+    """Send a host-escape approval prompt and resolve to approved/denied/timeout."""
     loop = asyncio.get_running_loop()
     future: asyncio.Future[bool] = loop.create_future()
     timed_out = [False]
@@ -428,7 +445,9 @@ async def _send_host_bash_approval(
 
     sent_msg = await bot.send_message(
         chat_id=chat_id,
-        text=_format_host_bash_approval(tool_input, _HOST_BASH_TIMEOUT_SECONDS),
+        text=_format_host_bash_approval(
+            tool_input, _HOST_BASH_TIMEOUT_SECONDS, is_monitor,
+        ),
         parse_mode="MarkdownV2",
         reply_markup=_host_bash_keyboard(tool_use_id),
         **thread_kwargs,
@@ -438,6 +457,7 @@ async def _send_host_bash_approval(
 
     countdown_task = asyncio.create_task(_host_bash_countdown(
         bot, chat_id, message_id, tool_use_id, tool_input, deadline, future,
+        is_monitor,
     ))
 
     try:
@@ -465,13 +485,13 @@ async def _send_host_bash_approval(
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
-            text=_format_host_bash_final(tool_input, outcome),
+            text=_format_host_bash_final(tool_input, outcome, is_monitor),
             parse_mode="MarkdownV2",
             reply_markup=None,
         )
     except Exception:
         logger.debug(
-            "Failed to edit host_bash approval message", exc_info=True,
+            "Failed to edit host-escape approval message", exc_info=True,
         )
 
     await log_sudo(

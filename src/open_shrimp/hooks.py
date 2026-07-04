@@ -67,10 +67,11 @@ QuestionCallback = Callable[[list[dict[str, Any]]], Awaitable[dict[str, str]]]
 # Outcome of a host_bash approval prompt.
 HostBashOutcome = Literal["approved", "denied", "timeout"]
 
-# Type for the host_bash approval callback: receives the host-escape tool's
-# input dict and a tool_use_id, returns the resolution outcome.
+# Type for the host-escape approval callback: receives the tool's input dict,
+# a tool_use_id, and whether the arm is a streaming monitor (host_monitor) vs
+# a one-shot command (host_bash); returns the resolution outcome.
 HostBashApprovalCallback = Callable[
-    [dict[str, Any], str], Awaitable[HostBashOutcome]
+    [dict[str, Any], str, bool], Awaitable[HostBashOutcome]
 ]
 
 # Type for the auto-approved edit notification callback.
@@ -272,35 +273,37 @@ def make_can_use_tool(
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResult:
-        # host_bash (sudo mode): always route to the dedicated approval
-        # callback.  Never auto-approved by patterns, session rules, or
-        # the containerized fast-path — the whole point is that this
-        # tool escapes the sandbox, so every invocation gets a fresh
-        # Telegram prompt with a 10-second auto-deny timer.
-        if p.is_host_bash(tool_name):
+        # host escape (host_bash / host_monitor, sudo mode): always route to
+        # the dedicated approval callback.  Never auto-approved by patterns,
+        # session rules, or the containerized fast-path — the whole point is
+        # that these tools escape the sandbox, so every arm gets a fresh
+        # Telegram prompt with an auto-deny timer.
+        if p.is_host_escape(tool_name):
+            is_monitor = not p.is_host_bash(tool_name)
+            label = "host_monitor" if is_monitor else "host_bash"
             if request_host_bash_approval is None:
                 logger.warning(
-                    "host_bash invoked but no approval callback wired; denying"
+                    "%s invoked but no approval callback wired; denying", label,
                 )
                 return PermissionResultDeny(
-                    message="host_bash approval is not configured.",
+                    message=f"{label} approval is not configured.",
                 )
             outcome = await request_host_bash_approval(
-                tool_input, context.tool_use_id,
+                tool_input, context.tool_use_id, is_monitor,
             )
             if outcome == "approved":
                 return PermissionResultAllow()
             if outcome == "timeout":
                 return PermissionResultDeny(
                     message=(
-                        "Auto-denied: the user did not respond to the "
-                        "host_bash approval prompt within 10 seconds. "
-                        "They may be away — try again later, or fall "
-                        "back to the sandboxed Bash tool."
+                        f"Auto-denied: the user did not respond to the "
+                        f"{label} approval prompt in time. They may be away — "
+                        "try again later, or fall back to the sandboxed Bash "
+                        "tool."
                     ),
                 )
             return PermissionResultDeny(
-                message="User denied the host_bash command.",
+                message=f"User denied the {label} command.",
             )
 
         # port_forward: list/remove don't expose new attack surface — only
