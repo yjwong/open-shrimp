@@ -1566,6 +1566,81 @@ def create_openshrimp_tools(
                     f"Error spawning host monitor: {exc}", is_error=True,
                 )
 
+            # SDK-Monitor presentation parity: a ⏳ status message with a
+            # 📺 View output button (Terminal Mini App tails the tee file),
+            # edited in place to a terminal state when the monitor ends.
+            # Best-effort — presentation must never break the monitor.
+            from open_shrimp.handlers.utils import _escape_mdv2
+
+            reply_markup = None
+            if terminal_base_url and config is not None:
+                app_url = (
+                    f"{terminal_base_url}/terminal/"
+                    f"?type=task&id={mon.monitor_id}"
+                )
+                reply_markup = InlineKeyboardMarkup([[
+                    make_web_app_button(
+                        "📺 View output",
+                        app_url,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        bot_token=config.telegram.token,
+                        is_private_chat=is_private_chat,
+                    ),
+                ]])
+            status_msg = None
+            try:
+                status_msg = await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⏳ {_escape_mdv2(description)}",
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup,
+                    disable_notification=True,
+                    **_thread_kwargs,
+                )
+            except Exception:
+                logger.debug(
+                    "host_monitor %s status message failed",
+                    mon.monitor_id, exc_info=True,
+                )
+            if status_msg is not None:
+                _status_message_id = status_msg.message_id
+                _status_markup = reply_markup
+
+                async def _on_end(reason: str) -> None:
+                    icon = {
+                        "ended": "✅",
+                        "timeout": "⏱️",
+                        "flood": "🛑",
+                        "stopped": "⏹️",
+                    }.get(reason, "✅")
+                    try:
+                        # Keep the View output button so the (now static)
+                        # tee file stays reachable after the end.
+                        await bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=_status_message_id,
+                            text=(
+                                f"{icon} {_escape_mdv2(description)} — "
+                                f"{_escape_mdv2(reason)}"
+                            ),
+                            parse_mode="MarkdownV2",
+                            reply_markup=_status_markup,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "host_monitor %s status edit failed",
+                            mon.monitor_id, exc_info=True,
+                        )
+
+                # Safe post-arm assignment: on_end only fires at finalize,
+                # and _finalize is one-shot guarded.  A very short-lived
+                # command can finalize while the ⏳ send was in flight —
+                # deliver the missed edit ourselves in that case.
+                mon.on_end = _on_end
+                if mon._finalized:
+                    await _on_end("ended")
+
             life = (
                 "persistent — runs until host_monitor_stop or session end"
                 if persistent

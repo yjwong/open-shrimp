@@ -1989,17 +1989,6 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         target = args[2]
         scope_tasks = _active_bg_tasks.get(scope, {})
 
-        # Host monitors live in their own registry, invisible to the CLI task
-        # registry, so match them here before the background-task lookup.
-        for mon in host_monitor.list_monitors(scope):
-            if mon.monitor_id == target or mon.monitor_id.startswith(target):
-                await host_monitor.stop_monitor(mon.monitor_id)
-                await message.reply_text(
-                    f"Stopped host monitor `{_escape_mdv2(mon.monitor_id)}`\\.",
-                    parse_mode="MarkdownV2",
-                )
-                return
-
         # Find by exact match or prefix.
         matched_task = None
         for tid, task in scope_tasks.items():
@@ -2012,6 +2001,24 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"No active task matching `{_escape_mdv2(target)}`\\.",
                 parse_mode="MarkdownV2",
             )
+            return
+
+        # Host monitors are host-side processes invisible to the CLI task
+        # registry; stopping one goes through host_monitor, whose _finalize
+        # unregisters it from _active_bg_tasks.
+        if matched_task.task_type == host_monitor.TASK_TYPE:
+            stopped = await host_monitor.stop_monitor(matched_task.task_id)
+            if stopped:
+                await message.reply_text(
+                    f"Stopped host monitor "
+                    f"`{_escape_mdv2(matched_task.task_id)}`\\.",
+                    parse_mode="MarkdownV2",
+                )
+            else:
+                await message.reply_text(
+                    "Failed to stop host monitor \\(already gone\\)\\.",
+                    parse_mode="MarkdownV2",
+                )
             return
 
         from open_shrimp.client_manager import stop_background_task
@@ -2037,9 +2044,10 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     # ── /tasks (list) ──
+    # Host monitors register as transient tasks (task_type "host_monitor"),
+    # so they render through the normal _active_bg_tasks path below.
     scope_tasks = _active_bg_tasks.get(scope, {})
-    monitors = host_monitor.list_monitors(scope)
-    if not scope_tasks and not monitors:
+    if not scope_tasks:
         await message.reply_text(
             "No active background tasks\\.", parse_mode="MarkdownV2"
         )
@@ -2047,35 +2055,23 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     now = time.monotonic()
     lines: list[str] = []
-    if scope_tasks:
-        lines.append(f"*Active background tasks \\({len(scope_tasks)}\\):*\n")
-        for task in scope_tasks.values():
-            elapsed = int(now - task.started_at)
-            minutes, seconds = divmod(elapsed, 60)
-            duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
+    lines.append(f"*Active background tasks \\({len(scope_tasks)}\\):*\n")
+    for task in scope_tasks.values():
+        elapsed = int(now - task.started_at)
+        minutes, seconds = divmod(elapsed, 60)
+        duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
 
-            tid_short = _escape_mdv2(task.task_id[:12])
-            desc_escaped = _escape_mdv2(task.description or "No description")
-            type_escaped = _escape_mdv2(task.task_type or "unknown")
+        tid_short = _escape_mdv2(task.task_id[:12])
+        desc_escaped = _escape_mdv2(task.description or "No description")
+        type_escaped = _escape_mdv2(task.task_type or "unknown")
 
-            line = (
-                f"• `{tid_short}` \\- {desc_escaped}\n"
-                f"  Type: {type_escaped} \\| Duration: {_escape_mdv2(duration)}"
-            )
-            if task.last_tool_name:
-                line += f" \\| Last tool: {_escape_mdv2(task.last_tool_name)}"
-            lines.append(line)
-
-    if monitors:
-        lines.append(f"*Host monitors \\({len(monitors)}\\):*\n")
-        for mon in monitors:
-            mid = _escape_mdv2(mon.monitor_id)
-            desc_escaped = _escape_mdv2(mon.description or "No description")
-            life = "persistent" if mon.persistent else "timed"
-            lines.append(
-                f"• `{mid}` \\- {desc_escaped}\n"
-                f"  Type: host\\_monitor \\({_escape_mdv2(life)}\\)"
-            )
+        line = (
+            f"• `{tid_short}` \\- {desc_escaped}\n"
+            f"  Type: {type_escaped} \\| Duration: {_escape_mdv2(duration)}"
+        )
+        if task.last_tool_name:
+            line += f" \\| Last tool: {_escape_mdv2(task.last_tool_name)}"
+        lines.append(line)
 
     lines.append(f"\nUse `/tasks stop <id>` to stop a task\\.")
     text = "\n".join(lines)

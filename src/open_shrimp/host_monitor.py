@@ -21,7 +21,10 @@ import logging
 import os
 import signal
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TextIO
 
 from open_shrimp import dispatch_registry
 from open_shrimp.db import ChatScope
@@ -71,14 +74,23 @@ class HostMonitor:
     #: detect a sustained flood past ``FLOOD_WINDOW_S``.
     suppress_started: float | None = None
     stopped: bool = False
+    #: Full-stream tee: every stdout line is appended here unthrottled, so the
+    #: Terminal Mini App can tail the complete output like an SDK task file.
+    output_path: Path | None = None
+    output_fh: TextIO | None = None
+    #: Presenter hook fired exactly once at end of life with the reason
+    #: ("ended" | "timeout" | "flood" | "stopped").
+    on_end: Callable[[str], Awaitable[None]] | None = None
+    _finalized: bool = False
 
+
+#: ``project`` segment for :func:`transient_task_output_path` and the
+#: ``task_type`` under which monitors register in ``_active_bg_tasks``.
+TASK_PROJECT = "host_monitor"
+TASK_TYPE = "host_monitor"
 
 _monitors: dict[str, HostMonitor] = {}
 _monitors_by_scope: dict[ChatScope, set[str]] = {}
-
-
-def _header(mon: HostMonitor) -> str:
-    return f"[host_monitor {mon.monitor_id}] {mon.description}"
 
 
 # --- Registry bookkeeping ---------------------------------------------------
@@ -126,7 +138,8 @@ async def _dispatch(mon: HostMonitor, text: str) -> None:
 
 
 def _event_message(mon: HostMonitor, lines: list[str], suppressed: int) -> str:
-    parts = [_header(mon)]
+    """One coalesced event, in the SDK Monitor's ``<task-notification>`` shape."""
+    parts: list[str] = []
     if suppressed:
         parts.append(
             f"[{suppressed} events suppressed — output rate too high. "
@@ -135,17 +148,30 @@ def _event_message(mon: HostMonitor, lines: list[str], suppressed: int) -> str:
         )
     if lines:
         parts.append("\n".join(lines))
-    return "\n".join(parts)
-
-
-def _flood_message(mon: HostMonitor) -> str:
+    event = "\n".join(parts)
     return (
-        f"{_header(mon)}\n"
-        "[Monitor stopped — too much output. Re-arm host_monitor with a "
-        "command that filters more aggressively; pipe through "
-        "grep --line-buffered / awk so only the lines you care about become "
-        "events.]"
+        "<task-notification>\n"
+        f"<task-id>{mon.monitor_id}</task-id>\n"
+        f'<summary>Monitor event: "{mon.description}"</summary>\n'
+        f"<event>{event}</event>\n"
+        "</task-notification>"
     )
+
+
+def _end_message(mon: HostMonitor, status: str, detail: str) -> str:
+    """The end-of-stream notification, mimicking the SDK completion envelope."""
+    parts = [
+        "<task-notification>",
+        f"<task-id>{mon.monitor_id}</task-id>",
+    ]
+    if mon.output_path is not None:
+        parts.append(f"<output-file>{mon.output_path}</output-file>")
+    parts.extend([
+        f"<status>{status}</status>",
+        f'<summary>Monitor "{mon.description}" stream ended — {detail}</summary>',
+        "</task-notification>",
+    ])
+    return "\n".join(parts)
 
 
 # --- Coalescing + throttle reader loop --------------------------------------
@@ -154,6 +180,14 @@ def _flood_message(mon: HostMonitor) -> str:
 def _on_line(mon: HostMonitor, line: str) -> None:
     if mon.stopped:
         return
+    # Tee the full stream to the output file before any throttle bookkeeping:
+    # the file gets everything, the chat gets coalesced events (SDK parity).
+    if mon.output_fh is not None:
+        try:
+            mon.output_fh.write(line + "\n")
+            mon.output_fh.flush()
+        except OSError:
+            pass
     if len(mon.pending) < MAX_PENDING:
         mon.pending.append(line)
     else:
@@ -186,8 +220,14 @@ async def _flush(mon: HostMonitor, *, final: bool = False) -> None:
         mon.suppress_started is not None
         and (mon.loop.time() - mon.suppress_started) > FLOOD_WINDOW_S
     ):
-        await _dispatch(mon, _flood_message(mon))
-        await _stop(mon)
+        await _dispatch(mon, _end_message(
+            mon, "flood",
+            "stopped, too much output. Re-arm host_monitor with a command "
+            "that filters more aggressively; pipe through "
+            "grep --line-buffered / awk so only the lines you care about "
+            "become events.",
+        ))
+        await _stop(mon, reason="flood")
         return
 
     if suppressed == 0:
@@ -230,12 +270,46 @@ async def _natural_exit(mon: HostMonitor) -> None:
         mon.timeout_handle.cancel()
         mon.timeout_handle = None
     await _dispatch(
-        mon, f"{_header(mon)}\n[Monitor ended — process exited (code {rc}).]",
+        mon, _end_message(mon, "completed", f"process exited (code {rc})."),
     )
     _deregister(mon)
+    await _finalize(mon, "ended")
 
 
 # --- Lifecycle: reap, kill, stop --------------------------------------------
+
+
+async def _finalize(mon: HostMonitor, reason: str) -> None:
+    """One-shot presentation cleanup: close the tee, unregister, fire on_end.
+
+    Called from both terminal paths (``_natural_exit`` and ``_stop``) so it
+    runs exactly once regardless of which wins the race.  Best-effort — a
+    presentation failure must never break monitor teardown.
+    """
+    if mon._finalized:
+        return
+    mon._finalized = True
+    if mon.output_fh is not None:
+        try:
+            mon.output_fh.close()
+        except OSError:
+            pass
+        mon.output_fh = None
+    try:
+        from open_shrimp.handlers.state import unregister_transient_task
+
+        unregister_transient_task(mon.scope, mon.monitor_id)
+    except Exception:
+        logger.debug(
+            "host_monitor %s unregister failed", mon.monitor_id, exc_info=True,
+        )
+    if mon.on_end is not None:
+        try:
+            await mon.on_end(reason)
+        except Exception:
+            logger.debug(
+                "host_monitor %s on_end failed", mon.monitor_id, exc_info=True,
+            )
 
 
 def _kill_proc(mon: HostMonitor) -> None:
@@ -253,7 +327,7 @@ async def _reap(mon: HostMonitor) -> int | None:
         return mon.proc.returncode
 
 
-async def _stop(mon: HostMonitor) -> None:
+async def _stop(mon: HostMonitor, reason: str = "stopped") -> None:
     """Authoritative teardown: mark stopped, cancel timers, kill, reap, drop.
 
     Owns every step so a monitor never leaks even when the killed process's
@@ -274,6 +348,7 @@ async def _stop(mon: HostMonitor) -> None:
         mon.reader_task.cancel()
     await _reap(mon)
     _deregister(mon)
+    await _finalize(mon, reason)
 
 
 def _on_timeout(mon: HostMonitor) -> None:
@@ -285,11 +360,12 @@ async def _timeout_stop(mon: HostMonitor) -> None:
     if mon.stopped:
         return
     await _dispatch(
-        mon,
-        f"{_header(mon)}\n[Monitor timed out — re-arm host_monitor if you "
-        "still need it.]",
+        mon, _end_message(
+            mon, "timeout",
+            "timed out; re-arm host_monitor if you still need it.",
+        ),
     )
-    await _stop(mon)
+    await _stop(mon, reason="timeout")
 
 
 # --- Public API -------------------------------------------------------------
@@ -303,6 +379,7 @@ async def start_monitor(
     cwd: str,
     timeout_ms: int,
     persistent: bool,
+    on_end: Callable[[str], Awaitable[None]] | None = None,
 ) -> HostMonitor:
     """Spawn a host command, register it, and begin streaming its lines.
 
@@ -332,8 +409,37 @@ async def start_monitor(
         proc=proc,
         loop=loop,
         persistent=persistent,
+        on_end=on_end,
     )
     _register(mon)
+
+    # Presentation plumbing (tee file + transient-task registry) is
+    # best-effort: mirror _ProgressSink — never let it break the monitor.
+    try:
+        from open_shrimp.terminal.log_source import transient_task_output_path
+
+        path = transient_task_output_path(TASK_PROJECT, mon.monitor_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mon.output_fh = open(path, "a", encoding="utf-8")
+        mon.output_path = path
+    except OSError:
+        logger.debug(
+            "host_monitor %s could not open output tee", mon.monitor_id,
+            exc_info=True,
+        )
+    try:
+        from open_shrimp.handlers.state import register_transient_task
+
+        register_transient_task(
+            scope, mon.monitor_id,
+            description=description, task_type=TASK_TYPE,
+        )
+    except Exception:
+        logger.debug(
+            "host_monitor %s could not register transient task",
+            mon.monitor_id, exc_info=True,
+        )
+
     mon.reader_task = asyncio.create_task(_reader_loop(mon))
     if not persistent:
         mon.timeout_handle = loop.call_later(
