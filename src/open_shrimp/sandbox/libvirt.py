@@ -45,6 +45,7 @@ from open_shrimp.sandbox.skill_paths import (
 )
 
 from open_shrimp.config import SandboxConfig
+from open_shrimp.vnc.rfb_snapshot import RfbSnapshotError, capture_to_png
 from open_shrimp.security_key.vm_helper_binary import (
     BINARY_NAME as SECURITY_KEY_HELPER_BINARY,
     ensure_security_key_vm_helper,
@@ -71,7 +72,6 @@ from open_shrimp.sandbox.libvirt_helpers import (
     load_cloud_init_fingerprint,
     load_ssh_port,
     qmp_send_key_combo,
-    qmp_screendump,
     qmp_send_mouse_event,
     qmp_send_scroll_event,
     qmp_type_text,
@@ -1043,13 +1043,24 @@ class LibvirtSandbox:
     # -- Computer-use operations ---------------------------------------------
 
     def take_screenshot(self, output_path: Path) -> None:
-        """Take a screenshot of the VM display via QMP ``screendump``.
+        """Capture the VM display over QEMU's built-in VNC (RFB).
 
-        Uses QMP to capture directly from the QEMU display device,
-        which works uniformly with and without VirGL and correctly
-        captures XWayland windows (unlike ``grim`` / ``wlr-screencopy``).
+        QMP ``screendump`` reads a pixman ``DisplaySurface`` that does not
+        exist when VirGL is enabled: the scanout is a GL/dmabuf resource on
+        the ``egl-headless`` display, so ``screendump`` fails with "no
+        surface". The live frame is served by QEMU's VNC server, and the
+        RFB snapshot works uniformly with and without VirGL.
         """
-        qmp_screendump(self._conn, self._dom_name, output_path)
+        port = self.get_vnc_port()
+        if port is None:
+            raise RuntimeError(
+                "cannot take screenshot: VNC port unavailable "
+                "(is the domain running with computer-use enabled?)"
+            )
+        try:
+            capture_to_png("127.0.0.1", port, output_path)
+        except RfbSnapshotError as e:
+            raise RuntimeError(f"VNC screenshot failed: {e}") from e
 
     def send_click(self, x: int, y: int, button: str = "left") -> None:
         """Click at screen coordinates via QMP."""
