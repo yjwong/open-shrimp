@@ -1736,6 +1736,7 @@ def create_openshrimp_tools(
             terminal_base_url=terminal_base_url,
             sandbox_managers=sandbox_managers,
             mcp_proxy=mcp_proxy,
+            db=db,
         )
         if ask_tool is not None:
             tools_list.append(ask_tool)

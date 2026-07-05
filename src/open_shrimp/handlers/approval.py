@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
+from open_shrimp.cross_context import handle_handoff_callback
 from open_shrimp.db import ChatScope
 
 from open_shrimp.handlers.state import (
@@ -914,6 +915,11 @@ async def handle_approval_callback(
         approved = data.startswith(_HOST_BASH_APPROVE_PREFIX)
         future.set_result(approved)
         await query.answer("Approved." if approved else "Denied.")
+        return True
+
+    # The three-way ask_context outer approval card owns its own button
+    # semantics in cross_context, so delegate rather than duplicate them here.
+    if await handle_handoff_callback(query, data):
         return True
 
     # Handle approve/deny

@@ -23,7 +23,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from telegram import Bot, InlineKeyboardMarkup
 
@@ -55,6 +55,21 @@ _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
 
 # Per-call wall-clock budget.
 _DEFAULT_TIMEOUT_SECONDS = 600.0
+
+# The user's choice on the three-way outer approval card.
+HandoffOutcome = Literal["inline", "new_topic", "deny"]
+
+# Callback-data prefixes for the three-way outer approval card. Kept distinct
+# from the generic ``approve:``/``deny:`` prefixes so ``handle_handoff_callback``
+# owns their resolution rather than the generic approval handler.
+_HANDOFF_INLINE_PREFIX = "askctx_inline:"
+_HANDOFF_TOPIC_PREFIX = "askctx_topic:"
+_HANDOFF_DENY_PREFIX = "askctx_deny:"
+_HANDOFF_PREFIXES = (
+    _HANDOFF_INLINE_PREFIX,
+    _HANDOFF_TOPIC_PREFIX,
+    _HANDOFF_DENY_PREFIX,
+)
 
 
 def _text_result(text: str, is_error: bool = False) -> dict[str, Any]:
@@ -220,6 +235,7 @@ def build_ask_context_tool(
     terminal_base_url: str | None = None,
     sandbox_managers: dict[str, Any] | None = None,
     mcp_proxy: Any | None = None,
+    db: Any | None = None,
 ) -> "OpenShrimpTool | None":
     """Build the ``ask_context`` tool descriptor, or ``None`` if no targets.
 
@@ -270,6 +286,7 @@ def build_ask_context_tool(
                 terminal_base_url=terminal_base_url,
                 sandbox_managers=sandbox_managers,
                 mcp_proxy=mcp_proxy,
+                db=db,
             )
 
     return OpenShrimpTool(
@@ -414,6 +431,18 @@ def _proxied_mcp_servers(
     return servers
 
 
+@dataclass
+class _OuterApproval:
+    """Resolution of the three-way outer approval card.
+
+    ``message_id`` is the card's Telegram message id, so the new-topic path
+    can edit it to a "handed off" note after the topic is created.
+    """
+
+    outcome: HandoffOutcome
+    message_id: int | None = None
+
+
 async def _request_outer_approval(
     *,
     bot: Bot,
@@ -421,12 +450,13 @@ async def _request_outer_approval(
     thread_id: int | None,
     target: str,
     question: str,
-) -> bool:
-    """Render the tailored Approve/Deny card for the outer ask_context call.
+) -> _OuterApproval:
+    """Render the three-way approval card for the outer ask_context call.
 
-    Reuses the standard ``approve:``/``deny:`` callback prefixes (with a
-    fresh ``tool_use_id``) so the existing ``handle_approval_callback``
-    resolves them and edits the card to ``✅ Approved.`` / ``❌ Denied.``.
+    The user chooses the mode at approval time: run the query inline (today's
+    synchronous read-only sub-query), hand it off to a new forum topic, or
+    deny. Uses dedicated ``askctx_*`` callback prefixes so the shared
+    ``handle_approval_callback`` resolves the future to an outcome string.
     """
     from telegram import InlineKeyboardButton
 
@@ -438,15 +468,17 @@ async def _request_outer_approval(
     from open_shrimp.handlers.utils import _escape_mdv2
 
     tool_use_id = f"askctx{os.urandom(6).hex()}"
-    approve_data = f"approve:{tool_use_id}"
-    deny_data = f"deny:{tool_use_id}"
+    inline_data = f"{_HANDOFF_INLINE_PREFIX}{tool_use_id}"
+    topic_data = f"{_HANDOFF_TOPIC_PREFIX}{tool_use_id}"
+    deny_data = f"{_HANDOFF_DENY_PREFIX}{tool_use_id}"
 
     text = (
         f"🔎 *Ask {_escape_mdv2(target)}?*\n"
         f"> {_escape_mdv2(_summary_line(question, limit=300))}"
     )
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Approve", callback_data=approve_data),
+        InlineKeyboardButton("Run inline", callback_data=inline_data),
+        InlineKeyboardButton("New topic", callback_data=topic_data),
         InlineKeyboardButton("Deny", callback_data=deny_data),
     ]])
 
@@ -471,16 +503,76 @@ async def _request_outer_approval(
     }
 
     loop = asyncio.get_running_loop()
-    future: asyncio.Future[bool] = loop.create_future()
-    _approval_futures[approve_data] = future
+    future: asyncio.Future[HandoffOutcome] = loop.create_future()
+    _approval_futures[inline_data] = future
+    _approval_futures[topic_data] = future
     _approval_futures[deny_data] = future
     try:
-        return await future
+        outcome = await future
     finally:
-        _approval_futures.pop(approve_data, None)
+        _approval_futures.pop(inline_data, None)
+        _approval_futures.pop(topic_data, None)
         _approval_futures.pop(deny_data, None)
         _approval_tool_names.pop(tool_use_id, None)
         _approval_metadata.pop(tool_use_id, None)
+
+    return _OuterApproval(outcome=outcome, message_id=sent.message_id)
+
+
+# (outcome, toast-answer, MarkdownV2 card note) per handoff button. Notes use a
+# real ellipsis so no MarkdownV2 escaping is needed.
+_HANDOFF_BUTTONS: dict[str, tuple[HandoffOutcome, str, str]] = {
+    _HANDOFF_INLINE_PREFIX: ("inline", "Running inline.", "🔎 *Running inline…*"),
+    _HANDOFF_TOPIC_PREFIX: (
+        "new_topic", "Handing off to a new topic.",
+        "↗️ *Handing off to a new topic…*",
+    ),
+    _HANDOFF_DENY_PREFIX: ("deny", "Denied.", "❌ *Denied*"),
+}
+
+
+async def handle_handoff_callback(query: Any, data: str) -> bool:
+    """Resolve a click on the three-way ask_context approval card.
+
+    Owns the card's button semantics (create side lives in
+    ``_request_outer_approval``): matches the ``askctx_*`` callback data,
+    resolves the shared future to the chosen outcome, and appends a status
+    note to the card. Returns ``True`` when *data* was a handoff button (so
+    the generic approval handler stops), ``False`` otherwise.
+    """
+    prefix = next((p for p in _HANDOFF_PREFIXES if data.startswith(p)), None)
+    if prefix is None:
+        return False
+
+    from open_shrimp.handlers.state import _approval_futures
+
+    future = _approval_futures.get(data)
+    if not future or future.done():
+        await query.answer("This approval has expired.")
+        return True
+
+    outcome, toast, note = _HANDOFF_BUTTONS[prefix]
+    future.set_result(outcome)
+    await query.answer(toast)
+
+    # For new_topic the card is fully rewritten by _run_handoff once the topic
+    # exists; this interim note gives immediate feedback.
+    if query.message:
+        try:
+            original_md = (
+                query.message.text_markdown_v2 or query.message.text or ""
+            )
+            await query.message.edit_text(
+                text=f"{original_md}\n\n{note}",
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+        except Exception:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                logger.exception("Failed to edit ask_context card")
+    return True
 
 
 def _make_parent_routed_approval(
@@ -794,6 +886,140 @@ def _format_tool_result(target: str, result: _SubQueryResult) -> dict[str, Any]:
     return _text_result(f"[{target} answered]\n{collected}")
 
 
+async def _edit_outer_card(
+    bot: Bot, chat_id: int, message_id: int | None, text: str,
+) -> None:
+    """Best-effort edit of the outer approval card to a final note."""
+    if message_id is None:
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode="MarkdownV2",
+            reply_markup=None,
+        )
+    except Exception:
+        logger.debug("Failed to edit ask_context handoff card", exc_info=True)
+
+
+async def _run_handoff(
+    *,
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    db: Any | None,
+    target: str,
+    question: str,
+    card_message_id: int | None,
+    is_private_chat: bool,
+) -> dict[str, Any]:
+    """Async new-topic handoff: create a topic, bind the target context,
+    inject the brief as its first turn, and return a fire-and-forget note.
+
+    The new topic then behaves like an ordinary conversation under the target
+    context — the target agent's tool calls route through that scope's normal
+    per-tool approval UI, which is the supervision the sandboxed inline path
+    cannot offer.
+    """
+    from open_shrimp.db import ChatScope, set_active_context
+    from open_shrimp.dispatch_registry import dispatch
+    from open_shrimp.handlers.utils import _escape_mdv2
+
+    # Topic gate: createForumTopic works in a private chat (bots may always
+    # create topics there) OR a forum supergroup. Telegram only sets
+    # ``Chat.is_forum`` on supergroups — a private chat reports it falsy even
+    # though topic creation is allowed — so private chats must be gated on
+    # ``is_private_chat``, not ``is_forum``.
+    topic_capable = is_private_chat
+    if not topic_capable:
+        try:
+            chat = await bot.get_chat(chat_id)
+            topic_capable = bool(getattr(chat, "is_forum", False))
+        except Exception:
+            logger.debug("get_chat failed during handoff", exc_info=True)
+            # Fall back to the topic signal: being in a topic implies a forum.
+            topic_capable = thread_id is not None
+
+    if not topic_capable:
+        await _edit_outer_card(
+            bot, chat_id, card_message_id,
+            "↗️ *Handoff unavailable* — needs a forum\\-enabled chat\\.",
+        )
+        return _text_result(
+            f"New-topic handoff to {target!r} requires a forum-enabled chat, "
+            "but this chat has no forum topics. Re-run and choose 'Run inline', "
+            "or switch to the context manually.",
+            is_error=True,
+        )
+
+    if db is None:
+        await _edit_outer_card(
+            bot, chat_id, card_message_id,
+            "↗️ *Handoff unavailable* — no database handle\\.",
+        )
+        return _text_result(
+            "New-topic handoff is unavailable (no database handle).",
+            is_error=True,
+        )
+
+    # 1. Create the topic with a placeholder name (the target agent sets a
+    #    descriptive title via edit_topic on its first turn).
+    try:
+        topic = await bot.create_forum_topic(chat_id, name=target[:128])
+    except Exception as exc:
+        logger.exception("create_forum_topic failed during handoff")
+        await _edit_outer_card(
+            bot, chat_id, card_message_id,
+            "↗️ *Handoff failed* — could not create topic\\.",
+        )
+        return _text_result(
+            f"Failed to create a new topic for the handoff to {target!r}: {exc}",
+            is_error=True,
+        )
+
+    new_thread_id = topic.message_thread_id
+    scope = ChatScope(chat_id=chat_id, thread_id=new_thread_id)
+
+    # 2. Bind the context BEFORE injecting the brief so the injected turn
+    #    spins up under the correct context. This ordering is the one race.
+    try:
+        await set_active_context(db, scope, target)
+    except Exception as exc:
+        logger.exception("set_active_context failed during handoff")
+        return _text_result(
+            f"Created topic {new_thread_id} but failed to bind it to context "
+            f"{target!r}: {exc}",
+            is_error=True,
+        )
+
+    # 3. Inject the brief as the first user turn in the new topic.
+    try:
+        await dispatch(
+            question, chat_id, thread_id=new_thread_id, placeholder=None,
+        )
+    except Exception as exc:
+        logger.exception("dispatch failed during handoff")
+        return _text_result(
+            f"Created topic {new_thread_id} bound to context {target!r} but "
+            f"failed to start the handoff conversation: {exc}",
+            is_error=True,
+        )
+
+    # 4. Note the source, return fire-and-forget.
+    await _edit_outer_card(
+        bot, chat_id, card_message_id,
+        f"↗️ *Handed off to new topic* — running under "
+        f"`{_escape_mdv2(target)}`",
+    )
+    return _text_result(
+        f"Handed off to a new topic (thread {new_thread_id}) running under "
+        f"context '{target}'. It runs independently — you will not receive "
+        f"its result here.",
+    )
+
+
 async def _run_query(
     *,
     bot: Bot,
@@ -808,22 +1034,34 @@ async def _run_query(
     terminal_base_url: str | None,
     sandbox_managers: dict[str, Any] | None,
     mcp_proxy: Any | None,
+    db: Any | None = None,
 ) -> dict[str, Any]:
     """Orchestrate one cross-context query: approve, configure, run, report."""
     from open_shrimp.client_manager import resolve_backend
     from open_shrimp.config import is_sandboxed
 
-    approved = await _request_outer_approval(
+    approval = await _request_outer_approval(
         bot=bot,
         chat_id=chat_id,
         thread_id=thread_id,
         target=target,
         question=question,
     )
-    if not approved:
+    if approval.outcome == "deny":
         return _text_result(
             f"Cross-context query to {target!r} was denied by the user.",
             is_error=True,
+        )
+    if approval.outcome == "new_topic":
+        return await _run_handoff(
+            bot=bot,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            db=db,
+            target=target,
+            question=question,
+            card_message_id=approval.message_id,
+            is_private_chat=is_private_chat,
         )
 
     backend = resolve_backend(context=ctx)

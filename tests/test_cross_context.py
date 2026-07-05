@@ -24,7 +24,7 @@ from open_shrimp.config import (
     SandboxConfig,
     TelegramConfig,
 )
-from open_shrimp.cross_context import build_ask_context_tool
+from open_shrimp.cross_context import _OuterApproval, build_ask_context_tool
 from open_shrimp.tools import create_openshrimp_tools
 
 
@@ -232,7 +232,7 @@ async def test_happy_path_returns_answer(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "open_shrimp.cross_context._request_outer_approval",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
     )
 
     bot = MagicMock()
@@ -278,7 +278,7 @@ async def test_outer_denial_errors_without_running(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "open_shrimp.cross_context._request_outer_approval",
-        AsyncMock(return_value=False),
+        AsyncMock(return_value=_OuterApproval(outcome="deny")),
     )
 
     bot = MagicMock()
@@ -318,7 +318,7 @@ async def test_allowed_tools_inherit_target(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "open_shrimp.cross_context._request_outer_approval",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
     )
     # Treat the target as non-sandboxed so Bash is not added.
     monkeypatch.setattr("open_shrimp.config.is_sandboxed", lambda ctx: False)
@@ -362,7 +362,7 @@ async def test_sandboxed_target_uses_sandbox_launch(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "open_shrimp.cross_context._request_outer_approval",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
     )
 
     bot = MagicMock()
@@ -419,7 +419,7 @@ async def test_sandboxed_target_injects_proxied_mcp_servers(monkeypatch) -> None
     )
     monkeypatch.setattr(
         "open_shrimp.cross_context._request_outer_approval",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
     )
 
     mcp_proxy = MagicMock()
@@ -478,7 +478,7 @@ async def test_sandboxed_target_without_manager_fails_closed(monkeypatch) -> Non
     )
     monkeypatch.setattr(
         "open_shrimp.cross_context._request_outer_approval",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
     )
 
     bot = MagicMock()
@@ -513,7 +513,7 @@ async def test_transient_task_unregistered_after_run(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "open_shrimp.cross_context._request_outer_approval",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
     )
 
     bot = MagicMock()
@@ -554,3 +554,190 @@ def test_register_unregister_transient_task_owner() -> None:
 
     # Idempotent / safe on unknown ids.
     unregister_transient_task(scope, "tid1")
+
+
+# --- New-topic handoff ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handoff_creates_topic_binds_and_dispatches(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=_OuterApproval(
+            outcome="new_topic", message_id=7,
+        )),
+    )
+    # The sub-query path must never run for a handoff.
+    fake_backend = MagicMock()
+    fake_backend.make_client.side_effect = AssertionError(
+        "handoff must not run the inline sub-query",
+    )
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: fake_backend,
+    )
+
+    set_calls: list[tuple] = []
+
+    async def _fake_set_active_context(db, scope, name):
+        set_calls.append((scope.chat_id, scope.thread_id, name))
+
+    dispatched: list[tuple] = []
+
+    async def _fake_dispatch(prompt, chat_id, thread_id=None, *, placeholder=None):
+        # Ordering guarantee: the context must be bound before injection.
+        assert set_calls, "context must be bound before dispatch"
+        dispatched.append((prompt, chat_id, thread_id, placeholder))
+
+    monkeypatch.setattr(
+        "open_shrimp.db.set_active_context", _fake_set_active_context,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.dispatch_registry.dispatch", _fake_dispatch,
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+    bot.edit_message_text = AsyncMock()
+    bot.get_chat = AsyncMock(return_value=SimpleNamespace(is_forum=True))
+    bot.create_forum_topic = AsyncMock(
+        return_value=SimpleNamespace(message_thread_id=670745),
+    )
+
+    tool = build_ask_context_tool(
+        bot=bot, chat_id=21491458, thread_id=None, config=_config(),
+        context_name="default", db=MagicMock(),
+    )
+    assert tool is not None
+    result = await tool.handler(
+        {"context": "glints-delta-etl", "question": "land the durable fix"},
+    )
+
+    assert result.get("is_error") is None
+    assert "new topic" in result["content"][0]["text"]
+    assert "670745" in result["content"][0]["text"]
+
+    bot.create_forum_topic.assert_awaited_once()
+    assert set_calls == [(21491458, 670745, "glints-delta-etl")]
+    assert dispatched == [("land the durable fix", 21491458, 670745, None)]
+    fake_backend.make_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_handoff_callback_resolves_future() -> None:
+    import asyncio
+
+    from open_shrimp.cross_context import (
+        _HANDOFF_TOPIC_PREFIX,
+        handle_handoff_callback,
+    )
+    from open_shrimp.handlers.state import _approval_futures
+
+    data = f"{_HANDOFF_TOPIC_PREFIX}abc123"
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    _approval_futures[data] = future
+
+    query = MagicMock()
+    query.answer = AsyncMock()
+    query.message.text_markdown_v2 = "🔎 *Ask x?*"
+    query.message.edit_text = AsyncMock()
+
+    try:
+        handled = await handle_handoff_callback(query, data)
+    finally:
+        _approval_futures.pop(data, None)
+
+    assert handled is True
+    assert future.result() == "new_topic"
+    query.answer.assert_awaited_once()
+    query.message.edit_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_handoff_callback_ignores_foreign_data() -> None:
+    from open_shrimp.cross_context import handle_handoff_callback
+
+    query = MagicMock()
+    # A non-handoff callback (e.g. a generic approve) must fall through.
+    assert await handle_handoff_callback(query, "approve:xyz") is False
+
+
+@pytest.mark.asyncio
+async def test_handoff_rejected_in_non_forum_chat(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=_OuterApproval(
+            outcome="new_topic", message_id=7,
+        )),
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+    bot.edit_message_text = AsyncMock()
+    bot.get_chat = AsyncMock(return_value=SimpleNamespace(is_forum=False))
+    bot.create_forum_topic = AsyncMock(
+        side_effect=AssertionError("must not create a topic in a non-forum chat"),
+    )
+
+    # A non-private chat whose is_forum is falsy must be rejected. (Private
+    # chats always allow topic creation and are covered by is_private_chat.)
+    tool = build_ask_context_tool(
+        bot=bot, chat_id=555, thread_id=None, config=_config(),
+        context_name="default", db=MagicMock(), is_private_chat=False,
+    )
+    assert tool is not None
+    result = await tool.handler(
+        {"context": "glints-delta-etl", "question": "q"},
+    )
+
+    assert result.get("is_error") is True
+    assert "forum-enabled chat" in result["content"][0]["text"]
+    bot.create_forum_topic.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handoff_allowed_in_private_chat_without_is_forum(monkeypatch) -> None:
+    # Regression: a private DM reports is_forum falsy, but bots can always
+    # create topics there. The gate must key off is_private_chat, not is_forum.
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=_OuterApproval(
+            outcome="new_topic", message_id=7,
+        )),
+    )
+
+    async def _noop_set_active_context(db, scope, name):
+        pass
+
+    async def _noop_dispatch(prompt, chat_id, thread_id=None, *, placeholder=None):
+        pass
+
+    monkeypatch.setattr(
+        "open_shrimp.db.set_active_context", _noop_set_active_context,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.dispatch_registry.dispatch", _noop_dispatch,
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+    bot.edit_message_text = AsyncMock()
+    # A private chat: is_forum is None. get_chat must not gate the decision.
+    bot.get_chat = AsyncMock(return_value=SimpleNamespace(is_forum=None))
+    bot.create_forum_topic = AsyncMock(
+        return_value=SimpleNamespace(message_thread_id=42),
+    )
+
+    tool = build_ask_context_tool(
+        bot=bot, chat_id=21491458, thread_id=None, config=_config(),
+        context_name="default", db=MagicMock(), is_private_chat=True,
+    )
+    assert tool is not None
+    result = await tool.handler(
+        {"context": "glints-delta-etl", "question": "q"},
+    )
+
+    assert result.get("is_error") is None
+    bot.create_forum_topic.assert_awaited_once()
+    bot.get_chat.assert_not_called()
