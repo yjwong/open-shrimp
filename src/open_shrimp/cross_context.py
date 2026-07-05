@@ -994,10 +994,19 @@ async def _run_handoff(
             is_error=True,
         )
 
-    # 3. Inject the brief as the first user turn in the new topic.
+    # 3. Inject the brief as the first user turn in the new topic. The brief
+    #    is otherwise silent, so surface it as a visible placeholder message
+    #    so the topic self-documents what it was handed.
+    brief = question.strip()
+    if len(brief) > 3000:
+        brief = brief[:3000] + "…"
+    placeholder = (
+        "↗️ *Handoff brief* \\(injected as the first turn\\)\n\n"
+        f"{_escape_mdv2(brief)}"
+    )
     try:
         await dispatch(
-            question, chat_id, thread_id=new_thread_id, placeholder=None,
+            question, chat_id, thread_id=new_thread_id, placeholder=placeholder,
         )
     except Exception as exc:
         logger.exception("dispatch failed during handoff")

@@ -619,7 +619,12 @@ async def test_handoff_creates_topic_binds_and_dispatches(monkeypatch) -> None:
 
     bot.create_forum_topic.assert_awaited_once()
     assert set_calls == [(21491458, 670745, "glints-delta-etl")]
-    assert dispatched == [("land the durable fix", 21491458, 670745, None)]
+    assert len(dispatched) == 1
+    prompt, d_chat, d_thread, placeholder = dispatched[0]
+    assert (prompt, d_chat, d_thread) == ("land the durable fix", 21491458, 670745)
+    # The brief is surfaced as a visible placeholder in the new topic.
+    assert placeholder is not None
+    assert "land the durable fix" in placeholder
     fake_backend.make_client.assert_not_called()
 
 
