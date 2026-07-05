@@ -8,6 +8,7 @@ interface ReviewContextValue {
   addComment: (blockIndex: number, blockText: string, comment: string) => void;
   editComment: (id: string, comment: string) => void;
   deleteComment: (id: string) => void;
+  clearComments: () => void;
 }
 
 const ReviewContext = createContext<ReviewContextValue | null>(null);
@@ -41,9 +42,11 @@ export function ReviewProvider({ children }: { children: ReactNode }) {
     setComments((prev) => prev.filter((c) => c.id !== id));
   }, []);
 
+  const clearComments = useCallback(() => setComments([]), []);
+
   return (
     <ReviewContext.Provider
-      value={{ reviewMode, toggleReviewMode, comments, addComment, editComment, deleteComment }}
+      value={{ reviewMode, toggleReviewMode, comments, addComment, editComment, deleteComment, clearComments }}
     >
       {children}
     </ReviewContext.Provider>

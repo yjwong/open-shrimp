@@ -422,6 +422,18 @@ export function injectStyles(): void {
       font-size: 13px;
       color: #f7768e;
     }
+    .submit-dialog-keepopen {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 16px;
+      font-size: 13px;
+      color: ${hint};
+      cursor: pointer;
+    }
+    .submit-dialog-keepopen input {
+      cursor: pointer;
+    }
     .submit-dialog-actions {
       display: flex;
       gap: 8px;

@@ -109,7 +109,7 @@ export default function App() {
 }
 
 function AppInner() {
-  const { reviewMode, comments } = useReview();
+  const { reviewMode, comments, clearComments } = useReview();
   const [data, setData] = useState<DocumentData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSubmitDialog, setShowSubmitDialog] = useState(false);
@@ -149,14 +149,19 @@ function AppInner() {
       .catch((e) => setError(`Fatal: ${e}`));
   }, []);
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (keepOpen: boolean) => {
     await submitReview({
       chatId,
       threadId,
       ...(contentId ? { contentId } : { path: filePath! }),
       comments,
     });
-    window.Telegram?.WebApp?.close();
+    if (keepOpen) {
+      clearComments();
+      setShowSubmitDialog(false);
+    } else {
+      window.Telegram?.WebApp?.close();
+    }
   };
 
   const fileDir = data?.path ? data.path.replace(/\/[^/]*$/, "") || "/" : null;
