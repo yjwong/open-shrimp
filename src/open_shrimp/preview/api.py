@@ -228,6 +228,69 @@ async def image_endpoint(request: Request) -> JSONResponse | FileResponse:
     return FileResponse(str(resolved), media_type=media_type)
 
 
+_PDF_EXTENSIONS = {".pdf"}
+
+_MAX_COMMENT_PAGE = 2000
+
+
+async def pdf_endpoint(request: Request) -> JSONResponse | FileResponse:
+    """GET /api/preview/pdf — serve a PDF file from disk.
+
+    Query params:
+        path: Absolute path to the PDF file.
+        token: Optional auth token (for viewers that can't send headers).
+    """
+    config: Config = request.app.state.config
+    token = request.query_params.get("token", "")
+    try:
+        if token:
+            await validate_token_param(
+                token, config.telegram.token, config.allowed_users
+            )
+        else:
+            await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    file_path_str = request.query_params.get("path", "")
+    if not file_path_str:
+        return JSONResponse(
+            {"error": "path query parameter is required"}, status_code=400
+        )
+
+    file_path = Path(file_path_str)
+
+    if not file_path.is_absolute():
+        return JSONResponse(
+            {"error": "path must be absolute"}, status_code=400
+        )
+
+    if not _is_within_context_directories(file_path, config):
+        return JSONResponse(
+            {"error": "path is outside configured context directories"},
+            status_code=403,
+        )
+
+    resolved = file_path.resolve()
+
+    if resolved.suffix.lower() not in _PDF_EXTENSIONS:
+        return JSONResponse(
+            {"error": "not a PDF file"}, status_code=400
+        )
+
+    if not resolved.is_file():
+        return JSONResponse({"error": "file not found"}, status_code=404)
+
+    # The path is stable across regenerations (the agent rewrites the same
+    # deck.pdf), so the WebView would otherwise serve a stale cached copy on
+    # refresh. ``no-store`` forces a fresh fetch every time.
+    return FileResponse(
+        str(resolved),
+        media_type="application/pdf",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 async def submit_review_endpoint(request: Request) -> JSONResponse:
     """POST /api/preview/submit-review — submit document review comments.
 
@@ -243,6 +306,9 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
             "path": <str>,
             "comments": [{"block_text": <str>, "comment": <str>}, ...]
         }
+
+    Each comment may carry either a ``block_text`` anchor (markdown preview)
+    or a ``page`` anchor (PDF review, 1-based page number) — both optional.
 
         # Ephemeral content (plan review):
         {
@@ -321,7 +387,10 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
                 status_code=403,
             )
 
-        subject = f"the document at `{path_str}`"
+        if file_path.suffix.lower() in _PDF_EXTENSIONS:
+            subject = f"the PDF at `{path_str}`"
+        else:
+            subject = f"the document at `{path_str}`"
 
     # ---- Validate comments ----
     comments = body.get("comments")
@@ -358,7 +427,25 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
                 status_code=400,
             )
 
-        prompt_parts.append(f"\n### Comment {i}")
+        page = entry_c.get("page")
+        if page is not None:
+            if (
+                not isinstance(page, int)
+                or isinstance(page, bool)
+                or not 1 <= page <= _MAX_COMMENT_PAGE
+            ):
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"comment {i} has an invalid page "
+                            f"(must be an integer 1-{_MAX_COMMENT_PAGE})"
+                        )
+                    },
+                    status_code=400,
+                )
+            prompt_parts.append(f"\n### Comment {i} (page {page})")
+        else:
+            prompt_parts.append(f"\n### Comment {i}")
         if block_text:
             prompt_parts.append(f"> {block_text}")
         prompt_parts.append(f"\n{comment_text}")
@@ -452,19 +539,22 @@ def create_preview_routes() -> list[Route | Mount]:
 
     Returns a list of routes to be added to the main Starlette app.
     """
-    _pkg_static = Path(__file__).resolve().parent / "static"
-    _dev_dist = (
-        Path(__file__).resolve().parent.parent.parent.parent
-        / "web"
-        / "markdown-app"
-        / "dist"
-    )
+    _pkg_dir = Path(__file__).resolve().parent
+    _web_dir = _pkg_dir.parent.parent.parent / "web"
+
+    _pkg_static = _pkg_dir / "static"
+    _dev_dist = _web_dir / "markdown-app" / "dist"
     _dist_dir = _pkg_static if _pkg_static.is_dir() else _dev_dist
+
+    _pkg_static_pdf = _pkg_dir / "static-pdf"
+    _dev_dist_pdf = _web_dir / "pdf-app" / "dist"
+    _pdf_dist_dir = _pkg_static_pdf if _pkg_static_pdf.is_dir() else _dev_dist_pdf
 
     routes: list[Route | Mount] = [
         Route("/api/preview/read", read_endpoint, methods=["GET"]),
         Route("/api/preview/content/{content_id}", content_endpoint, methods=["GET"]),
         Route("/api/preview/image", image_endpoint, methods=["GET"]),
+        Route("/api/preview/pdf", pdf_endpoint, methods=["GET"]),
         Route("/api/preview/submit-review", submit_review_endpoint, methods=["POST"]),
     ]
 
@@ -482,6 +572,22 @@ def create_preview_routes() -> list[Route | Mount]:
             "Markdown preview Mini App dist directory not found at %s — "
             "run 'npm run build' in web/markdown-app/ to build the frontend",
             _dist_dir,
+        )
+
+    if _pdf_dist_dir.is_dir():
+        routes.append(
+            Mount(
+                "/pdf",
+                app=StaticFiles(directory=str(_pdf_dist_dir), html=True),
+                name="pdf-app",
+            )
+        )
+        logger.info("Serving PDF review Mini App from %s", _pdf_dist_dir)
+    else:
+        logger.warning(
+            "PDF review Mini App dist directory not found at %s — "
+            "run 'npm run build' in web/pdf-app/ to build the frontend",
+            _pdf_dist_dir,
         )
 
     return routes

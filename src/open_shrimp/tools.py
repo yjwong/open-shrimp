@@ -351,31 +351,42 @@ def create_openshrimp_tools(
 
         filename = os.path.basename(path)
 
-        # Build a "Preview" WebApp button for markdown files.
-        reply_markup = None
-        if filename.lower().endswith(".md") and config is not None:
+        def _preview_button(label: str, app: str) -> InlineKeyboardMarkup | None:
+            """Build a Mini App button opening *app* (e.g. "preview", "pdf")
+            on *path*, or None when no Mini App base URL is configured."""
             base_url = None
             if config.review.public_url:
                 base_url = config.review.public_url.rstrip("/")
             elif config.review.host and config.review.port:
                 base_url = f"https://{config.review.host}:{config.review.port}"
-            if base_url:
-                from urllib.parse import quote
+            if not base_url:
+                return None
 
-                preview_params = f"path={quote(path, safe='')}&chat_id={chat_id}"
-                if thread_id is not None:
-                    preview_params += f"&thread_id={thread_id}"
-                preview_url = f"{base_url}/preview/?{preview_params}"
-                reply_markup = InlineKeyboardMarkup([[
-                    make_web_app_button(
-                        "📖 Preview",
-                        preview_url,
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        bot_token=config.telegram.token,
-                        is_private_chat=is_private_chat,
-                    ),
-                ]])
+            from urllib.parse import quote
+
+            params = f"path={quote(path, safe='')}&chat_id={chat_id}"
+            if thread_id is not None:
+                params += f"&thread_id={thread_id}"
+            url = f"{base_url}/{app}/?{params}"
+            return InlineKeyboardMarkup([[
+                make_web_app_button(
+                    label,
+                    url,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    bot_token=config.telegram.token,
+                    is_private_chat=is_private_chat,
+                ),
+            ]])
+
+        # Build a Mini App button for reviewable file types.
+        reply_markup = None
+        if config is not None:
+            lowered = filename.lower()
+            if lowered.endswith(".md"):
+                reply_markup = _preview_button("📖 Preview", "preview")
+            elif lowered.endswith(".pdf"):
+                reply_markup = _preview_button("📄 Review", "pdf")
 
         try:
             with open(path, "rb") as f:

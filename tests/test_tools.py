@@ -195,6 +195,61 @@ async def test_send_file_happy_path() -> None:
         os.unlink(path)
 
 
+def _button_config() -> MagicMock:
+    config = MagicMock()
+    config.review.public_url = "https://miniapps.example.com"
+    config.review.host = None
+    config.review.port = None
+    config.telegram.token = "123:abc"
+    return config
+
+
+async def _send_and_get_markup(suffix: str) -> object:
+    """Send a temp file with *suffix* via send_file, return the reply_markup."""
+    bot = MagicMock()
+    bot.send_document = AsyncMock()
+    send_file = _by_name(
+        create_openshrimp_tools(bot=bot, chat_id=42, config=_button_config())
+    )["send_file"].handler
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(b"content")
+        path = f.name
+    try:
+        r = await send_file({"file_path": path, "type": "document"})
+        assert "is_error" not in r
+        return bot.send_document.call_args.kwargs["reply_markup"]
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_send_file_pdf_gets_review_button() -> None:
+    markup = await _send_and_get_markup(".pdf")
+    assert markup is not None
+    button = markup.inline_keyboard[0][0]
+    assert button.text == "📄 Review"
+    url = button.web_app.url
+    assert url.startswith("https://miniapps.example.com/pdf/?path=")
+    assert "chat_id=42" in url
+
+
+@pytest.mark.asyncio
+async def test_send_file_md_gets_preview_button() -> None:
+    markup = await _send_and_get_markup(".md")
+    assert markup is not None
+    button = markup.inline_keyboard[0][0]
+    assert button.text == "📖 Preview"
+    assert button.web_app.url.startswith(
+        "https://miniapps.example.com/preview/?path="
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_file_other_types_get_no_button() -> None:
+    assert await _send_and_get_markup(".txt") is None
+
+
 @pytest.mark.asyncio
 async def test_host_bash_timeout() -> None:
     host_bash = _by_name(

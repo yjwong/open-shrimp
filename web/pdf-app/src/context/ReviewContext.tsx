@@ -1,0 +1,54 @@
+import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import type { PageComment } from "../types";
+
+interface ReviewContextValue {
+  comments: PageComment[];
+  addComment: (page: number, comment: string) => void;
+  editComment: (id: string, comment: string) => void;
+  deleteComment: (id: string) => void;
+  clearComments: () => void;
+}
+
+const ReviewContext = createContext<ReviewContextValue | null>(null);
+
+export function ReviewProvider({ children }: { children: ReactNode }) {
+  const [comments, setComments] = useState<PageComment[]>([]);
+
+  const addComment = useCallback((page: number, comment: string) => {
+    setComments((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        page,
+        comment,
+        createdAt: Date.now(),
+      },
+    ]);
+  }, []);
+
+  const editComment = useCallback((id: string, comment: string) => {
+    setComments((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, comment } : c))
+    );
+  }, []);
+
+  const deleteComment = useCallback((id: string) => {
+    setComments((prev) => prev.filter((c) => c.id !== id));
+  }, []);
+
+  const clearComments = useCallback(() => setComments([]), []);
+
+  return (
+    <ReviewContext.Provider
+      value={{ comments, addComment, editComment, deleteComment, clearComments }}
+    >
+      {children}
+    </ReviewContext.Provider>
+  );
+}
+
+export function useReview(): ReviewContextValue {
+  const ctx = useContext(ReviewContext);
+  if (!ctx) throw new Error("useReview must be used within ReviewProvider");
+  return ctx;
+}
