@@ -221,3 +221,26 @@ def test_lark_domain_feishu_parses():
 def test_lark_domain_invalid_rejected():
     with pytest.raises(ValueError, match="domain must be"):
         _validate_raw(_base_raw(_lark_events(domain="larksuite")))
+
+
+# ── require_mention (telegram) ──
+
+
+def test_require_mention_absent_defaults_false():
+    cfg = _parse(_base_raw(_VALID_EVENTS))
+    assert cfg.events.sources[0].require_mention is False
+
+
+def test_require_mention_true_parses():
+    events = copy.deepcopy(_VALID_EVENTS)
+    events["sources"][0]["require_mention"] = True
+    raw = _base_raw(events)
+    _validate_raw(raw)  # no raise
+    assert _parse(raw).events.sources[0].require_mention is True
+
+
+def test_require_mention_non_bool_rejected():
+    events = copy.deepcopy(_VALID_EVENTS)
+    events["sources"][0]["require_mention"] = "yes"
+    with pytest.raises(ValueError, match="require_mention must be a boolean"):
+        _validate_raw(_base_raw(events))

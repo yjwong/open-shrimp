@@ -137,6 +137,10 @@ class EventSourceConfig:
     # type: telegram
     token: str | None = None
     allowed_chats: list[int] = field(default_factory=list)
+    # Only ingest group messages that address the bot (@mention, /cmd@bot, or
+    # a text-mention). Private chats (DMs to the bot) are always ingested.
+    # telegram only; defaults off (ingest everything from allowed chats).
+    require_mention: bool = False
     # type: lark
     app_id: str | None = None
     app_secret: str | None = None
@@ -545,6 +549,12 @@ def _validate_events(raw: dict) -> None:
                         f"events source '{name}': allowed_chats entries "
                         f"must be integers, got: {c!r}"
                     )
+            require_mention = source.get("require_mention", False)
+            if not isinstance(require_mention, bool):
+                raise ValueError(
+                    f"events source '{name}': require_mention must be a "
+                    f"boolean, got: {require_mention!r}"
+                )
         elif stype == "lark":
             for req in ("app_id", "app_secret"):
                 val = source.get(req)
@@ -730,6 +740,7 @@ def _parse(raw: dict) -> Config:
                     type=s["type"],
                     token=s.get("token"),
                     allowed_chats=list(s.get("allowed_chats", [])),
+                    require_mention=bool(s.get("require_mention", False)),
                     app_id=s.get("app_id"),
                     app_secret=s.get("app_secret"),
                     domain=s.get("domain"),

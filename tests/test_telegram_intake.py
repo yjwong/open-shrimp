@@ -314,3 +314,124 @@ async def test_handler_swallows_emit_errors(caplog) -> None:
     with caplog.at_level(logging.ERROR, logger="open_shrimp.events.telegram_intake"):
         await handler(make_update(msg), None)  # must not raise
     assert any("failed to process" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------- require_mention
+
+BOT_USERNAME = "yjshouse_ext_bot"
+BOT_ID = 8687140347
+TARGET = f"@{BOT_USERNAME}"
+
+
+def _entity(etype, offset, length, user_id=None):
+    e = SimpleNamespace(type=etype, offset=offset, length=length)
+    if user_id is not None:
+        e.user = SimpleNamespace(id=user_id)
+    return e
+
+
+def _mention_msg(text):
+    off = text.index(TARGET)
+    return make_message(
+        chat_id=-100, chat_type="supergroup", text=text,
+        entities=[_entity("mention", off, len(TARGET))],
+    )
+
+
+def test_addresses_bot_mention():
+    from open_shrimp.events.telegram_intake import addresses_bot
+    msg = _mention_msg(f"hey {TARGET} look")
+    assert addresses_bot(msg, BOT_USERNAME, BOT_ID) is True
+
+
+def test_addresses_bot_other_username_ignored():
+    from open_shrimp.events.telegram_intake import addresses_bot
+    text = "hey @someone_else hi"
+    off = text.index("@someone_else")
+    msg = make_message(text=text, entities=[_entity("mention", off, len("@someone_else"))])
+    assert addresses_bot(msg, BOT_USERNAME, BOT_ID) is False
+
+
+def test_addresses_bot_command_to_bot():
+    from open_shrimp.events.telegram_intake import addresses_bot
+    text = f"/status{TARGET}"
+    msg = make_message(text=text, entities=[_entity("bot_command", 0, len(text))])
+    assert addresses_bot(msg, BOT_USERNAME, BOT_ID) is True
+
+
+def test_addresses_bot_bare_command_not_addressed():
+    from open_shrimp.events.telegram_intake import addresses_bot
+    msg = make_message(text="/status", entities=[_entity("bot_command", 0, len("/status"))])
+    assert addresses_bot(msg, BOT_USERNAME, BOT_ID) is False
+
+
+def test_addresses_bot_text_mention_by_id():
+    from open_shrimp.events.telegram_intake import addresses_bot
+    msg = make_message(text="poke", entities=[_entity("text_mention", 0, 4, user_id=BOT_ID)])
+    assert addresses_bot(msg, None, BOT_ID) is True
+    other = make_message(text="poke", entities=[_entity("text_mention", 0, 4, user_id=999)])
+    assert addresses_bot(other, None, BOT_ID) is False
+
+
+def test_addresses_bot_caption_mention():
+    from open_shrimp.events.telegram_intake import addresses_bot
+    cap = f"pic for {TARGET}"
+    off = cap.index(TARGET)
+    msg = make_message(
+        text=None, caption=cap, photo=[object()],
+        caption_entities=[_entity("mention", off, len(TARGET))],
+    )
+    assert addresses_bot(msg, BOT_USERNAME, BOT_ID) is True
+
+
+def test_addresses_bot_no_entities():
+    from open_shrimp.events.telegram_intake import addresses_bot
+    assert addresses_bot(make_message(text="plain chatter"), BOT_USERNAME, BOT_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_require_mention_drops_untagged_group_message():
+    emit = AsyncMock()
+    msg = make_message(chat_id=-100, chat_type="supergroup", text="just chatting")
+    await handle_intake_update(
+        "s", {-100}, emit, make_update(msg),
+        require_mention=True, bot_username=BOT_USERNAME, bot_id=BOT_ID,
+    )
+    emit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_require_mention_emits_tagged_group_message():
+    emitted = []
+    async def emit(e):
+        emitted.append(e)
+    msg = _mention_msg(f"{TARGET} please look")
+    await handle_intake_update(
+        "s", {-100}, emit, make_update(msg),
+        require_mention=True, bot_username=BOT_USERNAME, bot_id=BOT_ID,
+    )
+    assert len(emitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_require_mention_still_emits_private_dm():
+    emitted = []
+    async def emit(e):
+        emitted.append(e)
+    msg = make_message(chat_id=42, chat_type="private", text="hi bot")
+    await handle_intake_update(
+        "s", {42}, emit, make_update(msg),
+        require_mention=True, bot_username=BOT_USERNAME, bot_id=BOT_ID,
+    )
+    assert len(emitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_require_mention_off_emits_everything():
+    emit = AsyncMock()
+    msg = make_message(chat_id=-100, chat_type="supergroup", text="untagged")
+    await handle_intake_update(
+        "s", {-100}, emit, make_update(msg),
+        require_mention=False, bot_username=BOT_USERNAME, bot_id=BOT_ID,
+    )
+    emit.assert_awaited_once()

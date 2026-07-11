@@ -178,6 +178,10 @@ default_context: default
 #       type: telegram
 #       token: "123456:ABC..."     # a SECOND bot token (not telegram.token)
 #       allowed_chats: [-100987654321, 42424242]  # messages from other chats are ignored
+#       require_mention: true      # only ingest group messages that address the
+#                                  # bot (@mention, /cmd@bot, or text-mention);
+#                                  # DMs to the bot are always ingested. Default
+#                                  # false (ingest everything from allowed_chats).
 #       context: default           # pre-selected (★) default in the pick-up
 #                                  # context picker; omit for default_context
 #       pickup: true               # set false to keep this source purely
