@@ -27,6 +27,8 @@ def _payload(
     content: str | None = '{"text":"hello world"}',
     event_id: str = "evt-abc123",
     open_id: str | None = "ou_deadbeef",
+    chat_type: str = "p2p",
+    mentions: list[Any] | None = None,
 ) -> dict[str, Any]:
     sender_id: dict[str, Any] = {}
     if open_id is not None:
@@ -34,11 +36,13 @@ def _payload(
     message: dict[str, Any] = {
         "message_id": "om_1",
         "chat_id": "oc_1",
-        "chat_type": "p2p",
+        "chat_type": chat_type,
         "message_type": message_type,
     }
     if content is not None:
         message["content"] = content
+    if mentions is not None:
+        message["mentions"] = mentions
     return {
         "schema": "2.0",
         "header": {
@@ -53,9 +57,16 @@ def _payload(
     }
 
 
-def _source(domain: str | None = None) -> EventSourceConfig:
+def _source(
+    domain: str | None = None, require_mention: bool = False
+) -> EventSourceConfig:
     return EventSourceConfig(
-        name="lark", type="lark", app_id="cli_x", app_secret="sec_y", domain=domain
+        name="lark",
+        type="lark",
+        app_id="cli_x",
+        app_secret="sec_y",
+        domain=domain,
+        require_mention=require_mention,
     )
 
 
@@ -346,3 +357,114 @@ async def test_emit_exception_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(adapter, "_fetch_user_name", lambda open_id: None)
 
     await adapter._deliver(_payload())  # must not raise
+
+
+def _mention_adapter(
+    monkeypatch: pytest.MonkeyPatch, bot_open_id: str | None = "ou_bot"
+) -> LarkAdapter:
+    monkeypatch.setattr(lark_mod, "lark_oapi", object())
+    adapter = LarkAdapter(_source(require_mention=True))
+    adapter._loop = asyncio.get_running_loop()
+    monkeypatch.setattr(adapter, "_fetch_bot_open_id", lambda: bot_open_id)
+    monkeypatch.setattr(adapter, "_fetch_user_name", lambda open_id: None)
+    return adapter
+
+
+async def _emit_count(adapter: LarkAdapter, payload: dict[str, Any]) -> int:
+    received: list[Any] = []
+
+    async def emit(event: Any) -> None:
+        received.append(event)
+
+    adapter._emit = emit
+    await adapter._deliver(payload)
+    return len(received)
+
+
+@pytest.mark.asyncio
+async def test_require_mention_off_ingests_group_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lark_mod, "lark_oapi", object())
+    adapter = LarkAdapter(_source())  # require_mention defaults off
+    adapter._loop = asyncio.get_running_loop()
+    monkeypatch.setattr(adapter, "_fetch_user_name", lambda open_id: None)
+    assert await _emit_count(adapter, _payload(chat_type="group")) == 1
+
+
+@pytest.mark.asyncio
+async def test_require_mention_passes_p2p_without_mention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _mention_adapter(monkeypatch)
+    assert await _emit_count(adapter, _payload(chat_type="p2p")) == 1
+
+
+@pytest.mark.asyncio
+async def test_require_mention_drops_group_without_mentions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _mention_adapter(monkeypatch)
+    assert await _emit_count(adapter, _payload(chat_type="group")) == 0
+
+
+@pytest.mark.asyncio
+async def test_require_mention_drops_group_mentioning_someone_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _mention_adapter(monkeypatch)
+    payload = _payload(
+        chat_type="group",
+        mentions=[{"key": "@_user_1", "id": {"open_id": "ou_alice"}}],
+    )
+    assert await _emit_count(adapter, payload) == 0
+
+
+@pytest.mark.asyncio
+async def test_require_mention_passes_group_mentioning_bot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _mention_adapter(monkeypatch)
+    payload = _payload(
+        chat_type="group",
+        mentions=[
+            {"key": "@_user_1", "id": {"open_id": "ou_alice"}},
+            {"key": "@_user_2", "id": {"open_id": "ou_bot"}},
+        ],
+    )
+    assert await _emit_count(adapter, payload) == 1
+
+
+@pytest.mark.asyncio
+async def test_require_mention_fails_open_when_bot_id_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A group message that mentions *someone* but the bot's own open_id
+    # can't be resolved: emit rather than silently dropping.
+    adapter = _mention_adapter(monkeypatch, bot_open_id=None)
+    payload = _payload(
+        chat_type="group",
+        mentions=[{"key": "@_user_1", "id": {"open_id": "ou_alice"}}],
+    )
+    assert await _emit_count(adapter, payload) == 1
+
+
+@pytest.mark.asyncio
+async def test_bot_open_id_fetched_once_and_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _mention_adapter(monkeypatch)
+    calls = {"n": 0}
+
+    def fetch() -> str:
+        calls["n"] += 1
+        return "ou_bot"
+
+    monkeypatch.setattr(adapter, "_fetch_bot_open_id", fetch)
+    payload = _payload(
+        chat_type="group",
+        mentions=[{"key": "@_user_1", "id": {"open_id": "ou_bot"}}],
+    )
+    await _emit_count(adapter, payload)
+    await _emit_count(adapter, payload)
+    assert calls["n"] == 1

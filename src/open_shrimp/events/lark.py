@@ -81,6 +81,32 @@ def sender_open_id(payload: dict[str, Any]) -> str | None:
     return open_id if isinstance(open_id, str) and open_id else None
 
 
+def chat_type(payload: dict[str, Any]) -> str | None:
+    """Pull the message's chat_type (``p2p`` or ``group``) from a payload."""
+    event = payload.get("event") or {}
+    message = event.get("message") or {}
+    value = message.get("chat_type")
+    return value if isinstance(value, str) else None
+
+
+def mention_open_ids(payload: dict[str, Any]) -> set[str]:
+    """Collect the open_ids of everyone @-mentioned in the message."""
+    event = payload.get("event") or {}
+    message = event.get("message") or {}
+    mentions = message.get("mentions")
+    ids: set[str] = set()
+    if isinstance(mentions, list):
+        for mention in mentions:
+            if not isinstance(mention, dict):
+                continue
+            mid = mention.get("id")
+            if isinstance(mid, dict):
+                open_id = mid.get("open_id")
+                if isinstance(open_id, str) and open_id:
+                    ids.add(open_id)
+    return ids
+
+
 def map_message_event(
     source: str,
     payload: dict[str, Any],
@@ -150,6 +176,8 @@ class LarkAdapter:
         # construction stays free of SDK attribute access (tests build the
         # adapter with a sentinel lark_oapi).
         self._domain_key: str = source.domain or "feishu"
+        self._require_mention: bool = source.require_mention
+        self._bot_open_id: str | None = None
         self._emit: EmitFn | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping = threading.Event()
@@ -299,12 +327,77 @@ class LarkAdapter:
         if emit is None:
             return
         try:
+            if self._require_mention and not await self._addresses_bot(payload):
+                return
             open_id = sender_open_id(payload)
             sender_name = await self._resolve_sender(open_id) if open_id else None
             event = map_message_event(self.name, payload, sender_name)
             await emit(event)
         except Exception:
             logger.exception("lark[%s]: failed to deliver event", self.name)
+
+    async def _addresses_bot(self, payload: dict[str, Any]) -> bool:
+        """Whether a message should pass the require_mention gate.
+
+        A p2p (direct) message is implicitly addressed to the bot. A group
+        message must @-mention the bot; a group message with no mentions is
+        dropped without a lookup. When the bot's own open_id can't be
+        resolved we fail open, preferring an extra notice over a silent drop.
+        """
+        if chat_type(payload) == "p2p":
+            return True
+        ids = mention_open_ids(payload)
+        if not ids:
+            return False
+        bot_open_id = await self._ensure_bot_open_id()
+        if bot_open_id is None:
+            return True
+        return bot_open_id in ids
+
+    async def _ensure_bot_open_id(self) -> str | None:
+        if self._bot_open_id is not None:
+            return self._bot_open_id
+        try:
+            self._bot_open_id = await asyncio.to_thread(self._fetch_bot_open_id)
+        except Exception:
+            logger.warning(
+                "lark[%s]: could not resolve bot open_id for mention gating",
+                self.name,
+                exc_info=True,
+            )
+            self._bot_open_id = None
+        return self._bot_open_id
+
+    def _fetch_bot_open_id(self) -> str | None:
+        """Blocking fetch of the bot's own open_id via /bot/v3/info."""
+        if self._api_client is None:
+            return None
+        from lark_oapi.core.enum import AccessTokenType, HttpMethod
+        from lark_oapi.core.model import BaseRequest
+
+        request = (
+            BaseRequest.builder()
+            .http_method(HttpMethod.GET)
+            .uri("/open-apis/bot/v3/info")
+            .token_types({AccessTokenType.TENANT})
+            .build()
+        )
+        response = self._api_client.request(request)
+        if not response.success() or response.raw is None or not response.raw.content:
+            logger.debug(
+                "lark[%s]: bot info lookup failed: code=%s msg=%s",
+                self.name,
+                getattr(response, "code", None),
+                getattr(response, "msg", None),
+            )
+            return None
+        try:
+            data = json.loads(response.raw.content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        bot = data.get("bot") if isinstance(data, dict) else None
+        open_id = bot.get("open_id") if isinstance(bot, dict) else None
+        return open_id if isinstance(open_id, str) and open_id else None
 
     async def _resolve_sender(self, open_id: str) -> str | None:
         if open_id in self._name_cache:

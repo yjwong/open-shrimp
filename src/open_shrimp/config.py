@@ -523,6 +523,12 @@ def _validate_events(raw: dict) -> None:
                 f"events source '{name}': pickup must be a boolean, "
                 f"got: {pickup!r}"
             )
+        require_mention = source.get("require_mention", False)
+        if not isinstance(require_mention, bool):
+            raise ValueError(
+                f"events source '{name}': require_mention must be a "
+                f"boolean, got: {require_mention!r}"
+            )
 
         if stype == "telegram":
             token = source.get("token")
@@ -549,12 +555,6 @@ def _validate_events(raw: dict) -> None:
                         f"events source '{name}': allowed_chats entries "
                         f"must be integers, got: {c!r}"
                     )
-            require_mention = source.get("require_mention", False)
-            if not isinstance(require_mention, bool):
-                raise ValueError(
-                    f"events source '{name}': require_mention must be a "
-                    f"boolean, got: {require_mention!r}"
-                )
         elif stype == "lark":
             for req in ("app_id", "app_secret"):
                 val = source.get(req)

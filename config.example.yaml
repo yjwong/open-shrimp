@@ -193,6 +193,9 @@ default_context: default
 #       domain: lark               # "lark" (open.larksuite.com, international)
 #                                  # or "feishu" (open.feishu.cn, China).
 #                                  # Default: feishu.
+#       require_mention: true      # only ingest group messages that @-mention the
+#                                  # bot; direct (p2p) chats are always ingested.
+#                                  # Default false (ingest every message).
 #       # Lark app must use Event Subscription in "Long Connection" (WebSocket)
 #       # mode and subscribe to im.message.receive_v1. Add the bot to the
 #       # target chat and release an app version for it to take effect.
