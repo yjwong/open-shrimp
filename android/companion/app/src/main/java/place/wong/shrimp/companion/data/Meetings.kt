@@ -5,6 +5,8 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
+import org.json.JSONArray
 import org.json.JSONObject
 
 fun formatDuration(durationMs: Long): String {
@@ -29,6 +31,12 @@ data class Transcript(
     val wordCount: Int,
 )
 
+/** One diarization turn: [start, end] in seconds, 0-based speaker label. */
+data class SpeakerTurn(val start: Double, val end: Double, val speaker: Int)
+
+/** A timed transcript word (from words.json): absolute meeting offset in ms. */
+data class TimedWord(val word: String, val tMs: Long)
+
 data class Meeting(
     val id: String,
     val title: String,
@@ -39,7 +47,48 @@ data class Meeting(
     /** null until a transcription attempt has completed. */
     val transcriptState: TranscriptState? = null,
     val wordCount: Int = 0,
+    /** Number of speakers in the saved diarization; 0 = not diarized yet. */
+    val speakerCount: Int = 0,
 )
+
+/**
+ * Words falling in a gap between turns are assigned to the nearest turn;
+ * consecutive same-speaker words coalesce into one `Speaker N: …` utterance
+ * (labels are 1-based for display).
+ */
+fun renderAttributedTranscript(words: List<TimedWord>, turns: List<SpeakerTurn>): String {
+    if (words.isEmpty() || turns.isEmpty()) {
+        return ""
+    }
+    val sb = StringBuilder()
+    var currentSpeaker = -1
+    for (word in words.sortedBy { it.tMs }) {
+        val t = word.tMs / 1000.0
+        val speaker = (
+            turns.firstOrNull { t >= it.start && t <= it.end }
+                ?: turns.minBy { minOf(abs(it.start - t), abs(it.end - t)) }
+            ).speaker
+        if (speaker != currentSpeaker) {
+            if (sb.isNotEmpty()) {
+                sb.append("\n\n")
+            }
+            sb.append("Speaker ").append(speaker + 1).append(": ")
+            currentSpeaker = speaker
+        } else {
+            sb.append(' ')
+        }
+        sb.append(word.word)
+    }
+    return sb.toString()
+}
+
+/** Remap raw cluster ids to contiguous 0..N-1 in order of first appearance. */
+fun renumberSpeakers(turns: List<SpeakerTurn>): List<SpeakerTurn> {
+    val remap = LinkedHashMap<Int, Int>()
+    return turns.sortedBy { it.start }.map { turn ->
+        turn.copy(speaker = remap.getOrPut(turn.speaker) { remap.size })
+    }
+}
 
 /**
  * App-private meeting storage:
@@ -50,6 +99,8 @@ object MeetingStore {
     private const val AUDIO_FILE = "audio.ogg"
     private const val TRANSCRIPT_FILE = "transcript.txt"
     private const val WORDS_FILE = "words.json"
+    private const val DIARIZATION_FILE = "diarization.json"
+    private const val ATTRIBUTED_FILE = "attributed.txt"
 
     fun meetingsDir(context: Context): File = File(context.filesDir, "meetings")
 
@@ -89,10 +140,67 @@ object MeetingStore {
         return updated
     }
 
+    fun diarizationFile(meeting: Meeting): File = File(meeting.audioFile.parentFile, DIARIZATION_FILE)
+
+    fun attributedFile(meeting: Meeting): File = File(meeting.audioFile.parentFile, ATTRIBUTED_FILE)
+
+    fun readWords(meeting: Meeting): List<TimedWord> = try {
+        val json = JSONArray(wordsFile(meeting).readText())
+        (0 until json.length()).map { i ->
+            val word = json.getJSONObject(i)
+            TimedWord(word.getString("word"), word.getLong("t"))
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    fun readTurns(meeting: Meeting): List<SpeakerTurn> = try {
+        val json = JSONObject(diarizationFile(meeting).readText()).getJSONArray("turns")
+        (0 until json.length()).map { i ->
+            val turn = json.getJSONObject(i)
+            SpeakerTurn(turn.getDouble("start"), turn.getDouble("end"), turn.getInt("speaker"))
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    /** Persists diarization turns and the derived speaker-attributed transcript. */
+    fun saveDiarization(meeting: Meeting, rawTurns: List<SpeakerTurn>): Meeting {
+        val turns = renumberSpeakers(rawTurns)
+        val speakerCount = turns.maxOfOrNull { it.speaker + 1 } ?: 0
+        val turnsJson = JSONArray()
+        turns.forEach { turn ->
+            turnsJson.put(
+                JSONObject()
+                    .put("start", turn.start)
+                    .put("end", turn.end)
+                    .put("speaker", turn.speaker),
+            )
+        }
+        diarizationFile(meeting).writeText(
+            JSONObject().put("numSpeakers", speakerCount).put("turns", turnsJson).toString(),
+        )
+        attributedFile(meeting).writeText(renderAttributedTranscript(readWords(meeting), turns))
+        val updated = meeting.copy(speakerCount = speakerCount)
+        writeMeta(updated)
+        return updated
+    }
+
+    /** Relabels every turn of the given speakers to the lowest of them and re-renders. */
+    fun mergeSpeakers(meeting: Meeting, speakers: Set<Int>): Meeting {
+        val target = speakers.min()
+        val merged = readTurns(meeting).map { turn ->
+            if (turn.speaker in speakers) turn.copy(speaker = target) else turn
+        }
+        return saveDiarization(meeting, merged)
+    }
+
     fun list(context: Context): List<Meeting> =
         meetingsDir(context).listFiles { file -> file.isDirectory }.orEmpty()
             .mapNotNull(::readMeta)
             .sortedByDescending { it.startedAtMs }
+
+    fun get(context: Context, id: String): Meeting? = readMeta(File(meetingsDir(context), id))
 
     private fun writeMeta(meeting: Meeting) {
         val json = JSONObject()
@@ -102,6 +210,7 @@ object MeetingStore {
             .put("durationMs", meeting.durationMs)
             .put("audioFile", meeting.audioFile.name)
             .put("wordCount", meeting.wordCount)
+            .put("speakerCount", meeting.speakerCount)
         meeting.transcriptState?.let { json.put("transcriptState", it.name.lowercase()) }
         File(meeting.audioFile.parentFile, META_FILE).writeText(json.toString())
     }
@@ -118,6 +227,7 @@ object MeetingStore {
                 it.name.equals(json.optString("transcriptState"), ignoreCase = true)
             },
             wordCount = json.optInt("wordCount", 0),
+            speakerCount = json.optInt("speakerCount", 0),
         )
     } catch (_: Exception) {
         null

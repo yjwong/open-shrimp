@@ -16,6 +16,10 @@ local.properties
 google-services.json
 app/google-services.json
 
+# Large binary deps fetched by the fetchDiarizationDeps gradle task
+/app/libs/
+/app/src/main/assets/diar/
+
 # Crash / heap dumps
 *.hprof
 
