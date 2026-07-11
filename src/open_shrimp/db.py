@@ -200,6 +200,26 @@ CREATE INDEX IF NOT EXISTS idx_inbound_events_pickup
     ON inbound_events (chat_id, pickup_thread_id)
 """
 
+_CREATE_MEETING_JOBS_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    meeting_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    started_at_ms INTEGER,
+    duration_ms INTEGER,
+    speaker_count INTEGER NOT NULL DEFAULT 0,
+    word_count INTEGER NOT NULL DEFAULT 0,
+    transcript TEXT NOT NULL,
+    state TEXT NOT NULL,
+    notes_md TEXT,
+    error TEXT,
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    UNIQUE(device_id, meeting_id)
+)
+"""
+
 _CREATE_SECURITY_KEY_AUDIT_EVENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS security_key_audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -354,6 +374,7 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_ANDROID_COMPANION_NONCES_TABLE)
     await db.execute(_CREATE_EVENT_TOPICS_TABLE)
     await db.execute(_CREATE_INBOUND_EVENTS_TABLE)
+    await db.execute(_CREATE_MEETING_JOBS_TABLE)
     await db.commit()
     await _migrate_schema(db)
     await _migrate_scheduled_tasks_disabled(db)
@@ -933,5 +954,163 @@ async def prune_inbound_events(
         "SELECT id FROM inbound_events WHERE source = ? "
         "ORDER BY id DESC LIMIT ?)",
         (source, source, keep),
+    )
+    await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Meeting transcript jobs (Android companion upload -> notes -> delivery)
+# ---------------------------------------------------------------------------
+
+
+# Meeting-job state machine. The active set (still processing) and the
+# terminal set must remain complementary: requeue-on-restart selects the
+# former, completion-stamping selects the latter.
+MEETING_STATE_RECEIVED = "received"
+MEETING_STATE_GENERATING_NOTES = "generating_notes"
+MEETING_STATE_DELIVERED = "delivered"
+MEETING_STATE_FAILED = "failed"
+_MEETING_ACTIVE_STATES = (MEETING_STATE_RECEIVED, MEETING_STATE_GENERATING_NOTES)
+_MEETING_TERMINAL_STATES = (MEETING_STATE_DELIVERED, MEETING_STATE_FAILED)
+
+
+@dataclass
+class MeetingJob:
+    """A persisted meeting-transcript job.
+
+    States: received -> generating_notes -> delivered | failed.
+    """
+
+    id: int
+    device_id: str
+    meeting_id: str
+    title: str
+    started_at_ms: int | None
+    duration_ms: int | None
+    speaker_count: int
+    word_count: int
+    transcript: str
+    state: str
+    notes_md: str | None = None
+    error: str | None = None
+    created_at: int = 0
+    completed_at: int | None = None
+
+
+_MEETING_JOB_COLUMNS = (
+    "id, device_id, meeting_id, title, started_at_ms, duration_ms, "
+    "speaker_count, word_count, transcript, state, notes_md, error, "
+    "created_at, completed_at"
+)
+
+
+def _row_to_meeting_job(row: tuple) -> MeetingJob:
+    return MeetingJob(
+        id=row[0],
+        device_id=row[1],
+        meeting_id=row[2],
+        title=row[3],
+        started_at_ms=row[4],
+        duration_ms=row[5],
+        speaker_count=row[6],
+        word_count=row[7],
+        transcript=row[8],
+        state=row[9],
+        notes_md=row[10],
+        error=row[11],
+        created_at=row[12],
+        completed_at=row[13],
+    )
+
+
+async def upsert_meeting_job(
+    db: aiosqlite.Connection,
+    *,
+    device_id: str,
+    meeting_id: str,
+    title: str,
+    started_at_ms: int | None,
+    duration_ms: int | None,
+    speaker_count: int,
+    word_count: int,
+    transcript: str,
+) -> int:
+    """Insert or replace the job for (device, meeting); returns the row id.
+
+    A re-upload (retry, or redone diarization) resets the job to ``received``
+    and clears any previous notes/error so processing runs afresh.
+    """
+    cursor = await db.execute(
+        "INSERT INTO meeting_jobs (device_id, meeting_id, title, "
+        "started_at_ms, duration_ms, speaker_count, word_count, transcript, "
+        "state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (device_id, meeting_id) DO UPDATE SET "
+        "title = excluded.title, started_at_ms = excluded.started_at_ms, "
+        "duration_ms = excluded.duration_ms, "
+        "speaker_count = excluded.speaker_count, "
+        "word_count = excluded.word_count, transcript = excluded.transcript, "
+        "state = excluded.state, notes_md = NULL, error = NULL, "
+        "completed_at = NULL, created_at = excluded.created_at "
+        "RETURNING id",
+        (
+            device_id,
+            meeting_id,
+            title,
+            started_at_ms,
+            duration_ms,
+            speaker_count,
+            word_count,
+            transcript,
+            MEETING_STATE_RECEIVED,
+            int(time.time()),
+        ),
+    )
+    row = await cursor.fetchone()
+    await db.commit()
+    assert row is not None
+    return row[0]
+
+
+async def get_meeting_job(
+    db: aiosqlite.Connection, job_id: int
+) -> MeetingJob | None:
+    """Return the meeting job row for *job_id*, or None."""
+    cursor = await db.execute(
+        f"SELECT {_MEETING_JOB_COLUMNS} FROM meeting_jobs WHERE id = ?",
+        (job_id,),
+    )
+    row = await cursor.fetchone()
+    return _row_to_meeting_job(row) if row else None
+
+
+async def get_unfinished_meeting_jobs(
+    db: aiosqlite.Connection,
+) -> list[MeetingJob]:
+    """Jobs interrupted mid-processing (e.g. by a restart), oldest first."""
+    placeholders = ", ".join("?" for _ in _MEETING_ACTIVE_STATES)
+    cursor = await db.execute(
+        f"SELECT {_MEETING_JOB_COLUMNS} FROM meeting_jobs "
+        f"WHERE state IN ({placeholders}) ORDER BY id",
+        _MEETING_ACTIVE_STATES,
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_meeting_job(row) for row in rows]
+
+
+async def set_meeting_job_state(
+    db: aiosqlite.Connection,
+    job_id: int,
+    state: str,
+    *,
+    notes_md: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Update a job's state; terminal states also stamp completed_at."""
+    completed_at = int(time.time()) if state in _MEETING_TERMINAL_STATES else None
+    await db.execute(
+        "UPDATE meeting_jobs SET state = ?, "
+        "notes_md = COALESCE(?, notes_md), error = ?, completed_at = ? "
+        "WHERE id = ?",
+        (state, notes_md, error, completed_at, job_id),
     )
     await db.commit()

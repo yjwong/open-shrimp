@@ -920,6 +920,11 @@ def create_review_app(
 
     routes.extend(create_agent_status_routes())
 
+    # Android companion meeting-transcript upload endpoint.
+    from open_shrimp.meetings.api import create_meetings_routes
+
+    routes.extend(create_meetings_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db

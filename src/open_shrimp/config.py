@@ -163,6 +163,13 @@ _EVENT_SOURCE_TYPES = {"telegram", "lark"}
 
 
 @dataclass
+class MeetingsConfig:
+    chat_id: int  # forum chat where the Meetings topic is created
+    topic: str = "Meetings"  # forum topic name for notes/transcripts
+    notes_context: str | None = None  # context whose model/cwd writes the notes
+
+
+@dataclass
 class Config:
     telegram: TelegramConfig
     allowed_users: list[int]
@@ -176,6 +183,7 @@ class Config:
     # ``open_shrimp.backend.get_backend``).  Absent defaults to ``claude_sdk``.
     backend: str = "claude_sdk"
     events: EventsConfig | None = None
+    meetings: MeetingsConfig | None = None
 
 
 def _validate_raw(raw: dict) -> None:
@@ -463,6 +471,35 @@ def _validate_raw(raw: dict) -> None:
             ) from exc
 
     _validate_events(raw)
+    _validate_meetings(raw)
+
+
+def _validate_meetings(raw: dict) -> None:
+    """Validate the optional top-level ``meetings:`` section."""
+    meetings = raw.get("meetings")
+    if meetings is None:
+        return
+    if not isinstance(meetings, dict):
+        raise ValueError("meetings must be a mapping")
+
+    chat_id = meetings.get("chat_id")
+    if not isinstance(chat_id, int):
+        raise ValueError("meetings.chat_id is required and must be an integer")
+
+    topic = meetings.get("topic", "Meetings")
+    if not isinstance(topic, str) or not topic.strip():
+        raise ValueError("meetings.topic must be a non-empty string")
+    if len(topic) > 100 or "\n" in topic:
+        raise ValueError(
+            "meetings.topic must be a single line of at most 100 characters "
+            "(it becomes a forum topic title)"
+        )
+
+    ctx = meetings.get("notes_context")
+    if ctx is not None and (not isinstance(ctx, str) or ctx not in raw["contexts"]):
+        raise ValueError(
+            f"meetings.notes_context {ctx!r} is not a defined context"
+        )
 
 
 def _validate_events(raw: dict) -> None:
@@ -751,6 +788,15 @@ def _parse(raw: dict) -> Config:
             ],
         )
 
+    meetings_raw = raw.get("meetings")
+    meetings: MeetingsConfig | None = None
+    if meetings_raw is not None:
+        meetings = MeetingsConfig(
+            chat_id=meetings_raw["chat_id"],
+            topic=str(meetings_raw.get("topic", "Meetings")),
+            notes_context=meetings_raw.get("notes_context"),
+        )
+
     android_companion = AndroidCompanionConfig(
         push_provider=push_provider,
         fcm_project_id=android_companion_raw.get("fcm_project_id"),
@@ -769,6 +815,7 @@ def _parse(raw: dict) -> Config:
         auto_update=bool(raw.get("auto_update", True)),
         backend=str(raw.get("backend", "claude_sdk")),
         events=events,
+        meetings=meetings,
     )
 
 

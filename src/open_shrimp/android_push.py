@@ -201,6 +201,33 @@ class FcmPushSender:
             high_priority=True,
         )
 
+    async def send_transcription_ready(
+        self,
+        *,
+        device: dict[str, Any],
+        meeting_id: str,
+        state: str,
+        error: str | None = None,
+    ) -> PushDeliveryResult:
+        """Tell the phone a meeting-transcript job finished (delivered/failed)."""
+        if device.get("push_provider") != "fcm":
+            return PushDeliveryResult(status="unsupported_provider")
+        token = device.get("push_token")
+        if not isinstance(token, str) or not token:
+            return PushDeliveryResult(status="missing_token")
+        data = {
+            "type": "transcription_ready",
+            "meeting_id": meeting_id,
+            "state": state,
+        }
+        if error:
+            data["error"] = error[:200]
+        return await self._post_fcm_message(
+            token=token,
+            data=data,
+            high_priority=False,
+        )
+
     async def send_agent_status(
         self,
         *,

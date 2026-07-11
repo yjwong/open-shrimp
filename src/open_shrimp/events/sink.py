@@ -17,15 +17,14 @@ from telegram.error import BadRequest
 
 from open_shrimp.db import (
     delete_event_topic,
-    get_event_topic,
     insert_inbound_event,
     prune_inbound_events,
-    set_event_topic,
     set_inbound_event_delivery,
 )
 from open_shrimp.events.pickup import pickup_keyboard
 from open_shrimp.events.types import Event
 from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, escape, gfm_to_telegram
+from open_shrimp.telegram_topics import is_topic_gone, resolve_or_create_topic
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +37,6 @@ PRUNE_EVERY = 50
 # Forum-topic icon for the per-source inbox topics. Must be one of Telegram's
 # allowed topic-icon emoji (📥 is not in that set, so it stays in the title).
 INBOX_TOPIC_ICON = "📰"
-
-# Telegram reports a deleted/missing forum topic via BadRequest with
-# varying descriptions; match broadly on the text.
-_TOPIC_GONE_MARKERS = ("message thread not found", "topic_deleted", "topic deleted")
-
-
-def _is_topic_gone(exc: BadRequest) -> bool:
-    message = str(exc).lower()
-    return any(marker in message for marker in _TOPIC_GONE_MARKERS)
-
 
 def _header(event: Event) -> str:
     header = f"📥 {event.source}"
@@ -126,18 +115,14 @@ class EventSink:
         return self._icon_id
 
     async def _resolve_topic(self, source: str) -> int:
-        row = await get_event_topic(self._db, source)
-        if row is not None:
-            return row[1]
-        kwargs: dict[str, str] = {"name": f"📥 {source}"}
-        icon_id = await self._resolve_icon()
-        if icon_id is not None:
-            kwargs["icon_custom_emoji_id"] = icon_id
-        topic = await self._bot.create_forum_topic(self._chat_id, **kwargs)
-        thread_id: int = topic.message_thread_id
-        await set_event_topic(self._db, source, self._chat_id, thread_id)
-        logger.info("Created event topic %r (thread_id=%s)", source, thread_id)
-        return thread_id
+        return await resolve_or_create_topic(
+            self._bot,
+            self._db,
+            key=source,
+            chat_id=self._chat_id,
+            name=f"📥 {source}",
+            icon_custom_emoji_id=await self._resolve_icon(),
+        )
 
     async def _persist(self, event: Event, thread_id: int) -> int:
         """Persist the provider-delivered event content; returns the row id.
@@ -212,7 +197,7 @@ class EventSink:
             try:
                 message_id = await self._send_chunks(chunks, thread_id, button_id)
             except BadRequest as exc:
-                if not _is_topic_gone(exc):
+                if not is_topic_gone(exc):
                     raise
                 # The topic was deleted out from under us: recreate and
                 # retry exactly once.

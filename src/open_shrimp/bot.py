@@ -528,6 +528,16 @@ async def run_bot(
         event_manager = EventManager(config.events, app.bot, db)
         await event_manager.start()
 
+    if config.meetings is not None:
+        from open_shrimp.meetings.processor import (
+            MeetingProcessor,
+            set_active_processor,
+        )
+
+        meeting_processor = MeetingProcessor(config, app.bot, db, app.bot_data)
+        set_active_processor(meeting_processor)
+        await meeting_processor.requeue_unfinished()
+
     # Start config file watcher for live reloading.
     watcher_task = None
     if config_path:
@@ -550,6 +560,12 @@ async def run_bot(
                     await event_manager.stop()
             except (Exception, TimeoutError):
                 logger.warning("Error stopping event sources", exc_info=True)
+        # Deregister the meeting processor so late uploads get a clean 503
+        # instead of enqueueing into a stopping bot.
+        if config.meetings is not None:
+            from open_shrimp.meetings.processor import set_active_processor
+
+            set_active_processor(None)
         # Stop PTB first so the bot goes quiet on Telegram immediately.
         # Previously this came after session/sandbox cleanup, which meant
         # getUpdates polls kept firing for tens of seconds after the user

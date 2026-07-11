@@ -13,6 +13,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import place.wong.shrimp.companion.data.MeetingStore
+import place.wong.shrimp.companion.data.MeetingsSync
+import place.wong.shrimp.companion.data.NotesState
 import place.wong.shrimp.companion.data.Prefs
 import place.wong.shrimp.companion.data.SigningKeys
 
@@ -29,7 +32,43 @@ class ShrimpFirebaseMessagingService : FirebaseMessagingService() {
             "security_key_request" -> handleSecurityKeyRequest(data)
             "port_forward_request" -> handlePortForwardRequest(data)
             "agent_status" -> AgentStatusNotifier.handle(this, data)
+            "transcription_ready" -> handleTranscriptionReady(data)
         }
+    }
+
+    private fun handleTranscriptionReady(data: Map<String, String>) {
+        val meetingId = data["meeting_id"] ?: return
+        val delivered = data["state"] == "delivered"
+        val meeting = MeetingStore.get(this, meetingId) ?: return
+        MeetingStore.setNotesState(
+            meeting,
+            if (delivered) NotesState.DELIVERED else NotesState.FAILED,
+        )
+        MeetingsSync.bump()
+        ensureChannel()
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            meetingId.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val text = if (delivered) {
+            "Notes for \"${meeting.title}\" are in Telegram."
+        } else {
+            val error = data["error"].orEmpty().ifEmpty { "notes generation failed" }
+            "\"${meeting.title}\": $error"
+        }
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_agenda)
+            .setContentTitle(if (delivered) "Meeting notes delivered" else "Meeting notes failed")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(meetingId.hashCode(), notification)
     }
 
     private fun handlePortForwardRequest(data: Map<String, String>) {

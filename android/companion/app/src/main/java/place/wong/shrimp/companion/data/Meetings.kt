@@ -6,8 +6,18 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
+
+/** Bumped when meeting metadata changes outside the UI (e.g. an FCM push). */
+object MeetingsSync {
+    val ticks = MutableStateFlow(0L)
+
+    fun bump() {
+        ticks.value += 1
+    }
+}
 
 fun formatDuration(durationMs: Long): String {
     val totalSeconds = durationMs / 1000
@@ -22,6 +32,9 @@ fun formatDuration(durationMs: Long): String {
 }
 
 enum class TranscriptState { DONE, FAILED, UNAVAILABLE }
+
+/** Host-side notes pipeline state: SENT (processing), DELIVERED, or FAILED. */
+enum class NotesState { SENT, DELIVERED, FAILED }
 
 /** A finished transcription: flat text plus the timed word list (JSON `[{"word","t"}]`, absolute ms). */
 data class Transcript(
@@ -49,6 +62,8 @@ data class Meeting(
     val wordCount: Int = 0,
     /** Number of speakers in the saved diarization; 0 = not diarized yet. */
     val speakerCount: Int = 0,
+    /** null until the transcript has been sent to the host for notes. */
+    val notesState: NotesState? = null,
 )
 
 /**
@@ -186,6 +201,22 @@ object MeetingStore {
         return updated
     }
 
+    fun setNotesState(meeting: Meeting, state: NotesState?): Meeting {
+        val updated = meeting.copy(notesState = state)
+        writeMeta(updated)
+        return updated
+    }
+
+    /** The transcript to send for notes: attributed if diarized, else flat. */
+    fun uploadableTranscript(meeting: Meeting): String? {
+        val attributed = attributedFile(meeting)
+        val text = when {
+            meeting.speakerCount > 0 && attributed.exists() -> attributed.readText()
+            else -> runCatching { transcriptFile(meeting).readText() }.getOrNull()
+        }
+        return text?.takeIf { it.isNotBlank() }
+    }
+
     /** Relabels every turn of the given speakers to the lowest of them and re-renders. */
     fun mergeSpeakers(meeting: Meeting, speakers: Set<Int>): Meeting {
         val target = speakers.min()
@@ -212,6 +243,7 @@ object MeetingStore {
             .put("wordCount", meeting.wordCount)
             .put("speakerCount", meeting.speakerCount)
         meeting.transcriptState?.let { json.put("transcriptState", it.name.lowercase()) }
+        meeting.notesState?.let { json.put("notesState", it.name.lowercase()) }
         File(meeting.audioFile.parentFile, META_FILE).writeText(json.toString())
     }
 
@@ -228,6 +260,9 @@ object MeetingStore {
             },
             wordCount = json.optInt("wordCount", 0),
             speakerCount = json.optInt("speakerCount", 0),
+            notesState = NotesState.entries.firstOrNull {
+                it.name.equals(json.optString("notesState"), ignoreCase = true)
+            },
         )
     } catch (_: Exception) {
         null

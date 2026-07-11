@@ -199,3 +199,14 @@ default_context: default
 #       # Lark app must use Event Subscription in "Long Connection" (WebSocket)
 #       # mode and subscribe to im.message.receive_v1. Add the bot to the
 #       # target chat and release an app version for it to take effect.
+
+# Optional: meeting transcription (Android companion). The phone records and
+# transcribes meetings fully on-device, then uploads the diarized transcript
+# TEXT (audio never leaves the phone). The host generates Claude meeting
+# notes and delivers notes + transcript into a "📝 Meetings" forum topic,
+# then notifies the phone via FCM.
+# meetings:
+#   chat_id: -1001234567890   # forum chat where the Meetings topic is created
+#   topic: Meetings           # forum topic name (default: Meetings)
+#   notes_context: default    # context whose model/cwd generates the notes;
+#                             # omit for default_context (session is tool-less)

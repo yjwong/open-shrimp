@@ -174,6 +174,25 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
         )
     }
 
+    /** Upload a finished meeting transcript (text only; audio stays local). */
+    suspend fun uploadMeetingTranscript(
+        baseUrl: String,
+        deviceId: String,
+        meeting: Meeting,
+        transcript: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("meeting_id", meeting.id)
+            .put("title", meeting.title)
+            .put("started_at_ms", meeting.startedAtMs)
+            .put("duration_ms", meeting.durationMs)
+            .put("speaker_count", meeting.speakerCount)
+            .put("word_count", meeting.wordCount)
+            .put("transcript", transcript)
+            .toString()
+        signedPost("$baseUrl/api/meetings/transcripts", deviceId, "Transcript upload failed", body)
+    }
+
     private fun signedGet(url: String, deviceId: String, errPrefix: String): String {
         val request = SigningKeys.sign(Request.Builder().url(url), "GET", url, "", deviceId)
             .get()

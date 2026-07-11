@@ -107,6 +107,16 @@ async def list_active_android_push_devices(db: aiosqlite.Connection) -> list[dic
     ]
 
 
+async def get_active_push_device(
+    db: aiosqlite.Connection, device_id: str
+) -> dict[str, Any] | None:
+    """Return the active push-registered device row for *device_id*, or None."""
+    for device in await list_active_android_push_devices(db):
+        if device["device_id"] == device_id:
+            return device
+    return None
+
+
 async def revoke_android_device(db: aiosqlite.Connection, device_id: str) -> bool:
     cursor = await db.execute(
         """

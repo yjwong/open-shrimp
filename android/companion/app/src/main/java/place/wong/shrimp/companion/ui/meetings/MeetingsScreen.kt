@@ -48,6 +48,10 @@ import place.wong.shrimp.companion.MeetingDiarizationService
 import place.wong.shrimp.companion.MeetingRecorderService
 import place.wong.shrimp.companion.data.Meeting
 import place.wong.shrimp.companion.data.MeetingStore
+import place.wong.shrimp.companion.data.MeetingsSync
+import place.wong.shrimp.companion.data.NotesState
+import place.wong.shrimp.companion.data.Prefs
+import place.wong.shrimp.companion.data.ServerApi
 import place.wong.shrimp.companion.data.TranscriptState
 import place.wong.shrimp.companion.data.formatDuration
 
@@ -65,8 +69,9 @@ fun MeetingsScreen(onBack: () -> Unit) {
         MeetingRecorderService.state.map { it.recording }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = false)
     val diarization by MeetingDiarizationService.state.collectAsStateWithLifecycle()
+    val syncTick by MeetingsSync.ticks.collectAsStateWithLifecycle()
 
-    LaunchedEffect(recording, diarization.meetingId, reloadKey) {
+    LaunchedEffect(recording, diarization.meetingId, reloadKey, syncTick) {
         meetings = withContext(Dispatchers.IO) { MeetingStore.list(context) }
     }
 
@@ -141,6 +146,8 @@ private fun MeetingRow(
     var transcript by remember(meeting.id, meeting.speakerCount) { mutableStateOf<String?>(null) }
     var showCountDialog by remember { mutableStateOf(false) }
     var showMergeDialog by remember { mutableStateOf(false) }
+    var sendingNotes by remember(meeting.id) { mutableStateOf(false) }
+    var sendError by remember(meeting.id) { mutableStateOf<String?>(null) }
     val hasTranscript = meeting.wordCount > 0
     val canRunDiarization = hasTranscript && !recordingActive && !diarizationBusy &&
         MeetingDiarizationService.isSupported
@@ -189,6 +196,39 @@ private fun MeetingRow(
                             }
                         }
                     }
+                }
+                if (hasTranscript) {
+                    TextButton(
+                        enabled = !sendingNotes,
+                        onClick = {
+                            sendingNotes = true
+                            sendError = null
+                            scope.launch {
+                                val result = withContext(Dispatchers.IO) {
+                                    runCatching { sendForNotes(context, meeting) }
+                                }
+                                sendingNotes = false
+                                result
+                                    .onSuccess { onChanged() }
+                                    .onFailure { sendError = it.message ?: "Upload failed" }
+                            }
+                        },
+                    ) {
+                        Text(
+                            when {
+                                sendingNotes -> "Sending…"
+                                meeting.notesState != null -> "Resend for notes"
+                                else -> "Send for notes"
+                            },
+                        )
+                    }
+                }
+                if (sendError != null) {
+                    Text(
+                        "Send failed: $sendError",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
                 HorizontalDivider()
                 Text(transcript ?: "Loading transcript…", style = MaterialTheme.typography.bodySmall)
@@ -308,6 +348,18 @@ private fun MergeSpeakersDialog(
     )
 }
 
+/** Uploads the transcript text for host-side notes; audio never leaves the phone. */
+private suspend fun sendForNotes(context: android.content.Context, meeting: Meeting) {
+    val prefs = Prefs(context)
+    val baseUrl = prefs.baseUrl.trimEnd('/')
+    val deviceId = prefs.deviceId
+    check(baseUrl.isNotEmpty() && deviceId != null) { "Not paired with a server" }
+    val transcript = MeetingStore.uploadableTranscript(meeting)
+        ?: error("No transcript to send")
+    ServerApi().uploadMeetingTranscript(baseUrl, deviceId, meeting, transcript)
+    MeetingStore.setNotesState(meeting, NotesState.SENT)
+}
+
 private fun describeStatus(meeting: Meeting, recordingActive: Boolean): String {
     if (meeting.durationMs < 0) {
         return if (recordingActive) "Recording…" else "Interrupted"
@@ -320,6 +372,12 @@ private fun describeStatus(meeting: Meeting, recordingActive: Boolean): String {
     var base = "${formatDuration(meeting.durationMs)} • $sizeText"
     if (meeting.speakerCount > 0) {
         base += " • ${meeting.speakerCount} speaker" + if (meeting.speakerCount > 1) "s" else ""
+    }
+    when (meeting.notesState) {
+        NotesState.SENT -> base += " • notes: processing…"
+        NotesState.DELIVERED -> base += " • notes delivered"
+        NotesState.FAILED -> base += " • notes failed"
+        null -> {}
     }
     return when {
         meeting.wordCount > 0 -> "$base • ${meeting.wordCount} words (tap for transcript)"
