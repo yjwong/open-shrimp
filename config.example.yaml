@@ -162,3 +162,33 @@ default_context: default
 #   #   OPENSHRIMP_FCM_SERVICE_ACCOUNT_JSON
 #   fcm_project_id: your-firebase-project-id
 #   fcm_service_account_file: /path/to/firebase-service-account.json
+
+# Inbound events (optional).  External sources deliver events into dedicated
+# forum topics — one topic per source, auto-created on first event (e.g.
+# "📥 lark").  Events are posted as inert messages; no agent runs on receipt.
+# To act on an event, tap its "▶️ Pick up" button: a context picker opens and
+# the event is handed off to a dedicated new topic bound to the chosen
+# context.  The agent's first turn references the event by id only; it
+# fetches the provider-delivered content itself via the read_inbound_event
+# tool (untrusted content never enters a prompt).
+# events:
+#   chat_id: -1001234567890        # forum chat where 📥 topics are created
+#   sources:
+#     - name: tg-intake
+#       type: telegram
+#       token: "123456:ABC..."     # a SECOND bot token (not telegram.token)
+#       allowed_chats: [-100987654321, 42424242]  # messages from other chats are ignored
+#       context: default           # pre-selected (★) default in the pick-up
+#                                  # context picker; omit for default_context
+#       pickup: true               # set false to keep this source purely
+#                                  # inert (no pick-up buttons)
+#     - name: lark                 # requires: uv sync --extra lark
+#       type: lark
+#       app_id: "cli_..."
+#       app_secret: "..."
+#       domain: lark               # "lark" (open.larksuite.com, international)
+#                                  # or "feishu" (open.feishu.cn, China).
+#                                  # Default: feishu.
+#       # Lark app must use Event Subscription in "Long Connection" (WebSocket)
+#       # mode and subscribe to im.message.receive_v1. Add the bot to the
+#       # target chat and release an app version for it to take effect.

@@ -8,6 +8,7 @@ Also stores scheduled tasks for the scheduler module.
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -157,6 +158,39 @@ CREATE TABLE IF NOT EXISTS android_companion_nonces (
 )
 """
 
+_CREATE_EVENT_TOPICS_TABLE = """
+CREATE TABLE IF NOT EXISTS event_topics (
+    source TEXT PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    message_thread_id INTEGER NOT NULL
+)
+"""
+
+_CREATE_INBOUND_EVENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS inbound_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source      TEXT NOT NULL,
+    sender      TEXT,
+    text        TEXT,
+    raw         TEXT,
+    chat_id     INTEGER NOT NULL,
+    thread_id   INTEGER NOT NULL,
+    message_id  INTEGER,
+    picked_up   INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+)
+"""
+
+_CREATE_INBOUND_EVENTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_inbound_events_source_created
+    ON inbound_events (source, created_at)
+"""
+
+_CREATE_INBOUND_EVENTS_MESSAGE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_inbound_events_chat_message
+    ON inbound_events (chat_id, message_id)
+"""
+
 _CREATE_SECURITY_KEY_AUDIT_EVENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS security_key_audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,6 +319,10 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_ANDROID_COMPANION_PAIRING_CODES_TABLE)
     await db.execute(_CREATE_ANDROID_COMPANION_DEVICES_TABLE)
     await db.execute(_CREATE_ANDROID_COMPANION_NONCES_TABLE)
+    await db.execute(_CREATE_EVENT_TOPICS_TABLE)
+    await db.execute(_CREATE_INBOUND_EVENTS_TABLE)
+    await db.execute(_CREATE_INBOUND_EVENTS_INDEX)
+    await db.execute(_CREATE_INBOUND_EVENTS_MESSAGE_INDEX)
     await db.commit()
     await _migrate_schema(db)
     await _migrate_scheduled_tasks_disabled(db)
@@ -629,3 +667,176 @@ async def get_all_additional_directories_for_context(
     )
     rows = await cursor.fetchall()
     return [row[0] for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Inbound event topics
+# ---------------------------------------------------------------------------
+
+
+async def get_event_topic(
+    db: aiosqlite.Connection, source: str
+) -> tuple[int, int] | None:
+    """Return (chat_id, message_thread_id) for an event source, or None."""
+    cursor = await db.execute(
+        "SELECT chat_id, message_thread_id FROM event_topics WHERE source = ?",
+        (source,),
+    )
+    row = await cursor.fetchone()
+    return (row[0], row[1]) if row else None
+
+
+async def set_event_topic(
+    db: aiosqlite.Connection, source: str, chat_id: int, thread_id: int
+) -> None:
+    """Insert or update the forum topic mapping for an event source."""
+    await db.execute(
+        "INSERT INTO event_topics (source, chat_id, message_thread_id) "
+        "VALUES (?, ?, ?) "
+        "ON CONFLICT (source) "
+        "DO UPDATE SET chat_id = excluded.chat_id, "
+        "message_thread_id = excluded.message_thread_id",
+        (source, chat_id, thread_id),
+    )
+    await db.commit()
+
+
+async def delete_event_topic(db: aiosqlite.Connection, source: str) -> None:
+    """Remove the forum topic mapping for an event source."""
+    await db.execute("DELETE FROM event_topics WHERE source = ?", (source,))
+    await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Inbound events (pick-up handoff)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InboundEvent:
+    """A persisted inbound event row."""
+
+    id: int
+    source: str
+    sender: str | None
+    text: str | None
+    raw: str | None  # json.dumps of the raw payload, for the JSON fallback
+    chat_id: int
+    thread_id: int
+    message_id: int | None
+    picked_up: bool
+    created_at: int
+
+
+async def insert_inbound_event(
+    db: aiosqlite.Connection,
+    *,
+    source: str,
+    sender: str | None,
+    text: str | None,
+    raw: str | None,
+    chat_id: int,
+    thread_id: int,
+) -> int:
+    """Persist an inbound event, returning its integer id."""
+    cursor = await db.execute(
+        "INSERT INTO inbound_events "
+        "(source, sender, text, raw, chat_id, thread_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (source, sender, text, raw, chat_id, thread_id, int(time.time())),
+    )
+    await db.commit()
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
+
+
+async def set_inbound_event_delivery(
+    db: aiosqlite.Connection, event_id: int, thread_id: int, message_id: int
+) -> None:
+    """Record where the event message landed (button host, for later edits)."""
+    await db.execute(
+        "UPDATE inbound_events SET thread_id = ?, message_id = ? WHERE id = ?",
+        (thread_id, message_id, event_id),
+    )
+    await db.commit()
+
+
+_INBOUND_EVENT_COLUMNS = (
+    "id, source, sender, text, raw, chat_id, thread_id, "
+    "message_id, picked_up, created_at"
+)
+
+
+def _row_to_inbound_event(row: tuple) -> InboundEvent:
+    return InboundEvent(
+        id=row[0],
+        source=row[1],
+        sender=row[2],
+        text=row[3],
+        raw=row[4],
+        chat_id=row[5],
+        thread_id=row[6],
+        message_id=row[7],
+        picked_up=bool(row[8]),
+        created_at=row[9],
+    )
+
+
+async def get_inbound_event(
+    db: aiosqlite.Connection, event_id: int
+) -> InboundEvent | None:
+    """Return the inbound event row for *event_id*, or None."""
+    cursor = await db.execute(
+        f"SELECT {_INBOUND_EVENT_COLUMNS} FROM inbound_events WHERE id = ?",
+        (event_id,),
+    )
+    row = await cursor.fetchone()
+    return _row_to_inbound_event(row) if row else None
+
+
+async def get_inbound_event_by_message(
+    db: aiosqlite.Connection, chat_id: int, message_id: int
+) -> InboundEvent | None:
+    """Return the inbound event whose posted message is (chat_id, message_id)."""
+    cursor = await db.execute(
+        f"SELECT {_INBOUND_EVENT_COLUMNS} FROM inbound_events "
+        f"WHERE chat_id = ? AND message_id = ?",
+        (chat_id, message_id),
+    )
+    row = await cursor.fetchone()
+    return _row_to_inbound_event(row) if row else None
+
+
+async def claim_inbound_event(db: aiosqlite.Connection, event_id: int) -> bool:
+    """Atomically claim an event for pick-up.
+
+    Returns True if this call won the claim; False if the event was already
+    picked up (double-tap / concurrent tap race gate).
+    """
+    cursor = await db.execute(
+        "UPDATE inbound_events SET picked_up = 1 WHERE id = ? AND picked_up = 0",
+        (event_id,),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def release_inbound_event(db: aiosqlite.Connection, event_id: int) -> None:
+    """Undo a claim so the pick-up button works again after a failed spawn."""
+    await db.execute(
+        "UPDATE inbound_events SET picked_up = 0 WHERE id = ?", (event_id,)
+    )
+    await db.commit()
+
+
+async def prune_inbound_events(
+    db: aiosqlite.Connection, source: str, keep: int = 500
+) -> None:
+    """Delete all but the newest *keep* events for a source."""
+    await db.execute(
+        "DELETE FROM inbound_events WHERE source = ? AND id NOT IN ("
+        "SELECT id FROM inbound_events WHERE source = ? "
+        "ORDER BY id DESC LIMIT ?)",
+        (source, source, keep),
+    )
+    await db.commit()

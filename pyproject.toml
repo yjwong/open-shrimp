@@ -33,6 +33,7 @@ macos = [
     "pyobjc-framework-Quartz>=10.0",
 ]
 libvirt = ["libvirt-python>=10.0"]
+lark = ["lark-oapi"]
 
 [project.scripts]
 openshrimp = "open_shrimp.main:main"

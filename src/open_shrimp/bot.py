@@ -37,6 +37,7 @@ from open_shrimp.sandbox import (
 )
 from open_shrimp.sandbox.manager import destroy_contexts_background
 from open_shrimp.dispatch_registry import register_dispatch
+from open_shrimp.events.pickup import handle_pickup_callback
 from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
     add_dir_handler,
@@ -93,6 +94,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if not _is_authorized(query.from_user and query.from_user.id, config):
         await query.answer("Unauthorized.")
+        return
+
+    # Inbound-event pick-up (button + context picker)
+    if await handle_pickup_callback(query, data, config, context):
         return
 
     # /context selection and pagination
@@ -514,6 +519,15 @@ async def run_bot(
 
     register_update_checker(app)
 
+    # Start inbound event sources (they post via the main bot, so this
+    # must come after the bot is connected).
+    event_manager = None
+    if config.events is not None:
+        from open_shrimp.events.manager import EventManager
+
+        event_manager = EventManager(config.events, app.bot, db)
+        await event_manager.start()
+
     # Start config file watcher for live reloading.
     watcher_task = None
     if config_path:
@@ -528,6 +542,14 @@ async def run_bot(
     finally:
         if watcher_task:
             watcher_task.cancel()
+        # Stop event sources first: the intake bot should go quiet with the
+        # main bot, and the sink must not post through a stopping Application.
+        if event_manager is not None:
+            try:
+                async with asyncio.timeout(15):
+                    await event_manager.stop()
+            except (Exception, TimeoutError):
+                logger.warning("Error stopping event sources", exc_info=True)
         # Stop PTB first so the bot goes quiet on Telegram immediately.
         # Previously this came after session/sandbox cleanup, which meant
         # getUpdates polls kept firing for tens of seconds after the user

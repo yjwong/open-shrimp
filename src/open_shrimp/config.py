@@ -131,6 +131,34 @@ class AndroidCompanionConfig:
 
 
 @dataclass
+class EventSourceConfig:
+    name: str
+    type: str  # "telegram" or "lark"
+    # type: telegram
+    token: str | None = None
+    allowed_chats: list[int] = field(default_factory=list)
+    # type: lark
+    app_id: str | None = None
+    app_secret: str | None = None
+    # Lark region: "feishu" (open.feishu.cn, China) or "lark"
+    # (open.larksuite.com, international). Defaults to "feishu".
+    domain: str | None = None
+    # Pre-selected default in the pick-up context picker; None -> default_context.
+    context: str | None = None
+    # Attach a "Pick up" button to each posted event.
+    pickup: bool = True
+
+
+@dataclass
+class EventsConfig:
+    chat_id: int  # forum chat where per-source topics are created
+    sources: list[EventSourceConfig] = field(default_factory=list)
+
+
+_EVENT_SOURCE_TYPES = {"telegram", "lark"}
+
+
+@dataclass
 class Config:
     telegram: TelegramConfig
     allowed_users: list[int]
@@ -143,6 +171,7 @@ class Config:
     # The agent backend, selected once at startup (resolved via
     # ``open_shrimp.backend.get_backend``).  Absent defaults to ``claude_sdk``.
     backend: str = "claude_sdk"
+    events: EventsConfig | None = None
 
 
 def _validate_raw(raw: dict) -> None:
@@ -429,6 +458,117 @@ def _validate_raw(raw: dict) -> None:
                 f"not be found: {exc}"
             ) from exc
 
+    _validate_events(raw)
+
+
+def _validate_events(raw: dict) -> None:
+    """Validate the optional top-level ``events:`` section."""
+    events = raw.get("events")
+    if events is None:
+        return
+    if not isinstance(events, dict):
+        raise ValueError("events must be a mapping")
+
+    chat_id = events.get("chat_id")
+    if not isinstance(chat_id, int):
+        raise ValueError("events.chat_id is required and must be an integer")
+
+    sources = events.get("sources", [])
+    if not isinstance(sources, list):
+        raise ValueError("events.sources must be a list")
+
+    main_token = raw["telegram"]["token"]
+    seen_names: set[str] = set()
+    for i, source in enumerate(sources):
+        if not isinstance(source, dict):
+            raise ValueError(f"events.sources[{i}] must be a mapping")
+
+        name = source.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                f"events.sources[{i}]: name is required and must be a "
+                f"non-empty string"
+            )
+        if len(name) > 100 or "\n" in name:
+            raise ValueError(
+                f"events.sources[{i}]: name must be a single line of at "
+                f"most 100 characters (it becomes a forum topic title), "
+                f"got: {name!r}"
+            )
+        if name in seen_names:
+            raise ValueError(f"events.sources: duplicate source name {name!r}")
+        seen_names.add(name)
+
+        stype = source.get("type")
+        if stype not in _EVENT_SOURCE_TYPES:
+            raise ValueError(
+                f"events source '{name}': type must be one of "
+                f"{sorted(_EVENT_SOURCE_TYPES)}, got: {stype!r}"
+            )
+
+        ctx = source.get("context")
+        if ctx is not None:
+            if not isinstance(ctx, str) or ctx not in raw["contexts"]:
+                raise ValueError(
+                    f"events source '{name}': context {ctx!r} is not a "
+                    f"defined context"
+                )
+        pickup = source.get("pickup", True)
+        if not isinstance(pickup, bool):
+            raise ValueError(
+                f"events source '{name}': pickup must be a boolean, "
+                f"got: {pickup!r}"
+            )
+
+        if stype == "telegram":
+            token = source.get("token")
+            if not isinstance(token, str) or not token:
+                raise ValueError(
+                    f"events source '{name}': type 'telegram' requires a "
+                    f"'token' (a second bot token)"
+                )
+            if token == main_token:
+                raise ValueError(
+                    f"events source '{name}': token must not be the main "
+                    f"bot's telegram.token — create a separate intake bot "
+                    f"via @BotFather"
+                )
+            allowed_chats = source.get("allowed_chats")
+            if not isinstance(allowed_chats, list) or not allowed_chats:
+                raise ValueError(
+                    f"events source '{name}': allowed_chats must be a "
+                    f"non-empty list of chat ids"
+                )
+            for c in allowed_chats:
+                if not isinstance(c, int):
+                    raise ValueError(
+                        f"events source '{name}': allowed_chats entries "
+                        f"must be integers, got: {c!r}"
+                    )
+        elif stype == "lark":
+            for req in ("app_id", "app_secret"):
+                val = source.get(req)
+                if not isinstance(val, str) or not val:
+                    raise ValueError(
+                        f"events source '{name}': type 'lark' requires "
+                        f"'{req}'"
+                    )
+            domain = source.get("domain")
+            if domain is not None and domain not in ("lark", "feishu"):
+                raise ValueError(
+                    f"events source '{name}': domain must be 'lark' "
+                    f"(open.larksuite.com) or 'feishu' (open.feishu.cn), "
+                    f"got: {domain!r}"
+                )
+            import importlib.util
+
+            if importlib.util.find_spec("lark_oapi") is None:
+                raise ValueError(
+                    f"events source '{name}': type 'lark' requires the "
+                    f"'lark-oapi' package — install with "
+                    f"'uv sync --extra lark'"
+                )
+
 
 def _parse_sandbox_config(raw: dict) -> SandboxConfig:
     """Parse a sandbox config dict into a SandboxConfig dataclass.
@@ -579,6 +719,27 @@ def _parse(raw: dict) -> Config:
         tunnel=tunnel_raw,
     )
 
+    events_raw = raw.get("events")
+    events: EventsConfig | None = None
+    if events_raw is not None:
+        events = EventsConfig(
+            chat_id=events_raw["chat_id"],
+            sources=[
+                EventSourceConfig(
+                    name=s["name"],
+                    type=s["type"],
+                    token=s.get("token"),
+                    allowed_chats=list(s.get("allowed_chats", [])),
+                    app_id=s.get("app_id"),
+                    app_secret=s.get("app_secret"),
+                    domain=s.get("domain"),
+                    context=s.get("context"),
+                    pickup=bool(s.get("pickup", True)),
+                )
+                for s in events_raw.get("sources", [])
+            ],
+        )
+
     android_companion = AndroidCompanionConfig(
         push_provider=push_provider,
         fcm_project_id=android_companion_raw.get("fcm_project_id"),
@@ -596,6 +757,7 @@ def _parse(raw: dict) -> Config:
         instance_name=raw.get("instance_name"),
         auto_update=bool(raw.get("auto_update", True)),
         backend=str(raw.get("backend", "claude_sdk")),
+        events=events,
     )
 
 

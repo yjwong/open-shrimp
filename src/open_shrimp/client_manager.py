@@ -377,6 +377,10 @@ async def get_or_create_session(
                 "mcp__openshrimp__list_schedules",
                 "mcp__openshrimp__delete_schedule",
             ])
+        # Auto-approve read_inbound_event: read-only lookup of content the
+        # user already saw in the inbox topic.
+        if db is not None:
+            allowed_tools.append("mcp__openshrimp__read_inbound_event")
         # Auto-approve ask_context at the parent session: it renders its
         # own tailored approval card per call, so the generic can_use_tool
         # card must not also fire (which would show the raw wire name).

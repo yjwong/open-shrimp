@@ -1,0 +1,328 @@
+"""Lark (Feishu) inbound event adapter over the WebSocket long connection.
+
+Uses the ``lark-oapi`` SDK's WS client, which requires no public URL: it
+connects out and authenticates with app_id/app_secret. The SDK client is
+blocking (``ws.Client.start()`` never returns) and drives all its coroutines
+on a module-level event loop captured at ``lark_oapi.ws.client`` import time,
+so we give it a dedicated loop and run it in a daemon thread. Because that
+loop is a module-level global in the SDK, at most one Lark adapter per
+process is supported.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import threading
+from typing import TYPE_CHECKING, Any
+
+from open_shrimp.events.base import EmitFn
+from open_shrimp.events.types import Event
+
+if TYPE_CHECKING:
+    from open_shrimp.config import EventSourceConfig
+
+try:
+    import lark_oapi  # type: ignore[import-untyped]
+except ImportError:
+    lark_oapi = None
+
+logger = logging.getLogger(__name__)
+
+_INSTALL_HINT = (
+    "the 'lark-oapi' package is not installed — "
+    "install with 'uv sync --extra lark'"
+)
+_JOIN_TIMEOUT = 10.0
+_BACKOFF_INITIAL = 1.0
+_BACKOFF_MAX = 300.0
+_NAME_CACHE_SIZE = 512
+
+
+def extract_text(message_type: str | None, content: str | None) -> str | None:
+    """Extract plain text from a ``text`` message's JSON-encoded content."""
+    if message_type != "text" or not content:
+        return None
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    text = parsed.get("text")
+    return text if isinstance(text, str) else None
+
+
+def sender_open_id(payload: dict[str, Any]) -> str | None:
+    """Pull the sender's open_id out of a p2 im.message.receive_v1 payload."""
+    event = payload.get("event") or {}
+    sender = event.get("sender") or {}
+    sender_id = sender.get("sender_id") or {}
+    open_id = sender_id.get("open_id")
+    return open_id if isinstance(open_id, str) and open_id else None
+
+
+def map_message_event(
+    source: str,
+    payload: dict[str, Any],
+    sender_name: str | None = None,
+) -> Event:
+    """Map a p2 im.message.receive_v1 payload dict to an Event.
+
+    Text messages get ``Event.text``; anything else falls back to the full
+    payload in ``Event.raw``. Since Event has no header field, the message
+    type is appended to ``sender`` (e.g. ``Alice · [post]``) so the sink's
+    JSON fallback stays identifiable.
+    """
+    header = payload.get("header") or {}
+    event = payload.get("event") or {}
+    message = event.get("message") or {}
+    message_type = message.get("message_type")
+
+    sender = sender_name or sender_open_id(payload)
+    text = extract_text(message_type, message.get("content"))
+    raw: dict[str, Any] | None = None
+    if text is None:
+        raw = payload
+        if isinstance(message_type, str) and message_type != "text":
+            tag = f"[{message_type}]"
+            sender = f"{sender} · {tag}" if sender else tag
+
+    dedup_key = header.get("event_id")
+    return Event(
+        source=source,
+        sender=sender,
+        text=text,
+        raw=raw,
+        dedup_key=dedup_key if isinstance(dedup_key, str) else None,
+    )
+
+
+def _payload_from(data: Any) -> dict[str, Any]:
+    """Convert an SDK-typed event object (or a plain dict) to a dict payload."""
+    if isinstance(data, dict):
+        return data
+    assert lark_oapi is not None
+    marshalled = lark_oapi.JSON.marshal(data)
+    parsed = json.loads(marshalled or "{}")
+    return parsed if isinstance(parsed, dict) else {}
+
+
+class LarkAdapter:
+    """EventSourceAdapter for Lark via the WS long connection."""
+
+    def __init__(self, source: EventSourceConfig) -> None:
+        if lark_oapi is None:
+            raise RuntimeError(
+                f"Lark event source '{source.name}': {_INSTALL_HINT}"
+            )
+        self.name: str = source.name
+        self._app_id: str = source.app_id or ""
+        self._app_secret: str = source.app_secret or ""
+        # Resolved to an SDK URL constant lazily in start()/_run(), so
+        # construction stays free of SDK attribute access (tests build the
+        # adapter with a sentinel lark_oapi).
+        self._domain_key: str = source.domain or "feishu"
+        self._emit: EmitFn | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._ws_client: Any = None
+        self._sdk_loop: asyncio.AbstractEventLoop | None = None
+        self._api_client: Any = None
+        self._name_cache: dict[str, str | None] = {}
+
+    def _resolve_domain(self) -> str:
+        assert lark_oapi is not None
+        return {
+            "lark": lark_oapi.LARK_DOMAIN,
+            "feishu": lark_oapi.FEISHU_DOMAIN,
+        }.get(self._domain_key, lark_oapi.FEISHU_DOMAIN)
+
+    async def start(self, emit: EmitFn) -> None:
+        if lark_oapi is None:  # pragma: no cover - constructor already guards
+            raise RuntimeError(f"Lark event source '{self.name}': {_INSTALL_HINT}")
+        self._emit = emit
+        self._loop = asyncio.get_running_loop()
+        self._stopping.clear()
+        self._api_client = (
+            lark_oapi.Client.builder()
+            .app_id(self._app_id)
+            .app_secret(self._app_secret)
+            .domain(self._resolve_domain())
+            .build()
+        )
+        self._thread = threading.Thread(
+            target=self._run, name=f"lark-ws-{self.name}", daemon=True
+        )
+        self._thread.start()
+        logger.info("lark[%s]: adapter started", self.name)
+
+    async def stop(self) -> None:
+        self._stopping.set()
+        sdk_loop = self._sdk_loop
+        client = self._ws_client
+        if sdk_loop is not None and client is not None:
+
+            def _shutdown() -> None:
+                client._auto_reconnect = False
+                task = sdk_loop.create_task(client._disconnect())
+                task.add_done_callback(lambda _t: sdk_loop.stop())
+
+            try:
+                sdk_loop.call_soon_threadsafe(_shutdown)
+            except RuntimeError:
+                pass  # loop already closed
+
+        thread = self._thread
+        if thread is not None:
+            await asyncio.to_thread(thread.join, _JOIN_TIMEOUT)
+            if thread.is_alive():
+                logger.warning(
+                    "lark[%s]: ws thread did not exit within %.0fs; "
+                    "abandoning (daemon thread)",
+                    self.name,
+                    _JOIN_TIMEOUT,
+                )
+            else:
+                logger.info("lark[%s]: adapter stopped", self.name)
+        self._thread = None
+        self._ws_client = None
+        self._sdk_loop = None
+
+    def _run(self) -> None:
+        """Thread body: run the blocking SDK client, retry with backoff."""
+        assert lark_oapi is not None
+        backoff = _BACKOFF_INITIAL
+        while not self._stopping.is_set():
+            sdk_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(sdk_loop)
+            # The SDK schedules everything on this module-level global.
+            lark_oapi.ws.client.loop = sdk_loop
+            self._sdk_loop = sdk_loop
+
+            handler = (
+                lark_oapi.EventDispatcherHandler.builder("", "")
+                .register_p2_im_message_receive_v1(self._on_message)
+                .build()
+            )
+            client = lark_oapi.ws.Client(
+                self._app_id,
+                self._app_secret,
+                event_handler=handler,
+                domain=self._resolve_domain(),
+            )
+            self._ws_client = client
+            if self._stopping.is_set():
+                self._drain_loop(sdk_loop)
+                break
+            try:
+                client.start()  # blocks; SDK auto-reconnects internally
+                if not self._stopping.is_set():
+                    logger.error(
+                        "lark[%s]: ws client returned unexpectedly; "
+                        "restarting in %.0fs",
+                        self.name,
+                        backoff,
+                    )
+            except Exception:
+                if self._stopping.is_set():
+                    break
+                logger.exception(
+                    "lark[%s]: ws client died; restarting in %.0fs",
+                    self.name,
+                    backoff,
+                )
+            finally:
+                self._drain_loop(sdk_loop)
+            if self._stopping.wait(backoff):
+                break
+            backoff = min(backoff * 2, _BACKOFF_MAX)
+
+    def _drain_loop(self, sdk_loop: asyncio.AbstractEventLoop) -> None:
+        try:
+            pending = asyncio.all_tasks(sdk_loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                sdk_loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            sdk_loop.close()
+        except Exception:
+            logger.debug(
+                "lark[%s]: error draining sdk loop", self.name, exc_info=True
+            )
+
+    def _on_message(self, data: Any) -> None:
+        """SDK callback; fires on the WS thread. Hop into the bot's loop."""
+        loop = self._loop
+        if loop is None or self._emit is None:
+            logger.warning("lark[%s]: event received before start; dropped", self.name)
+            return
+        try:
+            payload = _payload_from(data)
+        except Exception:
+            logger.exception("lark[%s]: failed to decode event payload", self.name)
+            return
+        asyncio.run_coroutine_threadsafe(self._deliver(payload), loop)
+
+    async def _deliver(self, payload: dict[str, Any]) -> None:
+        emit = self._emit
+        if emit is None:
+            return
+        try:
+            open_id = sender_open_id(payload)
+            sender_name = await self._resolve_sender(open_id) if open_id else None
+            event = map_message_event(self.name, payload, sender_name)
+            await emit(event)
+        except Exception:
+            logger.exception("lark[%s]: failed to deliver event", self.name)
+
+    async def _resolve_sender(self, open_id: str) -> str | None:
+        if open_id in self._name_cache:
+            return self._name_cache[open_id]
+        try:
+            name = await asyncio.to_thread(self._fetch_user_name, open_id)
+        except Exception:
+            logger.debug(
+                "lark[%s]: could not resolve user name for %s",
+                self.name,
+                open_id,
+                exc_info=True,
+            )
+            name = None
+        self._name_cache[open_id] = name
+        while len(self._name_cache) > _NAME_CACHE_SIZE:
+            self._name_cache.pop(next(iter(self._name_cache)))
+        return name
+
+    def _fetch_user_name(self, open_id: str) -> str | None:
+        """Blocking user-info fetch; tenant scope may not allow it."""
+        if self._api_client is None:
+            return None
+        from lark_oapi.api.contact.v3 import GetUserRequest  # type: ignore[import-untyped]
+
+        request = (
+            GetUserRequest.builder()
+            .user_id(open_id)
+            .user_id_type("open_id")
+            .build()
+        )
+        response = self._api_client.contact.v3.user.get(request)
+        if (
+            not response.success()
+            or response.data is None
+            or response.data.user is None
+        ):
+            logger.debug(
+                "lark[%s]: user lookup for %s failed: code=%s msg=%s",
+                self.name,
+                open_id,
+                getattr(response, "code", None),
+                getattr(response, "msg", None),
+            )
+            return None
+        name = response.data.user.name
+        return name if isinstance(name, str) and name else None

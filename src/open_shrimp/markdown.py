@@ -18,7 +18,7 @@ _ESCAPE_CHARS = r"_*[]()~`>#+-=|{}.!"
 _ESCAPE_RE = re.compile(r"([" + re.escape(_ESCAPE_CHARS) + r"])")
 
 
-def _escape(text: str) -> str:
+def escape(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""
     return _ESCAPE_RE.sub(r"\\\1", text)
 
@@ -67,7 +67,7 @@ class TelegramRenderer(mistune.BaseRenderer):
     # ── Block-level ──
 
     def text(self, text: str) -> str:
-        return _escape(text)
+        return escape(text)
 
     def paragraph(self, text: str) -> str:
         return text + "\n\n"
@@ -79,7 +79,7 @@ class TelegramRenderer(mistune.BaseRenderer):
         return ""
 
     def thematic_break(self) -> str:
-        return _escape("---") + "\n\n"
+        return escape("---") + "\n\n"
 
     def block_code(self, code: str, **attrs: Any) -> str:
         info = attrs.get("info", "")
@@ -101,7 +101,7 @@ class TelegramRenderer(mistune.BaseRenderer):
         return text + "\n"
 
     def list_item(self, text: str) -> str:
-        return _escape("- ") + text.strip() + "\n"
+        return escape("- ") + text.strip() + "\n"
 
     def block_text(self, text: str) -> str:
         return text

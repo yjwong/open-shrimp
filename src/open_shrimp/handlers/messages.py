@@ -105,6 +105,49 @@ def _select_sandbox_manager(
 
 
 # ---------------------------------------------------------------------------
+# Reply context
+# ---------------------------------------------------------------------------
+
+async def _build_reply_context(
+    message: Any, bot_id: int | None, db: aiosqlite.Connection
+) -> str | None:
+    """Build the trusted reference line for a reply to a posted inbound event.
+
+    Prompts never carry untrusted content.  When the replied-to message is a
+    persisted ``inbound_events`` row (posted by the event sink), the prompt
+    gets only the event's id — the agent fetches the provider-delivered
+    content itself via the read_inbound_event tool.  Replies to anything
+    else inject nothing.
+    """
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None or bot_id is None:
+        return None
+    from_user = getattr(reply, "from_user", None)
+    if from_user is None or getattr(from_user, "id", None) != bot_id:
+        return None
+    from open_shrimp.db import get_inbound_event_by_message
+    from open_shrimp.events.pickup import read_event_instruction
+
+    row = await get_inbound_event_by_message(db, message.chat_id, reply.message_id)
+    if row is None:
+        return None
+    return (
+        f'[The user is replying to inbound event #{row.id} from source '
+        f'"{row.source}". {read_event_instruction(row.id)}]'
+    )
+
+
+async def _prepend_reply_context(
+    prompt: str, message: Any, bot_id: int | None, db: aiosqlite.Connection
+) -> str:
+    """Prepend the reply-context envelope to *prompt* when applicable."""
+    envelope = await _build_reply_context(message, bot_id, db)
+    if envelope is None:
+        return prompt
+    return f"{envelope}\n\n{prompt}" if prompt else envelope
+
+
+# ---------------------------------------------------------------------------
 # Attachment download helpers
 # ---------------------------------------------------------------------------
 
@@ -272,6 +315,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         scope, transcription[:100],
                     )
                     prompt = f"[Transcribed from voice note] {transcription}"
+                    prompt = await _prepend_reply_context(
+                        prompt, message, context.bot.id, db
+                    )
                     await _dispatch_to_agent(
                         prompt, [], scope, config, db, context,
                         user_id=update.effective_user.id,
@@ -318,6 +364,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         prompt = "What's in this audio file?"
     elif not prompt:
         return
+
+    # If this is a reply to an inbound event the sink posted, prepend a
+    # reference to the event id — the agent fetches the untrusted content
+    # itself via read_inbound_event.
+    prompt = await _prepend_reply_context(prompt, message, context.bot.id, db)
 
     # Download photo, document, and audio attachments if present
     attachments: list[FileAttachment] = []
