@@ -52,6 +52,7 @@ fun HomeScreen(
     onConsumePortForwardPush: () -> Unit,
     onOpenPairing: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenMeetings: () -> Unit,
     vm: HomeViewModel = viewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -148,6 +149,7 @@ fun HomeScreen(
                     }
                 }
             }
+            MeetingRecordCard(onOpenMeetings = onOpenMeetings)
         }
     }
 

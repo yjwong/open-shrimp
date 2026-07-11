@@ -6,6 +6,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.flow.StateFlow
 import place.wong.shrimp.companion.ui.home.HomeScreen
+import place.wong.shrimp.companion.ui.meetings.MeetingsScreen
 import place.wong.shrimp.companion.ui.pairing.PairingScreen
 import place.wong.shrimp.companion.ui.settings.SettingsScreen
 
@@ -13,6 +14,7 @@ object Routes {
     const val HOME = "home"
     const val PAIRING = "pairing"
     const val SETTINGS = "settings"
+    const val MEETINGS = "meetings"
 }
 
 /**
@@ -38,10 +40,14 @@ fun CompanionApp(
                 onConsumePortForwardPush = onConsumePortForwardPush,
                 onOpenPairing = { navController.navigate(Routes.PAIRING) },
                 onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                onOpenMeetings = { navController.navigate(Routes.MEETINGS) },
             )
         }
         composable(Routes.PAIRING) {
             PairingScreen(onBack = { navController.popBackStack() })
+        }
+        composable(Routes.MEETINGS) {
+            MeetingsScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.SETTINGS) {
             SettingsScreen(
