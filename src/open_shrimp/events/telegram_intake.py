@@ -4,7 +4,9 @@ Builds a second python-telegram-bot ``Application`` with a manual lifecycle
 (startup: initialize -> start -> updater.start_polling; shutdown in
 reverse). Messages from allowlisted chats are
 converted to :class:`~open_shrimp.events.types.Event` and handed to the sink's
-``emit``. The intake bot never sends anything to its source chats.
+``emit``. The intake bot never posts to its source chats on its own; the only
+outbound path is :meth:`TelegramIntakeAdapter.reply`, invoked explicitly via
+the ``reply_inbound_event`` tool.
 """
 
 import asyncio
@@ -122,6 +124,7 @@ def build_event(source_name: str, message: Message) -> Event:
         text=text,
         raw=message.to_dict(),
         dedup_key=f"{message.chat.id}:{message.message_id}",
+        reply_ref={"chat_id": message.chat.id, "message_id": message.message_id},
     )
 
 
@@ -183,6 +186,19 @@ class TelegramIntakeAdapter:
         self._stopped = False
         self._startup_task = asyncio.create_task(
             self._start_with_retry(emit), name=f"telegram-intake-start-{self.name}"
+        )
+
+    async def reply(self, reply_ref: dict, text: str) -> None:
+        """Send *text* as a Telegram reply to the originating message."""
+        chat_id = reply_ref.get("chat_id")
+        message_id = reply_ref.get("message_id")
+        if not isinstance(chat_id, int) or not isinstance(message_id, int):
+            raise ValueError("event carries no Telegram reply routing")
+        app = self._app
+        if app is None:
+            raise RuntimeError("Telegram intake adapter is not started")
+        await app.bot.send_message(
+            chat_id, text, reply_to_message_id=message_id
         )
 
     async def stop(self) -> None:

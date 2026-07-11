@@ -37,7 +37,11 @@ from open_shrimp.web_app_button import make_web_app_button
 
 from open_shrimp.agent import AgentEvent
 from open_shrimp.config import ContextConfig, is_sandboxed
-from open_shrimp.db import ChatScope, delete_session
+from open_shrimp.db import (
+    ChatScope,
+    delete_session,
+    get_inbound_event_by_pickup_scope,
+)
 from open_shrimp.hooks import (
     ApprovalCallback,
     EditNotifyCallback,
@@ -358,6 +362,24 @@ async def get_or_create_session(
     # not registered, so we must NOT advertise its tools — otherwise the
     # agent would attempt calls that surface as "unknown tool" errors
     # mid-conversation.
+    # A topic spawned by picking up an inbound event is bound to exactly one
+    # event; that binding gates the scope-bound reply_inbound_event tool
+    # (registered and auto-approved only here, and only when the source
+    # provided reply routing).
+    pickup_event_id: int | None = None
+    if db is not None and scope.thread_id is not None:
+        try:
+            _pickup_row = await get_inbound_event_by_pickup_scope(
+                db, scope.chat_id, scope.thread_id
+            )
+        except Exception:
+            logger.warning(
+                "Pickup-scope lookup failed for %s", scope, exc_info=True,
+            )
+            _pickup_row = None
+        if _pickup_row is not None and _pickup_row.reply_ref is not None:
+            pickup_event_id = _pickup_row.id
+
     allowed_tools = list(context.allowed_tools or [])
     # Seed the backend's session-start auto-approve list (the backend's
     # native vocabulary for tools whose interactive default is auto-allow
@@ -381,6 +403,11 @@ async def get_or_create_session(
         # user already saw in the inbox topic.
         if db is not None:
             allowed_tools.append("mcp__openshrimp__read_inbound_event")
+        # Auto-approve reply_inbound_event: it only exists in a topic spawned
+        # by picking up an event and can only reach that one event, so the
+        # scope binding is the approval boundary.
+        if pickup_event_id is not None:
+            allowed_tools.append("mcp__openshrimp__reply_inbound_event")
         # Auto-approve ask_context at the parent session: it renders its
         # own tailored approval card per call, so the generic can_use_tool
         # card must not also fire (which would show the raw wire name).
@@ -678,6 +705,7 @@ async def get_or_create_session(
                     mcp_proxy=mcp_proxy,
                     port_relay_registry=port_relay_registry,
                     push_sender=push_sender,
+                    pickup_event_id=pickup_event_id,
                 )
 
             # Sandboxed CLIs must reach the host proxy via the sandbox's

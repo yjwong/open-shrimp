@@ -28,6 +28,7 @@ from open_shrimp.db import (
     get_inbound_event,
     release_inbound_event,
     set_active_context,
+    set_inbound_event_pickup_thread,
 )
 from open_shrimp.handlers.utils import _escape_mdv2
 
@@ -237,6 +238,19 @@ async def _spawn_topic(
         await query.answer("Created the topic but failed to bind the context.")
         return
 
+    # Bind the event to its pick-up topic BEFORE dispatching: the session
+    # build looks this up to register (and auto-approve) the scope-bound
+    # reply_inbound_event tool.  Best-effort — on failure the topic still
+    # works, just without the reply tool.
+    can_reply = row.reply_ref is not None
+    try:
+        await set_inbound_event_pickup_thread(db, row.id, new_thread_id)
+    except Exception:
+        logger.exception(
+            "set_inbound_event_pickup_thread failed during event pick-up"
+        )
+        can_reply = False
+
     # The prompt is trusted text only: it references the event by id and
     # the agent fetches the untrusted content itself via read_inbound_event.
     prompt = (
@@ -244,6 +258,11 @@ async def _spawn_topic(
         f"this topic for you to act on. {read_event_instruction(row.id)} "
         f"Then summarize it and wait for my instructions."
     )
+    if can_reply:
+        prompt += (
+            " If a reply back to the sender is warranted, you can send one "
+            "with the reply_inbound_event tool."
+        )
 
     # The placeholder shows the event content to the human in Telegram; it
     # is display-only and never enters the agent's context.

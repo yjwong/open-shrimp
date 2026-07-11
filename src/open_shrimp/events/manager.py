@@ -11,6 +11,15 @@ from open_shrimp.events.sink import EventSink
 
 logger = logging.getLogger(__name__)
 
+# The manager currently running with the bot, if any.  Set on start() and
+# cleared on stop() so tool handlers (reply_inbound_event) can reach the
+# live adapters without threading the manager through the tool wiring.
+_active_manager: "EventManager | None" = None
+
+
+def get_active_manager() -> "EventManager | None":
+    return _active_manager
+
 
 def _build_adapter(source: EventSourceConfig) -> EventSourceAdapter:
     if source.type == "telegram":
@@ -39,7 +48,16 @@ class EventManager:
         self._sources = config.sources
         self._adapters: list[EventSourceAdapter] = []
 
+    def get_adapter(self, name: str) -> EventSourceAdapter | None:
+        """The running adapter for source *name*, or None."""
+        for adapter in self._adapters:
+            if adapter.name == name:
+                return adapter
+        return None
+
     async def start(self) -> None:
+        global _active_manager
+        _active_manager = self
         # A source that fails to start must not take down the others.
         for source in self._sources:
             try:
@@ -56,6 +74,9 @@ class EventManager:
             )
 
     async def stop(self) -> None:
+        global _active_manager
+        if _active_manager is self:
+            _active_manager = None
         for adapter in reversed(self._adapters):
             try:
                 await adapter.stop()

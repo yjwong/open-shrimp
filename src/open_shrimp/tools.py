@@ -245,6 +245,7 @@ def create_openshrimp_tools(
     mcp_proxy: Any | None = None,
     port_relay_registry: Any | None = None,
     push_sender: Any | None = None,
+    pickup_event_id: int | None = None,
 ) -> list[OpenShrimpTool]:
     """Build the transport-neutral OpenShrimp tool descriptors.
 
@@ -861,6 +862,115 @@ def create_openshrimp_tools(
             input_schema=_read_inbound_event_schema,
             read_only=True,
             handler=read_inbound_event,
+        ))
+
+    # --- reply_inbound_event ---
+    # Only exists in a topic spawned by picking up an inbound event, and can
+    # only reach that one event: the binding makes the tool safe to
+    # auto-approve without an event_id argument to guard.
+    if db is not None and pickup_event_id is not None:
+        from open_shrimp.db import get_inbound_event as _get_pickup_event
+
+        _bound_event_id = pickup_event_id
+
+        _reply_inbound_event_schema = {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "The plain-text reply to send back to the sender."
+                    ),
+                },
+            },
+            "required": ["text"],
+        }
+
+        async def reply_inbound_event(args: dict[str, Any]) -> dict[str, Any]:
+            import json as _json
+
+            from open_shrimp.events.base import SupportsReply
+            from open_shrimp.events.manager import get_active_manager
+
+            text = args.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return _text_result(
+                    "Error: text must be a non-empty string.", is_error=True,
+                )
+            row = await _get_pickup_event(db, _bound_event_id)
+            if row is None:
+                return _text_result(
+                    f"Inbound event #{_bound_event_id} no longer exists "
+                    "(pruned); cannot reply.",
+                    is_error=True,
+                )
+            if row.reply_ref is None:
+                return _text_result(
+                    f"Source {row.source!r} did not provide reply routing "
+                    "for this event.",
+                    is_error=True,
+                )
+            manager = get_active_manager()
+            adapter = (
+                manager.get_adapter(row.source) if manager is not None else None
+            )
+            if adapter is None:
+                return _text_result(
+                    f"Source {row.source!r} is not running; cannot reply.",
+                    is_error=True,
+                )
+            if not isinstance(adapter, SupportsReply):
+                return _text_result(
+                    f"Source {row.source!r} does not support replies.",
+                    is_error=True,
+                )
+            try:
+                await adapter.reply(_json.loads(row.reply_ref), text)
+            except Exception as exc:
+                logger.exception(
+                    "reply_inbound_event failed for event #%s", row.id,
+                )
+                return _text_result(f"Reply failed: {exc}", is_error=True)
+
+            # Echo the outbound reply into the pick-up topic so the human
+            # sees exactly what was sent without opening the source app.
+            try:
+                from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, escape
+
+                header = f"↪️ Replied to {row.source}"
+                if row.sender:
+                    header += f" · {row.sender}"
+                echo_body = text
+                budget = TELEGRAM_MAX_LENGTH // 2
+                if len(echo_body) > budget:
+                    echo_body = echo_body[:budget] + "…"
+                await bot.send_message(
+                    chat_id,
+                    f"*{escape(header)}*\n\n{escape(echo_body)}",
+                    parse_mode="MarkdownV2",
+                    **_thread_kwargs,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to echo reply for event #%s", row.id, exc_info=True,
+                )
+            return _text_result(
+                f"Reply sent to {row.source} (event #{row.id})."
+            )
+
+        tools_list.append(OpenShrimpTool(
+            name="reply_inbound_event",
+            description=(
+                "Send a plain-text reply back to the sender of the inbound "
+                "event this topic was created for. The reply is delivered "
+                "on the originating platform (e.g. as an in-thread reply on "
+                "Lark), and a copy is echoed into this topic. Only send a "
+                "reply when the user asks for one or the event clearly "
+                "warrants a response."
+            ),
+            input_schema=_reply_inbound_event_schema,
+            read_only=False,
+            handler=reply_inbound_event,
         ))
 
     # --- Computer use tools (GUI interaction) ---

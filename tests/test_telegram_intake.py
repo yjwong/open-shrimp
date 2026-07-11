@@ -182,6 +182,39 @@ def test_sender_group_without_user() -> None:
 # ---------------------------------------------------------------- dedup key
 
 
+def test_reply_ref_carries_chat_and_message_id() -> None:
+    event = build_event("tg-intake", make_message(chat_id=42, message_id=7, text="x"))
+    assert event.reply_ref == {"chat_id": 42, "message_id": 7}
+
+
+@pytest.mark.asyncio
+async def test_reply_sends_telegram_reply() -> None:
+    adapter = TelegramIntakeAdapter(make_source())
+    adapter._app = SimpleNamespace(bot=AsyncMock())
+
+    await adapter.reply({"chat_id": 42, "message_id": 7}, "hello")
+
+    adapter._app.bot.send_message.assert_awaited_once_with(
+        42, "hello", reply_to_message_id=7
+    )
+
+
+@pytest.mark.asyncio
+async def test_reply_before_start_raises() -> None:
+    adapter = TelegramIntakeAdapter(make_source())
+    with pytest.raises(RuntimeError):
+        await adapter.reply({"chat_id": 42, "message_id": 7}, "hello")
+
+
+@pytest.mark.asyncio
+async def test_reply_with_bad_routing_raises() -> None:
+    adapter = TelegramIntakeAdapter(make_source())
+    adapter._app = SimpleNamespace(bot=AsyncMock())
+    with pytest.raises(ValueError):
+        await adapter.reply({"chat_id": "42"}, "hello")
+    adapter._app.bot.send_message.assert_not_awaited()
+
+
 def test_dedup_key_format() -> None:
     msg = make_message(chat_id=-100987, message_id=314)
     assert build_event("s", msg).dedup_key == "-100987:314"

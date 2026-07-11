@@ -371,6 +371,34 @@ async def test_json_fallback_raw_payload_persisted(db):
 
 
 @pytest.mark.asyncio
+async def test_reply_ref_persisted_as_json(db):
+    from open_shrimp.db import get_inbound_event_by_message
+
+    bot = _make_bot()
+    sink = _pickup_sink(bot, db)
+
+    await sink.emit(_event(reply_ref={"message_id": "om_1"}))
+
+    row = await get_inbound_event_by_message(db, CHAT_ID, 1000)
+    assert row is not None
+    assert row.reply_ref == '{"message_id": "om_1"}'
+
+
+@pytest.mark.asyncio
+async def test_missing_reply_ref_persisted_as_null(db):
+    from open_shrimp.db import get_inbound_event_by_message
+
+    bot = _make_bot()
+    sink = _pickup_sink(bot, db)
+
+    await sink.emit(_event())
+
+    row = await get_inbound_event_by_message(db, CHAT_ID, 1000)
+    assert row is not None
+    assert row.reply_ref is None
+
+
+@pytest.mark.asyncio
 async def test_recreated_topic_delivery_records_new_thread(db):
     from open_shrimp.db import get_inbound_event_by_message
 

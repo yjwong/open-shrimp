@@ -150,6 +150,11 @@ class EventSink:
             if event.raw is not None
             else None
         )
+        reply_ref = (
+            json.dumps(event.reply_ref, ensure_ascii=False)
+            if event.reply_ref is not None
+            else None
+        )
         return await insert_inbound_event(
             self._db,
             source=event.source,
@@ -158,6 +163,7 @@ class EventSink:
             raw=raw,
             chat_id=self._chat_id,
             thread_id=thread_id,
+            reply_ref=reply_ref,
         )
 
     async def _send_chunks(

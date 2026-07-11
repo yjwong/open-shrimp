@@ -65,7 +65,13 @@ def _make_context(db):
     return SimpleNamespace(bot=bot, bot_data={"db": db})
 
 
-async def _persist_event(db, *, text="deploy failed on host-3", source="lark") -> int:
+async def _persist_event(
+    db,
+    *,
+    text="deploy failed on host-3",
+    source="lark",
+    reply_ref: str | None = None,
+) -> int:
     event_id = await insert_inbound_event(
         db,
         source=source,
@@ -74,6 +80,7 @@ async def _persist_event(db, *, text="deploy failed on host-3", source="lark") -
         raw=None,
         chat_id=CHAT_ID,
         thread_id=555,
+        reply_ref=reply_ref,
     )
     await set_inbound_event_delivery(db, event_id, 555, 9001)
     return event_id
@@ -307,6 +314,37 @@ async def test_happy_path_spawns_topic_binds_context_and_dispatches(
 
 
 @pytest.mark.asyncio
+async def test_pickup_binds_event_to_new_topic(db, dispatched):
+    dispatched(db)
+    event_id = await _persist_event(db)
+    context = _make_context(db)
+
+    await handle_pickup_callback(
+        _make_query(), f"{PICK_CTX_PREFIX}{event_id}:0", _config(), context
+    )
+
+    row = await get_inbound_event(db, event_id)
+    assert row.pickup_thread_id == NEW_THREAD_ID
+    # Without reply routing, the prompt must not advertise the reply tool.
+    [call] = dispatched.calls
+    assert "reply_inbound_event" not in call["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_pickup_prompt_advertises_reply_when_routable(db, dispatched):
+    dispatched(db)
+    event_id = await _persist_event(db, reply_ref='{"message_id": "om_1"}')
+    context = _make_context(db)
+
+    await handle_pickup_callback(
+        _make_query(), f"{PICK_CTX_PREFIX}{event_id}:0", _config(), context
+    )
+
+    [call] = dispatched.calls
+    assert "reply_inbound_event" in call["prompt"]
+
+
+@pytest.mark.asyncio
 async def test_double_tap_claims_only_once(db, dispatched):
     dispatched(db)
     event_id = await _persist_event(db)
@@ -438,6 +476,154 @@ async def test_read_tool_non_integer_id_errors(db):
     tool = _read_tool(db)
     result = await tool.handler({"event_id": "42; DROP TABLE"})
     assert result["is_error"] is True
+
+
+# ── reply_inbound_event tool ──
+
+
+def _tools(db, pickup_event_id, bot):
+    from open_shrimp.tools import create_openshrimp_tools
+
+    return create_openshrimp_tools(
+        bot,
+        CHAT_ID,
+        thread_id=NEW_THREAD_ID,
+        db=db,
+        pickup_event_id=pickup_event_id,
+    )
+
+
+def _reply_tool(db, pickup_event_id, bot):
+    tools = _tools(db, pickup_event_id, bot)
+    return next(t for t in tools if t.name == "reply_inbound_event")
+
+
+def _install_manager(monkeypatch, adapter):
+    manager = SimpleNamespace(
+        get_adapter=lambda name: adapter if adapter and name == adapter.name else None
+    )
+    monkeypatch.setattr("open_shrimp.events.manager._active_manager", manager)
+    return manager
+
+
+def test_reply_tool_absent_without_pickup_binding(db):
+    names = [t.name for t in _tools(db, None, AsyncMock())]
+    assert "reply_inbound_event" not in names
+
+
+@pytest.mark.asyncio
+async def test_reply_tool_sends_via_adapter_and_echoes(db, monkeypatch):
+    event_id = await _persist_event(db, reply_ref='{"message_id": "om_1"}')
+    adapter = SimpleNamespace(name="lark", reply=AsyncMock())
+    _install_manager(monkeypatch, adapter)
+    bot = AsyncMock()
+    tool = _reply_tool(db, event_id, bot)
+    assert tool.read_only is False
+
+    result = await tool.handler({"text": "on it — rolling back now"})
+
+    assert not result.get("is_error")
+    adapter.reply.assert_awaited_once_with(
+        {"message_id": "om_1"}, "on it — rolling back now"
+    )
+    # The outbound reply is echoed into the pick-up topic.
+    args, kwargs = bot.send_message.call_args
+    assert args[0] == CHAT_ID
+    assert kwargs["message_thread_id"] == NEW_THREAD_ID
+    assert "Replied to lark" in args[1]
+    assert "rolling back now" in args[1]
+
+
+@pytest.mark.asyncio
+async def test_reply_tool_empty_text_errors(db, monkeypatch):
+    event_id = await _persist_event(db, reply_ref='{"message_id": "om_1"}')
+    adapter = SimpleNamespace(name="lark", reply=AsyncMock())
+    _install_manager(monkeypatch, adapter)
+    tool = _reply_tool(db, event_id, AsyncMock())
+
+    for bad in ("", "   ", None, 42):
+        result = await tool.handler({"text": bad})
+        assert result["is_error"] is True
+    adapter.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reply_tool_pruned_event_errors(db, monkeypatch):
+    _install_manager(monkeypatch, SimpleNamespace(name="lark", reply=AsyncMock()))
+    tool = _reply_tool(db, 424242, AsyncMock())
+
+    result = await tool.handler({"text": "hello"})
+
+    assert result["is_error"] is True
+    assert "no longer exists" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_reply_tool_without_routing_errors(db, monkeypatch):
+    event_id = await _persist_event(db)  # no reply_ref
+    _install_manager(monkeypatch, SimpleNamespace(name="lark", reply=AsyncMock()))
+    tool = _reply_tool(db, event_id, AsyncMock())
+
+    result = await tool.handler({"text": "hello"})
+
+    assert result["is_error"] is True
+    assert "reply routing" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_reply_tool_adapter_not_running_errors(db, monkeypatch):
+    event_id = await _persist_event(db, reply_ref='{"message_id": "om_1"}')
+    monkeypatch.setattr("open_shrimp.events.manager._active_manager", None)
+    tool = _reply_tool(db, event_id, AsyncMock())
+
+    result = await tool.handler({"text": "hello"})
+
+    assert result["is_error"] is True
+    assert "not running" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_reply_tool_adapter_without_capability_errors(db, monkeypatch):
+    event_id = await _persist_event(db, reply_ref='{"message_id": "om_1"}')
+    _install_manager(monkeypatch, SimpleNamespace(name="lark"))  # no reply()
+    tool = _reply_tool(db, event_id, AsyncMock())
+
+    result = await tool.handler({"text": "hello"})
+
+    assert result["is_error"] is True
+    assert "does not support replies" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_reply_tool_adapter_failure_reported_no_echo(db, monkeypatch):
+    event_id = await _persist_event(db, reply_ref='{"message_id": "om_1"}')
+    adapter = SimpleNamespace(
+        name="lark", reply=AsyncMock(side_effect=RuntimeError("api down"))
+    )
+    _install_manager(monkeypatch, adapter)
+    bot = AsyncMock()
+    tool = _reply_tool(db, event_id, bot)
+
+    result = await tool.handler({"text": "hello"})
+
+    assert result["is_error"] is True
+    assert "api down" in result["content"][0]["text"]
+    bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reply_tool_echo_failure_does_not_fail_reply(db, monkeypatch):
+    event_id = await _persist_event(db, reply_ref='{"message_id": "om_1"}')
+    adapter = SimpleNamespace(name="lark", reply=AsyncMock())
+    _install_manager(monkeypatch, adapter)
+    bot = AsyncMock()
+    bot.send_message.side_effect = RuntimeError("telegram down")
+    tool = _reply_tool(db, event_id, bot)
+
+    result = await tool.handler({"text": "hello"})
+
+    assert not result.get("is_error")
+    adapter.reply.assert_awaited_once()
 
 
 # ── Deep links ──

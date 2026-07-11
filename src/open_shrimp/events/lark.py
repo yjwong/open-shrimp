@@ -89,6 +89,11 @@ def map_message_event(
             tag = f"[{message_type}]"
             sender = f"{sender} · {tag}" if sender else tag
 
+    message_id = message.get("message_id")
+    reply_ref: dict[str, Any] | None = None
+    if isinstance(message_id, str) and message_id:
+        reply_ref = {"message_id": message_id}
+
     dedup_key = header.get("event_id")
     return Event(
         source=source,
@@ -96,6 +101,7 @@ def map_message_event(
         text=text,
         raw=raw,
         dedup_key=dedup_key if isinstance(dedup_key, str) else None,
+        reply_ref=reply_ref,
     )
 
 
@@ -297,6 +303,41 @@ class LarkAdapter:
         while len(self._name_cache) > _NAME_CACHE_SIZE:
             self._name_cache.pop(next(iter(self._name_cache)))
         return name
+
+    async def reply(self, reply_ref: dict, text: str) -> None:
+        """Send *text* back to the originating message, in its thread."""
+        message_id = reply_ref.get("message_id")
+        if not isinstance(message_id, str) or not message_id:
+            raise ValueError("event carries no Lark message_id to reply to")
+        await asyncio.to_thread(self._send_reply, message_id, text)
+
+    def _send_reply(self, message_id: str, text: str) -> None:
+        """Blocking reply via the REST client (runs in a worker thread)."""
+        if self._api_client is None:
+            raise RuntimeError("Lark adapter is not started")
+        from lark_oapi.api.im.v1 import (  # type: ignore[import-untyped]
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        request = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .content(json.dumps({"text": text}, ensure_ascii=False))
+                .msg_type("text")
+                .reply_in_thread(True)
+                .build()
+            )
+            .build()
+        )
+        response = self._api_client.im.v1.message.reply(request)
+        if not response.success():
+            raise RuntimeError(
+                f"Lark reply failed: code={getattr(response, 'code', None)} "
+                f"msg={getattr(response, 'msg', None)}"
+            )
 
     def _fetch_user_name(self, open_id: str) -> str | None:
         """Blocking user-info fetch; tenant scope may not allow it."""

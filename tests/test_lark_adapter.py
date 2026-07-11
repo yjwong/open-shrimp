@@ -136,6 +136,97 @@ def test_malformed_text_content_falls_back_to_raw() -> None:
     assert event.raw == payload
 
 
+def test_reply_ref_carries_message_id() -> None:
+    event = map_message_event("lark", _payload())
+    assert event.reply_ref == {"message_id": "om_1"}
+
+
+def test_reply_ref_none_without_message_id() -> None:
+    payload = _payload()
+    del payload["event"]["message"]["message_id"]
+    event = map_message_event("lark", payload)
+    assert event.reply_ref is None
+
+
+@pytest.mark.asyncio
+async def test_reply_without_message_id_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    with pytest.raises(ValueError):
+        await adapter.reply({}, "hi")
+
+
+def test_send_reply_before_start_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    with pytest.raises(RuntimeError):
+        adapter._send_reply("om_1", "hi")
+
+
+def _fake_api_client(reply_fn: Any) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        im=SimpleNamespace(
+            v1=SimpleNamespace(message=SimpleNamespace(reply=reply_fn))
+        )
+    )
+
+
+def test_send_reply_builds_in_thread_text_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    sent: list[Any] = []
+
+    def fake_reply(request: Any) -> Any:
+        sent.append(request)
+
+        class _Resp:
+            @staticmethod
+            def success() -> bool:
+                return True
+
+        return _Resp()
+
+    adapter._api_client = _fake_api_client(fake_reply)
+
+    adapter._send_reply("om_1", "hello 你好")
+
+    [request] = sent
+    assert request.message_id == "om_1"
+    body = request.request_body
+    assert body.msg_type == "text"
+    assert body.reply_in_thread is True
+    assert body.content == '{"text": "hello 你好"}'
+
+
+def test_send_reply_failure_raises_with_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+
+    class _Resp:
+        code = 99991663
+        msg = "token invalid"
+
+        @staticmethod
+        def success() -> bool:
+            return False
+
+    adapter._api_client = _fake_api_client(lambda r: _Resp())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        adapter._send_reply("om_1", "hi")
+    assert "99991663" in str(excinfo.value)
+
+
 def test_extract_text_edge_cases() -> None:
     assert extract_text("text", '{"text":"hi"}') == "hi"
     assert extract_text("text", None) is None

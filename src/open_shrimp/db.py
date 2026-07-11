@@ -177,7 +177,9 @@ CREATE TABLE IF NOT EXISTS inbound_events (
     thread_id   INTEGER NOT NULL,
     message_id  INTEGER,
     picked_up   INTEGER NOT NULL DEFAULT 0,
-    created_at  INTEGER NOT NULL
+    created_at  INTEGER NOT NULL,
+    reply_ref   TEXT,
+    pickup_thread_id INTEGER
 )
 """
 
@@ -302,6 +304,25 @@ async def _migrate_security_key_android_columns(db: aiosqlite.Connection) -> Non
         await db.commit()
 
 
+async def _migrate_inbound_events_columns(db: aiosqlite.Connection) -> None:
+    """Add reply routing / pickup-scope columns to inbound_events when needed."""
+    cursor = await db.execute("PRAGMA table_info(inbound_events)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    migrations = {
+        "reply_ref": "ALTER TABLE inbound_events ADD COLUMN reply_ref TEXT",
+        "pickup_thread_id": (
+            "ALTER TABLE inbound_events ADD COLUMN pickup_thread_id INTEGER"
+        ),
+    }
+    changed = False
+    for column, sql in migrations.items():
+        if column not in columns:
+            await db.execute(sql)
+            changed = True
+    if changed:
+        await db.commit()
+
+
 async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     """Create the database and tables, return the connection."""
     if db_path is None:
@@ -327,6 +348,7 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await _migrate_schema(db)
     await _migrate_scheduled_tasks_disabled(db)
     await _migrate_security_key_android_columns(db)
+    await _migrate_inbound_events_columns(db)
     logger.info("Database initialized at %s", db_path)
     return db
 
@@ -726,6 +748,11 @@ class InboundEvent:
     message_id: int | None
     picked_up: bool
     created_at: int
+    # JSON reply routing extracted by the source adapter at ingest time,
+    # opaque to everything but the adapter's reply(); None if unroutable.
+    reply_ref: str | None = None
+    # The forum topic spawned by pick-up, if this event was picked up.
+    pickup_thread_id: int | None = None
 
 
 async def insert_inbound_event(
@@ -737,13 +764,14 @@ async def insert_inbound_event(
     raw: str | None,
     chat_id: int,
     thread_id: int,
+    reply_ref: str | None = None,
 ) -> int:
     """Persist an inbound event, returning its integer id."""
     cursor = await db.execute(
         "INSERT INTO inbound_events "
-        "(source, sender, text, raw, chat_id, thread_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (source, sender, text, raw, chat_id, thread_id, int(time.time())),
+        "(source, sender, text, raw, chat_id, thread_id, reply_ref, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (source, sender, text, raw, chat_id, thread_id, reply_ref, int(time.time())),
     )
     await db.commit()
     assert cursor.lastrowid is not None
@@ -763,7 +791,7 @@ async def set_inbound_event_delivery(
 
 _INBOUND_EVENT_COLUMNS = (
     "id, source, sender, text, raw, chat_id, thread_id, "
-    "message_id, picked_up, created_at"
+    "message_id, picked_up, created_at, reply_ref, pickup_thread_id"
 )
 
 
@@ -779,6 +807,8 @@ def _row_to_inbound_event(row: tuple) -> InboundEvent:
         message_id=row[7],
         picked_up=bool(row[8]),
         created_at=row[9],
+        reply_ref=row[10],
+        pickup_thread_id=row[11],
     )
 
 
@@ -805,6 +835,30 @@ async def get_inbound_event_by_message(
     )
     row = await cursor.fetchone()
     return _row_to_inbound_event(row) if row else None
+
+
+async def get_inbound_event_by_pickup_scope(
+    db: aiosqlite.Connection, chat_id: int, thread_id: int
+) -> InboundEvent | None:
+    """Return the event whose pick-up spawned the topic (chat_id, thread_id)."""
+    cursor = await db.execute(
+        f"SELECT {_INBOUND_EVENT_COLUMNS} FROM inbound_events "
+        f"WHERE chat_id = ? AND pickup_thread_id = ?",
+        (chat_id, thread_id),
+    )
+    row = await cursor.fetchone()
+    return _row_to_inbound_event(row) if row else None
+
+
+async def set_inbound_event_pickup_thread(
+    db: aiosqlite.Connection, event_id: int, thread_id: int
+) -> None:
+    """Bind the event to the forum topic its pick-up spawned."""
+    await db.execute(
+        "UPDATE inbound_events SET pickup_thread_id = ? WHERE id = ?",
+        (thread_id, event_id),
+    )
+    await db.commit()
 
 
 async def claim_inbound_event(db: aiosqlite.Connection, event_id: int) -> bool:
