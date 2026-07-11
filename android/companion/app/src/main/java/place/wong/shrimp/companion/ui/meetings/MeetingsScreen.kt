@@ -1,5 +1,6 @@
 package place.wong.shrimp.companion.ui.meetings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -31,10 +33,13 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import place.wong.shrimp.companion.MeetingRecorderService
 import place.wong.shrimp.companion.data.Meeting
 import place.wong.shrimp.companion.data.MeetingStore
+import place.wong.shrimp.companion.data.TranscriptState
 import place.wong.shrimp.companion.data.formatDuration
 
 private val rowDateFormat = SimpleDateFormat("EEE, d MMM yyyy HH:mm", Locale.US)
@@ -44,9 +49,13 @@ private val rowDateFormat = SimpleDateFormat("EEE, d MMM yyyy HH:mm", Locale.US)
 fun MeetingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var meetings by remember { mutableStateOf<List<Meeting>>(emptyList()) }
-    val recorderState by MeetingRecorderService.state.collectAsStateWithLifecycle()
+    // Only the recording flag matters here; collecting the full state would
+    // recompose every row on each 100 ms level tick.
+    val recording by remember {
+        MeetingRecorderService.state.map { it.recording }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
 
-    LaunchedEffect(recorderState.recording) {
+    LaunchedEffect(recording) {
         meetings = withContext(Dispatchers.IO) { MeetingStore.list(context) }
     }
 
@@ -86,7 +95,7 @@ fun MeetingsScreen(onBack: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 items(meetings, key = { it.id }) { meeting ->
-                    MeetingRow(meeting, recordingActive = recorderState.recording)
+                    MeetingRow(meeting, recordingActive = recording)
                 }
             }
         }
@@ -95,7 +104,14 @@ fun MeetingsScreen(onBack: () -> Unit) {
 
 @Composable
 private fun MeetingRow(meeting: Meeting, recordingActive: Boolean) {
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    var expanded by remember { mutableStateOf(false) }
+    var transcript by remember { mutableStateOf<String?>(null) }
+    val hasTranscript = meeting.wordCount > 0
+    ElevatedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = hasTranscript) { expanded = !expanded },
+    ) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -103,6 +119,18 @@ private fun MeetingRow(meeting: Meeting, recordingActive: Boolean) {
             Text(meeting.title, style = MaterialTheme.typography.titleMedium)
             Text(rowDateFormat.format(Date(meeting.startedAtMs)), style = MaterialTheme.typography.bodySmall)
             Text(describeStatus(meeting, recordingActive), style = MaterialTheme.typography.bodySmall)
+            if (expanded) {
+                LaunchedEffect(meeting.id) {
+                    if (transcript == null) {
+                        transcript = withContext(Dispatchers.IO) {
+                            runCatching { MeetingStore.transcriptFile(meeting).readText() }
+                                .getOrElse { "Could not read transcript: ${it.message}" }
+                        }
+                    }
+                }
+                HorizontalDivider()
+                Text(transcript ?: "Loading transcript…", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
@@ -116,5 +144,12 @@ private fun describeStatus(meeting: Meeting, recordingActive: Boolean): String {
         size >= 1 shl 20 -> "%.1f MB".format(Locale.US, size / (1024.0 * 1024.0))
         else -> "${size / 1024} kB"
     }
-    return "${formatDuration(meeting.durationMs)} • $sizeText"
+    val base = "${formatDuration(meeting.durationMs)} • $sizeText"
+    return when {
+        meeting.wordCount > 0 -> "$base • ${meeting.wordCount} words (tap for transcript)"
+        meeting.transcriptState == TranscriptState.FAILED -> "$base • transcription failed"
+        meeting.transcriptState == TranscriptState.UNAVAILABLE -> "$base • no on-device recognizer"
+        meeting.transcriptState == TranscriptState.DONE -> "$base • no speech detected"
+        else -> base
+    }
 }

@@ -24,6 +24,7 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import place.wong.shrimp.companion.data.LogStore
 import place.wong.shrimp.companion.data.Meeting
 import place.wong.shrimp.companion.data.MeetingStore
@@ -34,6 +35,8 @@ data class MeetingRecorderState(
     val startedElapsedMs: Long = 0L,
     /** Peak input level of the last audio chunk, 0..1. */
     val level: Float = 0f,
+    /** Words transcribed so far by the live on-device recognizer. */
+    val transcribedWords: Int = 0,
     val statusText: String? = null,
 )
 
@@ -116,6 +119,7 @@ class MeetingRecorderService : Service() {
         var audioRecord: AudioRecord? = null
         var codec: MediaCodec? = null
         var mux: MuxState? = null
+        var transcriber: MeetingTranscriber? = null
         var totalSamples = 0L
         try {
             val source = pickAudioSource()
@@ -142,6 +146,14 @@ class MeetingRecorderService : Service() {
             codec.start()
             mux = MuxState(MediaMuxer(meeting.audioFile.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_OGG))
 
+            transcriber = MeetingTranscriber(
+                this,
+                SAMPLE_RATE,
+                onStatus = ::publish,
+                onWordCount = { count -> mutableState.update { it.copy(transcribedWords = count) } },
+            )
+            transcriber.start()
+
             audioRecord.startRecording()
             publish("Recording started (mic source: ${sourceName(source)})")
 
@@ -152,6 +164,7 @@ class MeetingRecorderService : Service() {
                     continue
                 }
                 updateLevel(pcm, read)
+                transcriber.feed(pcm, read)
                 feedCodec(codec, mux, pcm, read, totalSamples)
                 totalSamples += read
             }
@@ -159,13 +172,19 @@ class MeetingRecorderService : Service() {
             sendEndOfStream(codec, mux, totalSamples)
 
             val durationMs = totalSamples * 1000L / SAMPLE_RATE
-            MeetingStore.finalize(meeting, durationMs)
-            publish("Saved ${meeting.title} (${formatDuration(durationMs)})")
+            var saved = MeetingStore.finalize(meeting, durationMs)
+            if (transcriber.isActive) {
+                publish("Finishing transcript…")
+            }
+            saved = MeetingStore.saveTranscript(saved, transcriber.finish(TRANSCRIBE_FINISH_TIMEOUT_MS))
+            val wordsNote = if (saved.wordCount > 0) ", ${saved.wordCount} words" else ""
+            publish("Saved ${meeting.title} (${formatDuration(durationMs)}$wordsNote)")
         } catch (e: Exception) {
             publish("Recording failed: ${e.message}")
         } finally {
             runCatching { audioRecord?.stop() }
             audioRecord?.release()
+            runCatching { transcriber?.finish(2_000) } // no-op if already finished
             runCatching { codec?.stop() }
             codec?.release()
             if (mux != null) {
@@ -174,7 +193,7 @@ class MeetingRecorderService : Service() {
                 }
                 mux.muxer.release()
             }
-            mutableState.value = MeetingRecorderState(statusText = mutableState.value.statusText)
+            mutableState.update { MeetingRecorderState(statusText = it.statusText) }
             wakeLock?.let { if (it.isHeld) it.release() }
             wakeLock = null
             stopSelf()
@@ -204,10 +223,7 @@ class MeetingRecorderService : Service() {
         }
         // Quantized so unchanged levels don't re-emit state (and recompose the meter) every chunk.
         val level = (peak * LEVEL_STEPS / 32767) / LEVEL_STEPS.toFloat()
-        val current = mutableState.value
-        if (current.level != level) {
-            mutableState.value = current.copy(level = level)
-        }
+        mutableState.update { if (it.level == level) it else it.copy(level = level) }
     }
 
     private class MuxState(val muxer: MediaMuxer) {
@@ -283,7 +299,7 @@ class MeetingRecorderService : Service() {
 
     private fun publish(message: String) {
         LogStore.add(message)
-        mutableState.value = mutableState.value.copy(statusText = message)
+        mutableState.update { it.copy(statusText = message) }
     }
 
     private fun notification(text: String): Notification {
@@ -323,10 +339,14 @@ class MeetingRecorderService : Service() {
         const val ACTION_STOP = "place.wong.shrimp.companion.meetings.STOP"
 
         private const val CHANNEL_ID = "meeting_recording"
-        private const val NOTIFICATION_ID = 45
+        // 44/45 are taken by SecurityKeyForwardingService/PortForwardProxyService.
+        private const val NOTIFICATION_ID = 46
         private const val SAMPLE_RATE = 16000
         private const val BIT_RATE = 32000
         private const val LEVEL_STEPS = 50
+
+        /** Post-stop wait for SODA to drain the backlog and flush its final segment. */
+        private const val TRANSCRIBE_FINISH_TIMEOUT_MS = 60_000L
 
         private val mutableState = MutableStateFlow(MeetingRecorderState())
         val state: StateFlow<MeetingRecorderState> = mutableState

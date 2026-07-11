@@ -62,6 +62,12 @@ fun MeetingRecordCard(onOpenMeetings: () -> Unit) {
                     progress = { state.level },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (state.transcribedWords > 0) {
+                    Text(
+                        "${state.transcribedWords} words transcribed",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 Button(
                     onClick = { MeetingRecorderService.stop(context) },
                     modifier = Modifier.fillMaxWidth(),
