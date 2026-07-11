@@ -186,6 +186,33 @@ def test_reply_ref_none_without_message_id() -> None:
     assert event.reply_ref is None
 
 
+def test_context_ref_falls_back_to_message_id_without_root() -> None:
+    event = map_message_event("lark", _payload())
+    assert event.context_ref == {
+        "chat_id": "oc_1",
+        "thread_id": "om_1",
+        "anchor_message_id": "om_1",
+    }
+
+
+def test_context_ref_uses_root_id_when_threaded() -> None:
+    payload = _payload()
+    payload["event"]["message"]["root_id"] = "om_root"
+    event = map_message_event("lark", payload)
+    assert event.context_ref == {
+        "chat_id": "oc_1",
+        "thread_id": "om_root",
+        "anchor_message_id": "om_1",
+    }
+
+
+def test_context_ref_none_without_chat_id() -> None:
+    payload = _payload()
+    del payload["event"]["message"]["chat_id"]
+    event = map_message_event("lark", payload)
+    assert event.context_ref is None
+
+
 @pytest.mark.asyncio
 async def test_reply_without_message_id_raises(
     monkeypatch: pytest.MonkeyPatch,
@@ -263,6 +290,140 @@ def test_send_reply_failure_raises_with_code(
     with pytest.raises(RuntimeError) as excinfo:
         adapter._send_reply("om_1", "hi")
     assert "99991663" in str(excinfo.value)
+
+
+def _listed_msg(
+    text: str | None, open_id: str | None, message_id: str, msg_type: str = "text"
+) -> Any:
+    from types import SimpleNamespace
+
+    content = f'{{"text":{__import__("json").dumps(text)}}}' if text is not None else None
+    return SimpleNamespace(
+        message_id=message_id,
+        msg_type=msg_type,
+        body=SimpleNamespace(content=content),
+        sender=SimpleNamespace(id=open_id),
+    )
+
+
+def _fake_list_client(list_fn: Any) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        im=SimpleNamespace(
+            v1=SimpleNamespace(message=SimpleNamespace(list=list_fn))
+        )
+    )
+
+
+def _list_response(items: list[Any], success: bool = True) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        success=lambda: success,
+        code=0,
+        msg="ok",
+        data=SimpleNamespace(items=items),
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_context_renders_thread_oldest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    monkeypatch.setattr(adapter, "_fetch_user_name", lambda oid: {"ou_a": "Alice", "ou_b": "Bob"}.get(oid))
+    calls: list[Any] = []
+
+    # API returns newest-first; the adapter reverses to oldest-first.
+    def fake_list(request: Any) -> Any:
+        calls.append(request)
+        return _list_response([
+            _listed_msg("second", "ou_b", "om_2"),
+            _listed_msg("first", "ou_a", "om_1"),
+        ])
+
+    adapter._api_client = _fake_list_client(fake_list)
+
+    out = await adapter.fetch_context(
+        {"chat_id": "oc_1", "thread_id": "om_root", "anchor_message_id": "om_2"}
+    )
+
+    assert out == "Alice: first\nBob (event message): second"
+    # A real thread root routes to the thread container.
+    assert calls[0].container_id_type == "thread"
+    assert calls[0].container_id == "om_root"
+
+
+@pytest.mark.asyncio
+async def test_fetch_context_falls_back_to_chat_when_no_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    monkeypatch.setattr(adapter, "_fetch_user_name", lambda oid: None)
+    calls: list[Any] = []
+
+    def fake_list(request: Any) -> Any:
+        calls.append(request)
+        return _list_response([_listed_msg("hi", "ou_x", "om_9")])
+
+    adapter._api_client = _fake_list_client(fake_list)
+
+    # thread_id == anchor means there was no real thread root.
+    out = await adapter.fetch_context(
+        {"chat_id": "oc_1", "thread_id": "om_9", "anchor_message_id": "om_9"}
+    )
+
+    assert out == "ou_x (event message): hi"
+    assert calls[0].container_id_type == "chat"
+    assert calls[0].container_id == "oc_1"
+
+
+@pytest.mark.asyncio
+async def test_fetch_context_none_when_no_text_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    adapter._api_client = _fake_list_client(
+        lambda r: _list_response([_listed_msg(None, "ou_x", "om_1", msg_type="image")])
+    )
+
+    out = await adapter.fetch_context(
+        {"chat_id": "oc_1", "thread_id": "om_1", "anchor_message_id": "om_1"}
+    )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_context_none_when_list_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    adapter._api_client = _fake_list_client(
+        lambda r: _list_response([], success=False)
+    )
+
+    out = await adapter.fetch_context(
+        {"chat_id": "oc_1", "thread_id": "om_1", "anchor_message_id": "om_1"}
+    )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_context_none_without_chat_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    assert await adapter.fetch_context({"thread_id": "om_1"}) is None
 
 
 def test_extract_text_edge_cases() -> None:

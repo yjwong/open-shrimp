@@ -814,7 +814,10 @@ def create_openshrimp_tools(
     # user-prompt text.
     if db is not None:
         from open_shrimp.db import get_inbound_event as _get_inbound_event
-        from open_shrimp.events.pickup import event_envelope as _event_envelope
+        from open_shrimp.events.pickup import (
+            context_envelope as _context_envelope,
+            event_envelope as _event_envelope,
+        )
 
         _read_inbound_event_schema = {
             "type": "object",
@@ -830,6 +833,35 @@ def create_openshrimp_tools(
             "required": ["event_id"],
         }
 
+        async def _fetch_event_context(row: Any) -> str | None:
+            """Enrich the event with adapter-fetched surrounding context.
+
+            Best-effort: returns an untrusted-wrapped block of extra context
+            (e.g. recent thread messages) when the live source adapter can
+            provide one, else None so the caller degrades to the bare event.
+            """
+            if row.context_ref is None:
+                return None
+            import json as _json
+
+            from open_shrimp.events.base import SupportsContext
+            from open_shrimp.events.manager import get_active_adapter
+
+            adapter = get_active_adapter(row.source)
+            if not isinstance(adapter, SupportsContext):
+                return None
+            try:
+                text = await adapter.fetch_context(_json.loads(row.context_ref))
+            except Exception:
+                logger.warning(
+                    "context fetch failed for inbound event #%s",
+                    row.id, exc_info=True,
+                )
+                return None
+            if not text:
+                return None
+            return _context_envelope(row.source, text)
+
         async def read_inbound_event(args: dict[str, Any]) -> dict[str, Any]:
             event_id = args.get("event_id")
             if not isinstance(event_id, int):
@@ -844,9 +876,13 @@ def create_openshrimp_tools(
             received = time.strftime(
                 "%Y-%m-%d %H:%M:%S", time.localtime(row.created_at),
             )
+            body = _event_envelope(row)
+            extra = await _fetch_event_context(row)
+            if extra:
+                body = f"{body}\n\n{extra}"
             return _text_result(
                 f"Inbound event #{row.id} from source {row.source!r}, "
-                f"received {received}.\n\n{_event_envelope(row)}"
+                f"received {received}.\n\n{body}"
             )
 
         tools_list.append(OpenShrimpTool(

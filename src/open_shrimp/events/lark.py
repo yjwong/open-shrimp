@@ -38,6 +38,7 @@ _JOIN_TIMEOUT = 10.0
 _BACKOFF_INITIAL = 1.0
 _BACKOFF_MAX = 300.0
 _NAME_CACHE_SIZE = 512
+_CONTEXT_MESSAGE_LIMIT = 20
 
 
 def extract_text(message_type: str | None, content: str | None) -> str | None:
@@ -140,6 +141,20 @@ def map_message_event(
     if isinstance(message_id, str) and message_id:
         reply_ref = {"message_id": message_id}
 
+    # Thread/chat handle for fetching surrounding context at read time.
+    # root_id is present only inside a thread; fall back to the message
+    # itself so a standalone message still anchors a lookup.
+    context_ref: dict[str, Any] | None = None
+    chat_id = message.get("chat_id")
+    if isinstance(chat_id, str) and chat_id:
+        root_id = message.get("root_id")
+        thread_anchor = root_id if isinstance(root_id, str) and root_id else message_id
+        context_ref = {
+            "chat_id": chat_id,
+            "thread_id": thread_anchor,
+            "anchor_message_id": message_id,
+        }
+
     dedup_key = header.get("event_id")
     return Event(
         source=source,
@@ -148,6 +163,7 @@ def map_message_event(
         raw=raw,
         dedup_key=dedup_key if isinstance(dedup_key, str) else None,
         reply_ref=reply_ref,
+        context_ref=context_ref,
     )
 
 
@@ -399,6 +415,13 @@ class LarkAdapter:
         open_id = bot.get("open_id") if isinstance(bot, dict) else None
         return open_id if isinstance(open_id, str) and open_id else None
 
+    def _cache_name(self, open_id: str, name: str | None) -> str | None:
+        """Store a resolved (possibly None) display name with LRU eviction."""
+        self._name_cache[open_id] = name
+        while len(self._name_cache) > _NAME_CACHE_SIZE:
+            self._name_cache.pop(next(iter(self._name_cache)))
+        return name
+
     async def _resolve_sender(self, open_id: str) -> str | None:
         if open_id in self._name_cache:
             return self._name_cache[open_id]
@@ -412,10 +435,7 @@ class LarkAdapter:
                 exc_info=True,
             )
             name = None
-        self._name_cache[open_id] = name
-        while len(self._name_cache) > _NAME_CACHE_SIZE:
-            self._name_cache.pop(next(iter(self._name_cache)))
-        return name
+        return self._cache_name(open_id, name)
 
     async def reply(self, reply_ref: dict, text: str) -> None:
         """Send *text* back to the originating message, in its thread."""
@@ -451,6 +471,109 @@ class LarkAdapter:
                 f"Lark reply failed: code={getattr(response, 'code', None)} "
                 f"msg={getattr(response, 'msg', None)}"
             )
+
+    async def fetch_context(self, context_ref: dict) -> str | None:
+        """Recent thread/chat messages around the event, oldest-first.
+
+        Returns None when nothing useful is available; the caller degrades
+        to the base event content. Text only — the caller wraps the return
+        value as untrusted data, so it must carry no instructions.
+        """
+        chat_id = context_ref.get("chat_id")
+        if not isinstance(chat_id, str) or not chat_id:
+            return None
+        thread_id = context_ref.get("thread_id")
+        anchor = context_ref.get("anchor_message_id")
+        return await asyncio.to_thread(
+            self._fetch_context_blocking, chat_id, thread_id, anchor
+        )
+
+    def _fetch_context_blocking(
+        self,
+        chat_id: str,
+        thread_id: str | None,
+        anchor: str | None,
+        limit: int = _CONTEXT_MESSAGE_LIMIT,
+    ) -> str | None:
+        if self._api_client is None:
+            raise RuntimeError("Lark adapter is not started")
+        # Prefer the precise thread container when the event carried a real
+        # thread root (thread_id differs from the message itself); otherwise
+        # fall back to recent chat history.
+        items: list[Any] = []
+        if isinstance(thread_id, str) and thread_id and thread_id != anchor:
+            items = self._list_messages("thread", thread_id, limit)
+        if not items:
+            items = self._list_messages("chat", chat_id, limit)
+        lines = [
+            line
+            for item in items
+            if (line := self._render_listed_message(item, anchor)) is not None
+        ]
+        return "\n".join(lines) if lines else None
+
+    def _list_messages(
+        self, container_id_type: str, container_id: str, limit: int
+    ) -> list[Any]:
+        """Blocking im.v1.message.list; newest *limit*, returned oldest-first."""
+        from lark_oapi.api.im.v1 import (  # type: ignore[import-untyped]
+            ListMessageRequest,
+        )
+
+        request = (
+            ListMessageRequest.builder()
+            .container_id_type(container_id_type)
+            .container_id(container_id)
+            .sort_type("ByCreateTimeDesc")
+            .page_size(limit)
+            .build()
+        )
+        response = self._api_client.im.v1.message.list(request)
+        if not response.success():
+            logger.debug(
+                "lark[%s]: message.list(%s=%s) failed: code=%s msg=%s",
+                self.name,
+                container_id_type,
+                container_id,
+                getattr(response, "code", None),
+                getattr(response, "msg", None),
+            )
+            return []
+        items = getattr(response.data, "items", None) or []
+        return list(reversed(items))
+
+    def _render_listed_message(self, item: Any, anchor: str | None) -> str | None:
+        """One ``sender: text`` line for a listed message, or None to skip."""
+        body = getattr(item, "body", None)
+        text = extract_text(
+            getattr(item, "msg_type", None), getattr(body, "content", None)
+        )
+        if text is None:
+            return None
+        open_id = getattr(getattr(item, "sender", None), "id", None)
+        if not isinstance(open_id, str) or not open_id:
+            open_id = None
+        who = (
+            (self._resolve_sender_blocking(open_id) if open_id else None)
+            or open_id
+            or "unknown"
+        )
+        marker = (
+            " (event message)"
+            if getattr(item, "message_id", None) == anchor
+            else ""
+        )
+        return f"{who}{marker}: {text}"
+
+    def _resolve_sender_blocking(self, open_id: str) -> str | None:
+        """Cached, blocking counterpart to :meth:`_resolve_sender`."""
+        if open_id in self._name_cache:
+            return self._name_cache[open_id]
+        try:
+            name = self._fetch_user_name(open_id)
+        except Exception:
+            name = None
+        return self._cache_name(open_id, name)
 
     def _fetch_user_name(self, open_id: str) -> str | None:
         """Blocking user-info fetch; tenant scope may not allow it."""

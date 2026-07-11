@@ -34,3 +34,19 @@ class SupportsReply(Protocol):
     """
 
     async def reply(self, reply_ref: dict, text: str) -> None: ...
+
+
+@runtime_checkable
+class SupportsContext(Protocol):
+    """Optional adapter capability: fetch surrounding context for an event.
+
+    ``context_ref`` is the adapter-specific dict the adapter put on the
+    :class:`Event` at ingest (e.g. Lark ``chat_id`` + ``thread_id``).
+    Returns a plain-text rendering of the extra context (e.g. recent thread
+    messages) or None when nothing extra is available. The caller wraps the
+    return value in the untrusted envelope, so the text must NOT embed
+    instructions. Raise only on hard failure — the caller degrades to the
+    base event content.
+    """
+
+    async def fetch_context(self, context_ref: dict) -> str | None: ...

@@ -14,3 +14,7 @@ class Event:
     # everything but the adapter's ``reply``); None if the source can't
     # route a reply back.
     reply_ref: dict | None = None
+    # Adapter-specific handle for fetching surrounding context (thread
+    # history, etc.) at read time, opaque to everything but the adapter's
+    # ``fetch_context``; None if the source can't enrich.
+    context_ref: dict | None = None

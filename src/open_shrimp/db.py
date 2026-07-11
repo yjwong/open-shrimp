@@ -180,7 +180,8 @@ CREATE TABLE IF NOT EXISTS inbound_events (
     created_at  INTEGER NOT NULL,
     reply_ref   TEXT,
     pickup_thread_id INTEGER,
-    pending_notified INTEGER NOT NULL DEFAULT 0
+    pending_notified INTEGER NOT NULL DEFAULT 0,
+    context_ref TEXT
 )
 """
 
@@ -323,6 +324,7 @@ async def _migrate_inbound_events_columns(db: aiosqlite.Connection) -> None:
             "ALTER TABLE inbound_events ADD COLUMN "
             "pending_notified INTEGER NOT NULL DEFAULT 0"
         ),
+        "context_ref": "ALTER TABLE inbound_events ADD COLUMN context_ref TEXT",
     }
     changed = False
     for column, sql in migrations.items():
@@ -352,14 +354,18 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_ANDROID_COMPANION_NONCES_TABLE)
     await db.execute(_CREATE_EVENT_TOPICS_TABLE)
     await db.execute(_CREATE_INBOUND_EVENTS_TABLE)
-    await db.execute(_CREATE_INBOUND_EVENTS_INDEX)
-    await db.execute(_CREATE_INBOUND_EVENTS_MESSAGE_INDEX)
-    await db.execute(_CREATE_INBOUND_EVENTS_PICKUP_INDEX)
     await db.commit()
     await _migrate_schema(db)
     await _migrate_scheduled_tasks_disabled(db)
     await _migrate_security_key_android_columns(db)
     await _migrate_inbound_events_columns(db)
+    # Index creation runs after the column migrations: the pickup index
+    # references pickup_thread_id, which an upgraded old table only gains
+    # via _migrate_inbound_events_columns.
+    await db.execute(_CREATE_INBOUND_EVENTS_INDEX)
+    await db.execute(_CREATE_INBOUND_EVENTS_MESSAGE_INDEX)
+    await db.execute(_CREATE_INBOUND_EVENTS_PICKUP_INDEX)
+    await db.commit()
     logger.info("Database initialized at %s", db_path)
     return db
 
@@ -767,6 +773,10 @@ class InboundEvent:
     # Set once the requester has been told their picked-up event is pending
     # the operator's response, so the notice fires at most once per event.
     pending_notified: bool = False
+    # JSON handle for fetching surrounding context (thread history, etc.),
+    # opaque to everything but the adapter's fetch_context(); None if the
+    # source can't enrich.
+    context_ref: str | None = None
 
 
 async def insert_inbound_event(
@@ -779,13 +789,16 @@ async def insert_inbound_event(
     chat_id: int,
     thread_id: int,
     reply_ref: str | None = None,
+    context_ref: str | None = None,
 ) -> int:
     """Persist an inbound event, returning its integer id."""
     cursor = await db.execute(
         "INSERT INTO inbound_events "
-        "(source, sender, text, raw, chat_id, thread_id, reply_ref, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (source, sender, text, raw, chat_id, thread_id, reply_ref, int(time.time())),
+        "(source, sender, text, raw, chat_id, thread_id, reply_ref, "
+        "context_ref, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (source, sender, text, raw, chat_id, thread_id, reply_ref,
+         context_ref, int(time.time())),
     )
     await db.commit()
     assert cursor.lastrowid is not None
@@ -806,7 +819,7 @@ async def set_inbound_event_delivery(
 _INBOUND_EVENT_COLUMNS = (
     "id, source, sender, text, raw, chat_id, thread_id, "
     "message_id, picked_up, created_at, reply_ref, pickup_thread_id, "
-    "pending_notified"
+    "pending_notified, context_ref"
 )
 
 
@@ -825,6 +838,7 @@ def _row_to_inbound_event(row: tuple) -> InboundEvent:
         reply_ref=row[10],
         pickup_thread_id=row[11],
         pending_notified=bool(row[12]),
+        context_ref=row[13],
     )
 
 

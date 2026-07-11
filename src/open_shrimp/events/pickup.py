@@ -73,19 +73,33 @@ def _attr(value: str) -> str:
     return value.replace('"', "&quot;")
 
 
-def event_envelope(row: InboundEvent) -> str:
-    """Untrusted-data envelope around the persisted provider content.
+def _wrap_untrusted(attrs: str, text: str) -> str:
+    """Wrap *text* in an ``<inbound-event untrusted="true">`` envelope.
 
     Embedded closing tags are neutralized so the content cannot break out
     of the envelope.  Only ever emitted inside a tool result
     (read_inbound_event), never in a prompt — prompts reference events by
     id only (see :func:`read_event_instruction`).
     """
-    body = _ENVELOPE_CLOSE_RE.sub("<\\\\/inbound-event>", event_body(row))
+    body = _ENVELOPE_CLOSE_RE.sub("<\\\\/inbound-event>", text)
+    return f'<inbound-event{attrs} untrusted="true">\n{body}\n</inbound-event>'
+
+
+def event_envelope(row: InboundEvent) -> str:
+    """Untrusted-data envelope around the persisted provider content."""
     attrs = f' source="{_attr(row.source)}"'
     if row.sender:
         attrs += f' sender="{_attr(row.sender)}"'
-    return f"<inbound-event{attrs} untrusted=\"true\">\n{body}\n</inbound-event>"
+    return _wrap_untrusted(attrs, event_body(row))
+
+
+def context_envelope(source: str, text: str) -> str:
+    """Untrusted-data envelope for adapter-fetched surrounding context.
+
+    Kept separate from :func:`event_envelope` so fetched thread/chat
+    context is distinguishable from the event itself.
+    """
+    return _wrap_untrusted(f' source="{_attr(source)}" kind="thread-context"', text)
 
 
 def read_event_instruction(event_id: int) -> str:
