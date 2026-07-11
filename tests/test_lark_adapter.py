@@ -98,6 +98,33 @@ def test_text_message_maps_to_event_text() -> None:
     assert event.dedup_key == "evt-abc123"
 
 
+def test_mention_placeholders_replaced_with_names() -> None:
+    payload = _payload(content='{"text":"@_user_1 ping @_user_2"}')
+    payload["event"]["message"]["mentions"] = [
+        {"key": "@_user_1", "name": "Alice", "id": {"open_id": "ou_a"}},
+        {"key": "@_user_2", "name": "Bob", "id": {"open_id": "ou_b"}},
+    ]
+    event = map_message_event("lark", payload)
+    assert event.text == "@Alice ping @Bob"
+
+
+def test_mention_without_name_leaves_placeholder() -> None:
+    payload = _payload(content='{"text":"@_user_1 hi"}')
+    payload["event"]["message"]["mentions"] = [
+        {"key": "@_user_1", "id": {"open_id": "ou_a"}},
+        "garbage",
+    ]
+    event = map_message_event("lark", payload)
+    assert event.text == "@_user_1 hi"
+
+
+def test_mentions_absent_or_malformed_is_noop() -> None:
+    assert map_message_event("lark", _payload()).text == "hello world"
+    payload = _payload(content='{"text":"@_user_1 hi"}')
+    payload["event"]["message"]["mentions"] = "not-a-list"
+    assert map_message_event("lark", payload).text == "@_user_1 hi"
+
+
 def test_dedup_key_is_event_id() -> None:
     event = map_message_event("lark", _payload(event_id="evt-42"))
     assert event.dedup_key == "evt-42"

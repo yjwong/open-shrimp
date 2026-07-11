@@ -54,6 +54,24 @@ def extract_text(message_type: str | None, content: str | None) -> str | None:
     return text if isinstance(text, str) else None
 
 
+def substitute_mentions(text: str, mentions: Any) -> str:
+    """Replace ``@_user_N`` placeholders with ``@<display name>``.
+
+    Lark message text carries opaque mention keys; the display names arrive
+    alongside in the message's ``mentions`` array.
+    """
+    if not isinstance(mentions, list):
+        return text
+    for mention in mentions:
+        if not isinstance(mention, dict):
+            continue
+        key = mention.get("key")
+        name = mention.get("name")
+        if isinstance(key, str) and key and isinstance(name, str) and name:
+            text = text.replace(key, f"@{name}")
+    return text
+
+
 def sender_open_id(payload: dict[str, Any]) -> str | None:
     """Pull the sender's open_id out of a p2 im.message.receive_v1 payload."""
     event = payload.get("event") or {}
@@ -82,6 +100,8 @@ def map_message_event(
 
     sender = sender_name or sender_open_id(payload)
     text = extract_text(message_type, message.get("content"))
+    if text is not None:
+        text = substitute_mentions(text, message.get("mentions"))
     raw: dict[str, Any] | None = None
     if text is None:
         raw = payload
