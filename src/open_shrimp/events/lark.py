@@ -142,16 +142,16 @@ def map_message_event(
         reply_ref = {"message_id": message_id}
 
     # Thread/chat handle for fetching surrounding context at read time.
-    # root_id is present only inside a thread; fall back to the message
-    # itself so a standalone message still anchors a lookup.
+    # thread_id is Lark's real thread container id (omt_…), present only on
+    # threaded messages; it is distinct from root_id (an om_… message id).
+    # A missing thread_id means the message is not in a thread.
     context_ref: dict[str, Any] | None = None
     chat_id = message.get("chat_id")
     if isinstance(chat_id, str) and chat_id:
-        root_id = message.get("root_id")
-        thread_anchor = root_id if isinstance(root_id, str) and root_id else message_id
+        thread_id = message.get("thread_id")
         context_ref = {
             "chat_id": chat_id,
-            "thread_id": thread_anchor,
+            "thread_id": thread_id if isinstance(thread_id, str) and thread_id else None,
             "anchor_message_id": message_id,
         }
 
@@ -497,13 +497,13 @@ class LarkAdapter:
     ) -> str | None:
         if self._api_client is None:
             raise RuntimeError("Lark adapter is not started")
-        # Prefer the precise thread container when the event carried a real
-        # thread root (thread_id differs from the message itself); otherwise
-        # fall back to recent chat history.
-        items: list[Any] = []
-        if isinstance(thread_id, str) and thread_id and thread_id != anchor:
+        # A threaded message reads from its exact thread container. A
+        # non-threaded message has no thread, so recent chat history is the
+        # only surrounding context. Never cross-fall-back: listing whole-chat
+        # history for a threaded message returns unrelated conversations.
+        if isinstance(thread_id, str) and thread_id:
             items = self._list_messages("thread", thread_id, limit)
-        if not items:
+        else:
             items = self._list_messages("chat", chat_id, limit)
         lines = [
             line
