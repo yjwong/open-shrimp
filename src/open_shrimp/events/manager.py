@@ -21,6 +21,12 @@ def get_active_manager() -> "EventManager | None":
     return _active_manager
 
 
+def get_active_adapter(source: str) -> EventSourceAdapter | None:
+    """The running adapter for *source* on the active manager, or None."""
+    manager = _active_manager
+    return manager.get_adapter(source) if manager is not None else None
+
+
 def _build_adapter(source: EventSourceConfig) -> EventSourceAdapter:
     if source.type == "telegram":
         from open_shrimp.events.telegram_intake import TelegramIntakeAdapter

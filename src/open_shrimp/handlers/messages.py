@@ -1094,6 +1094,14 @@ async def _start_agent_task(
                         # (latest_todos is left intact — the pinned Telegram
                         # message keeps showing the list across usage updates.)
                         _scope_todos.pop(scope, None)
+                        # If this scope is a picked-up event topic, the agent
+                        # is now idle awaiting the operator; tell the requester
+                        # their event is pending a response (once per event).
+                        from open_shrimp.events.progress import (
+                            notify_pending_if_needed,
+                        )
+
+                        await notify_pending_if_needed(context.bot, db, scope)
 
                     if result.num_turns == 0 and result.session_id is None:
                         break

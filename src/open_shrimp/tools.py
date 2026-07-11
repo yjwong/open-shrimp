@@ -890,7 +890,7 @@ def create_openshrimp_tools(
             import json as _json
 
             from open_shrimp.events.base import SupportsReply
-            from open_shrimp.events.manager import get_active_manager
+            from open_shrimp.events.manager import get_active_adapter
 
             text = args.get("text")
             if not isinstance(text, str) or not text.strip():
@@ -910,10 +910,7 @@ def create_openshrimp_tools(
                     "for this event.",
                     is_error=True,
                 )
-            manager = get_active_manager()
-            adapter = (
-                manager.get_adapter(row.source) if manager is not None else None
-            )
+            adapter = get_active_adapter(row.source)
             if adapter is None:
                 return _text_result(
                     f"Source {row.source!r} is not running; cannot reply.",
@@ -935,20 +932,11 @@ def create_openshrimp_tools(
             # Echo the outbound reply into the pick-up topic so the human
             # sees exactly what was sent without opening the source app.
             try:
-                from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, escape
+                from open_shrimp.events.progress import echo_reply_to_topic
 
-                header = f"↪️ Replied to {row.source}"
-                if row.sender:
-                    header += f" · {row.sender}"
-                echo_body = text
-                budget = TELEGRAM_MAX_LENGTH // 2
-                if len(echo_body) > budget:
-                    echo_body = echo_body[:budget] + "…"
-                await bot.send_message(
-                    chat_id,
-                    f"*{escape(header)}*\n\n{escape(echo_body)}",
-                    parse_mode="MarkdownV2",
-                    **_thread_kwargs,
+                await echo_reply_to_topic(
+                    bot, chat_id, thread_id,
+                    f"↪️ Replied to {row.source}", row.sender, text,
                 )
             except Exception:
                 logger.warning(

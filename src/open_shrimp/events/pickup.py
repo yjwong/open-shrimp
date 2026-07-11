@@ -289,6 +289,13 @@ async def _spawn_topic(
         logger.exception("dispatch failed during event pick-up")
         dispatch_failed = True
 
+    # Tell the requester their event moved from the inbox into active review.
+    from open_shrimp.events.progress import PICKED_UP_NOTICE, notify_requester
+
+    await notify_requester(
+        bot, row, PICKED_UP_NOTICE, echo_thread_id=new_thread_id,
+    )
+
     url = _topic_deep_link(bot.username, row.chat_id, new_thread_id)
     await _edit_markup(
         query,

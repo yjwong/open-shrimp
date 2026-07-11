@@ -222,6 +222,16 @@ class EventSink:
                 )
                 if event_id % PRUNE_EVERY == 0:
                     await prune_inbound_events(self._db, event.source)
+            # Acknowledge receipt back to the requester so they know the
+            # request landed and is awaiting review. Only for pickup sources:
+            # non-pickup events have no operator workflow to be pending on.
+            if event.source in self._pickup_sources:
+                from open_shrimp.events.progress import (
+                    RECEIVED_NOTICE,
+                    notify_source,
+                )
+
+                await notify_source(event.source, event.reply_ref, RECEIVED_NOTICE)
         except Exception:
             logger.exception(
                 "Failed to deliver event from source %r; dropping", event.source

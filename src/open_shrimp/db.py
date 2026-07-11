@@ -179,7 +179,8 @@ CREATE TABLE IF NOT EXISTS inbound_events (
     picked_up   INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL,
     reply_ref   TEXT,
-    pickup_thread_id INTEGER
+    pickup_thread_id INTEGER,
+    pending_notified INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -191,6 +192,11 @@ CREATE INDEX IF NOT EXISTS idx_inbound_events_source_created
 _CREATE_INBOUND_EVENTS_MESSAGE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_inbound_events_chat_message
     ON inbound_events (chat_id, message_id)
+"""
+
+_CREATE_INBOUND_EVENTS_PICKUP_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_inbound_events_pickup
+    ON inbound_events (chat_id, pickup_thread_id)
 """
 
 _CREATE_SECURITY_KEY_AUDIT_EVENTS_TABLE = """
@@ -313,6 +319,10 @@ async def _migrate_inbound_events_columns(db: aiosqlite.Connection) -> None:
         "pickup_thread_id": (
             "ALTER TABLE inbound_events ADD COLUMN pickup_thread_id INTEGER"
         ),
+        "pending_notified": (
+            "ALTER TABLE inbound_events ADD COLUMN "
+            "pending_notified INTEGER NOT NULL DEFAULT 0"
+        ),
     }
     changed = False
     for column, sql in migrations.items():
@@ -344,6 +354,7 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_INBOUND_EVENTS_TABLE)
     await db.execute(_CREATE_INBOUND_EVENTS_INDEX)
     await db.execute(_CREATE_INBOUND_EVENTS_MESSAGE_INDEX)
+    await db.execute(_CREATE_INBOUND_EVENTS_PICKUP_INDEX)
     await db.commit()
     await _migrate_schema(db)
     await _migrate_scheduled_tasks_disabled(db)
@@ -753,6 +764,9 @@ class InboundEvent:
     reply_ref: str | None = None
     # The forum topic spawned by pick-up, if this event was picked up.
     pickup_thread_id: int | None = None
+    # Set once the requester has been told their picked-up event is pending
+    # the operator's response, so the notice fires at most once per event.
+    pending_notified: bool = False
 
 
 async def insert_inbound_event(
@@ -791,7 +805,8 @@ async def set_inbound_event_delivery(
 
 _INBOUND_EVENT_COLUMNS = (
     "id, source, sender, text, raw, chat_id, thread_id, "
-    "message_id, picked_up, created_at, reply_ref, pickup_thread_id"
+    "message_id, picked_up, created_at, reply_ref, pickup_thread_id, "
+    "pending_notified"
 )
 
 
@@ -809,6 +824,7 @@ def _row_to_inbound_event(row: tuple) -> InboundEvent:
         created_at=row[9],
         reply_ref=row[10],
         pickup_thread_id=row[11],
+        pending_notified=bool(row[12]),
     )
 
 
@@ -857,6 +873,17 @@ async def set_inbound_event_pickup_thread(
     await db.execute(
         "UPDATE inbound_events SET pickup_thread_id = ? WHERE id = ?",
         (thread_id, event_id),
+    )
+    await db.commit()
+
+
+async def mark_inbound_event_pending_notified(
+    db: aiosqlite.Connection, event_id: int
+) -> None:
+    """Record that the requester was told their event is pending a response."""
+    await db.execute(
+        "UPDATE inbound_events SET pending_notified = 1 WHERE id = ?",
+        (event_id,),
     )
     await db.commit()
 
