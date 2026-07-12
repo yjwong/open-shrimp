@@ -55,6 +55,84 @@ def extract_text(message_type: str | None, content: str | None) -> str | None:
     return text if isinstance(text, str) else None
 
 
+def describe_non_text(
+    message_type: str | None,
+    content: str | None,
+    message_id: str | None = None,
+) -> str | None:
+    """A compact placeholder for a non-text message, exposing resource keys.
+
+    Returns a bracketed summary like ``[image image_key=img_v2_…]`` so an
+    agent can pull the binary out of band via Lark's message-resource API
+    (GET /im/v1/messages/{message_id}/resources/{file_key}). The message_id
+    is appended when the summary names a fetchable key, since that endpoint
+    needs both. None only when the message type is unknown *and* empty.
+    """
+    if not message_type:
+        return None
+    parsed: Any = {}
+    if content:
+        try:
+            loaded = json.loads(content)
+            parsed = loaded if isinstance(loaded, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            parsed = {}
+
+    if message_type == "image":
+        key = parsed.get("image_key")
+        desc = f"[image image_key={key}]" if key else "[image]"
+    elif message_type == "audio":
+        key = parsed.get("file_key")
+        desc = f"[audio file_key={key}]" if key else "[audio]"
+    elif message_type in ("file", "media"):
+        parts = [message_type]
+        if (name := parsed.get("file_name")):
+            parts.append(f"name={name}")
+        if (key := parsed.get("file_key")):
+            parts.append(f"file_key={key}")
+        desc = f"[{' '.join(parts)}]"
+    elif message_type == "sticker":
+        key = parsed.get("file_key")
+        desc = f"[sticker file_key={key}]" if key else "[sticker]"
+    elif message_type == "post":
+        desc = _describe_post(parsed)
+    else:
+        desc = f"[{message_type}]"
+
+    if message_id and ("image_key=" in desc or "file_key=" in desc):
+        desc = f"{desc} (message_id={message_id})"
+    return desc
+
+
+def _describe_post(parsed: dict[str, Any]) -> str:
+    """Flatten a Lark post (rich text) into text plus image_key markers."""
+    pieces: list[str] = []
+    content = parsed.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, list):
+                continue
+            for el in block:
+                if not isinstance(el, dict):
+                    continue
+                tag = el.get("tag")
+                if tag in ("text", "a") and isinstance(el.get("text"), str):
+                    href = el.get("href")
+                    pieces.append(
+                        f"{el['text']} ({href})"
+                        if tag == "a" and href
+                        else el["text"]
+                    )
+                elif tag == "img" and el.get("image_key"):
+                    pieces.append(f"[image image_key={el['image_key']}]")
+                elif tag == "at" and isinstance(el.get("user_name"), str):
+                    pieces.append(f"@{el['user_name']}")
+    body = " ".join(p for p in pieces if p)
+    title = parsed.get("title")
+    label = f"[post: {title}]" if isinstance(title, str) and title else "[post]"
+    return f"{label} {body}".strip()
+
+
 def substitute_mentions(text: str, mentions: Any) -> str:
     """Replace ``@_user_N`` placeholders with ``@<display name>``.
 
@@ -115,10 +193,11 @@ def map_message_event(
 ) -> Event:
     """Map a p2 im.message.receive_v1 payload dict to an Event.
 
-    Text messages get ``Event.text``; anything else falls back to the full
-    payload in ``Event.raw``. Since Event has no header field, the message
-    type is appended to ``sender`` (e.g. ``Alice · [post]``) so the sink's
-    JSON fallback stays identifiable.
+    Text messages get their plain text as ``Event.text``. Non-text messages
+    get a compact placeholder (e.g. ``[image image_key=… (message_id=…)]``)
+    that names the fetchable resource keys, so an agent can pull the binary
+    out of band via Lark's message-resource API. Only a genuinely
+    unparseable message falls back to the full payload in ``Event.raw``.
     """
     header = payload.get("header") or {}
     event = payload.get("event") or {}
@@ -127,17 +206,19 @@ def map_message_event(
 
     sender_id = sender_open_id(payload)
     sender = sender_name or sender_id
+
+    message_id = message.get("message_id")
+    mid = message_id if isinstance(message_id, str) and message_id else None
+
     text = extract_text(message_type, message.get("content"))
     if text is not None:
         text = substitute_mentions(text, message.get("mentions"))
     raw: dict[str, Any] | None = None
     if text is None:
-        raw = payload
-        if isinstance(message_type, str) and message_type != "text":
-            tag = f"[{message_type}]"
-            sender = f"{sender} · {tag}" if sender else tag
+        text = describe_non_text(message_type, message.get("content"), mid)
+        if text is None:
+            raw = payload  # genuinely unparseable — keep the full payload
 
-    message_id = message.get("message_id")
     reply_ref: dict[str, Any] | None = None
     if isinstance(message_id, str) and message_id:
         reply_ref = {"message_id": message_id}
@@ -547,9 +628,14 @@ class LarkAdapter:
     def _render_listed_message(self, item: Any, anchor: str | None) -> str | None:
         """One ``sender: text`` line for a listed message, or None to skip."""
         body = getattr(item, "body", None)
-        text = extract_text(
-            getattr(item, "msg_type", None), getattr(body, "content", None)
-        )
+        msg_type = getattr(item, "msg_type", None)
+        content = getattr(body, "content", None)
+        message_id = getattr(item, "message_id", None)
+        text = extract_text(msg_type, content)
+        if text is None:
+            text = describe_non_text(
+                msg_type, content, message_id if isinstance(message_id, str) else None
+            )
         if text is None:
             return None
         open_id = getattr(getattr(item, "sender", None), "id", None)

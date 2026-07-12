@@ -7,6 +7,7 @@ These must pass without lark-oapi installed: the mapping logic is pure
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from typing import Any
 
@@ -16,6 +17,7 @@ import open_shrimp.events.lark as lark_mod
 from open_shrimp.config import EventSourceConfig
 from open_shrimp.events.lark import (
     LarkAdapter,
+    describe_non_text,
     extract_text,
     map_message_event,
     sender_open_id,
@@ -151,24 +153,33 @@ def test_resolved_sender_name_wins() -> None:
     assert event.sender == "Alice"
 
 
-def test_non_text_message_uses_raw_fallback_with_type_tag() -> None:
+def test_post_message_maps_to_placeholder_text() -> None:
     payload = _payload(message_type="post", content='{"title":"t"}')
     event = map_message_event("lark", payload, sender_name="Alice")
-    assert event.text is None
-    assert event.raw == payload
-    assert event.sender == "Alice · [post]"
+    assert event.text == "[post: t]"
+    assert event.raw is None
+    assert event.sender == "Alice"
 
 
-def test_non_text_message_without_sender_still_tags_type() -> None:
+def test_image_message_maps_to_placeholder_with_keys() -> None:
     payload = _payload(message_type="image", content='{"image_key":"k"}', open_id=None)
     event = map_message_event("lark", payload)
-    assert event.text is None
-    assert event.raw == payload
-    assert event.sender == "[image]"
+    assert event.text == "[image image_key=k] (message_id=om_1)"
+    assert event.raw is None
+    assert event.sender is None
 
 
-def test_malformed_text_content_falls_back_to_raw() -> None:
+def test_malformed_text_content_falls_back_to_placeholder() -> None:
+    # Unparseable content still yields a typed placeholder, not a raw dump.
     payload = _payload(content="not-json")
+    event = map_message_event("lark", payload)
+    assert event.text == "[text]"
+    assert event.raw is None
+
+
+def test_missing_message_type_falls_back_to_raw() -> None:
+    payload = _payload(content="not-json")
+    del payload["event"]["message"]["message_type"]
     event = map_message_event("lark", payload)
     assert event.text is None
     assert event.raw == payload
@@ -412,15 +423,36 @@ async def test_fetch_context_no_chat_fallback_when_thread_empty(
 
 
 @pytest.mark.asyncio
-async def test_fetch_context_none_when_no_text_messages(
+async def test_fetch_context_renders_non_text_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A non-text message is no longer dropped; it renders as a typed
+    # placeholder so the thread stays coherent.
     pytest.importorskip("lark_oapi")
     monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
     adapter = LarkAdapter(_source())
-    adapter._api_client = _fake_list_client(
-        lambda r: _list_response([_listed_msg(None, "ou_x", "om_1", msg_type="image")])
+    monkeypatch.setattr(adapter, "_fetch_user_name", lambda oid: None)
+    image = _listed_msg(None, "ou_x", "om_1", msg_type="image")
+    image.body.content = '{"image_key":"img_k"}'
+    adapter._api_client = _fake_list_client(lambda r: _list_response([image]))
+
+    out = await adapter.fetch_context(
+        {"chat_id": "oc_1", "thread_id": "omt_1", "anchor_message_id": "om_1"}
     )
+    assert out == "ou_x (event message): [image image_key=img_k] (message_id=om_1)"
+
+
+@pytest.mark.asyncio
+async def test_fetch_context_none_when_all_messages_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An empty/typeless message still yields nothing to render.
+    pytest.importorskip("lark_oapi")
+    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
+    adapter = LarkAdapter(_source())
+    monkeypatch.setattr(adapter, "_fetch_user_name", lambda oid: None)
+    blank = _listed_msg(None, "ou_x", "om_1", msg_type=None)
+    adapter._api_client = _fake_list_client(lambda r: _list_response([blank]))
 
     out = await adapter.fetch_context(
         {"chat_id": "oc_1", "thread_id": "omt_1", "anchor_message_id": "om_1"}
@@ -461,6 +493,56 @@ def test_extract_text_edge_cases() -> None:
     assert extract_text("text", '{"other":"x"}') is None
     assert extract_text("post", '{"text":"hi"}') is None
     assert extract_text(None, '{"text":"hi"}') is None
+
+
+def test_describe_non_text_image_exposes_key_and_message_id() -> None:
+    assert (
+        describe_non_text("image", '{"image_key":"img_1"}', "om_9")
+        == "[image image_key=img_1] (message_id=om_9)"
+    )
+    # No message_id → key only, no trailing hint.
+    assert describe_non_text("image", '{"image_key":"img_1"}') == "[image image_key=img_1]"
+    # No key → bare marker, and no message_id appended without a key.
+    assert describe_non_text("image", "{}", "om_9") == "[image]"
+
+
+def test_describe_non_text_file_and_media() -> None:
+    assert (
+        describe_non_text("file", '{"file_key":"f_1","file_name":"report.pdf"}', "om_2")
+        == "[file name=report.pdf file_key=f_1] (message_id=om_2)"
+    )
+    assert (
+        describe_non_text("media", '{"file_key":"v_1"}', "om_3")
+        == "[media file_key=v_1] (message_id=om_3)"
+    )
+    assert describe_non_text("audio", '{"file_key":"a_1"}') == "[audio file_key=a_1]"
+    assert describe_non_text("sticker", '{"file_key":"s_1"}') == "[sticker file_key=s_1]"
+
+
+def test_describe_non_text_post_flattens_text_and_images() -> None:
+    content = json.dumps(
+        {
+            "title": "Weekly",
+            "content": [
+                [
+                    {"tag": "text", "text": "see this"},
+                    {"tag": "img", "image_key": "img_p"},
+                ],
+                [{"tag": "a", "text": "docs", "href": "https://x.test"}],
+            ],
+        }
+    )
+    out = describe_non_text("post", content, "om_5")
+    assert out == (
+        "[post: Weekly] see this [image image_key=img_p] docs (https://x.test) "
+        "(message_id=om_5)"
+    )
+
+
+def test_describe_non_text_unknown_and_empty() -> None:
+    assert describe_non_text("weird", None) == "[weird]"
+    assert describe_non_text("image", "not-json") == "[image]"
+    assert describe_non_text(None, '{"image_key":"k"}') is None
 
 
 def test_sender_open_id_missing() -> None:
