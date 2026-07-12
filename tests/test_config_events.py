@@ -191,6 +191,44 @@ def test_non_boolean_pickup_rejected():
         _validate_raw(_base_raw(events))
 
 
+# ── Trusted senders (auto-pickup) ──
+
+
+def test_trusted_senders_absent_defaults_empty():
+    cfg = _parse(_base_raw(_VALID_EVENTS))
+    assert cfg.events.sources[0].trusted_senders == []
+
+
+def test_trusted_senders_parses():
+    events = copy.deepcopy(_VALID_EVENTS)
+    events["sources"][0]["trusted_senders"] = ["ou_abc", "12345"]
+    raw = _base_raw(events)
+    _validate_raw(raw)  # no raise
+    assert _parse(raw).events.sources[0].trusted_senders == ["ou_abc", "12345"]
+
+
+def test_trusted_senders_non_list_rejected():
+    events = copy.deepcopy(_VALID_EVENTS)
+    events["sources"][0]["trusted_senders"] = "ou_abc"
+    with pytest.raises(ValueError, match="trusted_senders must be a list"):
+        _validate_raw(_base_raw(events))
+
+
+def test_trusted_senders_non_string_entry_rejected():
+    events = copy.deepcopy(_VALID_EVENTS)
+    events["sources"][0]["trusted_senders"] = ["ou_abc", 123]
+    with pytest.raises(ValueError, match="trusted_senders must be a list"):
+        _validate_raw(_base_raw(events))
+
+
+def test_trusted_senders_with_pickup_disabled_rejected():
+    events = copy.deepcopy(_VALID_EVENTS)
+    events["sources"][0]["pickup"] = False
+    events["sources"][0]["trusted_senders"] = ["ou_abc"]
+    with pytest.raises(ValueError, match="trusted_senders requires pickup"):
+        _validate_raw(_base_raw(events))
+
+
 # ── Lark domain (feishu / lark international) ──
 
 

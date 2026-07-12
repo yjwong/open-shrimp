@@ -27,6 +27,7 @@ from open_shrimp.events.pickup import (
     _build_picker,
     _topic_deep_link,
     handle_pickup_callback,
+    parse_context_directive,
     pickup_keyboard,
 )
 
@@ -130,6 +131,38 @@ async def test_non_event_callback_falls_through(db):
     )
     assert handled is False
     query.answer.assert_not_called()
+
+
+# ── /context: directive parsing (trusted-sender auto-pickup) ──
+
+
+def test_directive_returns_named_defined_context():
+    names = frozenset({"default", "glints-dockerfiles"})
+    assert (
+        parse_context_directive(
+            "please take a look /context:glints-dockerfiles", names
+        )
+        == "glints-dockerfiles"
+    )
+
+
+def test_directive_unknown_context_is_ignored():
+    assert parse_context_directive("/context:nope", frozenset({"default"})) is None
+
+
+def test_no_directive_returns_none():
+    names = frozenset({"default"})
+    assert parse_context_directive("just a normal message", names) is None
+    assert parse_context_directive(None, names) is None
+    assert parse_context_directive("", names) is None
+
+
+def test_directive_picks_first_defined_context():
+    names = frozenset({"default", "work"})
+    # An unknown name first, then a defined one: the defined one wins.
+    assert (
+        parse_context_directive("/context:bogus and /context:work", names) == "work"
+    )
 
 
 # ── Step 1: the context picker ──

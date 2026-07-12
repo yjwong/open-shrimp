@@ -118,12 +118,15 @@ def addresses_bot(
 def build_event(source_name: str, message: Message) -> Event:
     """Convert an intake Message to a backend-neutral Event."""
     text = message.text or message.caption or media_placeholder(message)
+    user = message.from_user
+    sender_id = str(user.id) if user is not None else None
     return Event(
         source=source_name,
         sender=format_sender(message),
         text=text,
         raw=message.to_dict(),
         dedup_key=f"{message.chat.id}:{message.message_id}",
+        sender_id=sender_id,
         reply_ref={"chat_id": message.chat.id, "message_id": message.message_id},
     )
 

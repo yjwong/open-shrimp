@@ -450,3 +450,144 @@ async def test_topic_created_without_icon_when_set_unavailable(db):
     await sink.emit(_event())  # must not raise
 
     bot.create_forum_topic.assert_called_once_with(CHAT_ID, name="📥 lark")
+
+
+# ── Trusted-sender auto-pickup ──
+
+TRUSTED_ID = "ou_trusted"
+AUTO_CONTEXT = "glints-dockerfiles"
+
+
+def _auto_sink(bot, db, trusted=(TRUSTED_ID,)) -> EventSink:
+    bot.username = "shrimpbot"
+    return EventSink(
+        bot,
+        db,
+        CHAT_ID,
+        pickup_sources=frozenset({"lark"}),
+        context_names=frozenset({"default", AUTO_CONTEXT}),
+        trusted_senders={"lark": frozenset(trusted)},
+    )
+
+
+@pytest.fixture
+def dispatched(monkeypatch):
+    """Capture dispatch() calls made by spawn_pickup_topic."""
+    calls: list[dict] = []
+
+    async def fake_dispatch(prompt, chat_id, thread_id=None, *, placeholder=None):
+        calls.append({"prompt": prompt, "chat_id": chat_id, "thread_id": thread_id})
+
+    monkeypatch.setattr("open_shrimp.dispatch_registry.dispatch", fake_dispatch)
+    return calls
+
+
+@pytest.fixture
+def received(monkeypatch):
+    """Capture RECEIVED_NOTICE sends so we can assert they're skipped."""
+    notify = AsyncMock(return_value=False)
+    monkeypatch.setattr("open_shrimp.events.progress.notify_source", notify)
+    return notify
+
+
+@pytest.mark.asyncio
+async def test_trusted_sender_directive_auto_picks_up(db, dispatched, received):
+    from open_shrimp.db import get_inbound_event_by_message
+
+    bot = _make_bot()  # inbox topic -> 111, pick-up topic -> 222
+    sink = _auto_sink(bot, db)
+
+    await sink.emit(
+        _event(sender_id=TRUSTED_ID, text=f"take a look /context:{AUTO_CONTEXT}")
+    )
+
+    # A second topic was spawned and the first turn dispatched into it.
+    assert bot.create_forum_topic.call_count == 2
+    assert len(dispatched) == 1
+    assert dispatched[0]["thread_id"] == 222
+
+    row = await get_inbound_event_by_message(db, CHAT_ID, 1000)
+    assert row is not None
+    assert row.picked_up is True
+    assert row.pickup_thread_id == 222
+
+    # The inbox button was rewritten to the picked-up deep link.
+    markup = bot.edit_message_reply_markup.call_args.kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].text.startswith("✅ Picked up")
+    # No receipt notice: the picked-up notice already went out (both notices
+    # share notify_source, so assert on the text rather than the call count).
+    from open_shrimp.events.progress import RECEIVED_NOTICE
+
+    sent_texts = [call.args[2] for call in received.call_args_list]
+    assert RECEIVED_NOTICE not in sent_texts
+
+
+@pytest.mark.asyncio
+async def test_untrusted_sender_directive_not_picked_up(db, dispatched, received):
+    from open_shrimp.db import get_inbound_event_by_message
+
+    bot = _make_bot()
+    sink = _auto_sink(bot, db)
+
+    await sink.emit(
+        _event(sender_id="ou_stranger", text=f"/context:{AUTO_CONTEXT}")
+    )
+
+    assert bot.create_forum_topic.call_count == 1  # inbox only
+    assert dispatched == []
+    row = await get_inbound_event_by_message(db, CHAT_ID, 1000)
+    assert row is not None and row.picked_up is False
+    bot.edit_message_reply_markup.assert_not_called()
+    received.assert_called_once()  # normal receipt notice still fires
+
+
+@pytest.mark.asyncio
+async def test_trusted_sender_without_directive_not_picked_up(
+    db, dispatched, received
+):
+    bot = _make_bot()
+    sink = _auto_sink(bot, db)
+
+    await sink.emit(_event(sender_id=TRUSTED_ID, text="just a plain message"))
+
+    assert dispatched == []
+    bot.edit_message_reply_markup.assert_not_called()
+    received.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_trusted_sender_unknown_context_not_picked_up(
+    db, dispatched, received
+):
+    bot = _make_bot()
+    sink = _auto_sink(bot, db)
+
+    await sink.emit(_event(sender_id=TRUSTED_ID, text="/context:does-not-exist"))
+
+    assert dispatched == []
+    bot.edit_message_reply_markup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_pickup_yields_to_concurrent_manual_claim(
+    db, dispatched, received, monkeypatch
+):
+    from open_shrimp.db import get_inbound_event_by_message
+
+    bot = _make_bot()
+    sink = _auto_sink(bot, db)
+    # Simulate a human tapping Pick up first: the atomic claim is lost.
+    monkeypatch.setattr(
+        "open_shrimp.events.sink.claim_inbound_event",
+        AsyncMock(return_value=False),
+    )
+
+    await sink.emit(
+        _event(sender_id=TRUSTED_ID, text=f"/context:{AUTO_CONTEXT}")
+    )
+
+    assert dispatched == []
+    assert bot.create_forum_topic.call_count == 1  # no pick-up topic
+    bot.edit_message_reply_markup.assert_not_called()
+    row = await get_inbound_event_by_message(db, CHAT_ID, 1000)
+    assert row is not None

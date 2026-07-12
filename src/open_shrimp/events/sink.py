@@ -16,12 +16,19 @@ from telegram import Bot
 from telegram.error import BadRequest
 
 from open_shrimp.db import (
+    claim_inbound_event,
     delete_event_topic,
+    get_inbound_event,
     insert_inbound_event,
     prune_inbound_events,
     set_inbound_event_delivery,
 )
-from open_shrimp.events.pickup import pickup_keyboard
+from open_shrimp.events.pickup import (
+    parse_context_directive,
+    picked_up_markup,
+    pickup_keyboard,
+    spawn_pickup_topic,
+)
 from open_shrimp.events.types import Event
 from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, escape, gfm_to_telegram
 from open_shrimp.telegram_topics import is_topic_gone, resolve_or_create_topic
@@ -74,11 +81,18 @@ class EventSink:
         db: aiosqlite.Connection,
         chat_id: int,
         pickup_sources: frozenset[str] = frozenset(),
+        *,
+        context_names: frozenset[str] = frozenset(),
+        trusted_senders: dict[str, frozenset[str]] | None = None,
     ) -> None:
         self._bot = bot
         self._db = db
         self._chat_id = chat_id
         self._pickup_sources = pickup_sources
+        # Auto-pickup resolves a /context: directive against these names; the
+        # feature is inert unless a source also lists trusted_senders.
+        self._context_names = context_names
+        self._trusted_senders = trusted_senders or {}
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._icon_id: str | None = None
         self._icon_resolved = False
@@ -213,10 +227,25 @@ class EventSink:
                 )
                 if event_id % PRUNE_EVERY == 0:
                     await prune_inbound_events(self._db, event.source)
+
+            # A trusted sender's /context: directive auto-picks-up the event —
+            # same claim/spawn path as a manual button tap. On any failure it
+            # leaves the normal Pick up button in place.
+            auto_picked = False
+            if (
+                event.source in self._pickup_sources
+                and message_id is not None
+            ):
+                auto_picked = await self._maybe_auto_pickup(
+                    event, event_id, message_id
+                )
+
             # Acknowledge receipt back to the requester so they know the
             # request landed and is awaiting review. Only for pickup sources:
             # non-pickup events have no operator workflow to be pending on.
-            if event.source in self._pickup_sources:
+            # Skipped when auto-picked: spawn_pickup_topic already sent the
+            # picked-up notice, so a receipt would double up.
+            if event.source in self._pickup_sources and not auto_picked:
                 from open_shrimp.events.progress import (
                     RECEIVED_NOTICE,
                     notify_source,
@@ -226,4 +255,61 @@ class EventSink:
         except Exception:
             logger.exception(
                 "Failed to deliver event from source %r; dropping", event.source
+            )
+
+    async def _maybe_auto_pickup(
+        self, event: Event, event_id: int, message_id: int
+    ) -> bool:
+        """Claim + spawn a pick-up topic for a trusted, directive-carrying event.
+
+        Trust is keyed on the platform-stable ``sender_id`` (never the
+        display name); the ``/context:`` directive is only honored after that
+        check passes and only if it names a defined context. Returns True iff
+        the event was claimed and a topic spawned. Never raises.
+        """
+        trusted = self._trusted_senders.get(event.source, frozenset())
+        if event.sender_id is None or event.sender_id not in trusted:
+            return False
+        ctx_name = parse_context_directive(event.text, self._context_names)
+        if ctx_name is None:
+            return False
+        try:
+            # The atomic claim is the race gate against a simultaneous manual tap.
+            if not await claim_inbound_event(self._db, event_id):
+                return False
+            row = await get_inbound_event(self._db, event_id)
+            if row is None:
+                return False
+            outcome = await spawn_pickup_topic(
+                self._bot, self._db, row, ctx_name
+            )
+            if outcome.thread_id is None or outcome.bind_failed:
+                return False
+            await self._rewrite_pickup_button(
+                message_id, outcome.thread_id, ctx_name
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Auto-pickup failed for event #%s; leaving it in the inbox",
+                event_id,
+            )
+            return False
+
+    async def _rewrite_pickup_button(
+        self, message_id: int, thread_id: int, ctx_name: str
+    ) -> None:
+        """Swap the inbox Pick up button for the picked-up deep link."""
+        try:
+            markup = picked_up_markup(
+                self._bot.username, self._chat_id, thread_id, ctx_name
+            )
+            await self._bot.edit_message_reply_markup(
+                chat_id=self._chat_id,
+                message_id=message_id,
+                reply_markup=markup,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to rewrite inbox button after auto-pickup", exc_info=True
             )

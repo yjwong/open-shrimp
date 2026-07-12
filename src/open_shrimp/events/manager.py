@@ -5,7 +5,7 @@ import logging
 import aiosqlite
 from telegram import Bot
 
-from open_shrimp.config import EventsConfig, EventSourceConfig
+from open_shrimp.config import Config, EventSourceConfig
 from open_shrimp.events.base import EventSourceAdapter
 from open_shrimp.events.sink import EventSink
 
@@ -43,15 +43,23 @@ class EventManager:
     """Owns the sink and the configured adapters."""
 
     def __init__(
-        self, config: EventsConfig, bot: Bot, db: aiosqlite.Connection,
+        self, config: Config, bot: Bot, db: aiosqlite.Connection,
     ) -> None:
+        events = config.events
+        assert events is not None, "EventManager requires configured events"
         self._sink = EventSink(
             bot,
             db,
-            config.chat_id,
-            pickup_sources=frozenset(s.name for s in config.sources if s.pickup),
+            events.chat_id,
+            pickup_sources=frozenset(s.name for s in events.sources if s.pickup),
+            context_names=frozenset(config.contexts),
+            trusted_senders={
+                s.name: frozenset(s.trusted_senders)
+                for s in events.sources
+                if s.trusted_senders
+            },
         )
-        self._sources = config.sources
+        self._sources = events.sources
         self._adapters: list[EventSourceAdapter] = []
 
     def get_adapter(self, name: str) -> EventSourceAdapter | None:

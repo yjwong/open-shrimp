@@ -10,6 +10,11 @@ class Event:
     text: str | None  # extracted plain text, if the payload had one
     raw: dict | None  # full payload for the JSON fallback
     dedup_key: str | None = None  # platform event/message id
+    # Platform-stable sender identity (Lark open_id, Telegram numeric user id
+    # as str). Distinct from ``sender``, which is an attacker-controlled
+    # display name; only this field may gate trust decisions. None if the
+    # payload carried no authenticated sender id.
+    sender_id: str | None = None
     # Adapter-specific routing for replying to this event (opaque to
     # everything but the adapter's ``reply``); None if the source can't
     # route a reply back.

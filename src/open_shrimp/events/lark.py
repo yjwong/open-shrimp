@@ -125,7 +125,8 @@ def map_message_event(
     message = event.get("message") or {}
     message_type = message.get("message_type")
 
-    sender = sender_name or sender_open_id(payload)
+    sender_id = sender_open_id(payload)
+    sender = sender_name or sender_id
     text = extract_text(message_type, message.get("content"))
     if text is not None:
         text = substitute_mentions(text, message.get("mentions"))
@@ -162,6 +163,7 @@ def map_message_event(
         text=text,
         raw=raw,
         dedup_key=dedup_key if isinstance(dedup_key, str) else None,
+        sender_id=sender_id,
         reply_ref=reply_ref,
         context_ref=context_ref,
     )

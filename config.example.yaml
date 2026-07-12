@@ -196,6 +196,13 @@ default_context: default
 #       require_mention: true      # only ingest group messages that @-mention the
 #                                  # bot; direct (p2p) chats are always ingested.
 #                                  # Default false (ingest every message).
+#       trusted_senders:           # platform-stable sender ids (Lark open_id /
+#         - ou_abc123              # Telegram numeric user id as a string). A
+#                                  # message from one of these that carries a
+#                                  # /context:<name> directive auto-picks-up into
+#                                  # that context — no button tap. Trust is keyed
+#                                  # on the id, never the display name. Requires
+#                                  # pickup (auto-pickup is a form of pickup).
 #       # Lark app must use Event Subscription in "Long Connection" (WebSocket)
 #       # mode and subscribe to im.message.receive_v1. Add the bot to the
 #       # target chat and release an app version for it to take effect.

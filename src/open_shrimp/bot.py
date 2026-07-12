@@ -525,7 +525,7 @@ async def run_bot(
     if config.events is not None:
         from open_shrimp.events.manager import EventManager
 
-        event_manager = EventManager(config.events, app.bot, db)
+        event_manager = EventManager(config, app.bot, db)
         await event_manager.start()
 
     if config.meetings is not None:

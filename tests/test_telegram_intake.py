@@ -25,11 +25,14 @@ def make_message(
     caption: str | None = None,
     full_name: str | None = "Alice Smith",
     username: str | None = None,
+    user_id: int = 555,
     **media: object,
 ) -> SimpleNamespace:
     chat = SimpleNamespace(id=chat_id, type=chat_type, title=chat_title)
     user = (
-        SimpleNamespace(full_name=full_name, username=username) if full_name else None
+        SimpleNamespace(id=user_id, full_name=full_name, username=username)
+        if full_name
+        else None
     )
     msg = SimpleNamespace(
         chat=chat,

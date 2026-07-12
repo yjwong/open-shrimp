@@ -151,6 +151,10 @@ class EventSourceConfig:
     context: str | None = None
     # Attach a "Pick up" button to each posted event.
     pickup: bool = True
+    # Platform-stable sender ids (Lark open_id / Telegram numeric user id as
+    # str) whose messages auto-pick-up when they carry a /context:<name>
+    # directive — no button tap needed. Empty disables auto-pickup.
+    trusted_senders: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -566,6 +570,20 @@ def _validate_events(raw: dict) -> None:
                 f"events source '{name}': require_mention must be a "
                 f"boolean, got: {require_mention!r}"
             )
+        trusted_senders = source.get("trusted_senders", [])
+        if not isinstance(trusted_senders, list) or not all(
+            isinstance(s, str) and s for s in trusted_senders
+        ):
+            raise ValueError(
+                f"events source '{name}': trusted_senders must be a list of "
+                f"non-empty strings, got: {trusted_senders!r}"
+            )
+        if trusted_senders and not pickup:
+            raise ValueError(
+                f"events source '{name}': trusted_senders requires pickup "
+                f"(auto-pickup is a form of pickup); remove pickup: false "
+                f"or clear trusted_senders"
+            )
 
         if stype == "telegram":
             token = source.get("token")
@@ -783,6 +801,7 @@ def _parse(raw: dict) -> Config:
                     domain=s.get("domain"),
                     context=s.get("context"),
                     pickup=bool(s.get("pickup", True)),
+                    trusted_senders=list(s.get("trusted_senders", [])),
                 )
                 for s in events_raw.get("sources", [])
             ],
