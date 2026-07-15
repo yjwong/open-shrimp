@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from open_shrimp.android_companion import authenticate_android_request
-from open_shrimp.db import upsert_meeting_job
+from open_shrimp.db import delete_meeting_job, upsert_meeting_job
 from open_shrimp.meetings.processor import get_active_processor
 from open_shrimp.review.auth import AuthError, read_json_body
 
@@ -93,11 +93,40 @@ async def upload_meeting_transcript_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"status": "processing"}, status_code=202)
 
 
+async def delete_meeting_endpoint(request: Request) -> JSONResponse:
+    """DELETE /api/meetings/{meeting_id} — drop the device's transcript/notes.
+
+    Idempotent: deleting an unknown (or already deleted) meeting succeeds, so
+    the phone can retry freely before removing its local copy.
+    """
+    try:
+        device = await authenticate_android_request(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    meeting_id = request.path_params["meeting_id"]
+    deleted = await delete_meeting_job(
+        request.app.state.db,
+        device_id=device["device_id"],
+        meeting_id=meeting_id,
+    )
+    if deleted:
+        logger.info(
+            "Deleted meeting %s for device %s", meeting_id, device["device_id"]
+        )
+    return JSONResponse({"deleted": deleted})
+
+
 def create_meetings_routes() -> list[Route]:
     return [
         Route(
             "/api/meetings/transcripts",
             upload_meeting_transcript_endpoint,
             methods=["POST"],
+        ),
+        Route(
+            "/api/meetings/{meeting_id}",
+            delete_meeting_endpoint,
+            methods=["DELETE"],
         ),
     ]

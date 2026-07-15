@@ -9,6 +9,7 @@ import pytest
 
 from open_shrimp.config import MeetingsConfig, _parse, _validate_raw
 from open_shrimp.db import (
+    delete_meeting_job,
     get_meeting_job,
     get_unfinished_meeting_jobs,
     init_db,
@@ -166,6 +167,31 @@ async def test_jobs_are_scoped_per_device(db):
     a = await _upsert(db, device_id="device-1")
     b = await _upsert(db, device_id="device-2")
     assert a != b
+
+
+@pytest.mark.asyncio
+async def test_delete_meeting_job(db):
+    job_id = await _upsert(db)
+    assert await delete_meeting_job(
+        db, device_id="device-1", meeting_id="20260710-104900"
+    )
+    assert await get_meeting_job(db, job_id) is None
+    # Idempotent: a second delete reports nothing removed.
+    assert not await delete_meeting_job(
+        db, device_id="device-1", meeting_id="20260710-104900"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_is_scoped_to_the_device(db):
+    mine = await _upsert(db, device_id="device-1")
+    other = await _upsert(db, device_id="device-2")
+    assert not await delete_meeting_job(
+        db, device_id="device-3", meeting_id="20260710-104900"
+    )
+    await delete_meeting_job(db, device_id="device-1", meeting_id="20260710-104900")
+    assert await get_meeting_job(db, mine) is None
+    assert await get_meeting_job(db, other) is not None
 
 
 # ---------------------------------------------------------------------------

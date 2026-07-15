@@ -193,6 +193,26 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
         signedPost("$baseUrl/api/meetings/transcripts", deviceId, "Transcript upload failed", body)
     }
 
+    /** Remove a previously uploaded meeting's transcript and notes from the host. */
+    suspend fun deleteUploadedMeeting(
+        baseUrl: String,
+        deviceId: String,
+        meetingId: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        signedDelete(
+            "$baseUrl/api/meetings/${urlEncode(meetingId)}",
+            deviceId,
+            "Server-side delete failed",
+        )
+    }
+
+    private fun signedDelete(url: String, deviceId: String, errPrefix: String): String {
+        val request = SigningKeys.sign(Request.Builder().url(url), "DELETE", url, "", deviceId)
+            .delete()
+            .build()
+        return executeForBody(request, errPrefix)
+    }
+
     private fun signedGet(url: String, deviceId: String, errPrefix: String): String {
         val request = SigningKeys.sign(Request.Builder().url(url), "GET", url, "", deviceId)
             .get()

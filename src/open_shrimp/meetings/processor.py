@@ -223,6 +223,15 @@ class MeetingProcessor:
                     generate_meeting_notes(self._config, job.transcript),
                     timeout=_NOTES_TIMEOUT_SECONDS,
                 )
+                # The phone may have deleted the meeting during the long
+                # notes-generation window; skip delivery if the row is gone.
+                # (A delete landing after this check still delivers — the
+                # residual race is the delivery call itself.)
+                if await get_meeting_job(self._db, job.id) is None:
+                    logger.info(
+                        "Meeting job %d deleted mid-processing; dropping", job.id
+                    )
+                    return
                 await self._deliver(job, notes)
                 await set_meeting_job_state(
                     self._db, job.id, MEETING_STATE_DELIVERED, notes_md=notes

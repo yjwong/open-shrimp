@@ -23,6 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
@@ -64,6 +65,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import java.io.File
 import java.util.Date
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -74,6 +76,7 @@ import place.wong.shrimp.companion.data.MeetingStore
 import place.wong.shrimp.companion.data.MeetingsSync
 import place.wong.shrimp.companion.data.Utterance
 import place.wong.shrimp.companion.data.buildUtterances
+import place.wong.shrimp.companion.data.deleteMeeting
 import place.wong.shrimp.companion.data.formatDuration
 import place.wong.shrimp.companion.data.uploadMeetingForNotes
 
@@ -279,6 +282,7 @@ private fun MeetingDetail(
                         recording = recording,
                         diarizationStage = diarizationStage,
                         diarizationBusy = diarizationBusy,
+                        onDeleted = onBack,
                     )
                 }
                 val list = utterances.orEmpty()
@@ -314,13 +318,17 @@ private fun MeetingHeader(
     recording: Boolean,
     diarizationStage: String?,
     diarizationBusy: Boolean,
+    onDeleted: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showCountDialog by remember { mutableStateOf(false) }
     var showMergeDialog by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
     var sendingNotes by remember(meeting.id) { mutableStateOf(false) }
     var sendError by remember(meeting.id) { mutableStateOf<String?>(null) }
+    var deleting by remember(meeting.id) { mutableStateOf(false) }
+    var deleteError by remember(meeting.id) { mutableStateOf<String?>(null) }
     val hasTranscript = meeting.wordCount > 0
     val canRunDiarization = hasTranscript && !recording && !diarizationBusy &&
         MeetingDiarizationService.isSupported
@@ -354,17 +362,11 @@ private fun MeetingHeader(
             TextButton(
                 enabled = !sendingNotes,
                 onClick = {
-                    sendingNotes = true
-                    sendError = null
-                    scope.launch {
-                        val result = withContext(Dispatchers.IO) {
-                            runCatching { uploadMeetingForNotes(context, meeting) }
-                        }
-                        sendingNotes = false
-                        result
-                            .onSuccess { MeetingsSync.bump() }
-                            .onFailure { sendError = it.message ?: "Upload failed" }
-                    }
+                    scope.runMeetingAction(
+                        setBusy = { sendingNotes = it },
+                        setError = { sendError = it },
+                        fallbackError = "Upload failed",
+                    ) { uploadMeetingForNotes(context, meeting) }
                 },
             ) {
                 Text(
@@ -379,6 +381,25 @@ private fun MeetingHeader(
         if (sendError != null) {
             Text(
                 "Send failed: $sendError",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        // No deleting out from under the recorder or the diarizer.
+        val busyWithThisMeeting =
+            (recording && meeting.durationMs < 0) || diarizationStage != null
+        TextButton(
+            enabled = !deleting && !busyWithThisMeeting,
+            colors = ButtonDefaults.textButtonColors(
+                contentColor = MaterialTheme.colorScheme.error,
+            ),
+            onClick = { showDeleteDialog = true },
+        ) {
+            Text(if (deleting) "Deleting…" else "Delete meeting")
+        }
+        if (deleteError != null) {
+            Text(
+                "Delete failed: $deleteError",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -416,6 +437,72 @@ private fun MeetingHeader(
             },
         )
     }
+    if (showDeleteDialog) {
+        DeleteMeetingDialog(
+            uploaded = meeting.notesState != null,
+            onDismiss = { showDeleteDialog = false },
+            onConfirm = {
+                showDeleteDialog = false
+                scope.runMeetingAction(
+                    setBusy = { deleting = it },
+                    setError = { deleteError = it },
+                    fallbackError = "Delete failed",
+                    onSuccess = onDeleted,
+                ) { deleteMeeting(context, meeting) }
+            },
+        )
+    }
+}
+
+/** Runs a meeting action on IO with busy/error bookkeeping and a list refresh. */
+private fun CoroutineScope.runMeetingAction(
+    setBusy: (Boolean) -> Unit,
+    setError: (String?) -> Unit,
+    fallbackError: String,
+    onSuccess: () -> Unit = {},
+    action: suspend () -> Unit,
+) {
+    setBusy(true)
+    setError(null)
+    launch {
+        val result = withContext(Dispatchers.IO) { runCatching { action() } }
+        setBusy(false)
+        result
+            .onSuccess {
+                MeetingsSync.bump()
+                onSuccess()
+            }
+            .onFailure { setError(it.message ?: fallbackError) }
+    }
+}
+
+@Composable
+private fun DeleteMeetingDialog(
+    uploaded: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete meeting?") },
+        text = {
+            Text(
+                "The recording and transcript are removed from this phone." +
+                    if (uploaded) {
+                        " The transcript and notes stored on the server are " +
+                            "deleted too (notes already posted to Telegram remain)."
+                    } else {
+                        ""
+                    },
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Delete") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable

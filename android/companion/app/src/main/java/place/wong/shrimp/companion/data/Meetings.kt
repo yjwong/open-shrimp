@@ -293,6 +293,10 @@ object MeetingStore {
         return saveDiarization(meeting, merged)
     }
 
+    /** Removes the meeting's directory (audio, transcripts, metadata). */
+    fun delete(context: Context, id: String): Boolean =
+        File(meetingsDir(context), id).deleteRecursively()
+
     fun list(context: Context): List<Meeting> =
         meetingsDir(context).listFiles { file -> file.isDirectory }.orEmpty()
             .mapNotNull(::readMeta)
@@ -336,12 +340,31 @@ object MeetingStore {
     }
 }
 
-/** Uploads the transcript text for host-side notes; audio never leaves the phone. */
-suspend fun uploadMeetingForNotes(context: Context, meeting: Meeting) {
+/** The paired server's (baseUrl, deviceId); throws when the app is not paired. */
+private fun pairedServer(context: Context): Pair<String, String> {
     val prefs = Prefs(context)
     val baseUrl = prefs.baseUrl.trimEnd('/')
     val deviceId = prefs.deviceId
     check(baseUrl.isNotEmpty() && deviceId != null) { "Not paired with a server" }
+    return baseUrl to deviceId
+}
+
+/**
+ * Deletes a meeting everywhere: the server copy first (so a failure leaves
+ * the local files — and the retry handle — intact), then the phone. Meetings
+ * never sent for notes have no server copy and skip straight to local delete.
+ */
+suspend fun deleteMeeting(context: Context, meeting: Meeting) {
+    if (meeting.notesState != null) {
+        val (baseUrl, deviceId) = pairedServer(context)
+        ServerApi().deleteUploadedMeeting(baseUrl, deviceId, meeting.id)
+    }
+    check(MeetingStore.delete(context, meeting.id)) { "Could not delete meeting files" }
+}
+
+/** Uploads the transcript text for host-side notes; audio never leaves the phone. */
+suspend fun uploadMeetingForNotes(context: Context, meeting: Meeting) {
+    val (baseUrl, deviceId) = pairedServer(context)
     val transcript = MeetingStore.uploadableTranscript(meeting)
         ?: error("No transcript to send")
     ServerApi().uploadMeetingTranscript(baseUrl, deviceId, meeting, transcript)

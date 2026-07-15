@@ -1071,6 +1071,18 @@ async def upsert_meeting_job(
     return row[0]
 
 
+async def delete_meeting_job(
+    db: aiosqlite.Connection, *, device_id: str, meeting_id: str
+) -> bool:
+    """Delete the job for (device, meeting); True if a row was removed."""
+    cursor = await db.execute(
+        "DELETE FROM meeting_jobs WHERE device_id = ? AND meeting_id = ?",
+        (device_id, meeting_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
 async def get_meeting_job(
     db: aiosqlite.Connection, job_id: int
 ) -> MeetingJob | None:
