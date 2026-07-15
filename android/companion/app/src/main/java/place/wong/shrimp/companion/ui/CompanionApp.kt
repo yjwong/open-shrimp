@@ -1,11 +1,14 @@
 package place.wong.shrimp.companion.ui
 
 import androidx.compose.runtime.Composable
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import kotlinx.coroutines.flow.StateFlow
 import place.wong.shrimp.companion.ui.home.HomeScreen
+import place.wong.shrimp.companion.ui.meetings.MeetingDetailScreen
 import place.wong.shrimp.companion.ui.meetings.MeetingsScreen
 import place.wong.shrimp.companion.ui.pairing.PairingScreen
 import place.wong.shrimp.companion.ui.settings.SettingsScreen
@@ -15,6 +18,9 @@ object Routes {
     const val PAIRING = "pairing"
     const val SETTINGS = "settings"
     const val MEETINGS = "meetings"
+    const val MEETING_DETAIL = "meetings/{id}"
+
+    fun meetingDetail(id: String) = "meetings/$id"
 }
 
 /**
@@ -47,7 +53,19 @@ fun CompanionApp(
             PairingScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.MEETINGS) {
-            MeetingsScreen(onBack = { navController.popBackStack() })
+            MeetingsScreen(
+                onBack = { navController.popBackStack() },
+                onOpenMeeting = { id -> navController.navigate(Routes.meetingDetail(id)) },
+            )
+        }
+        composable(
+            route = Routes.MEETING_DETAIL,
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) { entry ->
+            MeetingDetailScreen(
+                meetingId = entry.arguments?.getString("id").orEmpty(),
+                onBack = { navController.popBackStack() },
+            )
         }
         composable(Routes.SETTINGS) {
             SettingsScreen(

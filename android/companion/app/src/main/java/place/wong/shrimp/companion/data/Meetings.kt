@@ -66,35 +66,102 @@ data class Meeting(
     val notesState: NotesState? = null,
 )
 
+/** A run of consecutive same-speaker words; the unit of display and playback sync. */
+data class Utterance(
+    /** 0-based speaker label; -1 when the meeting is not diarized. */
+    val speaker: Int,
+    /** First word's absolute meeting offset in ms. */
+    val startMs: Long,
+    /** Last word's absolute meeting offset in ms. */
+    val endMs: Long,
+    val text: String,
+)
+
+/** Undiarized transcripts chunk at pauses so tap-to-seek still has targets. */
+private const val CHUNK_PAUSE_MS = 2000L
+private const val CHUNK_MAX_WORDS = 50
+
 /**
- * Words falling in a gap between turns are assigned to the nearest turn;
- * consecutive same-speaker words coalesce into one `Speaker N: …` utterance
- * (labels are 1-based for display).
+ * Groups timed words into utterances. Diarized: words falling in a gap between
+ * turns are assigned to the nearest turn; consecutive same-speaker words
+ * coalesce. Not diarized (`turns` empty): words chunk into `speaker = -1`
+ * utterances at pauses > 2 s, capped at 50 words per chunk.
  */
-fun renderAttributedTranscript(words: List<TimedWord>, turns: List<SpeakerTurn>): String {
-    if (words.isEmpty() || turns.isEmpty()) {
-        return ""
+fun buildUtterances(words: List<TimedWord>, turns: List<SpeakerTurn>): List<Utterance> {
+    val sorted = words.sortedBy { it.tMs }
+    if (sorted.isEmpty()) {
+        return emptyList()
     }
+    if (turns.isEmpty()) {
+        return chunkAtPauses(sorted)
+    }
+    val utterances = mutableListOf<Utterance>()
+    var speaker = -1
+    var startMs = 0L
+    var endMs = 0L
     val sb = StringBuilder()
-    var currentSpeaker = -1
-    for (word in words.sortedBy { it.tMs }) {
+    for (word in sorted) {
         val t = word.tMs / 1000.0
-        val speaker = (
+        val wordSpeaker = (
             turns.firstOrNull { t >= it.start && t <= it.end }
                 ?: turns.minBy { minOf(abs(it.start - t), abs(it.end - t)) }
             ).speaker
-        if (speaker != currentSpeaker) {
+        if (wordSpeaker != speaker) {
             if (sb.isNotEmpty()) {
-                sb.append("\n\n")
+                utterances.add(Utterance(speaker, startMs, endMs, sb.toString()))
+                sb.setLength(0)
             }
-            sb.append("Speaker ").append(speaker + 1).append(": ")
-            currentSpeaker = speaker
+            speaker = wordSpeaker
+            startMs = word.tMs
         } else {
             sb.append(' ')
         }
         sb.append(word.word)
+        endMs = word.tMs
     }
-    return sb.toString()
+    if (sb.isNotEmpty()) {
+        utterances.add(Utterance(speaker, startMs, endMs, sb.toString()))
+    }
+    return utterances
+}
+
+private fun chunkAtPauses(sorted: List<TimedWord>): List<Utterance> {
+    val utterances = mutableListOf<Utterance>()
+    var startMs = sorted.first().tMs
+    var endMs = startMs
+    var wordCount = 0
+    val sb = StringBuilder()
+    for (word in sorted) {
+        if (wordCount > 0 && (word.tMs - endMs > CHUNK_PAUSE_MS || wordCount >= CHUNK_MAX_WORDS)) {
+            utterances.add(Utterance(-1, startMs, endMs, sb.toString()))
+            sb.setLength(0)
+            startMs = word.tMs
+            wordCount = 0
+        }
+        if (wordCount > 0) {
+            sb.append(' ')
+        }
+        sb.append(word.word)
+        endMs = word.tMs
+        wordCount++
+    }
+    if (sb.isNotEmpty()) {
+        utterances.add(Utterance(-1, startMs, endMs, sb.toString()))
+    }
+    return utterances
+}
+
+/**
+ * The flat `Speaker N: …` rendering of the diarized utterances (labels are
+ * 1-based for display). Kept as a thin formatter over [buildUtterances] so
+ * display, upload, and playback sync can never disagree on attribution.
+ */
+fun renderAttributedTranscript(words: List<TimedWord>, turns: List<SpeakerTurn>): String {
+    if (turns.isEmpty()) {
+        return ""
+    }
+    return buildUtterances(words, turns)
+        .joinToString("\n\n") { "Speaker ${it.speaker + 1}: ${it.text}" }
 }
 
 /** Remap raw cluster ids to contiguous 0..N-1 in order of first appearance. */
@@ -267,4 +334,16 @@ object MeetingStore {
     } catch (_: Exception) {
         null
     }
+}
+
+/** Uploads the transcript text for host-side notes; audio never leaves the phone. */
+suspend fun uploadMeetingForNotes(context: Context, meeting: Meeting) {
+    val prefs = Prefs(context)
+    val baseUrl = prefs.baseUrl.trimEnd('/')
+    val deviceId = prefs.deviceId
+    check(baseUrl.isNotEmpty() && deviceId != null) { "Not paired with a server" }
+    val transcript = MeetingStore.uploadableTranscript(meeting)
+        ?: error("No transcript to send")
+    ServerApi().uploadMeetingTranscript(baseUrl, deviceId, meeting, transcript)
+    MeetingStore.setNotesState(meeting, NotesState.SENT)
 }
