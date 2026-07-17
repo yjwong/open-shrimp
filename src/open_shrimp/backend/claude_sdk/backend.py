@@ -51,15 +51,11 @@ class ClaudeSdkBackend:
         # SDK monkey-patches are applied here so they only run when this
         # backend is actually constructed — multi-backend installs that
         # never instantiate ``ClaudeSdkBackend`` never import the SDK.
-        # Both calls are idempotent; order matters because
-        # ``prompt_suggestion`` overrides ``read_messages`` on the class
-        # ``sdk_patches`` subclasses.
+        # Idempotent.
         from open_shrimp.backend.claude_sdk.prompt_suggestion import (
             install_patches as install_suggestion_patches,
         )
-        from open_shrimp.sdk_patches import apply as apply_sdk_patches
 
-        apply_sdk_patches()
         install_suggestion_patches()
 
         self._mcp_config_provider: MCPConfigProvider | None = None
