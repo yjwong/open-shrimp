@@ -1511,28 +1511,54 @@ def install_cli_via_ssh(
 ) -> None:
     """Install *binary_name* into ``/usr/local/bin`` of a libvirt VM.
 
-    Probes via SSH (skips if the binary is already on ``PATH``), SCPs
-    *host_binary_path* into ``/tmp``, then ``sudo mv``s + chmods it.
+    Compares the guest's ``/usr/local/bin/<name>`` against the host binary
+    by SHA-256 so a host-side upgrade propagates into existing VMs on the
+    next sandbox start.  A binary the operator provided elsewhere on
+    ``PATH`` is respected and never overwritten.  Installs by SCPing
+    *host_binary_path* into ``/tmp``, then ``sudo mv`` + chmod.
     """
+    import hashlib
     import logging
     _logger = logging.getLogger(__name__)
 
     ssh_opts = _ssh_common_opts(ssh_key, ssh_port)
     scp_opts = _scp_common_opts(ssh_key, ssh_port)
     remote = f"{ssh_user}@localhost"
+    final_path = f"/usr/local/bin/{binary_name}"
+
+    hasher = hashlib.sha256()
+    with open(host_binary_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            hasher.update(chunk)
+    local_hash = hasher.hexdigest()
 
     result = subprocess.run(
-        ["ssh", *ssh_opts, remote, "which", binary_name],
+        ["ssh", *ssh_opts, remote, "sha256sum", final_path],
         capture_output=True,
+        text=True,
     )
     if result.returncode == 0:
-        return
+        remote_hash = result.stdout.split()[0] if result.stdout.split() else ""
+        if remote_hash == local_hash:
+            return
+        _logger.info(
+            "%s in VM (ssh port %d) differs from host binary; reinstalling",
+            binary_name, ssh_port,
+        )
+    else:
+        # Not at /usr/local/bin — an operator-provided binary elsewhere on
+        # PATH (base image or provision script) is theirs to manage.
+        which = subprocess.run(
+            ["ssh", *ssh_opts, remote, "which", binary_name],
+            capture_output=True,
+        )
+        if which.returncode == 0:
+            return
 
     _logger.info(
         "Installing %s into VM (ssh port %d)...", binary_name, ssh_port,
     )
     tmp_path = f"/tmp/{binary_name}"
-    final_path = f"/usr/local/bin/{binary_name}"
     subprocess.run(
         ["scp", *scp_opts, host_binary_path, f"{remote}:{tmp_path}"],
         check=True,
