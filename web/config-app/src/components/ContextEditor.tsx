@@ -17,6 +17,7 @@ type PathStatus = "idle" | "checking" | "valid" | "invalid";
 
 const MODELS = [
   { value: "", label: "CLI default" },
+  { value: "fable", label: "fable" },
   { value: "opus", label: "opus" },
   { value: "opus[1m]", label: "opus[1m]" },
   { value: "sonnet", label: "sonnet" },

@@ -31,9 +31,10 @@ def _path_completer(text: str, state: int) -> str | None:
 
 _MODELS: tuple[tuple[str | None, str], ...] = (
     (None, "use CLI default (recommended)"),
-    ("sonnet", "fast and capable"),
-    ("opus", "most capable, slower"),
-    ("haiku", "fastest, least capable"),
+    ("fable", "most capable for your hardest and longest-running tasks"),
+    ("opus", "best for everyday, complex tasks"),
+    ("sonnet", "efficient for routine tasks, recommended for most coding"),
+    ("haiku", "fastest for quick answers"),
 )
 
 # Models that may support the [1m] (1M context) variant.

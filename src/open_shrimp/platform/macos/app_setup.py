@@ -61,9 +61,10 @@ _CONTENT_WIDTH = _WINDOW_WIDTH - 2 * _CONTENT_INSET
 
 _MODELS: tuple[tuple[str | None, str], ...] = (
     (None, "CLI default (recommended)"),
-    ("sonnet", "Fast and capable"),
-    ("opus", "Most capable, slower"),
-    ("haiku", "Fastest, least capable"),
+    ("fable", "Most capable for your hardest and longest-running tasks"),
+    ("opus", "Best for everyday, complex tasks"),
+    ("sonnet", "Efficient for routine tasks, recommended for most coding"),
+    ("haiku", "Fastest for quick answers"),
 )
 _1M_CANDIDATES = {"sonnet", "opus"}
 
