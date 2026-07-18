@@ -56,6 +56,7 @@ from open_shrimp.handlers.state import (
     _running_tasks,
     _scope_todos,
     _setup_queues,
+    signal_turn_done,
 )
 from open_shrimp.handlers.utils import (
     _cancel_running,
@@ -1099,6 +1100,10 @@ async def _start_agent_task(
 
                         await notify_pending_if_needed(context.bot, db, scope)
 
+                    # Release any external waiter on this turn (e.g. the
+                    # schedule runner) — the task itself stays alive.
+                    signal_turn_done(scope)
+
                     if result.num_turns == 0 and result.session_id is None:
                         break
 
@@ -1189,6 +1194,7 @@ async def _start_agent_task(
         finally:
             # Safety-net "done" for teardown paths (cancel/error) where no
             # per-turn "done" fired; notify_agent_status swallows its own errors.
+            signal_turn_done(scope)
             await notify_agent_status(
                 context.bot_data, config, db, scope, "done", title=ctx_name,
             )

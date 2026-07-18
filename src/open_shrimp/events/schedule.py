@@ -455,7 +455,11 @@ class ScheduleRunner:
         """One firing, under the semaphore: full interactive turn in the topic."""
         from open_shrimp.db import get_active_context
         from open_shrimp.dispatch_registry import dispatch
-        from open_shrimp.handlers.state import get_running_turn, reset_scope
+        from open_shrimp.handlers.state import (
+            arm_turn_done,
+            disarm_turn_done,
+            reset_scope,
+        )
         from open_shrimp.handlers.utils import _cancel_running
 
         if task.context_name not in self._config.contexts:
@@ -506,42 +510,44 @@ class ScheduleRunner:
             f"human is watching live, but output lands in this topic). "
             f"{task.prompt}"
         )
-        await dispatch(prompt, self._chat_id, thread_id=thread_id)
-
-        turn = get_running_turn(scope)
-        if turn is None:
-            logger.warning(
-                "Scheduled task %d (%s): dispatch did not start a turn",
-                task.id,
-                task.name,
-            )
-            return
-
-        # asyncio.wait (not wait_for): a timeout must not cancel the turn
-        # directly — _cancel_running also interrupts the CLI client.
-        _done, pending = await asyncio.wait({turn}, timeout=task.timeout_seconds)
-        if pending:
-            logger.warning(
-                "Scheduled task %d (%s) timed out after %ds",
-                task.id,
-                task.name,
-                task.timeout_seconds,
-            )
-            await _cancel_running(scope)
+        # The scope's asyncio task is a poor completion signal — the
+        # persistent client keeps it alive across turns — so the agent
+        # loop fires a per-turn event instead.  Armed before dispatch so
+        # even an instantly-finishing turn cannot be missed; the loop's
+        # teardown path also fires it, covering crashed turns.
+        turn_done = arm_turn_done(scope)
+        try:
+            await dispatch(prompt, self._chat_id, thread_id=thread_id)
             try:
-                await self._bot.send_message(
-                    chat_id=self._chat_id,
-                    text=(
-                        f"⏱️ Timed out after "
-                        f"{_format_duration(task.timeout_seconds)}."
-                    ),
-                    message_thread_id=thread_id,
+                await asyncio.wait_for(
+                    turn_done.wait(), timeout=task.timeout_seconds
                 )
-            except Exception:
-                logger.debug(
-                    "Failed to post timeout note for task %d",
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Scheduled task %d (%s) timed out after %ds",
                     task.id,
-                    exc_info=True,
+                    task.name,
+                    task.timeout_seconds,
                 )
-        else:
-            logger.info("Scheduled task %d (%s) completed", task.id, task.name)
+                await _cancel_running(scope)
+                try:
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        text=(
+                            f"⏱️ Timed out after "
+                            f"{_format_duration(task.timeout_seconds)}."
+                        ),
+                        message_thread_id=thread_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to post timeout note for task %d",
+                        task.id,
+                        exc_info=True,
+                    )
+            else:
+                logger.info(
+                    "Scheduled task %d (%s) completed", task.id, task.name
+                )
+        finally:
+            disarm_turn_done(scope, turn_done)

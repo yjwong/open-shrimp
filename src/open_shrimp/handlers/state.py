@@ -28,15 +28,46 @@ _running_tasks: dict[ChatScope, asyncio.Task[Any]] = {}
 
 
 def get_running_turn(scope: ChatScope) -> asyncio.Task[Any] | None:
-    """The scope's currently-running agent turn, or None.
+    """The scope's currently-running agent task, or None.
 
-    Lets external drivers (e.g. the schedule runner) await a turn they
-    started via ``dispatch()`` without reaching into ``_running_tasks``.
+    Note the task outlives individual turns: the persistent client keeps
+    it alive across messages, so it is a liveness handle, not a per-turn
+    completion signal (that is :func:`arm_turn_done`).
     """
     task = _running_tasks.get(scope)
     if task is not None and not task.done():
         return task
     return None
+
+
+# ---------------------------------------------------------------------------
+# Per-scope turn-completion signal for externally-driven turns.  The
+# schedule runner arms an event before dispatching; the agent loop fires
+# it at each per-turn "done" boundary and on task teardown.  Awaiting the
+# scope's asyncio task instead would never return at turn end — the
+# persistent client keeps that task alive across turns.
+# ---------------------------------------------------------------------------
+_pending_turn_done: dict[ChatScope, asyncio.Event] = {}
+
+
+def arm_turn_done(scope: ChatScope) -> asyncio.Event:
+    """Arm and return a fresh turn-completion event for *scope*."""
+    event = asyncio.Event()
+    _pending_turn_done[scope] = event
+    return event
+
+
+def disarm_turn_done(scope: ChatScope, event: asyncio.Event) -> None:
+    """Drop *event* if it is still the armed one for *scope*."""
+    if _pending_turn_done.get(scope) is event:
+        _pending_turn_done.pop(scope, None)
+
+
+def signal_turn_done(scope: ChatScope) -> None:
+    """Fire and disarm the pending turn-completion event, if any."""
+    event = _pending_turn_done.pop(scope, None)
+    if event is not None:
+        event.set()
 
 # ---------------------------------------------------------------------------
 # Per-scope dispatch lock: serialises _dispatch_to_agent so two messages

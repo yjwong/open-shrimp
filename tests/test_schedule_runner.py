@@ -88,11 +88,18 @@ def runner(db, bot):
 
 @pytest.fixture
 def dispatch_calls(monkeypatch):
-    """Capture dispatch() calls; restores the registry afterwards."""
+    """Capture dispatch() calls; restores the registry afterwards.
+
+    Fires the per-turn completion signal like the real agent loop does,
+    so the runner's await returns instead of running out the timeout.
+    """
+    from open_shrimp.handlers.state import signal_turn_done
+
     calls: list[tuple[str, object, str | None]] = []
 
     async def _fake_dispatch(prompt, scope, placeholder=None):
         calls.append((prompt, scope, placeholder))
+        signal_turn_done(scope)
 
     monkeypatch.setattr(dispatch_registry, "_dispatch_fn", _fake_dispatch)
     return calls
@@ -113,7 +120,11 @@ async def _make_task(db, *, schedule_type="interval", expr="30m", **overrides):
 @pytest.mark.asyncio
 async def test_run_creates_topic_and_dispatches(db, bot, runner, dispatch_calls):
     task = await _make_task(db)
-    await runner._execute(task)
+    # A completed turn must release the runner promptly — long before the
+    # task's 600s timeout (the persistent scope task never finishes, so
+    # the runner must key off the per-turn signal, not the task).
+    await asyncio.wait_for(runner._execute(task), timeout=5)
+    assert not any("⏱️" in text for _, text, _ in bot.sent)
 
     # A ⏰ topic was created and mapped under the task's id-based key.
     assert bot.created_topics == ["⏰ nightly"]
