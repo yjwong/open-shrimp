@@ -99,7 +99,6 @@ def _register_tools(
     bot=None,
     db=None,
     config=None,
-    job_queue=None,
     sandbox=None,
     host_bash_workdir: str | None = None,
 ) -> str:
@@ -114,7 +113,6 @@ def _register_tools(
             thread_id=thread_id,
             db=db,
             config=config,
-            job_queue=job_queue,
             sandbox=sandbox,
             context_name=context_name,
             user_id=user_id,
@@ -139,8 +137,7 @@ async def test_tools_list_private_chat_excludes_edit_topic() -> None:
     token = _register_tools(
         registry,
         db=object(),
-        config=SimpleNamespace(default_context="default"),
-        job_queue=object(),
+        config=SimpleNamespace(default_context="default", events=object()),
     )
     client, backing = await _client(registry)
     try:
@@ -377,12 +374,12 @@ async def test_tools_list_names_match_factory() -> None:
     bot = FakeBot()
     kwargs = dict(
         bot=bot, chat_id=1, thread_id=9, db=object(),
-        config=SimpleNamespace(default_context="default"), job_queue=object(),
+        config=SimpleNamespace(default_context="default", events=object()),
         user_id=10, is_private_chat=False, host_bash_workdir=None,
     )
     token = _register_tools(
         registry, chat_id=1, thread_id=9, is_private_chat=False, bot=bot,
-        db=kwargs["db"], config=kwargs["config"], job_queue=kwargs["job_queue"],
+        db=kwargs["db"], config=kwargs["config"],
     )
     direct_names = {t.name for t in create_openshrimp_tools(**kwargs)}
 
@@ -414,12 +411,12 @@ async def test_read_only_hint_parity() -> None:
     bot = FakeBot()
     kwargs = dict(
         bot=bot, chat_id=1, thread_id=9, db=object(),
-        config=SimpleNamespace(default_context="default"), job_queue=object(),
+        config=SimpleNamespace(default_context="default", events=object()),
         user_id=10, is_private_chat=False, host_bash_workdir="/tmp",
     )
     token = _register_tools(
         registry, chat_id=1, thread_id=9, is_private_chat=False, bot=bot,
-        db=kwargs["db"], config=kwargs["config"], job_queue=kwargs["job_queue"],
+        db=kwargs["db"], config=kwargs["config"],
         host_bash_workdir="/tmp",
     )
     by_name = {t.name: t for t in create_openshrimp_tools(**kwargs)}

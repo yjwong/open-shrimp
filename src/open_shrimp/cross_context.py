@@ -6,7 +6,7 @@ switching contexts.  The answering context runs a *fresh*, read-only
 session against its own project tree (its ``directory`` + ``CLAUDE.md`` +
 project MCP servers), so it can speak authoritatively about its own domain.
 
-The sub-query is a bare backend client (like ``scheduler._run_scheduled_prompt``):
+The sub-query is a bare backend client:
 it loads no OpenShrimp MCP tools, so it can never recurse back into
 ``ask_context`` (the A->B->A guard is structural, not a flag).  Its base
 capabilities are read-only; the target context's own ``allowed_tools`` are
@@ -44,8 +44,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Base read-only tool set, always granted to the answering sub-query.  Bash
-# is added only for sandboxed targets (same rule as
-# ``scheduler._run_scheduled_prompt``).
+# is added only for sandboxed targets (the sandbox provides the safety
+# boundary).
 _BASE_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
 
 # Bound concurrent cross-context queries so a fan-out of parallel

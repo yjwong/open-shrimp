@@ -22,7 +22,7 @@ from open_shrimp.client_manager import (
     get_session,
 )
 from open_shrimp.config import Config, ContextConfig, effective_backend
-from open_shrimp.db import ChatScope, delete_session, get_session_id, set_session_id
+from open_shrimp.db import ChatScope, get_session_id, set_session_id
 from open_shrimp.android_companion import (
     create_pairing_code,
     get_or_create_server_id,
@@ -42,6 +42,7 @@ from open_shrimp.handlers.state import (
     _running_tasks,
     _setup_queues,
     clear_session_approvals,
+    reset_scope,
 )
 from open_shrimp.handlers.utils import (
     _cancel_running,
@@ -179,13 +180,7 @@ async def handle_context_callback(
         ctx_name = await _get_context_name(scope, config, db)
 
         if target == ctx_name:
-            await _cancel_running(scope)
-            _injectable_sessions.pop(scope, None)
-            _setup_queues.pop(scope, None)
-            await close_session(scope)
-            await delete_session(db, scope, ctx_name)
-            clear_session_approvals(scope, ctx_name)
-            _active_bg_tasks.pop(scope, None)
+            await reset_scope(scope, ctx_name, db)
 
         ctx = config.contexts.get(target)
         desc = _escape_mdv2(ctx.description) if ctx else ""
@@ -351,15 +346,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     scope = chat_scope_from_message(message)
     ctx_name, ctx = await _get_context(scope, config, db)
 
-    await _cancel_running(scope)
-    _injectable_sessions.pop(scope, None)
-    _setup_queues.pop(scope, None)
-    await close_session(scope)
-    await delete_session(db, scope, ctx_name)
-    clear_session_approvals(scope, ctx_name)
-    _model_overrides.pop(scope, None)
-    _effort_overrides.pop(scope, None)
-    _active_bg_tasks.pop(scope, None)
+    await reset_scope(scope, ctx_name, db)
 
     if ctx.sandbox is not None:
         sandbox_managers = context.bot_data.get("sandbox_managers") or {}
@@ -1879,7 +1866,7 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Handle /schedule command: list and manage scheduled tasks.
 
     Usage:
-        /schedule           -- list all scheduled tasks for this chat
+        /schedule           -- list all scheduled tasks
         /schedule delete <n> -- delete a scheduled task by name
     """
     config: Config = context.bot_data["config"]
@@ -1888,29 +1875,34 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
-    scope = chat_scope_from_message(message)
     args = message.text.split() if message.text else []
 
     if len(args) >= 3 and args[1] == "delete":
         # Delete a task by name.
         task_name = " ".join(args[2:])
-        from open_shrimp.db import delete_scheduled_task, list_scheduled_tasks
+        from open_shrimp.db import (
+            delete_event_topic,
+            delete_scheduled_task,
+            list_scheduled_tasks,
+        )
+        from open_shrimp.events.schedule import get_active_runner, topic_key
 
-        # Find task ID for JobQueue removal.
-        tasks = await list_scheduled_tasks(db, scope)
+        # Find task ID for JobQueue and topic-mapping removal.
+        tasks = await list_scheduled_tasks(db)
         task_id = None
         for t in tasks:
             if t.name == task_name:
                 task_id = t.id
                 break
 
-        deleted = await delete_scheduled_task(db, scope, task_name)
+        deleted = await delete_scheduled_task(db, task_name)
         if deleted:
-            # Remove from JobQueue.
-            if task_id is not None and context.job_queue:
-                job_name = f"scheduled_task_{task_id}"
-                for j in context.job_queue.get_jobs_by_name(job_name):
-                    j.schedule_removal()
+            if task_id is not None:
+                runner = get_active_runner()
+                if runner is not None:
+                    runner.unregister_task(task_id)
+                # The topic itself stays in Telegram as a record.
+                await delete_event_topic(db, topic_key(task_id))
 
             escaped = _escape_mdv2(task_name)
             await message.reply_text(
@@ -1928,7 +1920,7 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # List all tasks.
     from open_shrimp.db import list_scheduled_tasks
 
-    tasks = await list_scheduled_tasks(db, scope)
+    tasks = await list_scheduled_tasks(db)
     if not tasks:
         await message.reply_text(
             "No scheduled tasks\\. Ask Claude to create one\\!",
@@ -1950,9 +1942,8 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         prompt_escaped = _escape_mdv2(prompt_preview)
         ctx_escaped = _escape_mdv2(t.context_name)
 
-        disabled_label = " \\[disabled\\]" if t.disabled else ""
         lines.append(
-            f"• *{name_escaped}*{disabled_label}\n"
+            f"• *{name_escaped}*\n"
             f"  📅 {desc_escaped}\n"
             f"  📁 `{ctx_escaped}`\n"
             f"  💬 _{prompt_escaped}_"

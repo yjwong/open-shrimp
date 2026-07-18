@@ -499,18 +499,6 @@ async def run_bot(
                 )
         asyncio.create_task(_run_orphan_cleanup())
 
-    # Reload scheduled tasks from the database.
-    from open_shrimp.scheduler import reload_tasks
-
-    if app.job_queue is not None:
-        loaded = await reload_tasks(db, app.bot, config, app.job_queue)
-        logger.info("Loaded %d scheduled tasks", loaded)
-    else:
-        logger.warning(
-            "JobQueue not available — scheduled tasks disabled. "
-            "Install python-telegram-bot[job-queue] to enable."
-        )
-
     # Start idle-session sweep so dangling Claude processes get reaped.
     start_idle_sweep()
 
@@ -519,14 +507,29 @@ async def run_bot(
 
     register_update_checker(app)
 
-    # Start inbound event sources (they post via the main bot, so this
-    # must come after the bot is connected).
+    # Start inbound event sources and the schedule runner (they post via
+    # the main bot, so this must come after the bot is connected).
     event_manager = None
     if config.events is not None:
         from open_shrimp.events.manager import EventManager
 
-        event_manager = EventManager(config, app.bot, db)
+        if app.job_queue is None:
+            logger.warning(
+                "JobQueue not available — scheduled tasks disabled. "
+                "Install python-telegram-bot[job-queue] to enable."
+            )
+        event_manager = EventManager(config, app.bot, db, app.job_queue)
         await event_manager.start()
+    else:
+        from open_shrimp.db import get_all_scheduled_tasks
+
+        stranded = await get_all_scheduled_tasks(db)
+        if stranded:
+            logger.warning(
+                "%d scheduled task(s) exist but events.chat_id is not "
+                "configured — they will not fire.",
+                len(stranded),
+            )
 
     if config.meetings is not None:
         from open_shrimp.meetings.processor import (

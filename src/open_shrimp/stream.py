@@ -50,8 +50,9 @@ logger = logging.getLogger(__name__)
 def _is_thread_not_found(exc: BaseException) -> bool:
     """Whether ``exc`` is Telegram's 'message thread not found' error.
 
-    The scheduler relies on this propagating out so it can disable the
-    task and stop re-firing into a deleted forum topic.
+    Streaming lets this propagate instead of retrying so a turn whose
+    forum topic was deleted stops sending instead of spraying messages
+    into the parent chat.
     """
     return (
         isinstance(exc, BadRequest)

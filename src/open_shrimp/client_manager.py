@@ -217,7 +217,6 @@ async def get_or_create_session(
     bot: Bot | None = None,
     db: Any | None = None,
     config: Any | None = None,
-    job_queue: Any | None = None,
     terminal_base_url: str | None = None,
     user_id: int = 0,
     is_private_chat: bool = True,
@@ -393,7 +392,11 @@ async def get_or_create_session(
         if scope.thread_id is not None:
             allowed_tools.append("mcp__openshrimp__edit_topic")
         # Auto-approve scheduling tools when available.
-        if db is not None and config is not None and job_queue is not None:
+        if (
+            db is not None
+            and config is not None
+            and getattr(config, "events", None) is not None
+        ):
             allowed_tools.extend([
                 "mcp__openshrimp__create_schedule",
                 "mcp__openshrimp__list_schedules",
@@ -693,7 +696,7 @@ async def get_or_create_session(
             def _tool_factory() -> list[OpenShrimpTool]:
                 return create_openshrimp_tools(
                     bot=bot, chat_id=scope.chat_id, thread_id=scope.thread_id,
-                    db=db, config=config, job_queue=job_queue,
+                    db=db, config=config,
                     sandbox=sandbox,
                     context_name=context_name,
                     phone_use=_phone_use_enabled,
@@ -878,7 +881,6 @@ async def reconnect_session(
     bot: Bot | None = None,
     db: Any | None = None,
     config: Any | None = None,
-    job_queue: Any | None = None,
     terminal_base_url: str | None = None,
     user_id: int = 0,
     is_private_chat: bool = True,
@@ -930,7 +932,6 @@ async def reconnect_session(
             bot=bot,
             db=db,
             config=config,
-            job_queue=job_queue,
             terminal_base_url=terminal_base_url,
             user_id=user_id,
             is_private_chat=is_private_chat,

@@ -43,16 +43,23 @@ def test_forum_thread_adds_edit_topic() -> None:
     assert "edit_topic" in _names(tools)
 
 
-def test_scheduling_tools_require_db_config_jobqueue() -> None:
-    # Missing any one of the three -> no scheduling tools.
+def test_scheduling_tools_require_db_and_events_config() -> None:
+    # No db -> no scheduling tools.
     tools = create_openshrimp_tools(
-        bot=MagicMock(), chat_id=1, db=MagicMock(), config=MagicMock(),
+        bot=MagicMock(), chat_id=1, config=MagicMock(),
+    )
+    assert "create_schedule" not in _names(tools)
+
+    # Config without events -> no scheduling tools.
+    config = MagicMock()
+    config.events = None
+    tools = create_openshrimp_tools(
+        bot=MagicMock(), chat_id=1, db=MagicMock(), config=config,
     )
     assert "create_schedule" not in _names(tools)
 
     tools = create_openshrimp_tools(
-        bot=MagicMock(), chat_id=1,
-        db=MagicMock(), config=MagicMock(), job_queue=MagicMock(),
+        bot=MagicMock(), chat_id=1, db=MagicMock(), config=MagicMock(),
     )
     assert {"create_schedule", "list_schedules", "delete_schedule"} <= set(
         _names(tools)
@@ -137,7 +144,7 @@ def test_read_only_flags() -> None:
     sandbox.supports_port_forwarding.return_value = True
     tools = _by_name(create_openshrimp_tools(
         bot=MagicMock(), chat_id=1, thread_id=9,
-        db=MagicMock(), config=MagicMock(), job_queue=MagicMock(),
+        db=MagicMock(), config=MagicMock(),
         sandbox=sandbox, host_bash_workdir="/tmp",
     ))
 

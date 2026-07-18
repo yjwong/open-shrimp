@@ -26,6 +26,18 @@ from open_shrimp.db import ChatScope
 # ---------------------------------------------------------------------------
 _running_tasks: dict[ChatScope, asyncio.Task[Any]] = {}
 
+
+def get_running_turn(scope: ChatScope) -> asyncio.Task[Any] | None:
+    """The scope's currently-running agent turn, or None.
+
+    Lets external drivers (e.g. the schedule runner) await a turn they
+    started via ``dispatch()`` without reaching into ``_running_tasks``.
+    """
+    task = _running_tasks.get(scope)
+    if task is not None and not task.done():
+        return task
+    return None
+
 # ---------------------------------------------------------------------------
 # Per-scope dispatch lock: serialises _dispatch_to_agent so two messages
 # for the same scope cannot both slip through the "no task running" check
@@ -245,6 +257,31 @@ def unregister_transient_task(scope: ChatScope, task_id: str) -> None:
     scope_tasks.pop(task_id, None)
     if not scope_tasks:
         _active_bg_tasks.pop(scope, None)
+
+
+async def reset_scope(scope: ChatScope, ctx_name: str, db: Any) -> None:
+    """Reset *scope* to a fresh session for *ctx_name*.
+
+    The full ``/clear`` sequence: cancel any running turn, drop the live
+    session and its queues, delete the persisted session mapping, and
+    clear all session-scoped approvals and overrides.  Shared by
+    ``clear_handler`` and the schedule runner (which resets before every
+    firing).  Deliberately leaves sandbox port forwards alone — callers
+    that want that cleanup (``/clear``) handle it themselves.
+    """
+    from open_shrimp.client_manager import close_session
+    from open_shrimp.db import delete_session
+    from open_shrimp.handlers.utils import _cancel_running
+
+    await _cancel_running(scope)
+    _injectable_sessions.pop(scope, None)
+    _setup_queues.pop(scope, None)
+    await close_session(scope)
+    await delete_session(db, scope, ctx_name)
+    clear_session_approvals(scope, ctx_name)
+    _model_overrides.pop(scope, None)
+    _effort_overrides.pop(scope, None)
+    _active_bg_tasks.pop(scope, None)
 
 
 # ---------------------------------------------------------------------------

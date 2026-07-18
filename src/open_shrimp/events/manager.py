@@ -1,6 +1,7 @@
 """Start and stop inbound event source adapters with the bot lifecycle."""
 
 import logging
+from typing import TYPE_CHECKING
 
 import aiosqlite
 from telegram import Bot
@@ -8,6 +9,11 @@ from telegram import Bot
 from open_shrimp.config import Config, EventSourceConfig
 from open_shrimp.events.base import EventSourceAdapter
 from open_shrimp.events.sink import EventSink
+
+if TYPE_CHECKING:
+    from telegram.ext import JobQueue
+
+    from open_shrimp.events.schedule import ScheduleRunner
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +46,22 @@ def _build_adapter(source: EventSourceConfig) -> EventSourceAdapter:
 
 
 class EventManager:
-    """Owns the sink and the configured adapters."""
+    """Owns the sink, the configured adapters, and the schedule runner."""
 
     def __init__(
-        self, config: Config, bot: Bot, db: aiosqlite.Connection,
+        self,
+        config: Config,
+        bot: Bot,
+        db: aiosqlite.Connection,
+        job_queue: "JobQueue | None" = None,
     ) -> None:
         events = config.events
         assert events is not None, "EventManager requires configured events"
+        self._runner: "ScheduleRunner | None" = None
+        if job_queue is not None:
+            from open_shrimp.events.schedule import ScheduleRunner
+
+            self._runner = ScheduleRunner(config, bot, db, job_queue)
         self._sink = EventSink(
             bot,
             db,
@@ -72,6 +87,11 @@ class EventManager:
     async def start(self) -> None:
         global _active_manager
         _active_manager = self
+        if self._runner is not None:
+            try:
+                await self._runner.start()
+            except Exception:
+                logger.exception("Failed to start the schedule runner")
         # A source that fails to start must not take down the others.
         for source in self._sources:
             try:
@@ -91,6 +111,11 @@ class EventManager:
         global _active_manager
         if _active_manager is self:
             _active_manager = None
+        if self._runner is not None:
+            try:
+                await self._runner.stop()
+            except Exception:
+                logger.warning("Error stopping the schedule runner", exc_info=True)
         for adapter in reversed(self._adapters):
             try:
                 await adapter.stop()

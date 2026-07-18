@@ -947,7 +947,6 @@ async def _start_agent_task(
                 bot=context.bot,
                 db=db,
                 config=config,
-                job_queue=getattr(context, "job_queue", None),
                 terminal_base_url=_base_url,
                 user_id=user_id,
                 is_private_chat=is_private_chat,
@@ -1061,10 +1060,7 @@ async def _start_agent_task(
                             todos=latest_todos if latest_todos else None,
                         )
 
-                    # Per-turn backend hook. Runs only on the interactive
-                    # handler path — the scheduler intentionally skips it
-                    # because scheduled tasks have no user waiting on
-                    # any per-turn UI affordance.
+                    # Per-turn backend hook.
                     try:
                         await _active_backend.on_turn_end(
                             bot=context.bot,
@@ -1126,7 +1122,6 @@ async def _start_agent_task(
                         bot=context.bot,
                         db=db,
                         config=config,
-                        job_queue=getattr(context, "job_queue", None),
                         terminal_base_url=_base_url,
                         user_id=user_id,
                         is_private_chat=is_private_chat,
