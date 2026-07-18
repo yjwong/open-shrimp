@@ -30,6 +30,7 @@ from claude_agent_sdk.types import (
     TaskNotificationMessage as _SdkTaskNotif,
     TaskProgressMessage as _SdkTaskProgress,
     TaskStartedMessage as _SdkTaskStarted,
+    TaskUpdatedMessage as _SdkTaskUpdated,
 )
 
 from open_shrimp.backend import types as bt
@@ -156,6 +157,21 @@ class SdkTranslator:
                 summary=msg.summary,
                 session_id=msg.session_id,
             )
+        if isinstance(msg, _SdkTaskUpdated):
+            # Subclasses SystemMessage, so it must be caught before the
+            # generic _SdkSystem branch below.
+            if msg.task_id in self._suppressed_task_ids:
+                if msg.status in bt.TERMINAL_TASK_STATUSES:
+                    self._suppressed_task_ids.discard(msg.task_id)
+                return None
+            return bt.TaskUpdatedMessage(
+                subtype=msg.subtype,
+                data=msg.data,
+                task_id=msg.task_id,
+                patch=msg.patch,
+                status=msg.status,
+                session_id=msg.session_id,
+            )
         if isinstance(msg, _SdkSystem):
             return bt.SystemMessage(subtype=msg.subtype, data=msg.data)
         if isinstance(msg, _SdkAssistant):
@@ -219,14 +235,14 @@ class SdkTranslator:
     ) -> bool:
         """Detect SDK auto-promotion of slow foreground Bash to a task.
 
-        Why: Claude Code CLI 2.1.117 (bundled with claude-agent-sdk 0.1.65)
-        silently wraps long-running foreground Bash in ``task_started`` /
-        ``task_notification`` events even when ``run_in_background`` was not
-        set.  Those auto-promoted tasks have an empty ``output_file`` and
-        no ``.output`` file on disk — the regular Bash tool-result flow
-        already rendered the output.  Without this filter we'd post ⏳ +
-        📋 noise and a "View output" button that 404s.  Reported upstream
-        as anthropics/claude-code#31518 (closed without fix).
+        Why: the Claude Code CLI silently wraps long-running foreground Bash
+        (minutes-scale) in ``task_started`` / ``task_notification`` events
+        even when ``run_in_background`` was not set.  Those auto-promoted
+        tasks have an empty ``output_file`` and no ``.output`` file on disk —
+        the regular Bash tool-result flow already rendered the output.
+        Without this filter we'd post ⏳ + 📋 noise and a "View output"
+        button that 404s.  Reported upstream as anthropics/claude-code#31518
+        (closed without fix).
         """
         if msg.task_type != "local_bash" or not msg.tool_use_id:
             return False

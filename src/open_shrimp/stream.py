@@ -25,9 +25,11 @@ from open_shrimp.backend.types import (
     RateLimitEvent,
     ResultMessage,
     SystemMessage,
+    TERMINAL_TASK_STATUSES,
     TaskNotificationMessage,
     TaskProgressMessage,
     TaskStartedMessage,
+    TaskUpdatedMessage,
     TextBlock,
     TextDeltaEvent,
     ToolResultBlock,
@@ -967,6 +969,31 @@ async def stream_response(
                         logger.exception(
                             "Failed to send task notification message"
                         )
+
+                elif isinstance(event, TaskUpdatedMessage):
+                    # A task's terminal state can arrive only as a
+                    # task_updated patch with no accompanying notification
+                    # (e.g. killed via TaskStop). Clear tracking so it does
+                    # not linger in /tasks. Stays silent: a normal completion
+                    # also emits a TaskNotificationMessage, which owns the 📋.
+                    if (
+                        event.status in TERMINAL_TASK_STATUSES
+                        and scope is not None
+                    ):
+                        from open_shrimp.handlers.state import _active_bg_tasks
+
+                        scope_tasks = _active_bg_tasks.get(scope)
+                        if scope_tasks and event.task_id in scope_tasks:
+                            scope_tasks.pop(event.task_id, None)
+                            if not scope_tasks:
+                                _active_bg_tasks.pop(scope, None)
+                            logger.info(
+                                "Cleared task %s from tracking on terminal "
+                                "task_updated (%s) for chat %d",
+                                event.task_id,
+                                event.status,
+                                state.chat_id,
+                            )
 
             elif isinstance(event, RateLimitEvent):
                 # backend.types.RateLimitEvent is flat (the SDK's nested

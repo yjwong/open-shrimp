@@ -189,6 +189,60 @@ def test_task_notification_translates():
     assert out.session_id == "sess-tn"
 
 
+def test_task_updated_translates_and_is_systemmessage_subclass():
+    msg = sdk.TaskUpdatedMessage(
+        subtype="task_updated",
+        data={"raw": 1},
+        task_id="task-4",
+        patch={"status": "killed", "end_time": 123},
+        status="killed",
+        uuid="u",
+        session_id="sess-tu",
+    )
+    out = SdkTranslator()(msg)
+    assert isinstance(out, bt.TaskUpdatedMessage)
+    # Must be caught before the generic SystemMessage branch in stream.py.
+    assert isinstance(out, bt.SystemMessage)
+    assert out.task_id == "task-4"
+    assert out.patch == {"status": "killed", "end_time": 123}
+    assert out.status == "killed"
+    assert out.session_id == "sess-tu"
+
+
+def test_task_updated_dropped_for_suppressed_fg_bash():
+    # An auto-promoted FG-bash task_started is dropped and its id recorded;
+    # a subsequent terminal task_updated for that id must also be dropped.
+    tr = SdkTranslator()
+    started = sdk.TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="fg-1",
+        description="slow bash",
+        uuid="u",
+        session_id="s",
+        tool_use_id="tu-fg",
+        task_type="local_bash",
+    )
+    # Prime the tool_use_map so the FG-bash detector fires (foreground Bash).
+    tr(
+        sdk.AssistantMessage(
+            content=[sdk.ToolUseBlock(id="tu-fg", name="Bash", input={})],
+            model="claude",
+        )
+    )
+    assert tr(started) is None
+    updated = sdk.TaskUpdatedMessage(
+        subtype="task_updated",
+        data={},
+        task_id="fg-1",
+        patch={"status": "completed"},
+        status="completed",
+        uuid="u",
+        session_id="s",
+    )
+    assert tr(updated) is None
+
+
 def test_user_message_str_content_passes_through():
     msg = sdk.UserMessage(content="plain string prompt")
     out = SdkTranslator()(msg)

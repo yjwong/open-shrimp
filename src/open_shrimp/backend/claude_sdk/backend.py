@@ -52,9 +52,20 @@ class ClaudeSdkBackend:
         # backend is actually constructed — multi-backend installs that
         # never instantiate ``ClaudeSdkBackend`` never import the SDK.
         # Idempotent.
+        import warnings
+
+        from claude_agent_sdk import CanUseToolShadowedWarning
+
         from open_shrimp.backend.claude_sdk.prompt_suggestion import (
             install_patches as install_suggestion_patches,
         )
+
+        # OpenShrimp deliberately whole-tool-allows its read-only and MCP
+        # tools (Read/Glob/Grep, Task*, computer_*, etc.) so they bypass the
+        # can_use_tool approval callback; that same callback still gates the
+        # mutating tools. The SDK's advisory shadowing warning is expected
+        # here and would only be log noise, so silence it.
+        warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
         install_suggestion_patches()
 

@@ -170,6 +170,25 @@ class TaskNotificationMessage(SystemMessage):
     session_id: str | None = None
 
 
+# A background task's terminal state can arrive as a bare TaskUpdatedMessage
+# with no accompanying TaskNotificationMessage (e.g. a task killed via TaskStop
+# reports status="killed" here and the notification is suppressed). Active-task
+# trackers must clear a task on a terminal status from *either* message. The set
+# spans both vocabularies: notifications report the mapped "stopped" while
+# updates report the raw "killed".
+TERMINAL_TASK_STATUSES: frozenset[str] = frozenset(
+    {"completed", "failed", "stopped", "killed"}
+)
+
+
+@dataclass
+class TaskUpdatedMessage(SystemMessage):
+    task_id: str = ""
+    patch: dict[str, Any] = field(default_factory=dict)
+    status: str | None = None
+    session_id: str | None = None
+
+
 @dataclass
 class RateLimitEvent:
     # Flat, vendor-neutral shape: the SDK nests these under
@@ -191,6 +210,7 @@ Message = Union[
     TaskStartedMessage,
     TaskProgressMessage,
     TaskNotificationMessage,
+    TaskUpdatedMessage,
     RateLimitEvent,
 ]
 
@@ -206,9 +226,11 @@ __all__ = [
     "ResultMessage",
     "StreamEvent",
     "SystemMessage",
+    "TERMINAL_TASK_STATUSES",
     "TaskNotificationMessage",
     "TaskProgressMessage",
     "TaskStartedMessage",
+    "TaskUpdatedMessage",
     "TextBlock",
     "TextDeltaEvent",
     "ToolPermissionContext",
