@@ -44,6 +44,10 @@ jobs:
         working-directory: web/config-app
         run: npm ci && npm run build
 
+      - name: Build PDF app frontend
+        working-directory: web/pdf-app
+        run: npm ci && npm run build
+
       - name: Build open-shrimp sdist
         run: uv build --sdist
 
@@ -520,6 +524,10 @@ jobs:
 
       - name: Build config app frontend
         working-directory: web/config-app
+        run: npm ci && npm run build
+
+      - name: Build PDF app frontend
+        working-directory: web/pdf-app
         run: npm ci && npm run build
 
       - name: Install dependencies
