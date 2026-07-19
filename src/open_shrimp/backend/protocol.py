@@ -50,6 +50,12 @@ CanUseTool = Callable[
 # ``Backend.make_tool_server`` selects the installer that consumes it.
 ToolFactory = Callable[[], list[Any]]
 
+# An async ``session_id -> checklist`` reader for backends whose checklist
+# tools are incremental (no single tool input carries the full list).  Returns
+# ``{"content", "status", "activeForm"}`` dicts — the shape the pinned-message
+# renderer and agent-status helpers consume.
+ChecklistReader = Callable[[str], Awaitable[list[dict[str, Any]]]]
+
 
 # ---------------------------------------------------------------------------
 # Options — the configuration contract
@@ -290,6 +296,25 @@ class Backend(Protocol):
         **kwargs: Any,
     ) -> list[SessionInfo]:
         """For /resume.  SDK: ``claude_agent_sdk.list_sessions``."""
+        ...
+
+    def checklist_reader(
+        self,
+        *,
+        ctx: "ContextConfig",
+        ctx_name: str,
+        **kwargs: Any,
+    ) -> ChecklistReader | None:
+        """An async ``session_id -> checklist`` reader for this context.
+
+        ``None`` when the backend has no checklist store to pull from —
+        i.e. when every checklist tool input carries a full snapshot
+        (``policy.checklist_snapshot``), so the stream never needs to
+        read the list from elsewhere.  How and where the checklist is
+        persisted is entirely the backend's business; like
+        ``list_sessions``, backend-specific context (e.g. sandbox state)
+        travels in ``kwargs``.
+        """
         ...
 
     def command_capabilities(self) -> set[str]:

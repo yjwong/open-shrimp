@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from open_shrimp.backend.policy import BackendPolicy
-    from open_shrimp.backend.protocol import BackendCopy
+    from open_shrimp.backend.protocol import BackendCopy, ChecklistReader
 
 from open_shrimp.backend.types import (
     AssistantMessage,
@@ -646,6 +646,7 @@ async def stream_response(
     scope: ChatScope | None = None,
     policy: "BackendPolicy | None" = None,
     copy: "BackendCopy | None" = None,
+    checklist_reader: "ChecklistReader | None" = None,
 ) -> StreamResult:
     """Stream backend events to Telegram as draft messages.
 
@@ -665,6 +666,10 @@ async def stream_response(
             Used to tag inline tool notifications as "(auto)".
         cwd: Working directory for the current context. When set, file
             paths under this directory are shown as relative paths.
+        checklist_reader: Async ``session_id -> checklist`` reader from
+            ``Backend.checklist_reader``. When set, checklist-tool results
+            (``policy.is_checklist_tool``) trigger a re-read that fires
+            ``on_todo_update`` with the current list.
 
     Returns:
         StreamResult with session_id, usage, cost, and timing info.
@@ -678,6 +683,43 @@ async def stream_response(
     sent_message_start = len(state.sent_message_ids)
     draft_task: asyncio.Task[None] | None = None
     p = _resolve_policy(policy, scope=scope)
+    # Whether a checklist tool ran this turn.  Lets the turn-end read
+    # distinguish "the agent emptied the list" (push the clear) from "the
+    # turn never touched the checklist" (skip the no-op update).
+    checklist_touched = False
+    # The last checklist pushed to on_todo_update this turn, for change
+    # detection: identical consecutive reads (e.g. the turn-end read after
+    # a tool-time read) skip the redundant pinned-message edit.
+    last_pushed: list[dict[str, Any]] | None = None
+
+    async def fire_todo_update(todos: list[dict[str, Any]]) -> None:
+        nonlocal last_pushed
+        if on_todo_update is None or todos == last_pushed:
+            return
+        last_pushed = todos
+        try:
+            await on_todo_update(todos)
+        except Exception:
+            logger.exception(
+                "Failed to update todos for chat %d", state.chat_id,
+            )
+
+    async def refresh_checklist() -> None:
+        """Re-read the backend's checklist store and push the current list."""
+        if on_todo_update is None or checklist_reader is None:
+            return
+        if not state.session_id:
+            return
+        try:
+            todos = await checklist_reader(state.session_id)
+        except Exception:
+            logger.exception(
+                "Checklist read failed for chat %d", state.chat_id,
+            )
+            return
+        if not todos and not checklist_touched:
+            return
+        await fire_todo_update(todos)
 
     async def periodic_flush() -> None:
         """Periodically flush dirty drafts."""
@@ -690,14 +732,17 @@ async def stream_response(
         draft_task = asyncio.create_task(periodic_flush())
 
         async for event in events:
+            # Capture session_id from any event that carries one, as early
+            # as possible — it's needed mid-turn (checklist store reads)
+            # and must survive a cancel before the ResultMessage arrives.
+            sid = getattr(event, "session_id", None)
+            if sid:
+                state.session_id = sid
+                result.session_id = sid
+
             # Suppress sub-agent messages from background tasks.
             _parent = getattr(event, "parent_tool_use_id", None)
             if _parent and _parent in state.bg_task_tool_use_ids:
-                # Still capture session_id from any message type.
-                sid = getattr(event, "session_id", None)
-                if sid:
-                    state.session_id = sid
-                    result.session_id = sid
                 continue
 
             if isinstance(event, AssistantMessage):
@@ -762,23 +807,24 @@ async def stream_response(
                                 policy=p,
                             )
 
-                        # TodoWrite-equivalent: update the pinned message
-                        # with the current task list.
-                        if p.is_todo_write(block.name) and on_todo_update is not None:
-                            todos = block.input.get("todos", [])
-                            try:
-                                await on_todo_update(todos)
-                            except Exception:
-                                logger.exception(
-                                    "Failed to update todos for chat %d",
-                                    state.chat_id,
-                                )
+                        # Checklist update: when the tool input carries the
+                        # full list, push it to the pinned message directly.
+                        # Incremental checklist tools are handled at their
+                        # ToolResultBlock instead (post-execution, so the
+                        # store read observes the mutation).
+                        if p.is_checklist_tool(block.name):
+                            snapshot = p.checklist_snapshot(
+                                block.name, block.input,
+                            )
+                            if snapshot is not None:
+                                await fire_todo_update(snapshot)
 
             elif isinstance(event, UserMessage):
                 # UserMessage carries tool results (ToolResultBlock).
                 # For Bash-like tools, send a collapsible message with a
                 # "Show output" button instead of embedding the output
                 # inline.
+                checklist_result = False
                 if isinstance(event.content, list):
                     for block in event.content:
                         if isinstance(block, ToolResultBlock):
@@ -801,6 +847,14 @@ async def stream_response(
                                     bot, state, tool_info[1],
                                     block.content,
                                 )
+                            elif p.is_checklist_tool(name):
+                                checklist_result = True
+                # A checklist tool finished executing: re-read the store
+                # and refresh the pinned message.  Coalesced per message
+                # so several checklist calls cost one read + one edit.
+                if checklist_result and checklist_reader is not None:
+                    checklist_touched = True
+                    await refresh_checklist()
 
             elif isinstance(event, TextDeltaEvent):
                 text = event.text
@@ -821,8 +875,10 @@ async def stream_response(
                         await _finalize_current(bot, state)
 
             elif isinstance(event, ResultMessage):
-                result.session_id = event.session_id
-                state.session_id = event.session_id
+                # Turn-end checklist read: subagent tool calls never appear
+                # in the main stream but write to the same checklist store,
+                # so a final read catches their changes.
+                await refresh_checklist()
                 result.model_usage = event.model_usage
                 result.num_turns = event.num_turns
                 result.duration_ms = event.duration_ms
@@ -834,14 +890,6 @@ async def stream_response(
                     )
 
             elif isinstance(event, SystemMessage):
-                # Capture session_id from init messages as early as
-                # possible so it's available even if the task is
-                # cancelled before ResultMessage arrives.
-                sid = getattr(event, "session_id", None)
-                if sid:
-                    state.session_id = sid
-                    result.session_id = sid
-
                 if isinstance(event, TaskStartedMessage):
                     logger.info(
                         "Background task started %s (%s) for chat %d: %s",

@@ -12,17 +12,20 @@ Each method is thin:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from open_shrimp.backend.claude_sdk.client import ClaudeSdkClient
 from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
+from open_shrimp.backend.claude_sdk.task_checklist import read_checklist
 from open_shrimp.backend.protocol import (
     BackendClient,
     BackendCopy,
     BackendOptions,
     CanUseTool,
+    ChecklistReader,
     MCPConfigProvider,
     MCPOAuthProvider,
     ToolFactory,
@@ -36,8 +39,35 @@ if TYPE_CHECKING:
 
     from open_shrimp.config import Config, ContextConfig
     from open_shrimp.db import ChatScope
-    from open_shrimp.sandbox.agent_runtime import AgentRuntime
+    from open_shrimp.sandbox.agent_runtime import AgentRuntime, HomeMount
     from open_shrimp.stream import StreamResult
+
+
+def _sandbox_home_mount(
+    ctx: "ContextConfig | None",
+    ctx_name: str | None,
+    sandbox_managers: Any | None,
+) -> "HomeMount | None":
+    """The per-context claude-home mount for a sandboxed context, else None.
+
+    Sandboxed contexts keep their session state (and the CLI's task store)
+    under the host-side directory the sandbox mounts as the guest's
+    ``~/.claude`` — not the host's own ``~/.claude``.
+    """
+    if (
+        ctx is None
+        or ctx_name is None
+        or not sandbox_managers
+        or ctx.sandbox is None
+        or not ctx.sandbox.enabled
+    ):
+        return None
+    from open_shrimp.backend.claude_sdk.runtime import claude_runtime
+
+    mgr = sandbox_managers.get(ctx.sandbox.backend)
+    if mgr is None:
+        return None
+    return claude_runtime(mgr.agent_home_dir(ctx_name)).home_mount
 
 
 class ClaudeSdkBackend:
@@ -141,19 +171,7 @@ class ClaudeSdkBackend:
         sandbox_managers = kwargs.pop("sandbox_managers", None)
         offset = kwargs.pop("offset", 0)
 
-        home_mount = None
-        if (
-            ctx is not None
-            and ctx_name is not None
-            and sandbox_managers
-            and ctx.sandbox is not None
-            and ctx.sandbox.enabled
-        ):
-            from open_shrimp.backend.claude_sdk.runtime import claude_runtime
-
-            mgr = sandbox_managers.get(ctx.sandbox.backend)
-            if mgr is not None:
-                home_mount = claude_runtime(mgr.agent_home_dir(ctx_name)).home_mount
+        home_mount = _sandbox_home_mount(ctx, ctx_name, sandbox_managers)
 
         if home_mount is not None and home_mount.holds_session_state:
             from claude_agent_sdk._internal.sessions import (
@@ -192,6 +210,41 @@ class ClaudeSdkBackend:
 
         rows = list_sessions(directory=directory, limit=limit, **kwargs)
         return [_to_session_info(r) for r in rows]
+
+    def checklist_reader(
+        self,
+        *,
+        ctx: "ContextConfig",
+        ctx_name: str,
+        **kwargs: Any,
+    ) -> ChecklistReader | None:
+        """An async ``session_id -> checklist`` reader over the CLI's
+        on-disk task store (``<claude-home>/tasks/<session-id>/``).
+
+        Resolves the claude-home the same way :meth:`list_sessions` does:
+        sandboxed contexts (``sandbox_managers`` in ``kwargs``) read the
+        per-context home the sandbox mounts as the guest's ``~/.claude``;
+        host contexts use the SDK's own resolution (``CLAUDE_CONFIG_DIR``,
+        falling back to ``~/.claude``).
+        """
+        home_mount = _sandbox_home_mount(
+            ctx, ctx_name, kwargs.get("sandbox_managers"),
+        )
+        if home_mount is not None and home_mount.holds_session_state:
+            claude_home = home_mount.host_dir
+        else:
+            from claude_agent_sdk._internal.sessions import (
+                _get_claude_config_home_dir,
+            )
+
+            claude_home = _get_claude_config_home_dir()
+
+        async def read(session_id: str) -> list[dict[str, Any]]:
+            return await asyncio.to_thread(
+                read_checklist, claude_home, session_id,
+            )
+
+        return read
 
     def command_capabilities(self) -> set[str]:
         return {"login", "usage", "mcp"}

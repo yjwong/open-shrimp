@@ -99,10 +99,10 @@ _setup_queues: dict[ChatScope, list[tuple[str, list[FileAttachment]]]] = {}
 _injected_attachment_paths: dict[ChatScope, list[Path]] = {}
 
 # ---------------------------------------------------------------------------
-# Per-scope latest TodoWrite list.  Mirrors the agent's task list so
+# Per-scope latest task checklist.  Mirrors the agent's task list so
 # agent-status pushes can attach x-of-y progress counts even from emission
 # points outside _run() (e.g. injection into a live turn).  Updated on every
-# TodoWrite, cleared in _run()'s finally block.
+# checklist change, cleared in _run()'s finally block.
 # ---------------------------------------------------------------------------
 _scope_todos: dict[ChatScope, list[dict[str, Any]]] = {}
 

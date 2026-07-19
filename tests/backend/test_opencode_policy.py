@@ -98,10 +98,19 @@ class TestCategoricalQueries:
         # SDK's Bash is not recognised.
         assert p.is_bash_like("Bash") is False
 
-    def test_is_todo_write(self) -> None:
+    def test_is_checklist_tool(self) -> None:
         p = OpenCodePolicy()
-        assert p.is_todo_write("todowrite") is True
-        assert p.is_todo_write("TodoWrite") is False
+        assert p.is_checklist_tool("todowrite") is True
+        # The SDK's Task tools are not OpenCode's wire vocabulary.
+        assert p.is_checklist_tool("TaskUpdate") is False
+
+    def test_checklist_snapshot_from_input(self) -> None:
+        # todowrite carries the full list in its input.
+        p = OpenCodePolicy()
+        todos = [{"content": "x", "status": "pending"}]
+        assert p.checklist_snapshot("todowrite", {"todos": todos}) == todos
+        assert p.checklist_snapshot("todowrite", {}) == []
+        assert p.checklist_snapshot("bash", {"todos": todos}) is None
 
     def test_is_host_bash(self) -> None:
         p = OpenCodePolicy()

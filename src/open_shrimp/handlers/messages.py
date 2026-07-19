@@ -881,7 +881,7 @@ async def _start_agent_task(
                         todos=_scope_todos.get(scope),
                     )
 
-            # Mutable container for the latest todo list from TodoWrite.
+            # Mutable container for the latest task checklist.
             # Preserved across stream_response iterations so the pinned
             # message retains the task list when usage is updated.
             latest_todos: list[dict[str, Any]] = []
@@ -909,10 +909,18 @@ async def _start_agent_task(
             # ``permission.asked.always`` event arm.
             from open_shrimp.client_manager import resolve_backend
 
-            policy = resolve_backend(
+            _backend = resolve_backend(
                 context.bot_data.get("backend"),
                 context=ctx_config,
-            ).policy
+            )
+            policy = _backend.policy
+            # Checklist reader for this conversation — loop-invariant, so
+            # resolved once here rather than per turn.
+            checklist_reader = _backend.checklist_reader(
+                ctx=ctx_config,
+                ctx_name=ctx_name,
+                sandbox_managers=context.bot_data.get("sandbox_managers"),
+            )
             persistent_rules = await policy.load_persistent_rules(
                 directory=ctx_config.directory,
             )
@@ -1048,6 +1056,7 @@ async def _start_agent_task(
                         scope=scope,
                         policy=_active_backend.policy,
                         copy=_active_backend.copy(),
+                        checklist_reader=checklist_reader,
                     )
 
                     if result.session_id:

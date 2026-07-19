@@ -6,7 +6,7 @@ conversation.  The turn lifecycle is just two phases:
 - ``running`` — the agent is working on a turn (the notification is live)
 - ``done``    — the agent went idle (the notification is dismissed)
 
-Progress is driven by the agent's TodoWrite list: ``running`` events carry
+Progress is driven by the agent's task checklist: ``running`` events carry
 ``todo_done``/``todo_total`` counts that render as a segmented bar and an
 "x/y" chip, and the ``text`` body reflects the active todo's label (the
 ``in_progress`` item's ``activeForm``) instead of a generic "Working…".
@@ -68,7 +68,7 @@ def current_todo_text(todos: list[dict[str, Any]] | None) -> str | None:
 
 
 def todo_counts(todos: list[dict[str, Any]] | None) -> tuple[int, int] | None:
-    """Reduce a TodoWrite list to ``(done, total)`` for the progress bar.
+    """Reduce a task checklist to ``(done, total)`` for the progress bar.
 
     Returns ``None`` when there are no todos, so the phone falls back to the
     indeterminate "Working…" bar.  Progress is modelled as ``done/total``
@@ -111,7 +111,7 @@ async def notify_agent_status(
 
     ``phase`` is ``running`` or ``done``.  ``awaiting`` overlays an approval
     request on a running notification (it carries ``tool_use_id`` and bumps
-    the push to high priority).  ``todos`` is the latest TodoWrite list, used
+    the push to high priority).  ``todos`` is the latest task checklist, used
     to attach ``done/total`` progress counts on running events.
 
     Best-effort: any failure (no devices, FCM not configured, network) is

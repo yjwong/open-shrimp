@@ -201,6 +201,17 @@ class OpenCodeBackend:
             auth_header=auth_header,
         )
 
+    def checklist_reader(
+        self,
+        *,
+        ctx: "ContextConfig",
+        ctx_name: str,
+        **kwargs: Any,
+    ) -> None:
+        """OpenCode has no checklist store to pull from: ``todowrite``
+        carries the full list in its input (``checklist_snapshot``)."""
+        return None
+
     def command_capabilities(self) -> set[str]:
         """OpenCode supports MCP management; login/usage ship separately.
 

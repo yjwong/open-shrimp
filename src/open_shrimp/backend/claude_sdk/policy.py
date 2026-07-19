@@ -51,8 +51,20 @@ _FILE_TARGETED_PATH_TOOLS: set[str] = {"Read", "Edit", "Write", "NotebookEdit"}
 
 #: Tools whose blockquote notifications are suppressed because their output
 #: is shown directly (Bash output as code block, Write/Edit via dedicated
-#: diff messages, NotebookEdit via the Edit-shaped affordances).
-_SUPPRESS_NOTIFICATION_TOOLS: set[str] = {"Bash", "Edit", "Write", "NotebookEdit"}
+#: diff messages, NotebookEdit via the Edit-shaped affordances).  TaskList
+#: and TaskGet are read-only checklist bookkeeping — pure noise next to the
+#: pinned checklist message.
+_SUPPRESS_NOTIFICATION_TOOLS: set[str] = {
+    "Bash", "Edit", "Write", "NotebookEdit", "TaskList", "TaskGet",
+}
+
+#: The checklist tools that mutate the session checklist.  Incremental — no
+#: tool input carries the full list, so each call triggers a re-read of the
+#: CLI's on-disk task store (``task_checklist.read_checklist``) to refresh
+#: the pinned message.  The read-only ``TaskList``/``TaskGet`` are excluded:
+#: they cannot change the store, and the turn-end read already reconciles
+#: out-of-band (subagent) changes.
+_CHECKLIST_TOOLS: set[str] = {"TaskCreate", "TaskUpdate"}
 
 #: Tools auto-approved inside a sandbox (Bash + Monitor both run arbitrary
 #: shell commands; the sandbox provides the safety boundary).
@@ -65,11 +77,12 @@ _CONTAINER_AUTO_APPROVE_TOOLS: set[str] = {"Bash", "Monitor"}
 #: ExitPlanMode is *not* in this set — it keeps its "View plan" Mini App
 #: approval row, since the user reviewing the plan is the entire point.
 _AUTO_APPROVED_AT_SESSION_START: list[str] = [
-    # Async task management — managing background tasks the model spawned.
+    # Session checklist — the model's own task list.
     "TaskCreate",
     "TaskGet",
     "TaskUpdate",
     "TaskList",
+    # Async task management — managing background tasks the model spawned.
     "TaskStop",
     "TaskOutput",
     # Mode transitions — entering/leaving plan or worktree modes.
@@ -206,6 +219,11 @@ def _escape_mdv2(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _truncate(text: str, limit: int) -> str:
+    """Clip *text* to *limit* characters with a trailing ellipsis."""
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
 def _summarize(
     tool_name: str, tool_input: dict[str, Any], cwd: str | None,
 ) -> str:
@@ -221,8 +239,7 @@ def _summarize(
             return f"{pattern} in {_relative_path(path, cwd)}"
         return pattern
     if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        return cmd[:80] + ("..." if len(cmd) > 80 else "")
+        return _truncate(tool_input.get("command", ""), 80)
     if tool_name == "Write" or tool_name == "Edit":
         return _relative_path(tool_input.get("file_path", ""), cwd)
     if tool_name == "NotebookEdit":
@@ -241,16 +258,27 @@ def _summarize(
                 "header", questions[0].get("question", ""),
             )[:60]
         return "asking user"
-    if tool_name == "TodoWrite":
-        todos = tool_input.get("todos", [])
-        if not todos:
-            return "clear all"
-        completed = sum(
-            1 for t in todos
-            if isinstance(t, dict) and t.get("status") == "completed"
+    if tool_name == "TaskCreate":
+        return _truncate(tool_input.get("subject", ""), 60)
+    if tool_name == "TaskUpdate":
+        task_id = tool_input.get("taskId", "?")
+        status = tool_input.get("status")
+        if status:
+            return f"#{task_id} → {status}"
+        changed = next(
+            (k for k in ("subject", "description", "activeForm", "owner")
+             if k in tool_input),
+            None,
         )
-        total = len(todos)
-        return f"{completed}/{total} done"
+        if changed:
+            return f"#{task_id} {changed}"
+        if "addBlocks" in tool_input or "addBlockedBy" in tool_input:
+            return f"#{task_id} deps"
+        return f"#{task_id}"
+    if tool_name == "TaskGet":
+        return f"#{tool_input.get('taskId', '?')}"
+    if tool_name == "TaskList":
+        return "list"
     if tool_name == "mcp__openshrimp__send_file":
         path = tool_input.get("file_path", "")
         basename = os.path.basename(path) if path else ""
@@ -261,8 +289,7 @@ def _summarize(
     # Generic: show first key's value
     for key, val in tool_input.items():
         if isinstance(val, str):
-            s = val[:60]
-            return s + ("..." if len(val) > 60 else "")
+            return _truncate(val, 60)
     return ""
 
 
@@ -604,8 +631,13 @@ class ClaudeSdkPolicy:
     def is_host_escape(self, tool_name: str) -> bool:
         return tool_name in (HOST_BASH_TOOL_NAME, HOST_MONITOR_TOOL_NAME)
 
-    def is_todo_write(self, tool_name: str) -> bool:
-        return tool_name == "TodoWrite"
+    def is_checklist_tool(self, tool_name: str) -> bool:
+        return tool_name in _CHECKLIST_TOOLS
+
+    def checklist_snapshot(
+        self, tool_name: str, tool_input: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        return None
 
     def is_subagent_task(self, task_type: str | None) -> bool:
         return task_type in ("local_agent", "remote_agent")

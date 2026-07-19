@@ -656,8 +656,15 @@ class OpenCodePolicy:
     def is_host_escape(self, tool_name: str) -> bool:
         return tool_name in (HOST_BASH_TOOL_NAME, HOST_MONITOR_TOOL_NAME)
 
-    def is_todo_write(self, tool_name: str) -> bool:
+    def is_checklist_tool(self, tool_name: str) -> bool:
         return tool_name == "todowrite"
+
+    def checklist_snapshot(
+        self, tool_name: str, tool_input: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        if tool_name != "todowrite":
+            return None
+        return tool_input.get("todos", [])
 
     def is_subagent_task(self, task_type: str | None) -> bool:
         return task_type in ("local_agent", "remote_agent")

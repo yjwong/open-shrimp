@@ -188,9 +188,17 @@ class BackendPolicy(Protocol):
         and is auto-approved."""
         ...
 
-    def is_todo_write(self, tool_name: str) -> bool:
-        """SDK: TodoWrite; OpenCode: todowrite.  Drives the pinned-
-        message update callback."""
+    def is_checklist_tool(self, tool_name: str) -> bool:
+        """True for tools that change the session checklist.  Drives the
+        pinned-message refresh in ``stream.py``."""
+        ...
+
+    def checklist_snapshot(
+        self, tool_name: str, tool_input: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        """The full checklist when this call's input carries it, else
+        ``None`` — the stream then pulls the list through the backend's
+        ``ChecklistReader`` after the tool's result arrives."""
         ...
 
     def is_subagent_task(self, task_type: str | None) -> bool:
