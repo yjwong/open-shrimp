@@ -71,8 +71,9 @@ _CHECKLIST_TOOLS: set[str] = {"TaskCreate", "TaskUpdate"}
 _CONTAINER_AUTO_APPROVE_TOOLS: set[str] = {"Bash", "Monitor"}
 
 #: Tools whose Claude Code interactive default is auto-allow and that have
-#: no user-facing approval value in OpenShrimp's flow.  Three groups:
-#: async-task management, mode transitions, registry/discovery.
+#: no user-facing approval value in OpenShrimp's flow.  Four groups:
+#: async-task management, mode transitions, registry/discovery, and skill
+#: invocation.
 #:
 #: ExitPlanMode is *not* in this set — it keeps its "View plan" Mini App
 #: approval row, since the user reviewing the plan is the entire point.
@@ -93,6 +94,11 @@ _AUTO_APPROVED_AT_SESSION_START: list[str] = [
     "ToolSearch",
     "ListMcpResources",
     "ReadMcpResource",
+    # Skill invocation — a bare Skill entry allows every skill (the same
+    # mechanism as the SDK's ``skills="all"`` option).  Loading a skill
+    # only injects its prompt; every tool call the skill then makes
+    # still goes through the session's normal approval policy.
+    "Skill",
 ]
 
 #: Fully-qualified name of the host_bash MCP tool — the SDK's MCP server
