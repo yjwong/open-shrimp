@@ -34,9 +34,10 @@ object MeetingDiarizer {
         durationMs: Long,
         numSpeakers: Int,
         onStage: (String) -> Unit,
+        onProgress: (Float) -> Unit,
     ): List<SpeakerTurn> {
         onStage("Decoding audio…")
-        val samples = decodeToMono16k(audioFile, durationMs)
+        val samples = decodeToMono16k(audioFile, durationMs, onProgress)
 
         onStage("Analyzing speakers… (takes ~1/7 of the recording length)")
         val config = OfflineSpeakerDiarizationConfig(
@@ -58,8 +59,14 @@ object MeetingDiarizer {
         )
         val diarizer = OfflineSpeakerDiarization(context.assets, config)
         try {
-            // processWithCallback crashes natively (JNI->Kotlin lambda bridge); use plain process.
-            return diarizer.process(samples).map {
+            // The callback covers the embedding-extraction phase (the bulk of the
+            // runtime); segmentation runs silently before it, clustering briefly
+            // after. It must be the Java bridge, not a lambda — see
+            // DiarizationProgressCallback for the JNI signature constraint.
+            val callback = DiarizationProgressCallback { processed, total ->
+                if (total > 0) onProgress(processed.toFloat() / total)
+            }
+            return diarizer.processWithCallback(samples, callback, 0L).map {
                 SpeakerTurn(it.start.toDouble(), it.end.toDouble(), it.speaker)
             }
         } finally {
@@ -72,7 +79,11 @@ object MeetingDiarizer {
      * Opus decoder outputs 48 kHz regardless of the encoded rate, so channels
      * are averaged down to mono and sample groups box-averaged down to 16 kHz.
      */
-    private fun decodeToMono16k(audioFile: File, durationMs: Long): FloatArray {
+    private fun decodeToMono16k(
+        audioFile: File,
+        durationMs: Long,
+        onProgress: (Float) -> Unit,
+    ): FloatArray {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -86,8 +97,8 @@ object MeetingDiarizer {
             codec.configure(format, null, null, 0)
             codec.start()
 
-            val expectedSamples = (maxOf(durationMs, 0) * TARGET_RATE / 1000 + TARGET_RATE).toInt()
-            val out = FloatVec(expectedSamples)
+            val durationSamples = (maxOf(durationMs, 0) * TARGET_RATE / 1000).toInt()
+            val out = FloatVec(durationSamples + TARGET_RATE)
             var decimator: Decimator? = null
             var channels = 1
             val info = MediaCodec.BufferInfo()
@@ -126,12 +137,18 @@ object MeetingDiarizer {
                         decimator.feed(sum / (channels * 32768f))
                     }
                     codec.releaseOutputBuffer(index, false)
+                    if (durationSamples > 0) {
+                        onProgress(minOf(out.size.toFloat() / durationSamples, 1f))
+                    }
                     if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                         break
                     }
                 }
             }
-            return out.toArray()
+            // Tolerating up to 2 s of trailing silence avoids duplicating a long
+            // recording just to trim it: the trim copy alone OOMs the 512 MB heap
+            // limit on hour-plus meetings (~290 MB for 75 min, twice while copying).
+            return out.toArray(maxSlack = 2 * TARGET_RATE)
         } finally {
             runCatching { codec?.stop() }
             codec?.release()
@@ -155,7 +172,9 @@ object MeetingDiarizer {
 
     private class FloatVec(capacity: Int) {
         private var data = FloatArray(maxOf(capacity, 1024))
-        private var size = 0
+
+        var size = 0
+            private set
 
         fun add(value: Float) {
             if (size == data.size) {
@@ -164,6 +183,12 @@ object MeetingDiarizer {
             data[size++] = value
         }
 
-        fun toArray(): FloatArray = if (size == data.size) data else data.copyOf(size)
+        /**
+         * The collected samples. The backing array is returned untrimmed when its
+         * unused tail is at most [maxSlack] samples — the tail is all zeros, i.e.
+         * silence, which the diarizer ignores.
+         */
+        fun toArray(maxSlack: Int): FloatArray =
+            if (data.size - size <= maxSlack) data else data.copyOf(size)
     }
 }

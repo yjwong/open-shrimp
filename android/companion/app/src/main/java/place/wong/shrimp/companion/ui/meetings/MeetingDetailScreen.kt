@@ -126,6 +126,7 @@ fun MeetingDetailScreen(meetingId: String, onBack: () -> Unit) {
         meeting = current,
         recording = signals.recording,
         diarizationStage = signals.diarizationStageFor(current.id),
+        diarizationProgress = signals.diarizationProgressFor(current.id),
         diarizationBusy = signals.diarization.meetingId != null,
         onBack = onBack,
     )
@@ -137,6 +138,7 @@ private fun MeetingDetail(
     meeting: Meeting,
     recording: Boolean,
     diarizationStage: String?,
+    diarizationProgress: Float?,
     diarizationBusy: Boolean,
     onBack: () -> Unit,
 ) {
@@ -281,6 +283,7 @@ private fun MeetingDetail(
                         meeting = meeting,
                         recording = recording,
                         diarizationStage = diarizationStage,
+                        diarizationProgress = diarizationProgress,
                         diarizationBusy = diarizationBusy,
                         onDeleted = onBack,
                     )
@@ -317,6 +320,7 @@ private fun MeetingHeader(
     meeting: Meeting,
     recording: Boolean,
     diarizationStage: String?,
+    diarizationProgress: Float?,
     diarizationBusy: Boolean,
     onDeleted: () -> Unit,
 ) {
@@ -345,6 +349,7 @@ private fun MeetingHeader(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary,
             )
+            DiarizationProgressBar(diarizationProgress)
         }
         if (canRunDiarization) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

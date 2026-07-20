@@ -22,6 +22,8 @@ data class DiarizationState(
     /** Meeting currently being diarized; null when idle. */
     val meetingId: String? = null,
     val stage: String? = null,
+    /** Analysis progress in [0, 1]; null while indeterminate (decode/segmentation). */
+    val progress: Float? = null,
 )
 
 /**
@@ -32,6 +34,7 @@ data class DiarizationState(
 class MeetingDiarizationService : Service() {
     private var workThread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var lastPercent = -1
 
     override fun onCreate() {
         super.onCreate()
@@ -69,6 +72,7 @@ class MeetingDiarizationService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "openshrimp:meeting-diarizer")
             .apply { acquire(WAKE_LOCK_TIMEOUT_MS) }
         mutableState.value = DiarizationState(meetingId = meeting.id, stage = "Starting…")
+        lastPercent = -1
         workThread = Thread({ runDiarization(meeting, numSpeakers) }, "meeting-diarizer").apply { start() }
         return START_NOT_STICKY
     }
@@ -82,10 +86,19 @@ class MeetingDiarizationService : Service() {
                 meeting.audioFile,
                 meeting.durationMs,
                 numSpeakers,
-                onStage = { stage -> mutableState.update { it.copy(stage = stage) } },
+                onStage = { stage ->
+                    lastPercent = -1
+                    mutableState.update { it.copy(stage = stage, progress = null) }
+                    (getSystemService(NOTIFICATION_SERVICE) as? NotificationManager)
+                        ?.notify(NOTIFICATION_ID, notification())
+                },
+                onProgress = ::publishProgress,
             )
             MeetingStore.saveDiarization(meeting, turns)
             publish("Identified $numSpeakers speakers in ${meeting.title} (${turns.size} turns)")
+        } catch (e: OutOfMemoryError) {
+            // Without this the worker thread's uncaught OOM kills the whole app.
+            publish("Speaker identification failed: recording too long to fit in memory")
         } catch (e: Exception) {
             publish("Speaker identification failed: ${e.message}")
         } finally {
@@ -101,7 +114,17 @@ class MeetingDiarizationService : Service() {
         LogStore.add(message)
     }
 
-    private fun notification(): Notification {
+    /** Called from the work thread per embedding chunk; only whole-percent changes propagate. */
+    private fun publishProgress(fraction: Float) {
+        val percent = (fraction * 100).toInt().coerceIn(0, 100)
+        if (percent == lastPercent) return
+        lastPercent = percent
+        mutableState.update { it.copy(progress = fraction) }
+        (getSystemService(NOTIFICATION_SERVICE) as? NotificationManager)
+            ?.notify(NOTIFICATION_ID, notification(percent))
+    }
+
+    private fun notification(progressPercent: Int = -1): Notification {
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         val launchIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), flags)
         return Notification.Builder(this, CHANNEL_ID)
@@ -110,6 +133,9 @@ class MeetingDiarizationService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_sort_by_size)
             .setContentIntent(launchIntent)
             .setOngoing(true)
+            .apply {
+                if (progressPercent >= 0) setProgress(100, progressPercent, false)
+            }
             .build()
     }
 

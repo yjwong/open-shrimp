@@ -1,8 +1,13 @@
 package place.wong.shrimp.companion.ui.meetings
 
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -41,3 +46,23 @@ internal fun MeetingSignals.diarizationStageFor(meetingId: String): String? =
     } else {
         null
     }
+
+/**
+ * Analysis progress in [0, 1] while the given meeting is being diarized; null
+ * when idle or while the run is still in an indeterminate stage.
+ */
+internal fun MeetingSignals.diarizationProgressFor(meetingId: String): Float? =
+    if (diarization.meetingId == meetingId) diarization.progress else null
+
+/** Determinate once the analysis reports progress; indeterminate before that. */
+@Composable
+internal fun DiarizationProgressBar(progress: Float?, modifier: Modifier = Modifier) {
+    val barModifier = modifier
+        .fillMaxWidth()
+        .padding(vertical = 2.dp)
+    if (progress != null) {
+        LinearProgressIndicator(progress = { progress }, modifier = barModifier)
+    } else {
+        LinearProgressIndicator(modifier = barModifier)
+    }
+}

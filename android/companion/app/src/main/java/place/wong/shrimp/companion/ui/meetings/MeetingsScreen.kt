@@ -86,6 +86,7 @@ fun MeetingsScreen(onBack: () -> Unit, onOpenMeeting: (String) -> Unit) {
                         meeting,
                         recordingActive = signals.recording,
                         diarizationStage = signals.diarizationStageFor(meeting.id),
+                        diarizationProgress = signals.diarizationProgressFor(meeting.id),
                         onOpen = { onOpenMeeting(meeting.id) },
                     )
                 }
@@ -100,6 +101,7 @@ private fun MeetingRow(
     recordingActive: Boolean,
     /** Progress text while this meeting is being diarized; null otherwise. */
     diarizationStage: String?,
+    diarizationProgress: Float?,
     onOpen: () -> Unit,
 ) {
     ElevatedCard(
@@ -120,6 +122,7 @@ private fun MeetingRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
+                DiarizationProgressBar(diarizationProgress)
             }
         }
     }
