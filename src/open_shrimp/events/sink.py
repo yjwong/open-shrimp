@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
+from collections.abc import Callable, Container
 
 import aiosqlite
 from telegram import Bot
@@ -82,16 +83,17 @@ class EventSink:
         chat_id: int,
         pickup_sources: frozenset[str] = frozenset(),
         *,
-        context_names: frozenset[str] = frozenset(),
+        get_context_names: Callable[[], Container[str]] | None = None,
         trusted_senders: dict[str, frozenset[str]] | None = None,
     ) -> None:
         self._bot = bot
         self._db = db
         self._chat_id = chat_id
         self._pickup_sources = pickup_sources
-        # Auto-pickup resolves a /context: directive against these names; the
-        # feature is inert unless a source also lists trusted_senders.
-        self._context_names = context_names
+        # Auto-pickup resolves a /context: directive against these names.
+        # A getter rather than a snapshot, so hot-added contexts resolve;
+        # the feature is inert unless a source also lists trusted_senders.
+        self._get_context_names = get_context_names or (lambda: frozenset())
         self._trusted_senders = trusted_senders or {}
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._icon_id: str | None = None
@@ -270,7 +272,7 @@ class EventSink:
         trusted = self._trusted_senders.get(event.source, frozenset())
         if event.sender_id is None or event.sender_id not in trusted:
             return False
-        ctx_name = parse_context_directive(event.text, self._context_names)
+        ctx_name = parse_context_directive(event.text, self._get_context_names())
         if ctx_name is None:
             return False
         try:

@@ -518,7 +518,11 @@ async def run_bot(
                 "JobQueue not available — scheduled tasks disabled. "
                 "Install python-telegram-bot[job-queue] to enable."
             )
-        event_manager = EventManager(config, app.bot, db, app.job_queue)
+        # Pass a getter into bot_data so the runner and sink see the
+        # hot-reloaded config, not the startup snapshot.
+        event_manager = EventManager(
+            lambda: app.bot_data["config"], app.bot, db, app.job_queue
+        )
         await event_manager.start()
     else:
         from open_shrimp.db import get_all_scheduled_tasks

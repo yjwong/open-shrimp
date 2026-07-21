@@ -1,6 +1,7 @@
 """Start and stop inbound event source adapters with the bot lifecycle."""
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import aiosqlite
@@ -50,24 +51,28 @@ class EventManager:
 
     def __init__(
         self,
-        config: Config,
+        get_config: Callable[[], Config],
         bot: Bot,
         db: aiosqlite.Connection,
         job_queue: "JobQueue | None" = None,
     ) -> None:
+        # Sources and the events chat are fixed at startup (adapters are
+        # started once), but context lookups go through the getter so the
+        # runner and sink see contexts hot-added to the config later.
+        config = get_config()
         events = config.events
         assert events is not None, "EventManager requires configured events"
         self._runner: "ScheduleRunner | None" = None
         if job_queue is not None:
             from open_shrimp.events.schedule import ScheduleRunner
 
-            self._runner = ScheduleRunner(config, bot, db, job_queue)
+            self._runner = ScheduleRunner(get_config, bot, db, job_queue)
         self._sink = EventSink(
             bot,
             db,
             events.chat_id,
             pickup_sources=frozenset(s.name for s in events.sources if s.pickup),
-            context_names=frozenset(config.contexts),
+            get_context_names=lambda: frozenset(get_config().contexts),
             trusted_senders={
                 s.name: frozenset(s.trusted_senders)
                 for s in events.sources

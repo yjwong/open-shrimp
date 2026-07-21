@@ -83,7 +83,7 @@ def bot():
 
 @pytest.fixture
 def runner(db, bot):
-    return ScheduleRunner(_config(), bot, db, _job_queue())
+    return ScheduleRunner(_config, bot, db, _job_queue())
 
 
 @pytest.fixture
@@ -232,6 +232,25 @@ async def test_missing_context_posts_note_no_dispatch(db, bot, runner, dispatch_
     assert dispatch_calls == []
     assert len(bot.sent) == 1
     assert "no longer exists" in bot.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_context_added_after_startup_is_seen(db, bot, dispatch_calls):
+    # The runner must resolve contexts through the live config, not a
+    # construction-time snapshot: a hot-reloaded config that adds the
+    # context makes the next firing run instead of skipping.
+    config = _config()
+    runner = ScheduleRunner(lambda: config, bot, db, _job_queue())
+    task = await _make_task(db, context_name="hot-added")
+
+    await runner._execute(task)
+    assert dispatch_calls == []
+    assert "no longer exists" in bot.sent[0][1]
+
+    config = _config()
+    config.contexts["hot-added"] = SimpleNamespace()
+    await asyncio.wait_for(runner._execute(task), timeout=5)
+    assert len(dispatch_calls) == 1
 
 
 @pytest.mark.asyncio

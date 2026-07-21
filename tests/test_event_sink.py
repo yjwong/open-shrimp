@@ -465,7 +465,7 @@ def _auto_sink(bot, db, trusted=(TRUSTED_ID,)) -> EventSink:
         db,
         CHAT_ID,
         pickup_sources=frozenset({"lark"}),
-        context_names=frozenset({"default", AUTO_CONTEXT}),
+        get_context_names=lambda: frozenset({"default", AUTO_CONTEXT}),
         trusted_senders={"lark": frozenset(trusted)},
     )
 

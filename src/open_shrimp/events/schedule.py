@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -190,14 +191,16 @@ class ScheduleRunner:
 
     def __init__(
         self,
-        config: Config,
+        get_config: Callable[[], Config],
         bot: Bot,
         db: aiosqlite.Connection,
         job_queue: JobQueue,
     ) -> None:
-        events = config.events
+        events = get_config().events
         assert events is not None, "ScheduleRunner requires configured events"
-        self._config = config
+        # A getter, not a snapshot: the config hot-reloads while the runner
+        # lives, and context checks must see contexts added since startup.
+        self._get_config = get_config
         self._bot = bot
         self._db = db
         self._job_queue = job_queue
@@ -314,21 +317,22 @@ class ScheduleRunner:
 
         Called once on start.  Returns the number of tasks registered.
         Stale one-shot tasks (datetime in the past) are deleted from the
-        DB.  Tasks with missing contexts are skipped (not deleted — the
-        context may come back after a config change).
+        DB.  Tasks with missing contexts are still registered — the
+        context may be hot-added to the config later, and each firing
+        re-checks against the live config anyway.
         """
         tasks = await get_all_scheduled_tasks(self._db)
         registered = 0
 
         for task in tasks:
-            if task.context_name not in self._config.contexts:
+            if task.context_name not in self._get_config().contexts:
                 logger.warning(
-                    "Skipping task %d (%s): context %r not in config",
+                    "Task %d (%s): context %r not in config; firings "
+                    "will skip until it is added",
                     task.id,
                     task.name,
                     task.context_name,
                 )
-                continue
 
             # Delete stale one-shot tasks.
             if task.schedule_type == "once":
@@ -462,7 +466,7 @@ class ScheduleRunner:
         )
         from open_shrimp.handlers.utils import _cancel_running
 
-        if task.context_name not in self._config.contexts:
+        if task.context_name not in self._get_config().contexts:
             logger.warning(
                 "Scheduled task %d (%s): context %r not found, skipping",
                 task.id,
