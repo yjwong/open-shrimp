@@ -111,6 +111,7 @@ class BackendOptions:
     # Honoured by all backends (semantics may map differently).
     effort: str | None = None
     allowed_tools: list[str] | None = None
+    disallowed_tools: list[str] | None = None
     add_dirs: list[str] | None = None
     system_prompt: Any = None  # str | preset-dict | None (see docstring)
 

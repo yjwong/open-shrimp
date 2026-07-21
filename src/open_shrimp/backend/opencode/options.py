@@ -7,8 +7,8 @@ native shape.
 
 Honoured-intersection mapping:
 
-* ``cwd``, ``resume``, ``effort``, ``allowed_tools``, ``add_dirs``,
-  ``can_use_tool``, ``stderr``, ``system_prompt`` → direct.
+* ``cwd``, ``resume``, ``effort``, ``allowed_tools``, ``disallowed_tools``,
+  ``add_dirs``, ``can_use_tool``, ``stderr``, ``system_prompt`` → direct.
 * ``model`` → ``split_provider_model(model)`` → ``(provider, model)``.  An
   unqualified ``model`` **raises** here (fail fast at connect — OpenCode
   requires ``provider/model``).
@@ -76,6 +76,7 @@ class OpenCodeOptions:
     # Honoured fields.
     effort: str | None = None  # → variant on prompt_async
     allowed_tools: list[str] | None = None  # → session permission rules
+    disallowed_tools: list[str] | None = None  # → last-position deny rules
     add_dirs: list[str] | None = None  # → external_directory allow rules
     stderr: Callable[[str], None] | None = None
     can_use_tool: Callable[..., Any] | None = None
@@ -113,6 +114,7 @@ def to_opencode(opts: BackendOptions) -> OpenCodeOptions:
         endpoint=extra.get("endpoint"),
         effort=opts.effort,
         allowed_tools=opts.allowed_tools,
+        disallowed_tools=opts.disallowed_tools,
         add_dirs=opts.add_dirs,
         stderr=opts.stderr,
         can_use_tool=opts.can_use_tool,

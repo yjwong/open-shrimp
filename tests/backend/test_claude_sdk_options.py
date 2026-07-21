@@ -16,6 +16,7 @@ def test_honoured_fields_map_1_to_1():
         model="claude-x",
         effort="high",
         allowed_tools=["Bash(git *)"],
+        disallowed_tools=["WebSearch"],
         add_dirs=["/extra"],
         setting_sources=["project", "user", "local"],
         include_partial_messages=True,
@@ -27,6 +28,7 @@ def test_honoured_fields_map_1_to_1():
     assert sdk.model == "claude-x"
     assert sdk.effort == "high"
     assert sdk.allowed_tools == ["Bash(git *)"]
+    assert sdk.disallowed_tools == ["WebSearch"]
     assert sdk.add_dirs == ["/extra"]
     assert sdk.setting_sources == ["project", "user", "local"]
     assert sdk.include_partial_messages is True

@@ -387,7 +387,21 @@ class OpenCodeClient:
         # baseline above, so each invocation routes through can_use_tool;
         # the child session is then drained and surfaced (see
         # ``receive_response``).
+        #
+        # Deny rules go last: OpenCode's evaluator picks the LAST matching
+        # rule, and a ``deny`` on pattern ``*`` also removes the tool from
+        # the model's tool list entirely.
+        rules.extend(self._rules_from_disallowed_tools())
         return rules
+
+    def _rules_from_disallowed_tools(self) -> list[dict[str, Any]]:
+        """Translate ``disallowed_tools`` entries to OpenCode deny rules."""
+        out: list[dict[str, Any]] = []
+        for entry in self._options.disallowed_tools or []:
+            rule = _rule_from_entry(entry, "deny")
+            if rule is not None:
+                out.append(rule)
+        return out
 
     def _rules_from_allowed_tools(
         self,
@@ -401,13 +415,11 @@ class OpenCodeClient:
         is toggled on, which routes through ``update_permission_rules``.
         """
         out: list[dict[str, Any]] = []
-        tools = self._options.allowed_tools or []
-        for entry in tools:
-            if not isinstance(entry, str):
+        for entry in self._options.allowed_tools or []:
+            rule = _rule_from_entry(entry, "allow")
+            if rule is None:
                 continue
-            permission, pattern = _parse_allowed_tool(entry)
-            if permission is None:
-                continue
+            permission = rule["permission"]
             in_include = include is None or permission in include
             if invert:
                 in_include = include is not None and permission not in include
@@ -415,13 +427,7 @@ class OpenCodeClient:
                 continue
             if permission in _MUTATING_OPENCODE_PERMS:
                 continue
-            out.append(
-                {
-                    "permission": permission,
-                    "pattern": pattern or "*",
-                    "action": "allow",
-                }
-            )
+            out.append(rule)
         return out
 
     def _rules_from_add_dirs(self) -> list[dict[str, Any]]:
@@ -1130,6 +1136,25 @@ def _parse_allowed_tool(entry: str) -> tuple[str | None, str | None]:
         return text, pattern
     lowered = text.lower()
     return lowered, pattern
+
+
+def _rule_from_entry(entry: Any, action: str) -> dict[str, Any] | None:
+    """Turn one ``allowed_tools``-style entry into an OpenCode rule dict.
+
+    Returns None for non-string or unparseable entries.  The single place
+    that knows the rule-dict shape for tool entries — both the allow and
+    deny builders go through it.
+    """
+    if not isinstance(entry, str):
+        return None
+    permission, pattern = _parse_allowed_tool(entry)
+    if permission is None:
+        return None
+    return {
+        "permission": permission,
+        "pattern": pattern or "*",
+        "action": action,
+    }
 
 
 def _deny_all_permission_rules() -> list[dict[str, Any]]:

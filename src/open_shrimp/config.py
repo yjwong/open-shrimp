@@ -93,6 +93,11 @@ class ContextConfig:
     directory: str
     description: str
     allowed_tools: list[str]
+    # Tools the agent must not have at all.  On the OpenCode backend these
+    # become last-position deny rules, which both block and hide the tool
+    # from the model; on the Claude SDK backend they map to the SDK's
+    # ``disallowed_tools``.
+    disallowed_tools: list[str] = field(default_factory=list)
     model: str | None = None
     effort: EffortLevel | None = None
     additional_directories: list[str] = field(default_factory=list)
@@ -227,6 +232,13 @@ def _validate_raw(raw: dict) -> None:
                 )
         if not isinstance(ctx["allowed_tools"], list):
             raise ValueError(f"Context '{name}': allowed_tools must be a list")
+        disallowed_raw = ctx.get("disallowed_tools", [])
+        if not isinstance(disallowed_raw, list) or not all(
+            isinstance(t, str) for t in disallowed_raw
+        ):
+            raise ValueError(
+                f"Context '{name}': disallowed_tools must be a list of strings"
+            )
         add_dirs = ctx.get("additional_directories", [])
         if not isinstance(add_dirs, list):
             raise ValueError(
@@ -747,6 +759,7 @@ def _parse(raw: dict) -> Config:
             directory=ctx["directory"],
             description=ctx["description"],
             allowed_tools=ctx["allowed_tools"],
+            disallowed_tools=ctx.get("disallowed_tools", []),
             model=ctx.get("model"),
             effort=ctx.get("effort"),
             additional_directories=ctx.get("additional_directories", []),
@@ -875,6 +888,8 @@ def config_to_dict(config: Config) -> dict[str, Any]:
             "description": ctx.description,
             "allowed_tools": ctx.allowed_tools,
         }
+        if ctx.disallowed_tools:
+            ctx_dict["disallowed_tools"] = ctx.disallowed_tools
         if ctx.model is not None:
             ctx_dict["model"] = ctx.model
         if ctx.effort is not None:

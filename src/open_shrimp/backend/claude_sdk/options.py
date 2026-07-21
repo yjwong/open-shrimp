@@ -42,6 +42,7 @@ def translate_options(opts: BackendOptions) -> ClaudeAgentOptions:
         model=opts.model,
         effort=opts.effort,
         allowed_tools=opts.allowed_tools,
+        disallowed_tools=opts.disallowed_tools,
         add_dirs=opts.add_dirs,
         setting_sources=opts.setting_sources,
         include_partial_messages=opts.include_partial_messages,

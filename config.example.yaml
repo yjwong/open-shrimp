@@ -34,6 +34,13 @@ contexts:
       #
       # Patterns are supported — these are passed to the Claude CLI as --allowedTools
       # - "Bash(git *)"        # allow all git commands
+    # disallowed_tools:
+    #   - WebSearch            # remove tools from the agent entirely
+    #   - WebFetch
+    #   # On the claude_sdk backend these map to --disallowedTools; on the
+    #   # opencode backend they become deny rules that also hide the tool
+    #   # from the model. Accepts hooks-style (WebFetch), opencode wire
+    #   # (webfetch), and MCP (mcp__server__tool) names.
     # additional_directories:
     #   - /home/you/Documents/shared-lib  # Extra dirs the agent can access
     #   - /home/you/Documents/api-service

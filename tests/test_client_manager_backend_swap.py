@@ -28,6 +28,7 @@ class _FakeCtx:
     directory: str = "/tmp/openshrimp-fake"
     description: str = ""
     allowed_tools: list[str] = field(default_factory=list)
+    disallowed_tools: list[str] = field(default_factory=list)
     model: str | None = None
     effort: str | None = None
     additional_directories: list[str] = field(default_factory=list)
