@@ -28,7 +28,9 @@ export interface ContextConfig {
   directory: string;
   description: string;
   allowed_tools: string[];
+  disallowed_tools?: string[];
   model?: string | null;
+  effort?: EffortLevel | null;
   backend?: string | null;
   additional_directories?: string[];
   default_for_chats?: number[];
@@ -44,3 +46,13 @@ export interface AppConfig {
 }
 
 export const BACKENDS = ["claude_sdk", "opencode"] as const;
+
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
+export const EFFORT_LEVELS: EffortLevel[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];

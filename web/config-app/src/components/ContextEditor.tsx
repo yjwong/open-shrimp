@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchModels, validatePath, type ModelOption } from "../lib/api";
-import { BACKENDS } from "../lib/types";
-import type { AppConfig, ContextConfig } from "../lib/types";
+import { BACKENDS, EFFORT_LEVELS } from "../lib/types";
+import type { AppConfig, ContextConfig, EffortLevel } from "../lib/types";
 import TagInput from "./TagInput";
 import SandboxForm from "./SandboxForm";
 
@@ -102,9 +102,13 @@ export default function ContextEditor({
   const [directory, setDirectory] = useState(existing?.directory ?? "");
   const [description, setDescription] = useState(existing?.description ?? "");
   const [model, setModel] = useState(existing?.model ?? "");
+  const [effort, setEffort] = useState<string>(existing?.effort ?? "");
   const [backend, setBackend] = useState(existing?.backend ?? "");
   const [allowedTools, setAllowedTools] = useState<string[]>(
     existing?.allowed_tools ?? [],
+  );
+  const [disallowedTools, setDisallowedTools] = useState<string[]>(
+    existing?.disallowed_tools ?? [],
   );
   const [additionalDirs, setAdditionalDirs] = useState<string[]>(
     existing?.additional_directories ?? [],
@@ -143,7 +147,11 @@ export default function ContextEditor({
       directory,
       description,
       allowed_tools: allowedTools,
+      ...(disallowedTools.length > 0
+        ? { disallowed_tools: disallowedTools }
+        : {}),
       model: model.trim() || null,
+      effort: (effort as EffortLevel) || null,
       backend: backend.trim() || null,
       additional_directories: additionalDirs.filter((d) => d.trim()),
       default_for_chats: parseChatIds(defaultForChats),
@@ -156,8 +164,10 @@ export default function ContextEditor({
     directory,
     description,
     model,
+    effort,
     backend,
     allowedTools,
+    disallowedTools,
     additionalDirs,
     defaultForChats,
     lockedForChats,
@@ -290,8 +300,33 @@ export default function ContextEditor({
         </div>
 
         <div className="form-group">
+          <label className="form-label">Effort</label>
+          <select
+            className="form-input"
+            value={effort}
+            onChange={(e) => setEffort(e.target.value)}
+          >
+            <option value="">CLI default</option>
+            {EFFORT_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+          <span className="form-hint">Thinking effort level for this context</span>
+        </div>
+
+        <div className="form-group">
           <label className="form-label">Allowed Tools</label>
           <TagInput values={allowedTools} onChange={setAllowedTools} />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Disallowed Tools</label>
+          <TagInput values={disallowedTools} onChange={setDisallowedTools} />
+          <span className="form-hint">
+            Tools blocked in this context, even if otherwise allowed
+          </span>
         </div>
 
         <div className="form-group">
