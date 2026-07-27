@@ -95,6 +95,36 @@ def event_envelope(row: InboundEvent) -> str:
     return _wrap_untrusted(attrs, event_body(row))
 
 
+def routing_summary(row: InboundEvent) -> str | None:
+    """Provider-side routing ids (chat/thread/message) as a ``k=v`` line.
+
+    These ids are platform-generated — the sending platform's server sets
+    them, the message author cannot — so they are trusted metadata and may
+    appear outside the untrusted envelope. They let an agent that holds its
+    own tools for the source platform address the originating chat/thread
+    directly, beyond the built-in reply/context capabilities.
+    """
+    refs: dict[str, Any] = {}
+    for blob in (row.reply_ref, row.context_ref):
+        if not blob:
+            continue
+        try:
+            data = json.loads(blob)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key, value in data.items():
+            if isinstance(value, (str, int)) and value != "" and key not in refs:
+                refs[key] = value
+    # context_ref's anchor is the same message the reply_ref points at.
+    if refs.get("anchor_message_id") == refs.get("message_id"):
+        refs.pop("anchor_message_id", None)
+    if not refs:
+        return None
+    return ", ".join(f"{key}={value}" for key, value in refs.items())
+
+
 def context_envelope(source: str, text: str) -> str:
     """Untrusted-data envelope for adapter-fetched surrounding context.
 

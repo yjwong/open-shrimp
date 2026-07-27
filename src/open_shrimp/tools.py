@@ -838,6 +838,7 @@ def create_openshrimp_tools(
         from open_shrimp.events.pickup import (
             context_envelope as _context_envelope,
             event_envelope as _event_envelope,
+            routing_summary as _routing_summary,
         )
 
         _read_inbound_event_schema = {
@@ -901,10 +902,14 @@ def create_openshrimp_tools(
             extra = await _fetch_event_context(row)
             if extra:
                 body = f"{body}\n\n{extra}"
-            return _text_result(
+            header = (
                 f"Inbound event #{row.id} from source {row.source!r}, "
-                f"received {received}.\n\n{body}"
+                f"received {received}."
             )
+            routing = _routing_summary(row)
+            if routing:
+                header += f"\nProvider routing ids: {routing}."
+            return _text_result(f"{header}\n\n{body}")
 
         tools_list.append(OpenShrimpTool(
             name="read_inbound_event",
