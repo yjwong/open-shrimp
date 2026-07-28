@@ -13,6 +13,11 @@ capabilities are read-only; the target context's own ``allowed_tools`` are
 inherited so anything the user already trusts there runs silently, and
 everything else routes a normal Approve/Deny prompt into the *originating*
 chat via the existing approval machinery.
+
+The *current* context is also a valid target, but only for the new-topic
+handoff path: the approval card offers no "Run inline" button for a
+self-target (an inline sub-query of yourself adds no capability), so the
+user can only spawn a parallel forum topic under the same context or deny.
 """
 
 from __future__ import annotations
@@ -98,7 +103,11 @@ def _queryable_contexts(
     }
 
 
-def _build_description(queryable: dict[str, "ContextConfig"]) -> str:
+def _build_description(
+    queryable: dict[str, "ContextConfig"],
+    current: str,
+    current_ctx: "ContextConfig | None",
+) -> str:
     """Enumerate the queryable contexts and their descriptions for the agent."""
     lines = [
         "Ask a focused question of ANOTHER context and get a synchronous "
@@ -107,11 +116,18 @@ def _build_description(queryable: dict[str, "ContextConfig"]) -> str:
         "MCP servers), so it can answer authoritatively about its own domain "
         "— without you switching contexts. It has no memory of this "
         "conversation, so make the question self-contained. Every call "
-        "requires the user's approval. Available contexts:",
+        "requires the user's approval. The CURRENT context is also a valid "
+        "target, but only as a new-topic handoff: the user can spawn a "
+        "parallel forum topic under this same context (useful to fork off a "
+        "subtask), never an inline sub-query — and a handoff is "
+        "fire-and-forget, so no answer comes back to you. Available "
+        "contexts:",
     ]
     for name, ctx in sorted(queryable.items()):
         desc = (getattr(ctx, "description", "") or "").strip()
         lines.append(f"- {name}: {desc}" if desc else f"- {name}")
+    if current_ctx is not None:
+        lines.append(f"- {current} (current context — new-topic handoff only)")
     return "\n".join(lines)
 
 
@@ -122,7 +138,9 @@ _ASK_CONTEXT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Name of the context to ask. Must be one of the available "
-                "contexts listed in this tool's description."
+                "contexts listed in this tool's description. The current "
+                "context is allowed only for a new-topic handoff (no inline "
+                "answer)."
             ),
         },
         "question": {
@@ -239,13 +257,21 @@ def build_ask_context_tool(
 ) -> "OpenShrimpTool | None":
     """Build the ``ask_context`` tool descriptor, or ``None`` if no targets.
 
-    Returns ``None`` when there is no *other* context to query (the tool
-    would be useless) or the config has no contexts map.
+    Returns ``None`` when the config has no contexts map or nothing is
+    targetable.  The current context alone is enough: it is a valid
+    handoff-only target, so the tool registers even in a single-context
+    config.
     """
     from open_shrimp.tools import OpenShrimpTool
 
+    def _current_ctx() -> "ContextConfig | None":
+        contexts = getattr(config, "contexts", None)
+        if not isinstance(contexts, dict):
+            return None
+        return contexts.get(context_name)
+
     queryable = _queryable_contexts(config, context_name)
-    if not queryable:
+    if not queryable and _current_ctx() is None:
         return None
 
     async def ask_context(args: dict[str, Any]) -> dict[str, Any]:
@@ -257,18 +283,15 @@ def build_ask_context_tool(
 
         # Re-resolve the queryable set at call time (config may have changed).
         valid = _queryable_contexts(config, context_name)
-        ctx = valid.get(target)
+        handoff_only = target == context_name
+        ctx = _current_ctx() if handoff_only else valid.get(target)
         if ctx is None:
-            names = ", ".join(sorted(valid)) or "(none)"
-            if target == context_name:
-                return _text_result(
-                    "Error: cannot ask the current context "
-                    f"({context_name!r}).",
-                    is_error=True,
-                )
+            names = sorted(valid)
+            if _current_ctx() is not None:
+                names.append(context_name)
             return _text_result(
                 f"Error: no queryable context named {target!r}. "
-                f"Available: {names}",
+                f"Available: {', '.join(names) or '(none)'}",
                 is_error=True,
             )
 
@@ -287,11 +310,12 @@ def build_ask_context_tool(
                 sandbox_managers=sandbox_managers,
                 mcp_proxy=mcp_proxy,
                 db=db,
+                handoff_only=handoff_only,
             )
 
     return OpenShrimpTool(
         name="ask_context",
-        description=_build_description(queryable),
+        description=_build_description(queryable, context_name, _current_ctx()),
         input_schema=_ASK_CONTEXT_SCHEMA,
         # Not read_only: it spins a sub-execution and must require the
         # standard per-call approval rather than being silently auto-read.
@@ -450,13 +474,17 @@ async def _request_outer_approval(
     thread_id: int | None,
     target: str,
     question: str,
+    include_inline: bool = True,
 ) -> _OuterApproval:
-    """Render the three-way approval card for the outer ask_context call.
+    """Render the approval card for the outer ask_context call.
 
     The user chooses the mode at approval time: run the query inline (today's
     synchronous read-only sub-query), hand it off to a new forum topic, or
-    deny. Uses dedicated ``askctx_*`` callback prefixes so the shared
-    ``handle_approval_callback`` resolves the future to an outcome string.
+    deny. A self-target passes ``include_inline=False``, which drops the
+    "Run inline" button — handing off to a parallel topic is the only run
+    mode that makes sense there. Uses dedicated ``askctx_*`` callback
+    prefixes so the shared ``handle_approval_callback`` resolves the future
+    to an outcome string.
     """
     from telegram import InlineKeyboardButton
 
@@ -472,15 +500,22 @@ async def _request_outer_approval(
     topic_data = f"{_HANDOFF_TOPIC_PREFIX}{tool_use_id}"
     deny_data = f"{_HANDOFF_DENY_PREFIX}{tool_use_id}"
 
+    header = (
+        f"🔎 *Ask {_escape_mdv2(target)}?*" if include_inline
+        else f"↗️ *Hand off to {_escape_mdv2(target)}?*"
+    )
     text = (
-        f"🔎 *Ask {_escape_mdv2(target)}?*\n"
+        f"{header}\n"
         f"> {_escape_mdv2(_summary_line(question, limit=300))}"
     )
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Run inline", callback_data=inline_data),
-        InlineKeyboardButton("New topic", callback_data=topic_data),
-        InlineKeyboardButton("Deny", callback_data=deny_data),
-    ]])
+    buttons = []
+    if include_inline:
+        buttons.append(
+            InlineKeyboardButton("Run inline", callback_data=inline_data),
+        )
+    buttons.append(InlineKeyboardButton("New topic", callback_data=topic_data))
+    buttons.append(InlineKeyboardButton("Deny", callback_data=deny_data))
+    keyboard = InlineKeyboardMarkup([buttons])
 
     thread_kwargs: dict[str, Any] = {}
     if thread_id is not None:
@@ -504,7 +539,8 @@ async def _request_outer_approval(
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[HandoffOutcome] = loop.create_future()
-    _approval_futures[inline_data] = future
+    if include_inline:
+        _approval_futures[inline_data] = future
     _approval_futures[topic_data] = future
     _approval_futures[deny_data] = future
     try:
@@ -1044,6 +1080,7 @@ async def _run_query(
     sandbox_managers: dict[str, Any] | None,
     mcp_proxy: Any | None,
     db: Any | None = None,
+    handoff_only: bool = False,
 ) -> dict[str, Any]:
     """Orchestrate one cross-context query: approve, configure, run, report."""
     from open_shrimp.client_manager import resolve_backend
@@ -1055,6 +1092,7 @@ async def _run_query(
         thread_id=thread_id,
         target=target,
         question=question,
+        include_inline=not handoff_only,
     )
     if approval.outcome == "deny":
         return _text_result(
@@ -1071,6 +1109,14 @@ async def _run_query(
             question=question,
             card_message_id=approval.message_id,
             is_private_chat=is_private_chat,
+        )
+    if handoff_only:
+        # The card offers no inline button for a self-target, so this only
+        # fires if the outcome plumbing regresses. Fail closed.
+        return _text_result(
+            f"Inline sub-queries of the current context ({target!r}) are not "
+            "supported; only the new-topic handoff is.",
+            is_error=True,
         )
 
     backend = resolve_backend(context=ctx)

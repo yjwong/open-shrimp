@@ -1,7 +1,7 @@
 """Tests for the cross-context query tool (``ask_context``).
 
-Covers gating (registered only when another context exists), the dynamic
-description, the unknown/self target error paths, and a full happy-path
+Covers gating, the dynamic description, the unknown-target error path,
+self-targeting (valid, but new-topic handoff only), and a full happy-path
 sub-query run with a faked backend client.
 """
 
@@ -68,7 +68,9 @@ def test_ask_context_absent_without_context_name() -> None:
     assert "ask_context" not in [t.name for t in tools]
 
 
-def test_ask_context_absent_when_no_other_context() -> None:
+def test_ask_context_registered_with_single_context() -> None:
+    # A single-context config still registers the tool: the current context
+    # is a valid target for the new-topic handoff (fork a parallel topic).
     cfg = Config(
         telegram=TelegramConfig(token="0:fake"),
         allowed_users=[1],
@@ -84,7 +86,8 @@ def test_ask_context_absent_when_no_other_context() -> None:
         bot=MagicMock(), chat_id=1, thread_id=None, config=cfg,
         context_name="only",
     )
-    assert tool is None
+    assert tool is not None
+    assert "only (current context — new-topic handoff only)" in tool.description
 
 
 def test_ask_context_survives_partial_config() -> None:
@@ -105,7 +108,8 @@ def test_description_lists_other_contexts() -> None:
     assert tool is not None
     assert "glints-delta-etl" in tool.description
     assert "the ETL pipeline project" in tool.description
-    # The current context is excluded from the list.
+    # The current context is listed as handoff-only, without its description.
+    assert "default (current context — new-topic handoff only)" in tool.description
     assert "personal default context" not in tool.description
     assert tool.read_only is False
 
@@ -126,7 +130,22 @@ async def test_unknown_target_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_self_target_errors() -> None:
+async def test_self_target_inline_outcome_fails_closed(monkeypatch) -> None:
+    # The card offers no inline button for a self-target; if the outcome
+    # plumbing ever produces "inline" anyway, the sub-query must not run.
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
+    )
+    fake_backend = MagicMock()
+    fake_backend.make_client.side_effect = AssertionError(
+        "self-target must never run an inline sub-query",
+    )
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: fake_backend,
+    )
+
     tool = build_ask_context_tool(
         bot=MagicMock(), chat_id=1, thread_id=None, config=_config(),
         context_name="default",
@@ -134,7 +153,8 @@ async def test_self_target_errors() -> None:
     assert tool is not None
     result = await tool.handler({"context": "default", "question": "hi"})
     assert result.get("is_error") is True
-    assert "current context" in result["content"][0]["text"]
+    assert "new-topic handoff" in result["content"][0]["text"]
+    fake_backend.make_client.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -746,3 +766,96 @@ async def test_handoff_allowed_in_private_chat_without_is_forum(monkeypatch) -> 
     assert result.get("is_error") is None
     bot.create_forum_topic.assert_awaited_once()
     bot.get_chat.assert_not_called()
+
+
+# --- Self-target (new-topic handoff only) -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_self_target_handoff_binds_same_context(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=_OuterApproval(
+            outcome="new_topic", message_id=7,
+        )),
+    )
+
+    set_calls: list[tuple] = []
+
+    async def _fake_set_active_context(db, scope, name):
+        set_calls.append((scope.chat_id, scope.thread_id, name))
+
+    dispatched: list[tuple] = []
+
+    async def _fake_dispatch(prompt, chat_id, thread_id=None, *, placeholder=None):
+        dispatched.append((prompt, chat_id, thread_id))
+
+    monkeypatch.setattr(
+        "open_shrimp.db.set_active_context", _fake_set_active_context,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.dispatch_registry.dispatch", _fake_dispatch,
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+    bot.edit_message_text = AsyncMock()
+    bot.create_forum_topic = AsyncMock(
+        return_value=SimpleNamespace(message_thread_id=99),
+    )
+
+    tool = build_ask_context_tool(
+        bot=bot, chat_id=1, thread_id=None, config=_config(),
+        context_name="default", db=MagicMock(),
+    )
+    assert tool is not None
+    result = await tool.handler(
+        {"context": "default", "question": "fork this subtask"},
+    )
+
+    assert result.get("is_error") is None
+    assert "new topic" in result["content"][0]["text"]
+    # The new topic runs under the SAME context as the caller.
+    assert set_calls == [(1, 99, "default")]
+    assert dispatched == [("fork this subtask", 1, 99)]
+
+    # The approval card was requested without the inline option.
+    from open_shrimp import cross_context
+
+    approval_mock = cross_context._request_outer_approval
+    assert approval_mock.await_args.kwargs["include_inline"] is False
+
+
+@pytest.mark.asyncio
+async def test_outer_approval_card_omits_inline_for_self() -> None:
+    import asyncio
+
+    from open_shrimp.cross_context import (
+        _HANDOFF_INLINE_PREFIX,
+        _request_outer_approval,
+    )
+    from open_shrimp.handlers.state import _approval_futures
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=9))
+
+    task = asyncio.create_task(_request_outer_approval(
+        bot=bot, chat_id=1, thread_id=None, target="default",
+        question="q", include_inline=False,
+    ))
+    while not bot.send_message.await_count:
+        await asyncio.sleep(0)
+
+    keyboard = bot.send_message.await_args.kwargs["reply_markup"]
+    labels = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert labels == ["New topic", "Deny"]
+    # No future is registered under the (unused) inline callback data.
+    assert not any(
+        k.startswith(_HANDOFF_INLINE_PREFIX) for k in _approval_futures
+    )
+
+    topic_data = keyboard.inline_keyboard[0][0].callback_data
+    _approval_futures[topic_data].set_result("new_topic")
+    approval = await task
+    assert approval.outcome == "new_topic"
+    assert approval.message_id == 9
