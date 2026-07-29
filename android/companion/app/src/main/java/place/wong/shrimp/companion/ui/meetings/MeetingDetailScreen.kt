@@ -1,5 +1,7 @@
 package place.wong.shrimp.companion.ui.meetings
 
+import android.content.Context
+import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.DragInteraction
@@ -21,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ButtonDefaults
@@ -57,6 +60,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -233,6 +237,7 @@ private fun MeetingDetail(
         }
     }
 
+    val context = LocalContext.current
     Scaffold(
         topBar = {
             TopAppBar(
@@ -240,6 +245,13 @@ private fun MeetingDetail(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (meeting.durationMs >= 0) {
+                        IconButton(onClick = { shareRecording(context, meeting) }) {
+                            Icon(Icons.Filled.Share, contentDescription = "Share recording")
+                        }
                     }
                 },
             )
@@ -457,6 +469,25 @@ private fun MeetingHeader(
             },
         )
     }
+}
+
+/**
+ * Opens the system share sheet with the meeting's audio. Every meeting's file
+ * is named audio.ogg on disk, so a per-meeting display name keeps shared
+ * copies distinguishable.
+ */
+private fun shareRecording(context: Context, meeting: Meeting) {
+    val uri = FileProvider.getUriForFile(
+        context,
+        context.packageName + ".fileprovider",
+        meeting.audioFile,
+        meeting.id + ".ogg",
+    )
+    val intent = Intent(Intent.ACTION_SEND)
+        .setType("audio/ogg")
+        .putExtra(Intent.EXTRA_STREAM, uri)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    context.startActivity(Intent.createChooser(intent, "Share recording"))
 }
 
 /** Runs a meeting action on IO with busy/error bookkeeping and a list refresh. */

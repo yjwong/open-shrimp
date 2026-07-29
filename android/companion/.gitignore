@@ -1,3 +1,7 @@
+# Signing key (public repo — must never be committed). Lives here so it
+# survives dev-environment rebuilds; losing it breaks device pairing.
+/debug.keystore
+
 # Built application files
 /build
 /app/build

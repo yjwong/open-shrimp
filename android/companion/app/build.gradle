@@ -21,6 +21,18 @@ android {
         }
     }
 
+    // The device pairing survives only as long as the signing key: sign with
+    // the checked-in keystore, not the machine-local ~/.android one, so a
+    // rebuilt dev environment still produces installable updates.
+    signingConfigs {
+        debug {
+            storeFile rootProject.file("debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+
     buildFeatures {
         compose true
     }
