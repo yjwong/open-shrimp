@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from open_shrimp.backend.claude_sdk.client import ClaudeSdkClient
 from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
 from open_shrimp.backend.claude_sdk.task_checklist import read_checklist
+from open_shrimp.backend.claude_sdk import models
 from open_shrimp.backend.protocol import (
     BackendClient,
     BackendCopy,
@@ -28,6 +29,7 @@ from open_shrimp.backend.protocol import (
     ChecklistReader,
     MCPConfigProvider,
     MCPOAuthProvider,
+    ModelChoice,
     ToolFactory,
 )
 from open_shrimp.backend.sessions import SessionInfo
@@ -248,6 +250,15 @@ class ClaudeSdkBackend:
 
     def command_capabilities(self) -> set[str]:
         return {"login", "usage", "mcp"}
+
+    def normalize_model(self, model: str | None) -> str | None:
+        return models.normalize_model(model)
+
+    def model_catalog(self) -> list[ModelChoice]:
+        return list(models.MODEL_CHOICES)
+
+    def is_known_model(self, model: str) -> bool:
+        return models.is_known_model(model)
 
     def copy(self) -> BackendCopy:
         return BackendCopy(

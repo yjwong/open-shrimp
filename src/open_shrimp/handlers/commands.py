@@ -23,6 +23,7 @@ from open_shrimp.client_manager import (
 )
 from open_shrimp.config import Config, ContextConfig, effective_backend
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
+from open_shrimp.backend.factory import get_backend_by_name
 from open_shrimp.android_companion import (
     create_pairing_code,
     get_or_create_server_id,
@@ -470,23 +471,35 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     scope = chat_scope_from_message(message)
     ctx_name = await _get_context_name(scope, config, db)
-    ctx_default_model = config.contexts[ctx_name].model
+    ctx = config.contexts[ctx_name]
+    ctx_default_model = ctx.model
+    backend = get_backend_by_name(effective_backend(ctx, config))
     current_override = _model_overrides.get(scope)
     args = message.text.split() if message.text else []
 
     if len(args) < 2:
-        # Show current model
+        # Show the model in effect, then whatever the backend offers by name.
+        in_effect = current_override or ctx_default_model or "CLI default"
+        label = "override" if current_override else "context default"
+        lines = [f"*Model:* `{_escape_mdv2(in_effect)}` \\({label}\\)"]
         if current_override:
-            text = (
-                f"*Model:* `{current_override}` \\(override\\)\n"
-                f"*Context default:* `{ctx_default_model or 'CLI default'}`\n\n"
-                f"Use `/model reset` to revert\\."
+            lines.append(
+                "*Context default:* "
+                f"`{_escape_mdv2(ctx_default_model or 'CLI default')}`"
             )
-        else:
-            text = f"*Model:* `{ctx_default_model or 'CLI default'}` \\(context default\\)"
-        for ch in ".-/":
-            text = text.replace(ch, f"\\{ch}")
-        await message.reply_text(text, parse_mode="MarkdownV2")
+        catalog = backend.model_catalog()
+        if catalog:
+            lines.append("")
+            lines.append("*Aliases:*")
+            lines.extend(
+                f"`{_escape_mdv2(c.alias)}` → `{_escape_mdv2(c.model_id)}`"
+                for c in catalog
+            )
+        lines.append("")
+        lines.append(
+            "`/model <alias\\|id>` to override, `/model reset` to revert\\."
+        )
+        await message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
         return
 
     target = args[1]
@@ -507,13 +520,25 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         return
 
-    # Set override
-    _model_overrides[scope] = target
+    # Store the canonical name so the serving binary's own alias table never
+    # gets a say in which model this scope runs.  An unrecognised value is
+    # still honoured — the backend gates the warning, not the override.
+    resolved = backend.normalize_model(target) or target
+    _model_overrides[scope] = resolved
     await close_session(scope)
-    model_escaped = _escape_mdv2(target)
+
+    shown = _escape_mdv2(resolved)
+    if resolved != target:
+        shown = f"`{_escape_mdv2(target)}` → `{shown}`"
+    else:
+        shown = f"`{shown}`"
+    warning = (
+        ""
+        if backend.is_known_model(target)
+        else "\n⚠️ Not a known alias or model ID — passing through as\\-is\\."
+    )
     await message.reply_text(
-        f"Model overridden to `{model_escaped}`\\. "
-        f"Use `/model reset` to revert\\.",
+        f"Model overridden to {shown}\\.{warning} Use `/model reset` to revert\\.",
         parse_mode="MarkdownV2",
     )
 

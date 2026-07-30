@@ -32,6 +32,7 @@ from open_shrimp.backend.protocol import (
     CanUseTool,
     MCPConfigProvider,
     MCPOAuthProvider,
+    ModelChoice,
     ToolFactory,
 )
 from open_shrimp.backend.sessions import SessionInfo
@@ -219,6 +220,26 @@ class OpenCodeBackend:
         and flips its capabilities on then.
         """
         return {"mcp"}
+
+    def normalize_model(self, model: str | None) -> str | None:
+        """Identity — OpenCode models are already the wire name.
+
+        Models are addressed as ``provider/model``; there are no short
+        aliases to expand.
+        """
+        return model
+
+    def model_catalog(self) -> list[ModelChoice]:
+        """Empty — the model list comes from the live provider catalogue.
+
+        ``config_app`` serves that catalogue over its own endpoint, so there
+        is no fixed set of named choices to offer here.
+        """
+        return []
+
+    def is_known_model(self, model: str) -> bool:
+        """Provider-qualified names are recognised; bare names are not."""
+        return "/" in model
 
     def copy(self) -> BackendCopy:
         """Skip every copy site that doesn't apply to OpenCode.

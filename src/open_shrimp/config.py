@@ -702,6 +702,9 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
 
 def _parse(raw: dict) -> Config:
     """Parse validated raw dict into Config dataclass."""
+    from open_shrimp.backend.factory import DEFAULT_BACKEND, get_backend_by_name
+
+    default_backend = str(raw.get("backend") or DEFAULT_BACKEND)
     contexts = {}
     for name, ctx in raw["contexts"].items():
         # Parse container config: presence of the key implies enabled.
@@ -755,12 +758,18 @@ def _parse(raw: dict) -> Config:
                 f"Context '{name}': mcp must be a mapping"
             )
 
+        # Let the backend canonicalise its own model names, so the model a
+        # context runs is fixed here rather than by whichever binary serves
+        # the turn.  Backends without aliases normalise to identity.
+        ctx_backend = get_backend_by_name(ctx.get("backend") or default_backend)
+        ctx_model = ctx_backend.normalize_model(ctx.get("model"))
+
         contexts[name] = ContextConfig(
             directory=ctx["directory"],
             description=ctx["description"],
             allowed_tools=ctx["allowed_tools"],
             disallowed_tools=ctx.get("disallowed_tools", []),
-            model=ctx.get("model"),
+            model=ctx_model,
             effort=ctx.get("effort"),
             additional_directories=ctx.get("additional_directories", []),
             default_for_chats=ctx.get("default_for_chats", []),

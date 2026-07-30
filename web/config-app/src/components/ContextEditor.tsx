@@ -15,13 +15,13 @@ interface ContextEditorProps {
 
 type PathStatus = "idle" | "checking" | "valid" | "invalid";
 
+// Mirrors MODEL_CHOICES in backend/claude_sdk/models.py. Aliases are bare:
+// the [1m] suffix is redundant on these models and entitlement-gated.
 const MODELS = [
   { value: "", label: "CLI default" },
   { value: "fable", label: "fable" },
   { value: "opus", label: "opus" },
-  { value: "opus[1m]", label: "opus[1m]" },
   { value: "sonnet", label: "sonnet" },
-  { value: "sonnet[1m]", label: "sonnet[1m]" },
   { value: "haiku", label: "haiku" },
 ] as const;
 
@@ -286,7 +286,7 @@ export default function ContextEditor({
                 list="model-options"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder="CLI default, or e.g. claude-opus-4-8[1m]"
+                placeholder="CLI default, or e.g. claude-opus-4-8"
               />
               <datalist id="model-options">
                 {MODELS.filter((m) => m.value !== "").map((m) => (

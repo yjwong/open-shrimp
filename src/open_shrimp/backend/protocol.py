@@ -88,6 +88,20 @@ class BackendCopy:
     assistant_error_messages: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ModelChoice:
+    """One model a backend offers under a stable name.
+
+    ``alias`` is what the user types and what config may store; ``model_id``
+    is what goes on the wire.  ``description`` is the menu blurb shown by the
+    setup wizards.
+    """
+
+    alias: str
+    model_id: str
+    description: str
+
+
 @dataclass
 class BackendOptions:
     """The honoured intersection of every backend's option set.
@@ -337,6 +351,34 @@ class Backend(Protocol):
         See :class:`BackendCopy` for field semantics.  ``None`` on any
         field means "skip the corresponding site entirely" — distinct
         from an empty string.
+        """
+        ...
+
+    def normalize_model(self, model: str | None) -> str | None:
+        """Canonicalise a configured or overridden model for this backend.
+
+        Fixes the model a turn runs in OpenShrimp's own config rather than
+        deferring to whatever alias table the serving binary happens to hold.
+        Normalises only — an unrecognised value passes through untouched, and
+        ``None`` ("no model configured") survives as ``None``.
+        """
+        ...
+
+    def model_catalog(self) -> list["ModelChoice"]:
+        """The models this backend offers by name, in menu order.
+
+        Empty when the backend has no fixed catalogue to offer — e.g. one
+        that enumerates models from a live provider list instead.  Callers
+        render a picker only when this is non-empty, so "no aliases here"
+        follows from the data rather than from a backend-name check.
+        """
+        ...
+
+    def is_known_model(self, model: str) -> bool:
+        """Whether this backend recognises *model*, gating presentation only.
+
+        A false answer never blocks the model — it only lets a caller warn
+        that the value was not recognised.
         """
         ...
 
