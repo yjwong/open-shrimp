@@ -451,6 +451,92 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ── /model ──
 
 
+def _build_model_page(
+    backend: Any, ctx_default_model: str | None, current_override: str | None
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Render the /model status text plus a picker for the backend's catalog.
+
+    Backends with an empty catalog get text only — there is nothing to offer
+    as a button, so the picker is absent rather than empty.
+    """
+    in_effect = current_override or ctx_default_model or "CLI default"
+    label = "override" if current_override else "context default"
+    lines = [f"*Model:* `{_escape_mdv2(in_effect)}` \\({label}\\)"]
+    if current_override:
+        lines.append(
+            "*Context default:* "
+            f"`{_escape_mdv2(ctx_default_model or 'CLI default')}`"
+        )
+
+    catalog = backend.model_catalog()
+    if not catalog:
+        lines.append("")
+        lines.append("`/model <id>` to override, `/model reset` to revert\\.")
+        return "\n".join(lines), None
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    for choice in catalog:
+        selected = in_effect in (choice.alias, choice.model_id)
+        buttons.append([
+            InlineKeyboardButton(
+                f"{'• ' if selected else ''}{choice.alias} — {choice.model_id}",
+                callback_data=f"model:{choice.alias}",
+            )
+        ])
+    if current_override:
+        buttons.append([
+            InlineKeyboardButton(
+                "↩ Revert to context default", callback_data="model_reset"
+            )
+        ])
+
+    lines.append("")
+    lines.append("_Pick a model, or `/model <id>` for one not listed\\._")
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def handle_model_callback(
+    query: Any, data: str, config: Config, context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Handle /model picker presses. Returns True if handled."""
+    if not (data.startswith("model:") or data == "model_reset"):
+        return False
+
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if not query.message:
+        await query.answer("Cannot determine chat.")
+        return True
+
+    scope = chat_scope_from_message(query.message)
+    ctx_name = await _get_context_name(scope, config, db)
+    ctx = config.contexts[ctx_name]
+    backend = get_backend_by_name(effective_backend(ctx, config))
+
+    if data == "model_reset":
+        _model_overrides.pop(scope, None)
+        answer = "Reverted to context default"
+    else:
+        # Store the canonical name, same as the text path.
+        alias = data[len("model:"):]
+        _model_overrides[scope] = backend.normalize_model(alias) or alias
+        answer = f"Model set to {alias}"
+
+    await close_session(scope)
+
+    text, markup = _build_model_page(
+        backend, ctx.model, _model_overrides.get(scope)
+    )
+    try:
+        await query.message.edit_text(
+            text, parse_mode="MarkdownV2", reply_markup=markup
+        )
+    except Exception:
+        logger.exception("Failed to update model message")
+
+    await query.answer(answer)
+    return True
+
+
 async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /model command: show or override the model for this chat.
 
@@ -478,28 +564,12 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     args = message.text.split() if message.text else []
 
     if len(args) < 2:
-        # Show the model in effect, then whatever the backend offers by name.
-        in_effect = current_override or ctx_default_model or "CLI default"
-        label = "override" if current_override else "context default"
-        lines = [f"*Model:* `{_escape_mdv2(in_effect)}` \\({label}\\)"]
-        if current_override:
-            lines.append(
-                "*Context default:* "
-                f"`{_escape_mdv2(ctx_default_model or 'CLI default')}`"
-            )
-        catalog = backend.model_catalog()
-        if catalog:
-            lines.append("")
-            lines.append("*Aliases:*")
-            lines.extend(
-                f"`{_escape_mdv2(c.alias)}` → `{_escape_mdv2(c.model_id)}`"
-                for c in catalog
-            )
-        lines.append("")
-        lines.append(
-            "`/model <alias\\|id>` to override, `/model reset` to revert\\."
+        text, markup = _build_model_page(
+            backend, ctx_default_model, current_override
         )
-        await message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+        await message.reply_text(
+            text, parse_mode="MarkdownV2", reply_markup=markup
+        )
         return
 
     target = args[1]

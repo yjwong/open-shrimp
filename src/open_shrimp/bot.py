@@ -48,6 +48,7 @@ from open_shrimp.handlers.commands import (
     context_handler,
     effort_handler,
     handle_context_callback,
+    handle_model_callback,
     handle_resume_callback,
     login_handler,
     mcp_handler,
@@ -102,6 +103,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     # /context selection and pagination
     if await handle_context_callback(query, data, config, context):
+        return
+
+    # /model picker selection and reset
+    if await handle_model_callback(query, data, config, context):
         return
 
     # /resume session selection

@@ -20,7 +20,7 @@ MODEL_CHOICES: tuple[ModelChoice, ...] = (
         "claude-fable-5",
         "Most capable for your hardest and longest-running tasks",
     ),
-    ModelChoice("opus", "claude-opus-4-8", "Best for everyday, complex tasks"),
+    ModelChoice("opus", "claude-opus-5", "Best for everyday, complex tasks"),
     ModelChoice(
         "sonnet",
         "claude-sonnet-5",
@@ -35,6 +35,7 @@ _BY_ALIAS: dict[str, str] = {c.alias: c.model_id for c in MODEL_CHOICES}
 _ALSO_KNOWN: frozenset[str] = frozenset(
     {
         "claude-mythos-5",
+        "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
         "claude-opus-4-5",
