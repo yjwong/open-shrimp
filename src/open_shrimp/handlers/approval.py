@@ -28,7 +28,10 @@ from open_shrimp.handlers.state import (
     _pending_agent_inputs,
     _pending_session_dirs,
     _pending_tool_approvals,
+    register_pending_approval,
+    release_pending_approval,
     RESOLVED_VIA_ANDROID,
+    take_pending_approvals,
 )
 from open_shrimp.handlers.utils import _escape_mdv2
 from open_shrimp.hooks import ApprovalRule, HostBashOutcome
@@ -223,6 +226,9 @@ async def _send_approval_keyboard(
         _approval_futures[accept_all_tool_data] = future
     if accept_dir_data:
         _approval_futures[accept_dir_data] = future
+    pending = register_pending_approval(
+        scope, chat_id, sent_msg.message_id, future, bot=bot, text=text,
+    )
 
     try:
         result = await future
@@ -251,6 +257,7 @@ async def _send_approval_keyboard(
                     logger.exception("Failed to edit phone-resolved approval message")
         return result
     finally:
+        release_pending_approval(scope, pending)
         _approval_resolved_via.pop(tool_use_id, None)
         _approval_futures.pop(approve_data, None)
         _approval_futures.pop(deny_data, None)
@@ -266,6 +273,37 @@ async def _send_approval_keyboard(
         _pending_agent_inputs.pop(tool_use_id, None)
         _approval_tool_names.pop(tool_use_id, None)
         _approval_metadata.pop(tool_use_id, None)
+
+
+async def retire_pending_approvals(scope: ChatScope) -> None:
+    """Invalidate every live approval card for *scope*.
+
+    A card outliving its session still shows live buttons that nothing is
+    listening to, so the tap neither acts nor reports.  Strip the buttons,
+    say so on the card, and cancel the future to unblock any waiter.
+    """
+    for entry in take_pending_approvals(scope):
+        if not entry.future.done():
+            entry.future.cancel()
+        if entry.bot is None or entry.message_id is None:
+            continue
+        try:
+            await entry.bot.edit_message_text(
+                chat_id=entry.chat_id,
+                message_id=entry.message_id,
+                text=f"{entry.text}\n\n⚪️ *Session ended — no longer live\\.*",
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+        except Exception:
+            try:
+                await entry.bot.edit_message_reply_markup(
+                    chat_id=entry.chat_id,
+                    message_id=entry.message_id,
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.debug("Failed to retire approval card", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

@@ -63,8 +63,9 @@ logger = logging.getLogger(__name__)
 # common case carries no streaming overhead and stays consumable by clients
 # that don't speak SSE.
 _SSE_GRACE_SECONDS = 2.0
-# Keepalive comments (ignored by the SSE parser) while the tool runs, so any
-# intermediary idle timeout on the path stays reset.
+# Heartbeat interval while the tool runs, keeping both the path's HTTP idle
+# timeouts and the caller's JSON-RPC idle timer reset.  See
+# ``_sse_tool_stream`` for the two heartbeat forms.
 _SSE_KEEPALIVE_SECONDS = 15.0
 
 
@@ -227,7 +228,7 @@ def _create_proxy_app(
 
         request_id = body.get("id") if isinstance(body, dict) else None
         return StreamingResponse(
-            _sse_tool_stream(task, request_id),
+            _sse_tool_stream(task, request_id, _progress_token(body)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
@@ -259,20 +260,49 @@ def _sse_event(message: dict[str, Any]) -> bytes:
     return f"data: {payload}\n\n".encode("utf-8")
 
 
+def _progress_token(body: Any) -> Any:
+    """Extract ``params._meta.progressToken`` from a JSON-RPC request, if any."""
+    if not isinstance(body, dict):
+        return None
+    params = body.get("params")
+    if not isinstance(params, dict):
+        return None
+    meta = params.get("_meta")
+    if not isinstance(meta, dict):
+        return None
+    return meta.get("progressToken")
+
+
+def _progress_notification(token: Any, progress: int) -> dict[str, Any]:
+    """Build a ``notifications/progress`` message for an in-flight call."""
+    return {
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {"progressToken": token, "progress": progress},
+    }
+
+
 async def _sse_tool_stream(
     task: "asyncio.Future[dict[str, Any] | None]",
     request_id: Any,
+    progress_token: Any = None,
 ) -> "AsyncIterator[bytes]":
     """Stream a slow ``tools/call`` result as Server-Sent Events.
 
     The first byte is flushed immediately so the response headers reach the
     caller right away (releasing any request idle timeout, which fires before
-    headers arrive); keepalive comments hold the connection open until the
-    handler finishes, after which the JSON-RPC result is delivered as one
+    headers arrive), after which the JSON-RPC result is delivered as one
     ``data:`` event and the stream closes.
+
+    While the handler runs the stream heartbeats.  With a ``progressToken``
+    the heartbeat is a ``notifications/progress`` message rather than an SSE
+    comment: MCP clients police a call with an idle timer counted at the
+    JSON-RPC layer, where a comment is invisible, so a tool that blocks on a
+    human tap would otherwise be aborted mid-wait.
     """
     # Immediate flush: forces headers + first byte onto the wire now.
     yield b": open\n\n"
+    heartbeats = 0
     try:
         while True:
             done, _ = await asyncio.wait(
@@ -280,7 +310,13 @@ async def _sse_tool_stream(
             )
             if done:
                 break
-            yield b": keepalive\n\n"
+            heartbeats += 1
+            if progress_token is None:
+                yield b": keepalive\n\n"
+            else:
+                yield _sse_event(
+                    _progress_notification(progress_token, heartbeats),
+                )
         result = task.result()
         if result is not None:
             yield _sse_event(result)

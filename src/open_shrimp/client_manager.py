@@ -960,6 +960,12 @@ async def close_session(scope: ChatScope) -> None:
 
     await host_monitor.stop_scope_monitors(scope)
 
+    # Retire any card still on screen: the client about to be disconnected is
+    # the only thing that could have acted on a tap.
+    from open_shrimp.handlers.approval import retire_pending_approvals
+
+    await retire_pending_approvals(scope)
+
     session = _active_sessions.pop(scope, None)
     if session is None:
         return
@@ -1032,15 +1038,28 @@ async def close_sessions_for_context(context_name: str) -> int:
     return len(scopes)
 
 
+def _stale_scopes(now: float) -> list[ChatScope]:
+    """Scopes whose session has been idle past ``_IDLE_TIMEOUT``.
+
+    A session parked on an unanswered approval is never stale: an agent
+    blocked on a prompt streams no messages, so ``last_activity`` cannot
+    distinguish it from an abandoned session.
+    """
+    from open_shrimp.handlers.state import has_pending_approval
+
+    return [
+        scope for scope, session in _active_sessions.items()
+        if now - session.last_activity > _IDLE_TIMEOUT
+        and not has_pending_approval(scope)
+    ]
+
+
 async def _sweep_idle_sessions() -> None:
     """Periodically close sessions that have been idle too long."""
     while True:
         await asyncio.sleep(60)
         now = time.monotonic()
-        stale = [
-            scope for scope, session in _active_sessions.items()
-            if now - session.last_activity > _IDLE_TIMEOUT
-        ]
+        stale = _stale_scopes(now)
         for scope in stale:
             logger.info(
                 "Closing idle session for scope %s (idle %.0fs)",

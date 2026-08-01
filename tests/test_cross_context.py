@@ -859,3 +859,83 @@ async def test_outer_approval_card_omits_inline_for_self() -> None:
     approval = await task
     assert approval.outcome == "new_topic"
     assert approval.message_id == 9
+
+
+@pytest.mark.asyncio
+async def test_unanswered_card_does_not_hold_the_concurrency_slot(
+    monkeypatch,
+) -> None:
+    """A card awaiting a tap must not wedge other contexts' queries.
+
+    With the slot held across the approval, a later call blocks before it can
+    post a card of its own — leaving the user nothing to tap to clear it.
+    """
+    import asyncio
+
+    from open_shrimp import cross_context
+
+    monkeypatch.setattr(cross_context, "_semaphore", asyncio.Semaphore(1))
+
+    reached = asyncio.Event()
+    arrivals = 0
+    release = asyncio.Event()
+
+    async def _blocking_approval(**kwargs):
+        nonlocal arrivals
+        arrivals += 1
+        if arrivals >= 2:
+            reached.set()
+        await release.wait()
+        return _OuterApproval(outcome="deny")
+
+    monkeypatch.setattr(
+        cross_context, "_request_outer_approval", _blocking_approval,
+    )
+
+    tool = build_ask_context_tool(
+        bot=MagicMock(), chat_id=1, thread_id=None, config=_config(),
+        context_name="default",
+    )
+    assert tool is not None
+    args = {"context": "glints-delta-etl", "question": "q"}
+    tasks = [
+        asyncio.create_task(tool.handler(dict(args))) for _ in range(2)
+    ]
+    try:
+        await asyncio.wait_for(reached.wait(), timeout=2)
+    finally:
+        release.set()
+        results = await asyncio.gather(*tasks)
+
+    assert arrivals == 2
+    assert all(r.get("is_error") for r in results)
+
+
+@pytest.mark.asyncio
+async def test_outer_approval_registers_pending_card_for_scope() -> None:
+    """The card is discoverable per-scope while it waits, and only while."""
+    import asyncio
+
+    from open_shrimp.cross_context import _request_outer_approval
+    from open_shrimp.db import ChatScope
+    from open_shrimp.handlers.state import _approval_futures, has_pending_approval
+
+    scope = ChatScope(chat_id=1, thread_id=77)
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=9))
+
+    assert has_pending_approval(scope) is False
+    task = asyncio.create_task(_request_outer_approval(
+        bot=bot, chat_id=1, thread_id=77, target="default", question="q",
+    ))
+    while not bot.send_message.await_count:
+        await asyncio.sleep(0)
+
+    assert has_pending_approval(scope) is True
+
+    keyboard = bot.send_message.await_args.kwargs["reply_markup"]
+    deny_data = keyboard.inline_keyboard[0][-1].callback_data
+    _approval_futures[deny_data].set_result("deny")
+    await task
+
+    assert has_pending_approval(scope) is False

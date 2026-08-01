@@ -141,6 +141,82 @@ _approval_tool_names: dict[str, str] = {}
 _approval_metadata: dict[str, dict[str, Any]] = {}
 
 # ---------------------------------------------------------------------------
+# Live approval cards awaiting a decision, keyed by scope.  Read by the idle
+# sweep (a scope waiting on a human is not idle) and by session teardown
+# (a card must not outlive the client that would act on the tap).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PendingApproval:
+    """One live approval card and the future its buttons resolve.
+
+    Carries its own ``bot`` and card text so a card can be retired from
+    anywhere — teardown happens outside any handler that has them to hand.
+    """
+
+    chat_id: int
+    message_id: int | None
+    future: asyncio.Future[Any]
+    bot: Any
+    text: str
+
+
+_pending_approvals: dict[ChatScope, list[PendingApproval]] = {}
+
+
+def register_pending_approval(
+    scope: ChatScope | None,
+    chat_id: int,
+    message_id: int | None,
+    future: asyncio.Future[Any],
+    bot: Any = None,
+    text: str = "",
+) -> PendingApproval | None:
+    """Record a live approval card for *scope*; None when it has no scope."""
+    if scope is None:
+        return None
+    entry = PendingApproval(
+        chat_id=chat_id,
+        message_id=message_id,
+        future=future,
+        bot=bot,
+        text=text,
+    )
+    _pending_approvals.setdefault(scope, []).append(entry)
+    return entry
+
+
+def release_pending_approval(
+    scope: ChatScope | None, entry: PendingApproval | None,
+) -> None:
+    """Drop a card registered by :func:`register_pending_approval`."""
+    if scope is None or entry is None:
+        return
+    entries = _pending_approvals.get(scope)
+    if entries is None:
+        return
+    try:
+        entries.remove(entry)
+    except ValueError:
+        return
+    if not entries:
+        _pending_approvals.pop(scope, None)
+
+
+def has_pending_approval(scope: ChatScope) -> bool:
+    """Whether *scope* is parked on an approval the user has yet to answer."""
+    return any(
+        not entry.future.done() for entry in _pending_approvals.get(scope, ())
+    )
+
+
+def take_pending_approvals(scope: ChatScope) -> list[PendingApproval]:
+    """Remove and return every live card for *scope*."""
+    return _pending_approvals.pop(scope, [])
+
+
+# ---------------------------------------------------------------------------
 # Sessions where the user has opted into "accept all edits" for mutating
 # file-access tools (Edit, Write) within the context working directory.
 # Keyed by (scope, context_name).  Cleared on /clear or context switch.

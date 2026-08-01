@@ -53,8 +53,9 @@ logger = logging.getLogger(__name__)
 # boundary).
 _BASE_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
 
-# Bound concurrent cross-context queries so a fan-out of parallel
-# ``ask_context`` calls can't exhaust resources.
+# Bound concurrent sub-query *sessions* so a fan-out of parallel
+# ``ask_context`` calls can't exhaust resources. Approval waits are outside
+# this cap — see ``_run_query``.
 _MAX_CONCURRENT = 3
 _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
 
@@ -295,23 +296,22 @@ def build_ask_context_tool(
                 is_error=True,
             )
 
-        async with _semaphore:
-            return await _run_query(
-                bot=bot,
-                chat_id=chat_id,
-                thread_id=thread_id,
-                config=config,
-                target=target,
-                ctx=ctx,
-                question=question,
-                user_id=user_id,
-                is_private_chat=is_private_chat,
-                terminal_base_url=terminal_base_url,
-                sandbox_managers=sandbox_managers,
-                mcp_proxy=mcp_proxy,
-                db=db,
-                handoff_only=handoff_only,
-            )
+        return await _run_query(
+            bot=bot,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            config=config,
+            target=target,
+            ctx=ctx,
+            question=question,
+            user_id=user_id,
+            is_private_chat=is_private_chat,
+            terminal_base_url=terminal_base_url,
+            sandbox_managers=sandbox_managers,
+            mcp_proxy=mcp_proxy,
+            db=db,
+            handoff_only=handoff_only,
+        )
 
     return OpenShrimpTool(
         name="ask_context",
@@ -488,10 +488,13 @@ async def _request_outer_approval(
     """
     from telegram import InlineKeyboardButton
 
+    from open_shrimp.db import ChatScope
     from open_shrimp.handlers.state import (
         _approval_futures,
         _approval_metadata,
         _approval_tool_names,
+        register_pending_approval,
+        release_pending_approval,
     )
     from open_shrimp.handlers.utils import _escape_mdv2
 
@@ -543,9 +546,14 @@ async def _request_outer_approval(
         _approval_futures[inline_data] = future
     _approval_futures[topic_data] = future
     _approval_futures[deny_data] = future
+    scope = ChatScope(chat_id=chat_id, thread_id=thread_id)
+    pending = register_pending_approval(
+        scope, chat_id, sent.message_id, future, bot=bot, text=text,
+    )
     try:
         outcome = await future
     finally:
+        release_pending_approval(scope, pending)
         _approval_futures.pop(inline_data, None)
         _approval_futures.pop(topic_data, None)
         _approval_futures.pop(deny_data, None)
@@ -1082,10 +1090,7 @@ async def _run_query(
     db: Any | None = None,
     handoff_only: bool = False,
 ) -> dict[str, Any]:
-    """Orchestrate one cross-context query: approve, configure, run, report."""
-    from open_shrimp.client_manager import resolve_backend
-    from open_shrimp.config import is_sandboxed
-
+    """Orchestrate one cross-context query: approve, then dispatch."""
     approval = await _request_outer_approval(
         bot=bot,
         chat_id=chat_id,
@@ -1118,6 +1123,48 @@ async def _run_query(
             "supported; only the new-topic handoff is.",
             is_error=True,
         )
+
+    # Taken only once the user has chosen to run inline: holding the slot
+    # across the approval would let unanswered cards, which consume nothing,
+    # wedge every other context's queries behind a prompt no one can see.
+    async with _semaphore:
+        return await _run_inline_query(
+            bot=bot,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            config=config,
+            target=target,
+            ctx=ctx,
+            question=question,
+            user_id=user_id,
+            is_private_chat=is_private_chat,
+            terminal_base_url=terminal_base_url,
+            sandbox_managers=sandbox_managers,
+            mcp_proxy=mcp_proxy,
+        )
+
+
+async def _run_inline_query(
+    *,
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    config: "Config",
+    target: str,
+    ctx: "ContextConfig",
+    question: str,
+    user_id: int,
+    is_private_chat: bool,
+    terminal_base_url: str | None,
+    sandbox_managers: dict[str, Any] | None,
+    mcp_proxy: Any | None,
+) -> dict[str, Any]:
+    """Run an approved inline sub-query: launch, execute, report.
+
+    Runs under the concurrency semaphore, so it must never wait on the user.
+    """
+    from open_shrimp.client_manager import resolve_backend
+    from open_shrimp.config import is_sandboxed
 
     backend = resolve_backend(context=ctx)
     sandboxed = is_sandboxed(ctx)

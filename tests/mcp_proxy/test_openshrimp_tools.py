@@ -550,6 +550,70 @@ async def test_slow_tool_call_upgrades_to_sse(monkeypatch) -> None:
     assert payload["result"]["content"][0]["text"] == "slow-done"
 
 
+async def test_slow_tool_call_heartbeats_as_progress(monkeypatch) -> None:
+    """With a progressToken the heartbeat is a real progress notification.
+
+    MCP clients time out a call on JSON-RPC-level silence, where an SSE
+    comment is invisible.
+    """
+    monkeypatch.setattr(proxy_server, "_SSE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(proxy_server, "_SSE_KEEPALIVE_SECONDS", 0.05)
+
+    async def slow_handler(args):
+        await asyncio.sleep(0.3)
+        return {"content": [{"type": "text", "text": "slow-done"}]}
+
+    slow_tool = OpenShrimpTool(
+        name="slow", description="", input_schema={"type": "object"},
+        read_only=False, handler=slow_handler,
+    )
+    registry = ProxyRegistry()
+    token = registry.register_tool_scope(
+        context_name="c", chat_id=1, thread_id=None, user_id=5,
+        tool_factory=lambda: [slow_tool],
+    )
+    client, backing = await _client(registry)
+    try:
+        chunks: list[str] = []
+        async with client.stream(
+            "POST",
+            f"/tools/{token}",
+            json={
+                "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": {
+                    "name": "slow",
+                    "arguments": {},
+                    "_meta": {"progressToken": "tok-1"},
+                },
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            async for chunk in resp.aiter_text():
+                chunks.append(chunk)
+        body = "".join(chunks)
+    finally:
+        await client.aclose()
+        await backing.aclose()
+
+    assert ": keepalive" not in body
+    messages = [
+        json.loads(line[len("data: "):])
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+    progress = [
+        m for m in messages if m.get("method") == "notifications/progress"
+    ]
+    assert progress, body
+    assert all(m["params"]["progressToken"] == "tok-1" for m in progress)
+    # Progress must advance, per spec.
+    values = [m["params"]["progress"] for m in progress]
+    assert values == sorted(values) and len(set(values)) == len(values)
+    # The result still closes the stream.
+    assert messages[-1]["id"] == 7
+    assert messages[-1]["result"]["content"][0]["text"] == "slow-done"
+
+
 async def test_fast_tool_call_stays_json(monkeypatch) -> None:
     """A tool that returns within the grace window keeps the plain-JSON path."""
     monkeypatch.setattr(proxy_server, "_SSE_GRACE_SECONDS", 0.5)
