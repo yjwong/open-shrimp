@@ -6,8 +6,9 @@ The orchestration files (``hooks.py``, ``stream.py``,
 rendering.  No SDK imports — this is a pure structural contract sitting
 alongside ``backend/protocol.py``.
 
-See ``docs/tool-taxonomy-consolidation-plan.md`` for the motivation and
-the per-method semantics.
+Tool names, param keys, and approval-card copy are backend-specific; the
+orchestration files must never test for a native tool name directly, or
+adding a backend means editing every call site.
 """
 
 from __future__ import annotations

@@ -106,13 +106,13 @@ class ModelChoice:
 class BackendOptions:
     """The honoured intersection of every backend's option set.
 
-    Backend-specific knobs live in ``extra`` so call sites never branch.  On
-    ``master`` the only backend (``claude_sdk``) honours *every* field, so the
-    "accept but ignore" fields have no live effect yet — but they stay so the
-    ``client_manager`` call site does not change when a second backend lands.
+    Backend-specific knobs live in ``extra`` so call sites never branch.  A
+    field a backend cannot express is accepted and ignored rather than
+    rejected, so the ``client_manager`` call site is identical whichever
+    backend is selected.
 
-    ``system_prompt`` is typed ``Any`` (the reference draft types it
-    ``str | None``): the live SDK path passes a *preset-dict*
+    ``system_prompt`` is typed ``Any`` rather than ``str | None``: the SDK
+    path passes a *preset-dict*
     (``{"type": "preset", "preset": "claude_code", "append": ...}``,
     ``client_manager.py``), not a plain string.  The adapter accepts either
     shape and passes it through unchanged.

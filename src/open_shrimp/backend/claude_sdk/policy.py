@@ -4,8 +4,6 @@ This module owns the SDK's native tool vocabulary, param keys, and
 per-tool rendering.  It implements ``BackendPolicy`` and is consumed by
 the orchestration files (``hooks.py``, ``stream.py``,
 ``handlers/approval.py``) through that protocol.
-
-See ``docs/tool-taxonomy-consolidation-plan.md`` for the design.
 """
 
 from __future__ import annotations
