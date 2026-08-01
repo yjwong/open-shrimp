@@ -625,8 +625,15 @@ def create_openshrimp_tools(
                     "description": (
                         "The schedule expression. For 'interval': '30m', "
                         "'1h', '2d'. For 'cron': '0 9 * * 1-5' (9am "
-                        "weekdays). For 'once': ISO datetime like "
-                        "'2026-03-21T09:00:00'."
+                        "weekdays; weekdays are numbered the crontab way, "
+                        "0 and 7 both Sunday). For 'once': ISO datetime like "
+                        "'2026-03-21T09:00:00'. Times are wall-clock in "
+                        + (
+                            f"{config.events.timezone}"
+                            if config.events and config.events.timezone
+                            else "the bot host's local zone"
+                        )
+                        + " — do not convert to UTC yourself."
                     ),
                 },
                 "timeout_seconds": {
@@ -666,7 +673,7 @@ def create_openshrimp_tools(
                 context_name = config.default_context
 
             try:
-                validate_schedule(schedule_type, schedule_expr)
+                validate_schedule(schedule_type, schedule_expr, runner.timezone)
             except ValueError as exc:
                 return _text_result(f"Error: {exc}", is_error=True)
 

@@ -28,6 +28,7 @@ import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 from telegram import Bot
@@ -106,7 +107,109 @@ def parse_interval_seconds(expr: str) -> int:
     return seconds
 
 
-def validate_schedule(schedule_type: str, schedule_expr: str) -> None:
+# Indexed the crontab way: 0=Sunday..6=Saturday.  APScheduler 3.x indexes
+# weekdays 0=Monday instead, so a crontab day_of_week field passed through
+# untranslated shifts every weekday by one.
+_CRON_DAY_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+
+
+def _cron_day_number(text: str) -> int:
+    n = int(text)
+    if n > 7:
+        raise ValueError(
+            f"Invalid day of week: {n}. Expected 0-7 (0 and 7 are Sunday)."
+        )
+    return n % 7  # crontab accepts both 0 and 7 for Sunday.
+
+
+def _translate_day_of_week(field: str) -> str:
+    """Rewrite a crontab ``day_of_week`` field into APScheduler day names.
+
+    Each term is expanded into an explicit list of days rather than rewritten
+    in place, because the two conventions disagree on where the week starts:
+    a crontab range or step anchored on Sunday has no equivalent spelling in
+    APScheduler's Monday-first numbering ("0-6" would become the backwards
+    range "sun-sat", and "*/2" would silently shift by a day).
+    """
+    named: list[str] = []
+    terms: list[int] = []
+    for token in field.split(","):
+        token = token.strip()
+        if not token:
+            raise ValueError(f"Invalid day of week: {field!r} has an empty term.")
+        # Named days already mean the same thing under both conventions.
+        if any(c.isalpha() for c in token):
+            named.append(token)
+            continue
+
+        base, _, step_text = token.partition("/")
+        step = int(step_text) if step_text else 1
+        if step < 1:
+            raise ValueError(f"Invalid day-of-week step: {step_text!r}.")
+
+        if base == "*":
+            start, span = 0, 6
+        elif "-" in base:
+            start_text, _, end_text = base.partition("-")
+            start = _cron_day_number(start_text)
+            # A range whose end precedes its start wraps around the weekend.
+            span = (_cron_day_number(end_text) - start) % 7
+        elif step_text:
+            # crontab reads a bare "N/S" as "N through the end of the week",
+            # where the end is Sunday in its 7 spelling — so "5/2" is Fri+Sun.
+            start = _cron_day_number(base)
+            span = 7 - start
+        else:
+            start, span = _cron_day_number(base), 0
+
+        terms.extend((start + offset) % 7 for offset in range(0, span + 1, step))
+
+    # Dedupe while keeping the natural week order so the result reads cleanly.
+    return ",".join(named + [_CRON_DAY_NAMES[d] for d in sorted(set(terms))])
+
+
+def build_cron_trigger(schedule_expr: str, tz: str | None = None) -> Any:
+    """Build an APScheduler ``CronTrigger`` from a 5-field crontab expression.
+
+    Raises ValueError if the expression is malformed.
+    """
+    from apscheduler.triggers.cron import CronTrigger
+
+    parts = schedule_expr.strip().split()
+    if len(parts) != 5:
+        raise ValueError(
+            f"Cron expression must have 5 fields "
+            f"(minute hour day month day_of_week). Got {len(parts)} fields."
+        )
+    try:
+        return CronTrigger(
+            minute=parts[0],
+            hour=parts[1],
+            day=parts[2],
+            month=parts[3],
+            day_of_week=_translate_day_of_week(parts[4]),
+            timezone=tz,
+        )
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"Invalid cron expression: {exc}") from exc
+
+
+def parse_once_datetime(schedule_expr: str, tz: str | None = None) -> datetime:
+    """Parse a one-shot ISO timestamp into an aware UTC datetime.
+
+    A timestamp without an offset means the configured zone — the user asked
+    for a wall-clock time where they live, not wherever the bot is hosted.
+    """
+    dt = datetime.fromisoformat(schedule_expr)
+    if dt.tzinfo is None:
+        local = datetime.now().astimezone().tzinfo
+        dt = dt.replace(tzinfo=ZoneInfo(tz) if tz else local)
+    return dt.astimezone(timezone.utc)
+
+
+def validate_schedule(
+    schedule_type: str, schedule_expr: str, tz: str | None = None
+) -> None:
     """Validate a schedule type and expression.
 
     Raises ValueError with a user-friendly message if invalid.
@@ -126,25 +229,7 @@ def validate_schedule(schedule_type: str, schedule_expr: str) -> None:
             )
 
     elif schedule_type == "cron":
-        # Validate cron by trying to construct an APScheduler CronTrigger.
-        from apscheduler.triggers.cron import CronTrigger
-
-        parts = schedule_expr.strip().split()
-        if len(parts) != 5:
-            raise ValueError(
-                f"Cron expression must have 5 fields "
-                f"(minute hour day month day_of_week). Got {len(parts)} fields."
-            )
-        try:
-            trigger = CronTrigger(
-                minute=parts[0],
-                hour=parts[1],
-                day=parts[2],
-                month=parts[3],
-                day_of_week=parts[4],
-            )
-        except (ValueError, TypeError) as exc:
-            raise ValueError(f"Invalid cron expression: {exc}") from exc
+        trigger = build_cron_trigger(schedule_expr, tz)
 
         # Check minimum interval for cron: reject "* * * * *" (every minute)
         # by checking if the trigger would fire within _MIN_INTERVAL_SECONDS.
@@ -162,12 +247,7 @@ def validate_schedule(schedule_type: str, schedule_expr: str) -> None:
 
     elif schedule_type == "once":
         try:
-            dt = datetime.fromisoformat(schedule_expr)
-            if dt.tzinfo is None:
-                # Treat naive datetimes as UTC.
-                dt = dt.replace(tzinfo=timezone.utc)
-            else:
-                dt = dt.astimezone(timezone.utc)
+            dt = parse_once_datetime(schedule_expr, tz)
         except ValueError as exc:
             raise ValueError(
                 f"Invalid datetime for one-shot schedule: {schedule_expr!r}. "
@@ -205,9 +285,18 @@ class ScheduleRunner:
         self._db = db
         self._job_queue = job_queue
         self._chat_id = events.chat_id
+        # Pinned at construction: re-registering every job on a hot reload to
+        # pick up a zone change is not worth the churn, and the zone is the
+        # kind of setting that changes once at most.
+        self._timezone = events.timezone
         self._semaphore = asyncio.Semaphore(_MAX_CONCURRENT_TASKS)
         # Currently-executing task IDs, to enforce max_instances=1.
         self._running_ids: set[int] = set()
+
+    @property
+    def timezone(self) -> str | None:
+        """The IANA zone schedules are interpreted in, or None for host-local."""
+        return self._timezone
 
     async def start(self) -> None:
         global _active_runner
@@ -243,16 +332,8 @@ class ScheduleRunner:
                 )
 
             elif task.schedule_type == "cron":
-                from apscheduler.triggers.cron import CronTrigger
+                trigger = build_cron_trigger(task.schedule_expr, self._timezone)
 
-                parts = task.schedule_expr.strip().split()
-                trigger = CronTrigger(
-                    minute=parts[0],
-                    hour=parts[1],
-                    day=parts[2],
-                    month=parts[3],
-                    day_of_week=parts[4],
-                )
                 # Use run_custom to register cron jobs through PTB's JobQueue
                 # wrapper.  Direct scheduler.add_job() bypasses PTB's args
                 # wrapping, which causes get_jobs_by_name() to crash with
@@ -264,11 +345,7 @@ class ScheduleRunner:
                 )
 
             elif task.schedule_type == "once":
-                dt = datetime.fromisoformat(task.schedule_expr)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                else:
-                    dt = dt.astimezone(timezone.utc)
+                dt = parse_once_datetime(task.schedule_expr, self._timezone)
 
                 # Skip one-shot tasks whose time has passed.
                 if dt <= datetime.now(timezone.utc):
@@ -337,11 +414,7 @@ class ScheduleRunner:
             # Delete stale one-shot tasks.
             if task.schedule_type == "once":
                 try:
-                    dt = datetime.fromisoformat(task.schedule_expr)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    else:
-                        dt = dt.astimezone(timezone.utc)
+                    dt = parse_once_datetime(task.schedule_expr, self._timezone)
                     if dt <= datetime.now(timezone.utc):
                         await delete_scheduled_task_by_id(self._db, task.id)
                         logger.info(

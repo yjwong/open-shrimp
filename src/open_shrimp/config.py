@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
 _VALID_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
@@ -166,6 +167,10 @@ class EventSourceConfig:
 class EventsConfig:
     chat_id: int  # forum chat where per-source topics are created
     sources: list[EventSourceConfig] = field(default_factory=list)
+    # IANA zone that cron/once schedules are interpreted in.  Absent means the
+    # host's local zone, which makes a task's wall-clock time depend on where
+    # the bot happens to run; set it to pin schedules to a real place.
+    timezone: str | None = None
 
 
 _EVENT_SOURCE_TYPES = {"telegram", "lark"}
@@ -809,6 +814,16 @@ def _parse(raw: dict) -> Config:
     events_raw = raw.get("events")
     events: EventsConfig | None = None
     if events_raw is not None:
+        events_tz = events_raw.get("timezone")
+        if events_tz is not None:
+            try:
+                ZoneInfo(str(events_tz))
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid events.timezone: {events_tz!r}. "
+                    f"Expected an IANA zone name like 'Asia/Singapore'."
+                ) from exc
+
         events = EventsConfig(
             chat_id=events_raw["chat_id"],
             sources=[
@@ -827,6 +842,7 @@ def _parse(raw: dict) -> Config:
                 )
                 for s in events_raw.get("sources", [])
             ],
+            timezone=events_raw.get("timezone"),
         )
 
     meetings_raw = raw.get("meetings")

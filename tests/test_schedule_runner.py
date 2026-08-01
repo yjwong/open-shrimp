@@ -58,7 +58,7 @@ class FakeBot:
 
 def _config():
     return SimpleNamespace(
-        events=SimpleNamespace(chat_id=EVENTS_CHAT_ID),
+        events=SimpleNamespace(chat_id=EVENTS_CHAT_ID, timezone=None),
         contexts={"dev": SimpleNamespace()},
     )
 

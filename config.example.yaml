@@ -180,6 +180,12 @@ default_context: default
 # tool (untrusted content never enters a prompt).
 # events:
 #   chat_id: -1001234567890        # forum chat where 📥 topics are created
+#   timezone: Asia/Singapore       # IANA zone that scheduled-task times are
+#                                  # interpreted in — both cron expressions and
+#                                  # one-shot timestamps without an offset.
+#                                  # Omit to use the bot host's local zone,
+#                                  # which makes "9am" depend on where the bot
+#                                  # runs rather than where you are.
 #   sources:
 #     - name: tg-intake
 #       type: telegram

@@ -137,7 +137,10 @@ async def test_tools_list_private_chat_excludes_edit_topic() -> None:
     token = _register_tools(
         registry,
         db=object(),
-        config=SimpleNamespace(default_context="default", events=object()),
+        config=SimpleNamespace(
+            default_context="default",
+            events=SimpleNamespace(chat_id=-100, timezone=None),
+        ),
     )
     client, backing = await _client(registry)
     try:
@@ -374,7 +377,10 @@ async def test_tools_list_names_match_factory() -> None:
     bot = FakeBot()
     kwargs = dict(
         bot=bot, chat_id=1, thread_id=9, db=object(),
-        config=SimpleNamespace(default_context="default", events=object()),
+        config=SimpleNamespace(
+            default_context="default",
+            events=SimpleNamespace(chat_id=-100, timezone=None),
+        ),
         user_id=10, is_private_chat=False, host_bash_workdir=None,
     )
     token = _register_tools(
@@ -411,7 +417,10 @@ async def test_read_only_hint_parity() -> None:
     bot = FakeBot()
     kwargs = dict(
         bot=bot, chat_id=1, thread_id=9, db=object(),
-        config=SimpleNamespace(default_context="default", events=object()),
+        config=SimpleNamespace(
+            default_context="default",
+            events=SimpleNamespace(chat_id=-100, timezone=None),
+        ),
         user_id=10, is_private_chat=False, host_bash_workdir="/tmp",
     )
     token = _register_tools(
