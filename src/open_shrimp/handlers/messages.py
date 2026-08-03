@@ -10,6 +10,7 @@ from typing import Any
 
 import aiosqlite
 from telegram import Bot, Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from open_shrimp.agent import (
@@ -37,6 +38,7 @@ from open_shrimp.handlers.approval import (
     _send_host_bash_approval,
 )
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
+from open_shrimp.markdown import escape as _escape_md
 from open_shrimp.handlers.questions import (
     _complete_other_input,
     _handle_ask_user_questions,
@@ -153,9 +155,51 @@ async def _prepend_reply_context(
 # ---------------------------------------------------------------------------
 
 
+# The Bot API refuses ``getFile`` above this size.  The cap belongs to the API
+# server, so pointing the bot at a self-hosted one lifts it.
+_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+
+
+def _describe_size(size: int | None) -> str:
+    """Render an attachment size for a user-facing message."""
+    if size is None:
+        return "unknown size"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+async def _fetch_file(
+    bot: Bot, file_id: str, size: int | None, label: str, skipped: list[str]
+) -> bytes | None:
+    """Download one attachment's bytes.
+
+    Returns ``None`` and appends a user-facing reason to ``skipped`` when the
+    file cannot be retrieved, so that one unusable attachment never costs the
+    user the others sent alongside it.
+    """
+    if size is not None and size > _MAX_DOWNLOAD_BYTES:
+        logger.warning(
+            "Attachment %r (%s) exceeds the Bot API download limit",
+            label, _describe_size(size),
+        )
+        skipped.append(f"{label} — {_describe_size(size)}, over the 20 MB limit")
+        return None
+    try:
+        file = await bot.get_file(file_id)
+        return bytes(await file.download_as_bytearray())
+    except TelegramError as exc:
+        logger.warning("Failed to download attachment %r", label, exc_info=True)
+        # Telegram omits file_size on some attachments, so the limit can still
+        # be hit here despite the check above.
+        if "too big" in str(exc).lower():
+            skipped.append(f"{label} — over the 20 MB limit")
+        else:
+            skipped.append(f"{label} — download failed: {exc}")
+        return None
+
+
 async def _download_telegram_photos(
     messages: list[Any], bot: Bot
-) -> list[FileAttachment]:
+) -> tuple[list[FileAttachment], list[str]]:
     """Download photos from one or more Telegram messages and return as FileAttachments.
 
     Each message may contain one photo (represented as a list of PhotoSize
@@ -163,54 +207,66 @@ async def _download_telegram_photos(
     each message.
     """
     attachments: list[FileAttachment] = []
+    skipped: list[str] = []
     for message in messages:
         if not message.photo:
             continue
         # message.photo is a list of PhotoSize objects sorted by size.
         # Take the largest one (last element) for best quality.
         photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        photo_bytes = bytes(await file.download_as_bytearray())
+        photo_bytes = await _fetch_file(
+            bot, photo.file_id, photo.file_size, "photo", skipped
+        )
+        if photo_bytes is None:
+            continue
         attachments.append(FileAttachment(data=photo_bytes, mime_type="image/jpeg"))
-    return attachments
+    return attachments, skipped
 
 
 async def _download_telegram_documents(
     messages: list[Any], bot: Bot
-) -> list[FileAttachment]:
+) -> tuple[list[FileAttachment], list[str]]:
     """Download documents from one or more Telegram messages and return as FileAttachments.
 
     Telegram documents include PDFs, text files, and other non-photo file
     uploads.  Each message may have at most one document.
     """
     attachments: list[FileAttachment] = []
+    skipped: list[str] = []
     for message in messages:
         if not message.document:
             continue
         doc = message.document
-        file = await bot.get_file(doc.file_id)
-        doc_bytes = bytes(await file.download_as_bytearray())
+        doc_bytes = await _fetch_file(
+            bot, doc.file_id, doc.file_size, doc.file_name or "document", skipped
+        )
+        if doc_bytes is None:
+            continue
         mime_type = doc.mime_type or "application/octet-stream"
         filename = doc.file_name
         attachments.append(FileAttachment(data=doc_bytes, mime_type=mime_type, filename=filename))
-    return attachments
+    return attachments, skipped
 
 
 async def _download_telegram_audio(
     messages: list[Any], bot: Bot
-) -> list[FileAttachment]:
+) -> tuple[list[FileAttachment], list[str]]:
     """Download Telegram audio messages and return as FileAttachments."""
     attachments: list[FileAttachment] = []
+    skipped: list[str] = []
     for message in messages:
         if not message.audio:
             continue
         audio = message.audio
-        file = await bot.get_file(audio.file_id)
-        audio_bytes = bytes(await file.download_as_bytearray())
+        audio_bytes = await _fetch_file(
+            bot, audio.file_id, audio.file_size, audio.file_name or "audio", skipped
+        )
+        if audio_bytes is None:
+            continue
         mime_type = audio.mime_type or "audio/mpeg"
         filename = audio.file_name
         attachments.append(FileAttachment(data=audio_bytes, mime_type=mime_type, filename=filename))
-    return attachments
+    return attachments, skipped
 
 
 async def _download_telegram_voice(
@@ -229,14 +285,54 @@ async def _download_telegram_voice(
 
 async def _download_all_attachments(
     messages: list[Any], bot: Bot
-) -> list[FileAttachment]:
-    """Download all photos, documents, and audio files from messages concurrently."""
-    photos, docs, audio = await asyncio.gather(
+) -> tuple[list[FileAttachment], list[str]]:
+    """Download all photos, documents, and audio files from messages concurrently.
+
+    Returns the attachments that were retrieved plus a user-facing reason for
+    each one that was not.  A failing kind never aborts the others.
+    """
+    results = await asyncio.gather(
         _download_telegram_photos(messages, bot),
         _download_telegram_documents(messages, bot),
         _download_telegram_audio(messages, bot),
+        return_exceptions=True,
     )
-    return photos + docs + audio
+    attachments: list[FileAttachment] = []
+    skipped: list[str] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning("Attachment download failed", exc_info=result)
+            skipped.append(f"an attachment — download failed: {result}")
+            continue
+        downloaded, missed = result
+        attachments.extend(downloaded)
+        skipped.extend(missed)
+    return attachments, skipped
+
+
+async def _warn_skipped_attachments(
+    bot: Bot, scope: ChatScope, skipped: list[str]
+) -> None:
+    """Tell the user which attachments never reached the agent, and why.
+
+    Attachment failures are reported rather than swallowed: a silently dropped
+    file is indistinguishable from the bot ignoring the message.
+    """
+    if not skipped:
+        return
+    lines = "\n".join(f"• {_escape_md(item)}" for item in skipped)
+    header = _escape_md(
+        "Couldn't read this file:" if len(skipped) == 1 else "Couldn't read these files:"
+    )
+    try:
+        await bot.send_message(
+            chat_id=scope.chat_id,
+            text=f"{header}\n{lines}",
+            parse_mode="MarkdownV2",
+            **_thread_kwargs(scope),
+        )
+    except Exception:
+        logger.warning("Failed to report skipped attachments for scope %s", scope, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -374,11 +470,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Download photo, document, and audio attachments if present
     attachments: list[FileAttachment] = []
     if has_photo or has_document or has_audio:
-        attachments = await _download_all_attachments([message], context.bot)
+        attachments, skipped = await _download_all_attachments([message], context.bot)
         logger.info(
-            "Downloaded %d attachment(s) for scope %s (%d bytes)",
-            len(attachments), scope, sum(len(att.data) for att in attachments),
+            "Downloaded %d attachment(s) for scope %s (%d bytes), %d skipped",
+            len(attachments), scope, sum(len(att.data) for att in attachments), len(skipped),
         )
+        await _warn_skipped_attachments(context.bot, scope, skipped)
+        # Nothing arrived and the prompt was only ever a stand-in for the
+        # files — there is nothing for the agent to answer.
+        if skipped and not attachments and not raw_text and not has_location:
+            return
 
     await _dispatch_to_agent(
         prompt, attachments, scope, config, db, context,
@@ -493,11 +594,17 @@ async def _handle_media_group_message(
             else:
                 prompt = "What's in these files?"
 
-        attachments = await _download_all_attachments(messages, context.bot)
+        attachments, skipped = await _download_all_attachments(messages, context.bot)
         logger.info(
-            "Media group %s complete: %d attachment(s) for scope %s (%d bytes)",
-            group_id, len(attachments), scope, sum(len(att.data) for att in attachments),
+            "Media group %s complete: %d attachment(s) for scope %s (%d bytes), %d skipped",
+            group_id, len(attachments), scope,
+            sum(len(att.data) for att in attachments), len(skipped),
         )
+        await _warn_skipped_attachments(context.bot, scope, skipped)
+        # Nothing arrived and the prompt was only ever a stand-in for the
+        # files — there is nothing for the agent to answer.
+        if skipped and not attachments and not raw_text:
+            return
 
         await _dispatch_to_agent(
             prompt, attachments, scope, config, db, context,
