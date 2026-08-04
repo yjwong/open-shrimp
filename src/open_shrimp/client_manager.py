@@ -713,6 +713,23 @@ async def get_or_create_session(
                     pickup_event_id=pickup_event_id,
                 )
 
+            # Some sandbox backends can't reach host loopback services
+            # directly (the HCS NAT gateway forwards egress but not inbound to
+            # the host).  Those expose ``ensure_host_port_forward`` to bring up
+            # a guest→host relay for the proxy port before it is addressed.
+            if (
+                is_containerized
+                and sandbox is not None
+                and hasattr(sandbox, "ensure_host_port_forward")
+            ):
+                try:
+                    sandbox.ensure_host_port_forward(mcp_proxy.port)
+                except Exception:
+                    logger.warning(
+                        "Failed to set up guest→host forward for the MCP proxy",
+                        exc_info=True,
+                    )
+
             # Sandboxed CLIs must reach the host proxy via the sandbox's
             # host address; non-sandboxed CLIs use loopback.
             host_ip = (

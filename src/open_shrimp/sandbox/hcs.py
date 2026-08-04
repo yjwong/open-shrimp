@@ -118,6 +118,7 @@ class HcsSandbox:
         # Live handles, populated by ensure_running.
         self._runtime_id: str | None = None
         self._ep_props: dict | None = None
+        self._forwarded_ports: set[int] = set()
 
     # -- identity helpers -----------------------------------------------------
 
@@ -148,16 +149,15 @@ class HcsSandbox:
 
     @property
     def host_address(self) -> str:
-        """The NAT gateway the guest routes host traffic through.
+        """Loopback — the guest reaches host services through the guest→host
+        relay, which listens on the guest's own ``127.0.0.1`` and bridges to
+        the host's ``127.0.0.1`` over hvsocket.
 
-        Read from the live endpoint properties (the ``.1`` of the collision-
-        checked subnet); falls back to the deterministic first-host address
-        when the endpoint is not yet up.
+        The HNS NAT gateway forwards guest egress to the internet but not
+        inbound to host loopback, so the gateway address is unusable for
+        reaching the MCP proxy; the relay makes loopback the right answer.
         """
-        props = self._ep_props or self._endpoint_props()
-        if props and props.get("GatewayAddress"):
-            return str(props["GatewayAddress"])
-        return "169.254.0.1"
+        return "127.0.0.1"
 
     # -- share plan -----------------------------------------------------------
 
@@ -287,6 +287,8 @@ class HcsSandbox:
     def _stage_cfg_share(self) -> None:
         exec_src = Path(__file__).with_name("hcs_exec_agent.py")
         shutil.copyfile(exec_src, self._cfg_dir / "exec_agent.py")
+        relay_src = Path(__file__).with_name("hcs_host_relay.py")
+        shutil.copyfile(relay_src, self._cfg_dir / "host_relay.py")
         provision = self._config.provision
         (self._cfg_dir / "provision.sh").write_text(
             provision or "", encoding="utf-8", newline="\n",
@@ -336,6 +338,7 @@ class HcsSandbox:
         from open_shrimp.sandbox import hcs_win as W
 
         self._log(log_file, "Booting HCS sandbox...")
+        self._forwarded_ports.clear()  # a fresh VM has no guest relay running
         self._teardown_stale()
 
         subnet = H.pick_subnet(W.hcn_network_prefixes())
@@ -533,6 +536,27 @@ class HcsSandbox:
             self._hcs_install(self)
         if self._runtime.provision_credentials is not None:
             self._runtime.provision_credentials(self._claude_home_dir)
+
+    def ensure_host_port_forward(self, host_port: int) -> None:
+        """Make host ``127.0.0.1:host_port`` reachable from the guest.
+
+        Starts the process-wide host relay (once) and a guest-side relay
+        listener on the same loopback port, so the agent CLI can reach the
+        OpenShrimp MCP proxy.  Idempotent per port; a no-op once forwarded.
+        """
+        if host_port in self._forwarded_ports or self._runtime_id is None:
+            return
+        from open_shrimp.sandbox import hcs_win as W
+
+        W.ensure_host_relay(self._runtime_id)
+        chan = W.ControlChannel(self._runtime_id, H.CONTROL_PORT)
+        chan.run(
+            f"sh -c 'chroot {H.MNT_ROOT} /usr/bin/env PATH={H.CHROOT_PATH} "
+            f"python3 {H.CHROOT_CFG_DIR}/host_relay.py {host_port} "
+            f"</dev/null >/tmp/host-relay-{host_port}.log 2>&1 &'",
+            tolerate_read_timeout=True, read_timeout=4.0,
+        )
+        self._forwarded_ports.add(host_port)
 
     def guest_exec(
         self, argv: list[str], *, read_timeout: float = 120.0,

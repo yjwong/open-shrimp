@@ -592,6 +592,114 @@ class ControlChannel:
         return ok and "openshrimp-ping" in out
 
 
+# ---------------------------------------------------------------------------
+# Guest→host relay (host half): AF_HYPERV accept → 127.0.0.1:<port> bridge
+# ---------------------------------------------------------------------------
+
+_GUEST_COMM_KEY = (
+    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization"
+    r"\GuestCommunicationServices"
+)
+
+_host_relay_lock = threading.Lock()
+_host_relay_vms: set[str] = set()
+_host_relay_registered = False
+
+
+def register_guest_comm_service(port: int, name: str) -> None:
+    """Register the vsock service GUID so guests may connect to a host app.
+
+    The ``GuestCommunicationServices`` hive is the guest→host allow-list; a
+    host ``AF_HYPERV`` listener is only reachable from a guest once its
+    service GUID is registered here.  Idempotent; needs HKLM write (the bot
+    already runs with the Hyper-V-admin token HCS requires).
+    """
+    import winreg
+
+    guid = vsock_service_id(port)
+    with winreg.CreateKey(
+        winreg.HKEY_LOCAL_MACHINE, f"{_GUEST_COMM_KEY}\\{guid}",
+    ) as key:
+        winreg.SetValueEx(key, "ElementName", 0, winreg.REG_SZ, name)
+
+
+def _relay_pipe(src: socket.socket, dst: socket.socket) -> None:
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+def _relay_handle(conn: socket.socket) -> None:
+    upstream = None
+    try:
+        hdr = b""
+        while len(hdr) < 2:
+            chunk = conn.recv(2 - len(hdr))
+            if not chunk:
+                return
+            hdr += chunk
+        port = (hdr[0] << 8) | hdr[1]
+        upstream = socket.create_connection(("127.0.0.1", port), timeout=10)
+    except OSError:
+        conn.close()
+        return
+    t = threading.Thread(target=_relay_pipe, args=(conn, upstream), daemon=True)
+    t.start()
+    _relay_pipe(upstream, conn)
+    conn.close()
+    upstream.close()
+
+
+def _relay_accept(srv: socket.socket) -> None:
+    while True:
+        try:
+            conn, _addr = srv.accept()
+        except OSError:
+            return
+        threading.Thread(target=_relay_handle, args=(conn,), daemon=True).start()
+
+
+def ensure_host_relay(runtime_id: str) -> None:
+    """Start the host relay listener for one VM (once per RuntimeId).
+
+    The relay service GUID is registered once (process-wide); the
+    ``AF_HYPERV`` listener must bind to the VM's **RuntimeId** — a wildcard or
+    children VmId is never routed guest connections on this stack, only the
+    per-VM RuntimeId is.  Every sandbox guest reaches host loopback services
+    through its own listener.
+    """
+    global _host_relay_registered
+    from open_shrimp.sandbox.hcs_helpers import RELAY_PORT
+
+    with _host_relay_lock:
+        if not _host_relay_registered:
+            register_guest_comm_service(RELAY_PORT, "openshrimp-hcs-relay")
+            _host_relay_registered = True
+        if runtime_id in _host_relay_vms:
+            return
+        srv = socket.socket(
+            socket.AF_HYPERV, socket.SOCK_STREAM, socket.HV_PROTOCOL_RAW,
+        )
+        srv.bind((runtime_id, vsock_service_id(RELAY_PORT)))
+        srv.listen(64)
+        threading.Thread(target=_relay_accept, args=(srv,), daemon=True).start()
+        _host_relay_vms.add(runtime_id)
+        logger.info(
+            "HCS host relay listening for VM %s on hvsocket port 0x%x",
+            runtime_id, RELAY_PORT,
+        )
+
+
 def vsock_port_reachable(runtime_id: str, port: int, timeout: float = 3.0) -> bool:
     """True when something in the guest accepts on vsock *port*."""
     s = socket.socket(

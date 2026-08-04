@@ -34,6 +34,11 @@ from pathlib import Path, PureWindowsPath
 CONTROL_PORT = 0x5000
 #: The in-rootfs exec server (one long-lived CLI session per connection).
 EXEC_PORT = 0x5001
+#: The guest→host relay: the guest dials AF_VSOCK CID_HOST:this, the host
+#: accepts on AF_HYPERV and bridges to a host-loopback TCP port.  This is how
+#: the sandbox reaches host services (the MCP proxy) that bind 127.0.0.1 — the
+#: HNS NAT gateway forwards guest egress but not inbound to host loopback.
+RELAY_PORT = 0x5002
 
 #: Plan9 share vsock ports, in declaration order.
 P9_PORT_WORKSPACE = 564
