@@ -522,6 +522,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+hcs = [
+    { name = "win32more" },
+]
 lark = [
     { name = "lark-oapi" },
 ]
@@ -562,8 +565,9 @@ requires-dist = [
     { name = "tree-sitter-bash", specifier = ">=0.23,<1.0" },
     { name = "uvicorn", extras = ["standard"] },
     { name = "watchfiles", specifier = ">=1.0" },
+    { name = "win32more", marker = "extra == 'hcs'", specifier = "==0.8.1" },
 ]
-provides-extras = ["lark", "libvirt", "macos"]
+provides-extras = ["hcs", "lark", "libvirt", "macos"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1469,4 +1473,123 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/86/eb/20b6cdf273913d0ad05a6a14aed4b9a85591c18a987a3d47f20fa13dcc47/websockets-15.0.1-cp313-cp313-win32.whl", hash = "sha256:ba9e56e8ceeeedb2e080147ba85ffcd5cd0711b89576b83784d8605a7df455fa", size = 176393, upload-time = "2025-03-05T20:02:53.814Z" },
     { url = "https://files.pythonhosted.org/packages/1b/6c/c65773d6cab416a64d191d6ee8a8b1c68a09970ea6909d16965d26bfed1e/websockets-15.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:e09473f095a819042ecb2ab9465aee615bd9c2028e4ef7d933600a8401c79561", size = 176837, upload-time = "2025-03-05T20:02:55.237Z" },
     { url = "https://files.pythonhosted.org/packages/fa/a8/5b41e0da817d64113292ab1f8247140aac61cbf6cfd085d6a0fa77f4984f/websockets-15.0.1-py3-none-any.whl", hash = "sha256:f7a866fbc1e97b5c617ee4116daaa09b722101d4a3c170c787450ba409f9736f", size = 169743, upload-time = "2025-03-05T20:03:39.41Z" },
+]
+
+[[package]]
+name = "win32more"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "win32more-appsdk" },
+    { name = "win32more-core" },
+    { name = "win32more-microsoft-graphics-win2d" },
+    { name = "win32more-microsoft-web-webview2" },
+    { name = "win32more-microsoft-windows-sdk-contracts" },
+    { name = "win32more-microsoft-windows-sdk-win32metadata" },
+    { name = "win32more-microsoft-windows-wdk-win32metadata" },
+    { name = "win32more-microsoft-windowsappsdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/54/b2/296ede14cdd2bd0bfb90fef262e945918480f43e0211744427c6d7e9f721/win32more-0.8.1.tar.gz", hash = "sha256:07cea83d8b1b27cb807448a8683428e17865827059bd5c844d07e89c68367dda", size = 4845, upload-time = "2026-05-20T12:15:46.246Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/58/3e6522eb9d77650e58df059051cd92900328b5096111cfead8ff7f789bd7/win32more-0.8.1-py3-none-any.whl", hash = "sha256:13066e92ac818be7746a3f1bb41ca2990d38cdb3273dda2c707b52658cbeef40", size = 3675, upload-time = "2026-05-20T12:15:45.048Z" },
+]
+
+[[package]]
+name = "win32more-appsdk"
+version = "0.8.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "win32more-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4b/ab/cced60a7a2041f4c8a416e65de4aef1246ac241b88447e024e511cb22fa9/win32more_appsdk-0.8.3.tar.gz", hash = "sha256:c0aac4e383c9aa4e8eb20196ad7771bb92e91b1aab0abbf215d443d3adba8c71", size = 11308, upload-time = "2026-05-15T15:01:34.936Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/52/e7e79475d31d93c4bf17a29a80787ab46202d39c3156a555dd4c97028ca0/win32more_appsdk-0.8.3-py2.py3-none-any.whl", hash = "sha256:3fb9d6e7ae3e9299713a17e3753258999b09759c95a20887a192560f5c17d82d", size = 12912, upload-time = "2026-05-15T15:01:36.03Z" },
+]
+
+[[package]]
+name = "win32more-core"
+version = "0.8.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/ef/aed2f3db7565ca343d474d8dff628e2576db466c858d37b0e31e0ed05f39/win32more_core-0.8.6.tar.gz", hash = "sha256:957860aa08fa0aa556da998491efa57198c0cc3193883aa55f60233a6d94a172", size = 24969, upload-time = "2026-07-25T11:39:02.581Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/8a/d0c4f0a276709677440c92fdf4530b6f018afbef2729f036ba0b9ee4338d/win32more_core-0.8.6-py2.py3-none-any.whl", hash = "sha256:1c87889ef147be41ebba8534ae508b5d7283e6f234a57cd13b931a2f5202fda0", size = 29635, upload-time = "2026-07-25T11:39:01.573Z" },
+]
+
+[[package]]
+name = "win32more-microsoft-graphics-win2d"
+version = "0.8.1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "win32more-core" },
+    { name = "win32more-microsoft-windowsappsdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/44/c1/d9b7c0cfd9292efb45fbdf23aa758c4c0727469dd7a3cc77e50536cb914f/win32more_microsoft_graphics_win2d-0.8.1.4.0.tar.gz", hash = "sha256:d95197936a8ba96014b26f496b983b47b450bf365dd3ca5bf624867ac5be27b5", size = 1911025, upload-time = "2026-03-20T06:59:49.349Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/5d/31cce00a5194204852dd429d319219cd27adf625cd5bef6d963fdd87d4bd/win32more_microsoft_graphics_win2d-0.8.1.4.0-py2.py3-none-any.whl", hash = "sha256:959f725bff94f3e76d4aee78d76e7d462f0e90ed763332e1320f597068e3eab3", size = 1968416, upload-time = "2026-03-20T06:59:47.359Z" },
+]
+
+[[package]]
+name = "win32more-microsoft-web-webview2"
+version = "0.8.1.0.4129.50"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "win32more-core" },
+    { name = "win32more-microsoft-windows-sdk-contracts" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b6/ca/278dceecac5731c2ee84d4246a88f40343f61f60a7d706a0cd382262b090/win32more_microsoft_web_webview2-0.8.1.0.4129.50.tar.gz", hash = "sha256:af2d95da33cf8d909824502923bc2b98dbde00d1357b3412445d99c9bb615d70", size = 888272, upload-time = "2026-08-03T13:11:45.321Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/5f/4ecdb6413e8050aa5c613004dbd826b24ca66ce26093be57006f896fd231/win32more_microsoft_web_webview2-0.8.1.0.4129.50-py2.py3-none-any.whl", hash = "sha256:9a592ad7e1bd2e0e592d7844b2f804379b6f30680d107c19b890b7c31f97387f", size = 910322, upload-time = "2026-08-03T13:11:43.419Z" },
+]
+
+[[package]]
+name = "win32more-microsoft-windows-sdk-contracts"
+version = "0.8.10.0.28000.2526"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "win32more-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a7/b6/aebeb95e63c653fd9b2471795cdec1f175ee1914ddf63cc737a74eab523c/win32more_microsoft_windows_sdk_contracts-0.8.10.0.28000.2526.tar.gz", hash = "sha256:fb260848cb34ac9434f321ea49f67a2a52e15a5c71640479780f01f425c1ddc7", size = 1645728, upload-time = "2026-07-25T09:48:37.669Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/68/ca1322690c2262233d425a7ea5817f4af3442fef6bf26a0278f655c5469f/win32more_microsoft_windows_sdk_contracts-0.8.10.0.28000.2526-py2.py3-none-any.whl", hash = "sha256:4574438100e381c1899c2c7b3eb7ef10d06aa9ddc2a59f7e00760c6f032c6af9", size = 1816078, upload-time = "2026-07-25T09:48:35.682Z" },
+]
+
+[[package]]
+name = "win32more-microsoft-windows-sdk-win32metadata"
+version = "0.8.71.0.14"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "win32more-core" },
+    { name = "win32more-microsoft-windows-sdk-contracts" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d1/30/4a7cf5f9375ba517dab0b8a42a266d6b4a53cea8a4ab2d69e557a2a016a3/win32more_microsoft_windows_sdk_win32metadata-0.8.71.0.14.tar.gz", hash = "sha256:39a8db691a3bb8f1ac24f416ae9d592268debe81b128ed68dcd34ade9b5d2f87", size = 3897642, upload-time = "2026-06-26T13:32:20.495Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/5f/5adce3f282c7be9ec07b0be853efc2ce02d18d882bce549e3154c174dec6/win32more_microsoft_windows_sdk_win32metadata-0.8.71.0.14-py2.py3-none-any.whl", hash = "sha256:4e1aecd55c0139fda56b118c645193cacd9ff18ab20d7e45bbd19092711032e9", size = 4042741, upload-time = "2026-06-26T13:32:18.359Z" },
+]
+
+[[package]]
+name = "win32more-microsoft-windows-wdk-win32metadata"
+version = "0.8.0.13.25"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "win32more-core" },
+    { name = "win32more-microsoft-windows-sdk-win32metadata" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/34/98/c1900d0393c757d39bcf4db4e74e1b80b19b71f16a57e3b090dec9dfd66a/win32more_microsoft_windows_wdk_win32metadata-0.8.0.13.25.tar.gz", hash = "sha256:4b42783c57caaabcd731535ab31039f84f08af6d5dbd8e86a097e70953253df6", size = 259270, upload-time = "2026-05-20T12:12:28.273Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/21/f2/8f2305ec575e8c1b4ca8a70a67bcf6ce39590d1c0e2b19f0d023a3da6e8d/win32more_microsoft_windows_wdk_win32metadata-0.8.0.13.25-py2.py3-none-any.whl", hash = "sha256:07f5b4ed77f7958825971d0450a93730d9f0e73f092ea9875b862219d7308f0b", size = 264813, upload-time = "2026-05-20T12:12:26.313Z" },
+]
+
+[[package]]
+name = "win32more-microsoft-windowsappsdk"
+version = "0.8.2.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "win32more-appsdk" },
+    { name = "win32more-core" },
+    { name = "win32more-microsoft-web-webview2" },
+    { name = "win32more-microsoft-windows-sdk-contracts" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/84/b3/f7f2736de5f2d80d9bbf1a0c6f754bcba2b320e6fde0fb36d3e31bac351b/win32more_microsoft_windowsappsdk-0.8.2.3.1.tar.gz", hash = "sha256:a1f5b0b879d132fd5a5e9231e8a85588fadf65f7af0a1ae21c23164d5157014c", size = 1182557, upload-time = "2026-07-17T11:05:38.868Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/30/63038b49baea6a296fb3754fccf1420178bdbac70b6ed4215489c4861579/win32more_microsoft_windowsappsdk-0.8.2.3.1-py2.py3-none-any.whl", hash = "sha256:dd74ea98d5de6ed2ab18e415bea827327c0d7969105ba065b20c5175d1b97561", size = 1244032, upload-time = "2026-07-17T11:05:37.282Z" },
 ]
