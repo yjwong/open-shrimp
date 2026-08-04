@@ -602,8 +602,19 @@ _GUEST_COMM_KEY = (
 )
 
 _host_relay_lock = threading.Lock()
-_host_relay_vms: set[str] = set()
+_host_relay_sockets: dict[str, socket.socket] = {}
 _host_relay_registered = False
+# The only host ports the relay may bridge to.  The guest is the untrusted
+# party a sandbox contains, so a guest-supplied port is validated against this
+# allow-list — the relay is a path to the MCP proxy, never a general host
+# loopback pivot.
+_relay_allowed_ports: set[int] = set()
+
+
+def allow_relay_port(port: int) -> None:
+    """Permit the guest→host relay to bridge to host ``127.0.0.1:port``."""
+    with _host_relay_lock:
+        _relay_allowed_ports.add(port)
 
 
 def register_guest_comm_service(port: int, name: str) -> None:
@@ -649,6 +660,15 @@ def _relay_handle(conn: socket.socket) -> None:
                 return
             hdr += chunk
         port = (hdr[0] << 8) | hdr[1]
+        with _host_relay_lock:
+            allowed = port in _relay_allowed_ports
+        if not allowed:
+            logger.warning(
+                "HCS relay refused guest connection to non-allowlisted host "
+                "port %d", port,
+            )
+            conn.close()
+            return
         upstream = socket.create_connection(("127.0.0.1", port), timeout=10)
     except OSError:
         conn.close()
@@ -685,7 +705,7 @@ def ensure_host_relay(runtime_id: str) -> None:
         if not _host_relay_registered:
             register_guest_comm_service(RELAY_PORT, "openshrimp-hcs-relay")
             _host_relay_registered = True
-        if runtime_id in _host_relay_vms:
+        if runtime_id in _host_relay_sockets:
             return
         srv = socket.socket(
             socket.AF_HYPERV, socket.SOCK_STREAM, socket.HV_PROTOCOL_RAW,
@@ -693,11 +713,27 @@ def ensure_host_relay(runtime_id: str) -> None:
         srv.bind((runtime_id, vsock_service_id(RELAY_PORT)))
         srv.listen(64)
         threading.Thread(target=_relay_accept, args=(srv,), daemon=True).start()
-        _host_relay_vms.add(runtime_id)
+        _host_relay_sockets[runtime_id] = srv
         logger.info(
             "HCS host relay listening for VM %s on hvsocket port 0x%x",
             runtime_id, RELAY_PORT,
         )
+
+
+def close_host_relay(runtime_id: str) -> None:
+    """Close the relay listener for a torn-down VM.
+
+    Closing the socket makes the ``_relay_accept`` loop's ``accept`` raise and
+    the thread exit, so a bot that rebuilds sandboxes does not leak a listener
+    + thread per dead RuntimeId.
+    """
+    with _host_relay_lock:
+        srv = _host_relay_sockets.pop(runtime_id, None)
+    if srv is not None:
+        try:
+            srv.close()
+        except OSError:
+            pass
 
 
 def vsock_port_reachable(runtime_id: str, port: int, timeout: float = 3.0) -> bool:

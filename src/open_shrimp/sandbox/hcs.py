@@ -29,14 +29,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import shutil
-import stat
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import TYPE_CHECKING
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.agent_runtime import (
@@ -46,6 +46,9 @@ from open_shrimp.sandbox.agent_runtime import (
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox import hcs_helpers as H
+
+if TYPE_CHECKING:
+    from open_shrimp.sandbox.hcs_win import ControlChannel
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,25 @@ class HcsSandbox:
         self._additional_directories = additional_directories or []
         self._instance_prefix = instance_prefix
         self._runtime = runtime
+
+        # The guest sees drive-relative POSIX paths (C:\a\b -> /a/b), and the
+        # approval layer maps a guest path back with os.path.realpath, which on
+        # Windows resolves against the process's current drive.  That mapping is
+        # only injective — and the boundary check only sound — when every shared
+        # directory is on that one drive.  Refuse anything off it rather than
+        # silently mis-scope the boundary.
+        cwd_drive = PureWindowsPath(os.getcwd()).drive.upper()
+        for label, d in [("directory", project_dir),
+                         *[("additional_directories", a)
+                           for a in self._additional_directories]]:
+            drive = PureWindowsPath(d).drive.upper()
+            if drive != cwd_drive:
+                raise RuntimeError(
+                    f"HCS sandbox context {label} {d!r} is on drive {drive!r}, "
+                    f"but the process runs on {cwd_drive!r}. All sandbox "
+                    "directories must share the process drive so the approval "
+                    "boundary maps guest paths correctly."
+                )
 
         self._sdir = state_dir
         self._claude_home_dir = self._sdir / "claude-home"
@@ -329,7 +351,7 @@ class HcsSandbox:
         if rid is not None:
             self._runtime_id = rid
             self._log(log_file, "Reattaching to running HCS sandbox...")
-            self._provision_guest(log_file=log_file)
+            self._reattach_guest(log_file=log_file)
             return
 
         self._boot(log_file=log_file)
@@ -428,18 +450,17 @@ class HcsSandbox:
         ):
             ctl(f"@mount {port} {name} {mnt} {opts}", expect="MOUNT-OK")
         for i, extra in enumerate(self._additional_directories):
-            gp = H.windows_to_guest_path(extra)
-            ctl(f"sh -c 'mkdir -p /mnt/add{i}'")
+            ctl(f"mkdir -p /mnt/add{i}")
             ctl(f"@mount {H.P9_PORT_EXTRA_BASE + i} add{i} /mnt/add{i} {opts}",
                 expect="MOUNT-OK")
 
         # 2. Mount the rootfs VHDX by ext4 label, and proc/sys/dev inside it.
         ctl(
-            "sh -c 'dev=$(labelfind clauderoot); echo DEV=$dev; "
+            f"dev=$(labelfind {H.ROOTFS_LABEL}); echo DEV=$dev; "
             f"mount -t ext4 \"$dev\" {H.MNT_ROOT} && echo ROOT-MOUNT-OK; "
             f"mount -t proc proc {H.MNT_ROOT}/proc; "
             f"mount -t sysfs sysfs {H.MNT_ROOT}/sys; "
-            f"mount -t devtmpfs dev {H.MNT_ROOT}/dev'",
+            f"mount -t devtmpfs dev {H.MNT_ROOT}/dev",
             expect="ROOT-MOUNT-OK",
         )
 
@@ -455,8 +476,12 @@ class HcsSandbox:
             binds.append(
                 (f"/mnt/add{i}", f"{H.MNT_ROOT}{H.windows_to_guest_path(extra)}")
             )
+        # Guest paths derive from user config (project dir, additional dirs),
+        # which routinely contain spaces on Windows; every interpolated path is
+        # shell-quoted so a space or quote cannot split the command or break out.
         for src, dst in binds:
-            ctl(f"sh -c 'mkdir -p {dst} && mount -o bind {src} {dst}'")
+            ctl(f"mkdir -p {shlex.quote(dst)} && "
+                f"mount -o bind {shlex.quote(src)} {shlex.quote(dst)}")
 
         # 4. Persistent volumes: format-if-blank, mount by label — via the
         #    rootfs's own e2fsprogs (the control initramfs busybox has no
@@ -466,12 +491,19 @@ class HcsSandbox:
         for idx, guest_path in enumerate(self._persistent_paths()):
             dev = f"/dev/{H.persistent_dev_name(idx)}"
             label = H.persistent_vol_label(guest_path)
-            ctl(
-                f"chroot {H.MNT_ROOT} /usr/bin/env PATH={H.CHROOT_PATH} sh -c '"
+            # The guest path is passed as a positional arg ($1) to the inner
+            # chroot sh, never spliced into the single-quoted script — and
+            # shell-quoted for the agent's outer sh.  label/dev are safe
+            # (hex/fixed).  A blank disk is formatted at its LUN device; a
+            # formatted one resolves by label, so attach-order drift is inert.
+            inner = (
                 f"d=$(blkid -L {label} 2>/dev/null || true); "
                 f"if [ -z \"$d\" ]; then mkfs.ext4 -q -L {label} {dev}; d={dev}; fi; "
-                f"mkdir -p {guest_path} && mount -t ext4 \"$d\" {guest_path} "
-                f"&& echo PV-OK'",
+                'mkdir -p "$1" && mount -t ext4 "$d" "$1" && echo PV-OK'
+            )
+            ctl(
+                f"chroot {H.MNT_ROOT} /usr/bin/env PATH={H.CHROOT_PATH} "
+                f"sh -c {shlex.quote(inner)} _ {shlex.quote(guest_path)}",
                 expect="PV-OK", read_timeout=120.0,
             )
 
@@ -484,25 +516,51 @@ class HcsSandbox:
                 expect="PROVISION-DONE", read_timeout=600.0,
             )
 
-        # 6. Start the exec agent inside the chroot; it must be able to bind
-        #    vsock, so it runs against the guest's own network namespace.
-        ctl(
-            f"sh -c 'chroot {H.MNT_ROOT} /usr/bin/env HOME=/root "
-            f"PATH={H.CHROOT_PATH} python3 {H.CHROOT_CFG_DIR}/exec_agent.py "
-            f"{H.EXEC_PORT} </dev/null >/tmp/exec-agent.log 2>&1 &'",
-            tolerate_read_timeout=True, read_timeout=4.0,
-        )
-        for _ in range(40):
-            if W.vsock_port_reachable(self._runtime_id, H.EXEC_PORT):
-                break
-            time.sleep(0.25)
-        else:
-            raise RuntimeError("exec agent never bound its vsock port")
+        # 6. Start the exec agent inside the chroot (against the guest's own
+        #    network namespace, so it can bind vsock).
+        self._start_exec_agent(chan)
 
         # 7. Push the static network config from the endpoint properties.
         self._configure_network(chan)
 
-    def _configure_network(self, chan) -> None:
+    def _start_exec_agent(self, chan: "ControlChannel") -> None:
+        """(Re)start the in-chroot vsock exec server and wait for it to bind.
+
+        Split out so the reattach path can restart just the exec agent without
+        re-running the one-shot mount sequence.
+        """
+        from open_shrimp.sandbox import hcs_win as W
+
+        chan.run(
+            f"chroot {H.MNT_ROOT} /usr/bin/env HOME=/root "
+            f"PATH={H.CHROOT_PATH} python3 {H.CHROOT_CFG_DIR}/exec_agent.py "
+            f"{H.EXEC_PORT} </dev/null >/tmp/exec-agent.log 2>&1 &",
+            tolerate_read_timeout=True, read_timeout=4.0,
+        )
+        for _ in range(40):
+            if W.vsock_port_reachable(self._runtime_id, H.EXEC_PORT):
+                return
+            time.sleep(0.25)
+        raise RuntimeError("exec agent never bound its vsock port")
+
+    def _reattach_guest(self, *, log_file: Path | None) -> None:
+        """Recover a Running compute system whose exec agent died.
+
+        The compute system stays on its original boot (``StopOnReset`` turns a
+        guest reset into a stop), so the shares and rootfs are still mounted —
+        only the exec agent needs restarting.  If that fails the guest is
+        unhealthy, so fall back to a clean reboot.
+        """
+        from open_shrimp.sandbox import hcs_win as W
+
+        chan = W.ControlChannel(self._runtime_id, H.CONTROL_PORT)
+        try:
+            self._start_exec_agent(chan)
+        except RuntimeError:
+            self._log(log_file, "Reattach failed; rebooting HCS sandbox...")
+            self._boot(log_file=log_file)
+
+    def _configure_network(self, chan: "ControlChannel") -> None:
         props = self._ep_props or self._endpoint_props()
         if not props or not props.get("IPAddress"):
             logger.warning("no endpoint IP; guest egress will be unavailable")
@@ -548,6 +606,7 @@ class HcsSandbox:
             return
         from open_shrimp.sandbox import hcs_win as W
 
+        W.allow_relay_port(host_port)
         W.ensure_host_relay(self._runtime_id)
         chan = W.ControlChannel(self._runtime_id, H.CONTROL_PORT)
         chan.run(
@@ -669,11 +728,11 @@ class HcsSandbox:
             # rootfs is reborn every boot, so only these journals matter.
             chan = W.ControlChannel(rid, H.CONTROL_PORT)
             umounts = " ".join(
-                f"umount {H.MNT_ROOT}{gp} 2>/dev/null;"
+                f"umount {shlex.quote(H.MNT_ROOT + gp)} 2>/dev/null;"
                 for gp in self._persistent_paths()
             )
             chan.run(
-                f"sh -c 'sync; {umounts} sync; echo FLUSH-OK'",
+                f"sync; {umounts} sync; echo FLUSH-OK",
                 read_timeout=30.0,
             )
 
@@ -700,7 +759,10 @@ class HcsSandbox:
             finally:
                 op.close()
 
+        if rid is not None:
+            W.close_host_relay(rid)
         self._runtime_id = None
+        self._forwarded_ports.clear()
         self._runtime_id_file().unlink(missing_ok=True)
 
     def destroy(self) -> None:
@@ -893,7 +955,12 @@ class HcsSandbox:
             try:
                 dest = uploads / host_path.name
                 shutil.copyfile(host_path, dest)
-                result.append(Path(f"{ws}/.openshrimp-uploads/{host_path.name}"))
+                # The guest is Linux: return a POSIX path so its string form
+                # keeps forward slashes when spliced into the agent's prompt
+                # (a WindowsPath would stringify with backslashes).
+                result.append(
+                    PurePosixPath(ws) / ".openshrimp-uploads" / host_path.name
+                )
             except OSError:
                 logger.warning("failed to stage upload %s", host_path, exc_info=True)
                 result.append(host_path)

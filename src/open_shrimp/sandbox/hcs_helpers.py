@@ -58,6 +58,11 @@ MNT_ROOT = "/mnt/root"
 #: surfaces inside the rootfs chroot.
 CHROOT_CFG_DIR = "/run/openshrimp"
 
+#: The ext4 volume label the operator's ``base_image`` VHDX is formatted with;
+#: the guest resolves and mounts the rootfs by this label.  It is a disk
+#: convention of the supplied image, not the identity of any agent.
+ROOTFS_LABEL = "clauderoot"
+
 #: Console marker printed by the initramfs agent once its vsock listener is
 #: up; the cold-boot path waits for it before opening the control channel.
 AGENT_MARKER = b"AGENT-LISTENING"
