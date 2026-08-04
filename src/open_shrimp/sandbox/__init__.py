@@ -3,6 +3,7 @@
 from open_shrimp.sandbox.base import Sandbox
 from open_shrimp.sandbox.manager import (
     DockerSandboxManager,
+    HcsSandboxManager,
     LibvirtSandboxManager,
     LimaSandboxManager,
     SandboxManager,
@@ -13,6 +14,7 @@ from open_shrimp.sandbox.manager import (
 
 __all__ = [
     "DockerSandboxManager",
+    "HcsSandboxManager",
     "LibvirtSandboxManager",
     "LimaSandboxManager",
     "Sandbox",

@@ -1190,6 +1190,187 @@ class LibvirtSandboxManager:
 
 
 # ---------------------------------------------------------------------------
+# HCS implementation (Windows)
+# ---------------------------------------------------------------------------
+
+
+class HcsSandboxManager:
+    """Host Compute Service–backed :class:`SandboxManager` for native Windows.
+
+    One HCS compute system per context, cached by ``context_name``.  The
+    per-instance :class:`~open_shrimp.sandbox.hcs.HcsSandbox` refuses to
+    construct off Windows, so importing this manager elsewhere is harmless.
+    """
+
+    def __init__(self) -> None:
+        self._instance_prefix = "openshrimp"
+        self._container_label = "openshrimp"  # unused, but protocol requires it
+        self._sandbox_cache: dict[str, Sandbox] = {}
+        self._sandbox_runtime: dict[str, str] = {}
+
+        self._active_builds: dict[str, Path] = {}
+        self._active_builds_lock = threading.Lock()
+
+        self._build_log_dir = _build_log_dir()
+        self._state_dir = _data_dir() / "hcs"
+
+    # -- Instance naming ------------------------------------------------------
+
+    def set_instance_prefix(self, instance_name: str | None) -> None:
+        if instance_name:
+            self._instance_prefix = f"openshrimp-{instance_name}"
+            self._container_label = f"openshrimp-{instance_name}"
+        else:
+            self._instance_prefix = "openshrimp"
+            self._container_label = "openshrimp"
+
+    @property
+    def instance_prefix(self) -> str:
+        return self._instance_prefix
+
+    @property
+    def container_label(self) -> str:
+        return self._container_label
+
+    # -- Global lifecycle -----------------------------------------------------
+
+    def start_reaper(self) -> None:
+        """No reaper needed — HCS compute systems are enumerable by Owner and
+        terminated explicitly; there is no crash-orphan daemon."""
+
+    def stop_reaper(self) -> None:
+        pass
+
+    def stop_all(self) -> None:
+        for sandbox in list(self._sandbox_cache.values()):
+            try:
+                sandbox.stop()
+            except Exception:
+                logger.debug("Error stopping HCS sandbox", exc_info=True)
+        self._sandbox_cache.clear()
+        self._sandbox_runtime.clear()
+
+    # -- Invalidation ----------------------------------------------------------
+
+    def invalidate_sandbox(self, context_name: str) -> None:
+        self._sandbox_runtime.pop(context_name, None)
+        cached = self._sandbox_cache.pop(context_name, None)
+        if cached is not None:
+            try:
+                cached.stop()
+            except Exception:
+                logger.debug("Error stopping HCS sandbox %s", context_name, exc_info=True)
+            logger.info("Invalidated HCS sandbox for context '%s'", context_name)
+
+    def get_active_sandbox(self, context_name: str) -> Sandbox | None:
+        return self._sandbox_cache.get(context_name)
+
+    def destroy_context(self, context_name: str) -> None:
+        cached = self._sandbox_cache.get(context_name)
+        if cached is not None and hasattr(cached, "destroy"):
+            try:
+                cached.destroy()
+            except Exception:
+                logger.debug("Error destroying HCS sandbox %s", context_name, exc_info=True)
+        self.invalidate_sandbox(context_name)
+
+        shutil.rmtree(self._state_dir / context_name, ignore_errors=True)
+        self.unregister_build(context_name)
+        logger.info("Destroyed HCS resources for context '%s'", context_name)
+
+    def cleanup_orphans(self, active_contexts: set[str]) -> None:
+        if not self._state_dir.exists():
+            return
+        for child in self._state_dir.iterdir():
+            if child.is_dir() and child.name not in active_contexts:
+                logger.info("Orphan HCS context found: %s", child.name)
+                self.destroy_context(child.name)
+
+    # -- Factory --------------------------------------------------------------
+
+    def create_sandbox(
+        self, context_name: str, context: ContextConfig,
+        *, runtime: "AgentRuntime | None" = None,
+    ) -> Sandbox:
+        cached = self._sandbox_cache.get(context_name)
+        if cached is not None:
+            if runtime is None or self._sandbox_runtime.get(context_name) == runtime.name:
+                return cached
+            logger.info(
+                "Runtime changed for context '%s' (%s -> %s); rebuilding sandbox",
+                context_name,
+                self._sandbox_runtime.get(context_name),
+                runtime.name,
+            )
+            self.invalidate_sandbox(context_name)
+
+        assert context.sandbox is not None
+
+        from open_shrimp.sandbox.hcs import HcsSandbox
+
+        sandbox = HcsSandbox(
+            context_name=context_name,
+            config=context.sandbox,
+            project_dir=context.directory,
+            state_dir=self._state_dir / context_name,
+            additional_directories=context.additional_directories or None,
+            instance_prefix=self._instance_prefix,
+            runtime=runtime,
+        )
+        self._sandbox_cache[context_name] = sandbox
+        if runtime is not None:
+            self._sandbox_runtime[context_name] = runtime.name
+        return sandbox
+
+    # -- Build logging --------------------------------------------------------
+
+    def register_build(self, context_name: str) -> Path:
+        self._build_log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._build_log_dir / f"{context_name}.log"
+        log_path.write_bytes(b"")
+        with self._active_builds_lock:
+            self._active_builds[context_name] = log_path
+        register_active_build(context_name, log_path, self)
+        logger.info(
+            "Registered build log for context '%s': %s", context_name, log_path,
+        )
+        return log_path
+
+    def unregister_build(self, context_name: str) -> None:
+        with self._active_builds_lock:
+            self._active_builds.pop(context_name, None)
+        unregister_active_build(context_name)
+        logger.info("Unregistered build for context '%s'", context_name)
+
+        log_path = self._build_log_dir / f"{context_name}.log"
+
+        def _cleanup() -> None:
+            try:
+                log_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        timer = threading.Timer(3600, _cleanup)
+        timer.daemon = True
+        timer.start()
+
+    def is_build_active(self, context_name: str) -> bool:
+        with self._active_builds_lock:
+            return context_name in self._active_builds
+
+    @property
+    def build_log_dir(self) -> Path:
+        return self._build_log_dir
+
+    @property
+    def state_dir(self) -> Path:
+        return self._state_dir
+
+    def agent_home_dir(self, context_name: str) -> Path:
+        return self._state_dir / context_name / "claude-home"
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -1209,6 +1390,7 @@ _MANAGER_FACTORIES: dict[str, type[SandboxManager]] = {
     "docker": DockerSandboxManager,
     "libvirt": LibvirtSandboxManager,
     "lima": LimaSandboxManager,
+    "hcs": HcsSandboxManager,
 }
 
 
@@ -1238,4 +1420,6 @@ def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
         managers["libvirt"] = create_sandbox_manager("libvirt")
     if "lima" in backends:
         managers["lima"] = create_sandbox_manager("lima")
+    if "hcs" in backends:
+        managers["hcs"] = create_sandbox_manager("hcs")
     return managers

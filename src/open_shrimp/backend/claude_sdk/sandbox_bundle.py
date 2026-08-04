@@ -15,6 +15,9 @@ from open_shrimp.backend.claude_sdk.libvirt_install import (
 from open_shrimp.backend.claude_sdk.lima_install import (
     ensure_claude_cli_in_vm,
 )
+from open_shrimp.backend.claude_sdk.hcs_install import (
+    install_claude_cli_in_hcs,
+)
 from open_shrimp.sandbox.agent_runtime import ImageBundle
 
 
@@ -40,4 +43,5 @@ def claude_image_bundle() -> ImageBundle:
         computer_use_build_args=(("INSTALL_CLAUDE_CODE", "true"),),
         libvirt_install=install_claude_cli_via_ssh,
         lima_install=ensure_claude_cli_in_vm,
+        hcs_install=install_claude_cli_in_hcs,
     )

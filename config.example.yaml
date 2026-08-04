@@ -53,7 +53,7 @@ contexts:
     # locked_for_chats:
     #   - -1001234567890  # Locks this group chat to this context (cannot switch)
     # sandbox:                     # Run the Claude CLI in an isolated sandbox.
-    #   backend: docker            # "docker" (Linux), "libvirt" (Linux VM), or "lima" (macOS VM)
+    #   backend: docker            # "docker" (Linux), "libvirt" (Linux VM), "lima" (macOS VM), or "hcs" (Windows VM)
     #                              # Provides strong filesystem isolation — the agent
     #                              # can only access the project directory and its
     #                              # own session storage.
@@ -108,6 +108,26 @@ contexts:
     #   # disk_size: 20             # VM disk in GB (default: 20)
     #   # provision: |              # Shell script run on first boot
     #   #   apt-get install -y nodejs npm
+    #   # HCS backend (Windows only) — a Linux guest under the Host Compute
+    #   # Service, the layer beneath WSL2/Windows Sandbox. Install the extra:
+    #   #   pip install 'open-shrimp[hcs]'   (win32more; needs WSL's kernel).
+    #   # backend: hcs
+    #   # base_image: C:\path\to\rootfs.vhdx  # REQUIRED. An ext4 VHDX labelled
+    #   #                          # `clauderoot` holding the Linux userland +
+    #   #                          # Node.js + the agent CLI. Copied per context
+    #   #                          # (the guest root); persistent_paths survive a
+    #   #                          # rebuild, the rootfs is reborn on every boot.
+    #   # memory: 2048             # Guest memory in MB (default: 2048)
+    #   # cpus: 2                  # Guest vCPUs (default: 2)
+    #   # disk_size: 20            # GB per persistent_paths VHDX (dynamic/sparse)
+    #   # persistent_paths:        # Guest dirs backed by a dedicated ext4 VHDX,
+    #   #   - /home/claude/.cache  #   mounted by label, surviving rebuilds.
+    #   # provision: |             # Shell script run once inside the rootfs.
+    #   #   npm install -g some-tool
+    #   # The WSL-shipped kernel and a control initramfs are located via
+    #   # OPENSHRIMP_HCS_KERNEL / OPENSHRIMP_HCS_INITRD when not at their
+    #   # defaults (C:\Program Files\WSL\tools\kernel and the staged initrd).
+    #   # The bot's account must be in Administrators or Hyper-V Administrators.
     # mcp:                          # Per-context MCP server overlay (opencode only).
     #                               # Honoured by `backend: opencode`; ignored by the
     #                               # claude backend, which reads MCP servers from

@@ -34,6 +34,10 @@ macos = [
 ]
 libvirt = ["libvirt-python>=10.0"]
 lark = ["lark-oapi"]
+# Windows-only: the HCS sandbox backend drives computecore/computenetwork/
+# virtdisk through win32more's ctypes bindings.  Pinned exactly — treat any
+# bump as a re-validation (the bindings are generated from preview metadata).
+hcs = ["win32more==0.8.1"]
 
 [project.scripts]
 openshrimp = "open_shrimp.main:main"

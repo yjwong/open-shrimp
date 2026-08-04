@@ -191,6 +191,10 @@ class ImageBundle:
     computer_use_build_args: tuple[tuple[str, str], ...] = ()
     libvirt_install: Callable[[Path, int, str], None] | None = None
     lima_install: Callable[[str, str, str], None] | None = None
+    # HCS installs the CLI from npm inside the rootfs over the exec channel;
+    # the hook receives the ``HcsSandbox`` (its ``guest_exec`` runs commands
+    # in the guest chroot).  ``None`` → the rootfs image already ships the CLI.
+    hcs_install: Callable[[object], None] | None = None
 
     def guest_task_tmp(self, uid: int) -> str:
         """Guest dir the agent writes background-task output to.

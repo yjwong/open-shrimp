@@ -44,7 +44,7 @@ class AndroidConfig:
 class SandboxConfig:
     """Unified sandbox configuration for all backends."""
 
-    backend: str  # "docker", "libvirt", "lima"
+    backend: str  # "docker", "libvirt", "lima", "hcs"
     enabled: bool = True
     guest_os: str = "linux"  # "linux" or "macos" (macos requires backend: lima, ARM host)
 
@@ -75,7 +75,7 @@ class SandboxConfig:
 
 
 # Valid values for sandbox config fields.
-_SANDBOX_BACKENDS = {"docker", "libvirt", "lima"}
+_SANDBOX_BACKENDS = {"docker", "libvirt", "lima", "hcs"}
 _SANDBOX_GUEST_OS = {"linux", "macos"}
 _ANDROID_IMAGE_TYPES = {"VANILLA", "GAPPS"}
 _ANDROID_GPU_MODES = {"virgl", "software"}
