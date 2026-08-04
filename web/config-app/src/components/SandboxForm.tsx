@@ -5,7 +5,7 @@ interface SandboxFormProps {
   onChange: (sandbox: SandboxConfig | null) => void;
 }
 
-const BACKENDS = ["docker", "libvirt", "lima"] as const;
+const BACKENDS = ["docker", "libvirt", "lima", "hcs"] as const;
 
 export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
   if (!sandbox) {
@@ -32,7 +32,10 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
     update({ android: { ...(sandbox.android ?? {}), ...patch } });
   };
 
-  const isVM = sandbox.backend === "libvirt" || sandbox.backend === "lima";
+  const isVM =
+    sandbox.backend === "libvirt" ||
+    sandbox.backend === "lima" ||
+    sandbox.backend === "hcs";
 
   return (
     <div className="sandbox-section">
@@ -277,7 +280,11 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
               onChange={(e) =>
                 update({ base_image: e.target.value || null })
               }
-              placeholder="Path to base qcow2/cloud image"
+              placeholder={
+                sandbox.backend === "hcs"
+                  ? "Path to rootfs VHDX (required)"
+                  : "Path to base qcow2/cloud image"
+              }
             />
           </div>
           <div className="form-group">
@@ -295,11 +302,11 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
         </>
       )}
 
-      {sandbox.backend === "libvirt" && (
+      {(sandbox.backend === "libvirt" || sandbox.backend === "hcs") && (
         <div className="form-group">
           <label className="form-label">Persistent Paths</label>
           <span className="form-hint">
-            Guest paths with dedicated qcow2 volumes that survive VM rebuilds
+            Guest paths with dedicated disk volumes that survive VM rebuilds
           </span>
           <div className="list-input-items">
             {(sandbox.persistent_paths ?? []).map((p, i) => (

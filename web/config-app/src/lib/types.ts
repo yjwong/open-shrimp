@@ -6,7 +6,7 @@ export interface AndroidConfig {
 }
 
 export interface SandboxConfig {
-  backend: "docker" | "libvirt" | "lima";
+  backend: "docker" | "libvirt" | "lima" | "hcs";
   enabled?: boolean;
   guest_os?: "linux" | "macos";
   docker_in_docker?: boolean;
