@@ -9,15 +9,23 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
 import json
 import logging
 import os
-import pty
 import struct
-import termios
+import sys
 from collections.abc import AsyncGenerator
 from pathlib import Path
+
+# The /login endpoint drives the Claude TUI through a Unix pty.  Windows
+# has no pty (ConPTY would need a different transport entirely), so there
+# the endpoint reports "unsupported" and the rest of the terminal API
+# (log tailing/reading) keeps working.
+_PTY_SUPPORTED = sys.platform != "win32"
+if _PTY_SUPPORTED:
+    import fcntl
+    import pty
+    import termios
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
@@ -529,6 +537,15 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
         return
 
     await websocket.accept()
+
+    if not _PTY_SUPPORTED:
+        await websocket.send_text(
+            "\x1b[31mInteractive login is not available on Windows — "
+            "run 'claude /login' in a terminal on the bot host instead."
+            "\x1b[0m\r\n"
+        )
+        await websocket.close()
+        return
 
     # If there's an existing live session, reattach to it.
     if _login_session is not None and _login_session.alive:

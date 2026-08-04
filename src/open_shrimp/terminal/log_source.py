@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,8 +28,26 @@ _TASK_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 # task_type values that indicate an agent transcript (JSONL format).
 _AGENT_TASK_TYPES = {"local_agent", "remote_agent"}
 
+def _claude_tmp_base() -> Path:
+    """Base directory for Claude CLI tmp files.
+
+    Mirrors the CLI's ``getClaudeTempDir``: ``$CLAUDE_CODE_TMPDIR`` wins;
+    otherwise ``/tmp/claude-{uid}`` on Unix (per-user suffix because /tmp
+    is shared) and ``{tmpdir}/claude`` on Windows (the tmp dir is already
+    per-user there).  Symlinks resolved so paths compare equal on macOS.
+    """
+    override = os.environ.get("CLAUDE_CODE_TMPDIR")
+    if sys.platform == "win32":
+        base = Path(override) if override else Path(tempfile.gettempdir())
+        name = "claude"
+    else:
+        base = Path(override) if override else Path("/tmp")
+        name = f"claude-{os.getuid()}"
+    return base.resolve() / name
+
+
 # Base directory for Claude CLI tmp files
-_CLAUDE_TMP_BASE = Path(f"/tmp/claude-{os.getuid()}")
+_CLAUDE_TMP_BASE = _claude_tmp_base()
 
 
 @dataclass

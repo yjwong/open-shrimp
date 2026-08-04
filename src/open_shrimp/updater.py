@@ -415,11 +415,12 @@ async def apply_update(
     # Set env var so post-restart message shows the new version.
     os.environ["OPENSHRIMP_UPDATE_VERSION"] = update_info.version
 
-    # Trigger restart via the existing mechanism.
-    from open_shrimp.main import request_restart
+    # Trigger restart via the existing mechanism.  In-process shutdown, not
+    # os.kill(SIGTERM): on Windows that is an unconditional TerminateProcess.
+    from open_shrimp.main import request_restart, request_shutdown
 
     request_restart()
-    os.kill(os.getpid(), __import__("signal").SIGTERM)
+    request_shutdown()
 
 
 # ── Update check job ──

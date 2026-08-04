@@ -20,12 +20,17 @@ logger = logging.getLogger("open_shrimp")
 
 _restart_requested = False
 
+# The stop event (and its loop) of the currently running bot, so
+# request_shutdown() can reach it from any thread.
+_active_stop_event: asyncio.Event | None = None
+_active_stop_event_loop: asyncio.AbstractEventLoop | None = None
+
 
 def _dump_debug_info() -> None:
-    """Dump asyncio tasks and thread stacks to stderr on SIGUSR1."""
+    """Dump asyncio tasks and thread stacks to stderr on SIGUSR1/SIGBREAK."""
     import faulthandler
 
-    logger.warning("=== SIGUSR1 received — dumping debug info ===")
+    logger.warning("=== debug-dump signal received — dumping debug info ===")
 
     # Dump all thread stacks via faulthandler (writes to stderr)
     logger.warning("--- Thread stacks ---")
@@ -63,6 +68,60 @@ def request_restart() -> None:
     """Signal that the process should re-exec after shutdown."""
     global _restart_requested
     _restart_requested = True
+
+
+def request_shutdown() -> None:
+    """Trigger the same graceful shutdown a SIGTERM would.
+
+    Safe to call from any thread; a no-op if the bot is not running.
+    Exists so in-process callers (e.g. the /restart handler) don't have
+    to deliver a signal — ``os.kill(pid, SIGTERM)`` on Windows is an
+    unconditional ``TerminateProcess`` that skips shutdown entirely.
+    """
+    event = _active_stop_event
+    if event is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        event.set()
+    else:
+        # Called from a non-loop thread (signal fallback path).
+        _active_loop = _active_stop_event_loop
+        if _active_loop is not None:
+            _active_loop.call_soon_threadsafe(event.set)
+
+
+def _install_signal_handlers(
+    loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event
+) -> None:
+    """Install SIGTERM/SIGINT shutdown (and debug-dump) handlers portably.
+
+    ``loop.add_signal_handler`` raises :class:`NotImplementedError` on
+    Windows (Proactor), so fall back to :func:`signal.signal` there and
+    marshal back onto the loop with ``call_soon_threadsafe``.  The debug
+    dump binds to SIGUSR1 where it exists and Ctrl+Break (SIGBREAK)
+    on Windows.
+    """
+    global _active_stop_event_loop
+    _active_stop_event_loop = loop
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop_event.set)
+        loop.add_signal_handler(signal.SIGUSR1, _dump_debug_info)
+    except NotImplementedError:
+        def _stop(signum: int, frame: object) -> None:
+            loop.call_soon_threadsafe(stop_event.set)
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, _stop)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(
+                signal.SIGBREAK,
+                lambda signum, frame: _dump_debug_info(),
+            )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -175,10 +234,9 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     # Set up graceful shutdown
     if stop_event is None:
         stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, stop_event.set)
-        loop.add_signal_handler(signal.SIGUSR1, _dump_debug_info)
+        _install_signal_handlers(asyncio.get_running_loop(), stop_event)
+    global _active_stop_event
+    _active_stop_event = stop_event
 
     sandbox_mgrs = create_sandbox_managers(config)
 
@@ -335,15 +393,30 @@ def main() -> None:
 
         pyapp = pyapp_binary_path()
         if pyapp:
-            os.execv(str(pyapp), [str(pyapp)] + sys.argv[1:])
+            _reexec([str(pyapp)] + sys.argv[1:])
         else:
             uv = shutil.which("uv")
             if uv:
                 # Re-exec via uv run so the venv is rebuilt if needed,
                 # matching the systemd ExecStart invocation.
-                os.execv(uv, [uv, "run", "openshrimp"] + sys.argv[1:])
+                _reexec([uv, "run", "openshrimp"] + sys.argv[1:])
             else:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                _reexec([sys.executable] + sys.argv)
+
+
+def _reexec(argv: list[str]) -> None:
+    """Replace this process with *argv*.
+
+    ``os.execv`` on Windows does not replace the process image — it spawns
+    a child with naive argument joining and returns the console to the
+    shell while both run.  Spawn an ordinary child and exit instead.
+    """
+    if sys.platform == "win32":
+        import subprocess
+
+        subprocess.Popen(argv)
+        sys.exit(0)
+    os.execv(argv[0], argv)
 
 
 if __name__ == "__main__":

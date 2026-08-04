@@ -30,9 +30,14 @@ class TestDetectPlatform:
             mock_sys.platform = "darwin"
             assert _detect_platform() == "macos"
 
-    def test_unsupported(self) -> None:
+    def test_windows(self) -> None:
         with patch("open_shrimp.service.sys") as mock_sys:
             mock_sys.platform = "win32"
+            assert _detect_platform() == "windows"
+
+    def test_unsupported(self) -> None:
+        with patch("open_shrimp.service.sys") as mock_sys:
+            mock_sys.platform = "sunos5"
             with pytest.raises(RuntimeError, match="Unsupported platform"):
                 _detect_platform()
 

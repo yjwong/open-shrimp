@@ -2230,9 +2230,8 @@ async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     import os
-    import signal
 
-    from open_shrimp.main import request_restart
+    from open_shrimp.main import request_restart, request_shutdown
 
     await message.reply_text("Restarting\\.\\.\\.", parse_mode="MarkdownV2")
 
@@ -2246,7 +2245,9 @@ async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         os.environ.pop("OPENSHRIMP_RESTART_THREAD_ID", None)
 
     request_restart()
-    os.kill(os.getpid(), signal.SIGTERM)
+    # Trigger shutdown in-process rather than via os.kill(SIGTERM):
+    # on Windows that would be an unconditional TerminateProcess.
+    request_shutdown()
 
 
 # ── /config ──

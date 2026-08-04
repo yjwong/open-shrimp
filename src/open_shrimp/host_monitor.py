@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import signal
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -28,6 +26,7 @@ from typing import TextIO
 
 from open_shrimp import dispatch_registry
 from open_shrimp.db import ChatScope
+from open_shrimp.host_shell import kill_host_shell_tree, spawn_host_shell
 
 logger = logging.getLogger(__name__)
 
@@ -312,11 +311,8 @@ async def _finalize(mon: HostMonitor, reason: str) -> None:
             )
 
 
-def _kill_proc(mon: HostMonitor) -> None:
-    try:
-        os.killpg(os.getpgid(mon.proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+async def _kill_proc(mon: HostMonitor) -> None:
+    await kill_host_shell_tree(mon.proc)
 
 
 async def _reap(mon: HostMonitor) -> int | None:
@@ -343,7 +339,7 @@ async def _stop(mon: HostMonitor, reason: str = "stopped") -> None:
     if mon.flush_handle is not None:
         mon.flush_handle.cancel()
         mon.flush_handle = None
-    _kill_proc(mon)
+    await _kill_proc(mon)
     if mon.reader_task is not None and mon.reader_task is not asyncio.current_task():
         mon.reader_task.cancel()
     await _reap(mon)
@@ -392,12 +388,11 @@ async def start_monitor(
             "with host_monitor_stop first."
         )
 
-    proc = await asyncio.create_subprocess_shell(
+    proc = await spawn_host_shell(
         command,
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
     )
 
     loop = asyncio.get_running_loop()

@@ -10,7 +10,6 @@ import asyncio
 import logging
 import mimetypes
 import os
-import signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -22,6 +21,11 @@ if TYPE_CHECKING:
 
 from telegram import Bot, InlineKeyboardMarkup
 
+from open_shrimp.host_shell import (
+    SHELL_DESCRIPTION,
+    kill_host_shell_tree,
+    spawn_host_shell,
+)
 from open_shrimp.web_app_button import make_web_app_button
 
 logger = logging.getLogger(__name__)
@@ -1621,7 +1625,7 @@ def create_openshrimp_tools(
                     "type": "string",
                     "description": (
                         "The shell command to execute on the host. "
-                        "Runs via /bin/sh -c."
+                        f"Runs via {SHELL_DESCRIPTION}."
                     ),
                 },
                 "description": {
@@ -1659,12 +1663,11 @@ def create_openshrimp_tools(
                 "host_bash (sudo) running on host: %s", command[:200],
             )
             try:
-                proc = await asyncio.create_subprocess_shell(
+                proc = await spawn_host_shell(
                     command,
                     cwd=_host_workdir,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    start_new_session=True,
                 )
             except Exception as exc:
                 return _text_result(
@@ -1676,10 +1679,7 @@ def create_openshrimp_tools(
                     proc.communicate(), timeout=float(timeout_seconds),
                 )
             except asyncio.TimeoutError:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                await kill_host_shell_tree(proc)
                 await proc.wait()
                 return _text_result(
                     f"Error: host_bash timed out after {timeout_seconds}s.",

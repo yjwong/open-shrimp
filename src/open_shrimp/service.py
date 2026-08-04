@@ -27,7 +27,7 @@ _LAUNCHD_LABEL = "com.openshrimp.bot"
 
 
 def _detect_platform() -> str:
-    """Return 'linux' or 'macos'.
+    """Return 'linux', 'macos', or 'windows'.
 
     Raises:
         RuntimeError: On unsupported platforms.
@@ -36,10 +36,35 @@ def _detect_platform() -> str:
         return "linux"
     if sys.platform == "darwin":
         return "macos"
+    if sys.platform == "win32":
+        return "windows"
     raise RuntimeError(
         f"Unsupported platform: {sys.platform}. "
-        "Only Linux (systemd) and macOS (launchd) are supported."
+        "Only Linux (systemd), macOS (launchd), and Windows are supported."
     )
+
+
+def _print_windows_instructions(config_path: str) -> None:
+    """Windows has no managed service install; print the manual recipe.
+
+    A Windows *service* proper (SCM) needs a wrapper like NSSM or WinSW;
+    the supported path is a Scheduled Task that starts at logon.
+    """
+    exec_args = _detect_executable()
+    cmd = " ".join(
+        f'"{a}"' if " " in a else a
+        for a in [*exec_args, "--config", config_path]
+    )
+    print("Automatic service install is not supported on Windows.")
+    print("Run the bot manually:")
+    print(f"  {cmd}")
+    print()
+    print("Or register a Scheduled Task that starts it at logon:")
+    print(
+        f'  schtasks /Create /TN OpenShrimp /SC ONLOGON /TR \'{cmd}\''
+    )
+    print("Remove it later with:")
+    print("  schtasks /Delete /TN OpenShrimp /F")
 
 
 def _detect_executable() -> list[str]:
@@ -157,6 +182,11 @@ def install_service(config_path: str) -> None:
         config_path: Path to the OpenShrimp config file.
     """
     platform = _detect_platform()
+    if platform == "windows":
+        _print_windows_instructions(
+            str(Path(config_path).expanduser().resolve())
+        )
+        return
     svc_path = _service_path(platform)
 
     # Check for existing installation
@@ -269,6 +299,12 @@ def uninstall_service() -> None:
     On macOS, unloads and removes the launchd user agent.
     """
     platform = _detect_platform()
+    if platform == "windows":
+        print(
+            "No managed service on Windows. If you registered a Scheduled "
+            "Task, remove it with:\n  schtasks /Delete /TN OpenShrimp /F"
+        )
+        return
     svc_path = _service_path(platform)
 
     if not svc_path.exists():
