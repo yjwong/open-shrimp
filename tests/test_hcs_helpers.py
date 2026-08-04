@@ -91,14 +91,17 @@ def test_compose_vm_config_devices_and_ordering():
             ("home", r"C:\home", 565, 0),
         ],
         scsi_disks=[r"C:\rootfs.vhdx", r"C:\pv-a.vhdx"],
+        connect_sddl="D:P(A;;FA;;;S-1-5-21-1-2-3-1001)",
     )
     vm = cfg["VirtualMachine"]
     devs = vm["Devices"]
     # Never terminate on last handle closed — the guest outlives the bot.
     assert cfg["ShouldTerminateOnLastHandleClosed"] is False
-    # Allow-all hvsocket SD is present (control channel precondition).
+    # The connect SD is the caller-supplied one (narrowed to the bot's SID);
+    # the bind SD stays allow-all for the guest→host relay direction.
     sd = devs["HvSocket"]["HvSocketConfig"]
-    assert sd["DefaultConnectSecurityDescriptor"] == "D:P(A;;FA;;;WD)"
+    assert sd["DefaultConnectSecurityDescriptor"] == "D:P(A;;FA;;;S-1-5-21-1-2-3-1001)"
+    assert sd["DefaultBindSecurityDescriptor"] == "D:P(A;;FA;;;WD)"
     # Rootfs must be SCSI LUN 0.
     assert devs["Scsi"]["0"]["Attachments"]["0"]["Path"] == r"C:\rootfs.vhdx"
     assert devs["Scsi"]["0"]["Attachments"]["1"]["Path"] == r"C:\pv-a.vhdx"
@@ -109,6 +112,16 @@ def test_compose_vm_config_devices_and_ordering():
     kd = vm["Chipset"]["LinuxKernelDirect"]
     assert kd["KernelFilePath"] == r"C:\kernel"
     assert "loglevel=4" in kd["KernelCmdLine"]
+
+
+def test_compose_vm_config_connect_sddl_defaults_allow_all():
+    cfg = H.compose_vm_config(
+        owner="o", kernel_path="k", initrd_path="i", memory_mb=1024, cpus=1,
+        console_pipe="p", endpoint_guid="e", endpoint_mac="m",
+        p9_shares=[], scsi_disks=["r"],
+    )
+    sd = cfg["VirtualMachine"]["Devices"]["HvSocket"]["HvSocketConfig"]
+    assert sd["DefaultConnectSecurityDescriptor"] == "D:P(A;;FA;;;WD)"
 
 
 def test_config_fingerprint_changes_with_inputs(tmp_path):

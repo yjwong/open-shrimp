@@ -196,6 +196,7 @@ def compose_vm_config(
     endpoint_mac: str,
     p9_shares: list[tuple[str, str, int, int]],
     scsi_disks: list[str],
+    connect_sddl: str = "D:P(A;;FA;;;WD)",
     schema_minor: int = 1,
 ) -> dict:
     """Compose the full compute-system config JSON.
@@ -225,13 +226,16 @@ def compose_vm_config(
             },
             "Devices": {
                 "ComPorts": {"0": {"NamedPipe": console_pipe}},
-                # Allow-all connect SD: without it the VM exposes no
-                # hvsocket endpoint the host may address (WSAEADDRNOTAVAIL),
-                # and the control channel never comes up.
+                # A permissive connect SD is required for the host to address
+                # the guest's hvsocket endpoints at all (without one the
+                # control channel fails WSAEADDRNOTAVAIL); *connect_sddl*
+                # narrows it to the bot's own account so no other local user
+                # can drive the guest's exec/control ports.  The bind SD (the
+                # guest→host relay direction) stays allow-all.
                 "HvSocket": {
                     "HvSocketConfig": {
                         "DefaultBindSecurityDescriptor": "D:P(A;;FA;;;WD)",
-                        "DefaultConnectSecurityDescriptor": "D:P(A;;FA;;;WD)",
+                        "DefaultConnectSecurityDescriptor": connect_sddl,
                     }
                 },
                 "Plan9": {

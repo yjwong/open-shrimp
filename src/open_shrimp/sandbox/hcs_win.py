@@ -77,9 +77,78 @@ _GENERIC_ALL = 0x10000000
 _OPEN_EXISTING = 3
 _ERROR_BROKEN_PIPE = 109
 
+_advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+_advapi32.OpenProcessToken.restype = wintypes.BOOL
+_advapi32.OpenProcessToken.argtypes = [
+    ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+]
+_advapi32.GetTokenInformation.restype = wintypes.BOOL
+_advapi32.GetTokenInformation.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD),
+]
+_advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+_advapi32.ConvertSidToStringSidW.argtypes = [
+    ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p),
+]
+
+_TOKEN_QUERY = 0x0008
+_TOKEN_USER = 1
+
 _HCN = importlib.import_module(
     "win32more.Windows.Win32.System.HostComputeNetwork"
 )
+
+
+def current_user_sid() -> str:
+    """Return the SID string (``S-1-5-…``) of the account this process runs as."""
+    token = ctypes.c_void_p()
+    if not _advapi32.OpenProcessToken(
+        _kernel32.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token),
+    ):
+        raise OSError(ctypes.get_last_error(), "OpenProcessToken failed")
+    try:
+        size = wintypes.DWORD()
+        _advapi32.GetTokenInformation(
+            token, _TOKEN_USER, None, 0, ctypes.byref(size),
+        )
+        buf = ctypes.create_string_buffer(size.value)
+        if not _advapi32.GetTokenInformation(
+            token, _TOKEN_USER, buf, size, ctypes.byref(size),
+        ):
+            raise OSError(ctypes.get_last_error(), "GetTokenInformation failed")
+        # TOKEN_USER begins with SID_AND_ATTRIBUTES { PSID Sid; ... }, so the
+        # first pointer-sized field is the PSID.
+        sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+        str_ptr = ctypes.c_wchar_p()
+        if not _advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(str_ptr)):
+            raise OSError(ctypes.get_last_error(), "ConvertSidToStringSid failed")
+        try:
+            return str_ptr.value
+        finally:
+            _kernel32.LocalFree(str_ptr)
+    finally:
+        _kernel32.CloseHandle(token)
+
+
+def hvsocket_connect_sddl() -> str:
+    """SDDL granting hvsocket connect access to only the bot's own account.
+
+    Restricts host→guest connections (the guest's exec/control ports) to the
+    account OpenShrimp runs as, so another local user cannot drive the guest.
+    Falls back to allow-all (with a warning) if the SID can't be resolved,
+    rather than making the sandbox unbootable.
+    """
+    try:
+        sid = current_user_sid()
+    except OSError:
+        logger.warning(
+            "Could not resolve the bot SID; using an allow-all hvsocket "
+            "connect SD (any local user could reach the guest ports)",
+            exc_info=True,
+        )
+        return "D:P(A;;FA;;;WD)"
+    return f"D:P(A;;FA;;;{sid})"
 
 
 class HcsError(RuntimeError):

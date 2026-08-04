@@ -395,6 +395,7 @@ class HcsSandbox:
                 endpoint_mac=props["MacAddress"],
                 p9_shares=self._p9_shares(),
                 scsi_disks=self._scsi_disks(),
+                connect_sddl=W.hvsocket_connect_sddl(),
             )
             system = W.create_compute_system(
                 self._system_id, json.dumps(config), op,
