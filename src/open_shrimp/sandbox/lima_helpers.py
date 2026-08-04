@@ -647,7 +647,7 @@ def _build_computer_use_provisions() -> list[dict]:
         [Service]
         Type=simple
         Environment=WAYLAND_DISPLAY=wayland-0
-        ExecStartPre=/bin/bash -c 'for i in \$(seq 1 75); do [ -S "\$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done'
+        ExecStartPre=/bin/bash -c 'for i in \\$(seq 1 75); do [ -S "\\$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.2; done'
         ExecStart=${BROWSER_BIN} --no-first-run --no-default-browser-check --disable-background-networking --disable-default-apps --ozone-platform=wayland --user-data-dir=%h/.config/google-chrome-debug --remote-debugging-port=9222 --window-size=1280,720
         Restart=on-failure
         RestartSec=5

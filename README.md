@@ -160,7 +160,7 @@ On first run, the binary will automatically set up an isolated Python environmen
 
 ### Option 2: From Source
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/yjwong/open-shrimp.git

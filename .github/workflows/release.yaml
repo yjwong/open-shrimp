@@ -149,7 +149,7 @@ jobs:
         env:
           PYAPP_PROJECT_PATH: ${{ steps.sdist.outputs.filename }}
           PYAPP_PROJECT_FEATURES: ${{ matrix.features || '' }}
-          PYAPP_PYTHON_VERSION: "3.11"
+          PYAPP_PYTHON_VERSION: "3.12"
           PYAPP_EXEC_CODE: ${{ matrix.exec_code }}
           PYAPP_DISTRIBUTION_EMBED: "1"
           PYAPP_PASS_LOCATION: "1"
@@ -496,7 +496,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

@@ -7,7 +7,7 @@ name = "moonshine-stt"
 dynamic = ["version"]
 description = "Lightweight CLI for speech-to-text using Moonshine ONNX models"
 license = { file = "LICENSE" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "av",
     "numpy",

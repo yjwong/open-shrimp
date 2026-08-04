@@ -60,7 +60,7 @@ RUN touch /etc/subuid /etc/subgid \
 
 # Copy the Claude CLI binary.
 # Default: the bundled binary from claude-agent-sdk.
-ARG CLAUDE_CLI=.venv/lib/python3.11/site-packages/claude_agent_sdk/_bundled/claude
+ARG CLAUDE_CLI=.venv/lib/python3.12/site-packages/claude_agent_sdk/_bundled/claude
 COPY ${CLAUDE_CLI} /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude
 

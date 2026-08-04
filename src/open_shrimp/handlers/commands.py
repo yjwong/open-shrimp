@@ -1489,22 +1489,22 @@ def _get_sandbox_for_security_key(
 def _push_status_text(push_status: object) -> str:
     status = push_status if isinstance(push_status, str) else None
     if status == "sent":
-        return "Push notification sent to the paired Android device\."
+        return r"Push notification sent to the paired Android device\."
     if status == "no_device":
         return (
             "No paired Android device with push is available; open the Android app "
-            "and use Find pending session\."
+            r"and use Find pending session\."
         )
     if status == "not_configured":
-        return "Push is not configured; open the Android app and use Find pending session\."
+        return r"Push is not configured; open the Android app and use Find pending session\."
     if status in {"failed", "missing_token", "unsupported_provider"}:
         return (
-            f"Push delivery failed \(`{_escape_mdv2(status)}`\); open the Android app "
-            "and use Find pending session\."
+            rf"Push delivery failed \(`{_escape_mdv2(status)}`\); open the Android app "
+            r"and use Find pending session\."
         )
     return (
         "Push status is pending; open the Android app and use Find pending session "
-        "if no notification arrives\."
+        r"if no notification arrives\."
     )
 
 
@@ -1532,7 +1532,7 @@ async def security_key_handler(
     )
     if not has_computer_use:
         await update.message.reply_text(
-            f"Context `{_escape_mdv2(context_name)}` does not have computer use enabled\.",
+            rf"Context `{_escape_mdv2(context_name)}` does not have computer use enabled\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -1591,30 +1591,30 @@ async def security_key_handler(
     helper_error = helper_result.error if helper_result is not None else None
 
     helper_status = (
-        "VM helper started automatically\. Fallback command:"
+        r"VM helper started automatically\. Fallback command:"
         if helper_started
-        else "VM helper was not started automatically\. Run this in the computer\-use VM:"
+        else r"VM helper was not started automatically\. Run this in the computer\-use VM:"
     )
     record = await get_security_key_session_record(db, session_id=session.id)
     destination_label = security_key_destination_label(config, context_name, sandbox_id)
     manual_fallback_lines = (
         [
-            "Manual phone URL \(advanced debug fallback\):",
+            r"Manual phone URL \(advanced debug fallback\):",
             f"`{_escape_mdv2(phone_url)}`",
         ]
         if show_manual_fallback
         else [
-            "Manual phone URL is hidden by default\. Use `/security_key debug` "
-            "only if paired Android claim is unavailable\.",
+            r"Manual phone URL is hidden by default\. Use `/security_key debug` "
+            r"only if paired Android claim is unavailable\.",
         ]
     )
 
     text = "\n".join(
         [
-            "Security key forwarding request created\.",
+            r"Security key forwarding request created\.",
             f"Destination: `{_escape_mdv2(destination_label)}`",
             "",
-            f"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`\.",
+            rf"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`\.",
             _push_status_text(record["push_status"] if record is not None else None),
             *manual_fallback_lines,
             "",
@@ -1623,13 +1623,13 @@ async def security_key_handler(
             *(
                 [
                     "",
-                    f"Auto\-start error: `{_escape_mdv2(helper_error)}`",
+                    rf"Auto\-start error: `{_escape_mdv2(helper_error)}`",
                 ]
                 if helper_error
                 else []
             ),
             "",
-            "The Android app must still require fresh local device approval before forwarding\.",
+            r"The Android app must still require fresh local device approval before forwarding\.",
         ]
     )
     await update.message.reply_text(text, parse_mode="MarkdownV2")
@@ -1658,14 +1658,14 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         pairing_url = f"openshrimp://pair?base_url={public_base}&code={pairing['code']}"
         text = "\n".join(
             [
-                "Android companion pairing code created\.",
+                r"Android companion pairing code created\.",
                 "",
                 f"Code: `{_escape_mdv2(pairing['code'])}`",
                 f"Server: `{_escape_mdv2(server_id)}`",
                 f"Base URL: `{_escape_mdv2(public_base)}`",
                 f"Deep link: `{_escape_mdv2(pairing_url)}`",
                 "",
-                "The code expires in `10 minutes` and can be used once\.",
+                r"The code expires in `10 minutes` and can be used once\.",
             ]
         )
         await update.message.reply_text(text, parse_mode="MarkdownV2")
@@ -1674,7 +1674,7 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if action in {"list", "devices"}:
         devices = await list_android_devices(db)
         if not devices:
-            await update.message.reply_text("No Android companion devices are paired\.", parse_mode="MarkdownV2")
+            await update.message.reply_text(r"No Android companion devices are paired\.", parse_mode="MarkdownV2")
             return
         lines = ["Android companion devices:", ""]
         for device in devices:
@@ -1695,15 +1695,15 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             lines.append(
                 f"• `{_escape_mdv2(device['device_id'])}` — "
                 f"{_escape_mdv2(device['display_name'])} "
-                f"\({_escape_mdv2(status)}, {_escape_mdv2(push)}, "
-                f"last seen {_escape_mdv2(last_seen)}\)"
+                rf"\({_escape_mdv2(status)}, {_escape_mdv2(push)}, "
+                rf"last seen {_escape_mdv2(last_seen)}\)"
             )
         lines.extend(
             [
                 "",
                 "Only one Android companion can be active in this release; "
-                "pairing a new phone deactivates the previous one\.",
-                "Revoke with `/pair revoke <device_id>`\.",
+                r"pairing a new phone deactivates the previous one\.",
+                r"Revoke with `/pair revoke <device_id>`\.",
             ]
         )
         await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
@@ -1713,15 +1713,15 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         device_id = args[1]
         if await revoke_android_device(db, device_id):
             await update.message.reply_text(
-                "Android companion device revoked\. It can no longer claim pending sessions or receive new push requests\.",
+                r"Android companion device revoked\. It can no longer claim pending sessions or receive new push requests\.",
                 parse_mode="MarkdownV2",
             )
         else:
-            await update.message.reply_text("No matching active Android companion device found\.", parse_mode="MarkdownV2")
+            await update.message.reply_text(r"No matching active Android companion device found\.", parse_mode="MarkdownV2")
         return
 
     await update.message.reply_text(
-        "Usage: `/pair`, `/pair list`, or `/pair revoke <device_id>`\.",
+        r"Usage: `/pair`, `/pair list`, or `/pair revoke <device_id>`\.",
         parse_mode="MarkdownV2",
     )
 
