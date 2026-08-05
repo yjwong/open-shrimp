@@ -7,9 +7,11 @@ the Telegram Bot instance for sending files, images, etc.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import mimetypes
 import os
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -239,6 +241,7 @@ def create_openshrimp_tools(
     config: Any | None = None,
     sandbox: "Sandbox | None" = None,
     context_name: str | None = None,
+    computer_use: bool = False,
     phone_use: bool = False,
     user_id: int = 0,
     is_private_chat: bool = True,
@@ -260,9 +263,10 @@ def create_openshrimp_tools(
     tools (create_schedule, list_schedules, delete_schedule) are also
     included.
 
-    Computer-use tools are included when *sandbox* has a non-``None``
-    :meth:`~Sandbox.get_screenshots_dir`, indicating the backend supports
-    GUI interaction.
+    Computer-use tools are included when *sandbox* is provided and
+    *computer_use* is true — the context's own flag, not a probe of the
+    sandbox: backends without a shared screenshots directory (screenshots
+    served from a live frame) still get the full tool set.
 
     Args:
         bot: Telegram Bot instance.
@@ -1037,7 +1041,10 @@ def create_openshrimp_tools(
     # --- Computer use tools (GUI interaction) ---
     # All backends implement the same Sandbox protocol methods
     # (take_screenshot, send_click, send_type, send_key, send_scroll,
-    # focus_window), so the tool handlers are backend-agnostic.
+    # focus_window), so the tool handlers are backend-agnostic.  A shared
+    # screenshots directory is an optional affordance, not the capability
+    # signal: when absent, screenshots are returned inline instead of as a
+    # guest-readable file path.
     _cu_sandbox = sandbox
     _screenshots_dir: str | None = None
     if _cu_sandbox is not None:
@@ -1068,12 +1075,17 @@ def create_openshrimp_tools(
             ),
         ]])
 
-    if _cu_sandbox is not None and _screenshots_dir is not None:
+    if _cu_sandbox is not None and computer_use:
 
         async def computer_screenshot(args: dict[str, Any]) -> dict[str, Any]:
             ts = int(time.time() * 1000)
+            # Without a shared screenshots directory the agent has no
+            # guest-visible path to Read, so the PNG is written to a host
+            # temp file and returned inline as image content instead.
+            shared = _screenshots_dir is not None
             host_path = os.path.join(
-                _screenshots_dir or "/tmp", f"screenshot-{ts}.png",
+                _screenshots_dir or tempfile.gettempdir(),
+                f"screenshot-{ts}.png",
             )
 
             try:
@@ -1101,10 +1113,34 @@ def create_openshrimp_tools(
                     "Failed to send screenshot to Telegram", exc_info=True
                 )
 
-            return _text_result(
-                f"Screenshot saved to {host_path}. "
-                f"Use the Read tool to view the image."
-            )
+            if shared:
+                return _text_result(
+                    f"Screenshot saved to {host_path}. "
+                    f"Use the Read tool to view the image."
+                )
+            try:
+                with open(host_path, "rb") as f:
+                    png = f.read()
+            except OSError as exc:
+                return _text_result(
+                    f"Error reading screenshot: {exc}", is_error=True,
+                )
+            finally:
+                try:
+                    os.remove(host_path)
+                except OSError:
+                    pass
+            return {
+                "content": [
+                    {
+                        "type": "image",
+                        "data": base64.b64encode(png).decode("ascii"),
+                        "mimeType": "image/png",
+                    },
+                    {"type": "text", "text": "Screenshot of the desktop."},
+                ],
+                "is_error": False,
+            }
 
         _computer_click_schema = {
             "type": "object",

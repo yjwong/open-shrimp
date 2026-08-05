@@ -100,6 +100,7 @@ def _register_tools(
     db=None,
     config=None,
     sandbox=None,
+    computer_use: bool = False,
     host_bash_workdir: str | None = None,
 ) -> str:
     bot = bot or FakeBot()
@@ -115,6 +116,7 @@ def _register_tools(
             config=config,
             sandbox=sandbox,
             context_name=context_name,
+            computer_use=computer_use,
             user_id=user_id,
             is_private_chat=is_private_chat,
             host_bash_workdir=host_bash_workdir,
@@ -201,10 +203,10 @@ async def test_host_bash_only_listed_with_workdir(tmp_path) -> None:
     assert "host_bash" in {t["name"] for t in with_["tools"]}
 
 
-async def test_computer_tools_listed_with_screenshots_dir(tmp_path) -> None:
+async def test_computer_tools_listed_with_computer_use(tmp_path) -> None:
     sandbox = FakeSandbox(tmp_path)
     registry = ProxyRegistry()
-    token = _register_tools(registry, sandbox=sandbox)
+    token = _register_tools(registry, sandbox=sandbox, computer_use=True)
     client, backing = await _client(registry)
     try:
         result = await _rpc(client, token, "tools/list")
@@ -271,7 +273,7 @@ async def test_send_file_missing_path_returns_tool_error() -> None:
 async def test_computer_click_uses_master_message(tmp_path) -> None:
     sandbox = FakeSandbox(tmp_path)
     registry = ProxyRegistry()
-    token = _register_tools(registry, sandbox=sandbox)
+    token = _register_tools(registry, sandbox=sandbox, computer_use=True)
     client, backing = await _client(registry)
     try:
         result = await _rpc(

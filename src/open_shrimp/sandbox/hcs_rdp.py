@@ -639,8 +639,10 @@ class HcsRdpSession:
         *,
         helper_exe: Path,
         target: str,
+        # The default matches the 1280x720 coordinate contract of the
+        # computer-use tools (and the desktop size they describe).
         width: int = 1280,
-        height: int = 800,
+        height: int = 720,
         dll_dir: Path | None = None,
         exec_fn: Callable[..., tuple[int, str]] | None = None,
         connect_timeout: float = 30.0,

@@ -66,22 +66,42 @@ def test_scheduling_tools_require_db_and_events_config() -> None:
     )
 
 
-def test_computer_use_tools_require_screenshots_dir() -> None:
-    sandbox = MagicMock()
-    sandbox.get_screenshots_dir.return_value = None
-    sandbox.supports_port_forwarding.return_value = False
-    tools = create_openshrimp_tools(bot=MagicMock(), chat_id=1, sandbox=sandbox)
-    assert _names(tools) == ["send_file"]
+_COMPUTER_TOOL_NAMES = (
+    "computer_screenshot", "computer_click", "computer_type",
+    "computer_key", "computer_scroll", "computer_toplevel",
+)
 
+
+def test_computer_use_tools_gated_on_flag_not_screenshots_dir() -> None:
+    # A screenshots dir alone does not enable the tools...
     sandbox = MagicMock()
     sandbox.get_screenshots_dir.return_value = "/tmp/shots"
     sandbox.supports_port_forwarding.return_value = False
     tools = create_openshrimp_tools(bot=MagicMock(), chat_id=1, sandbox=sandbox)
-    for name in (
-        "computer_screenshot", "computer_click", "computer_type",
-        "computer_key", "computer_scroll", "computer_toplevel",
-    ):
+    assert _names(tools) == ["send_file"]
+
+    # ...the flag does, with a screenshots dir (docker/libvirt/lima shape)...
+    tools = create_openshrimp_tools(
+        bot=MagicMock(), chat_id=1, sandbox=sandbox, computer_use=True,
+    )
+    for name in _COMPUTER_TOOL_NAMES:
         assert name in _names(tools)
+
+    # ...and without one (screenshots served from a live frame).
+    sandbox = MagicMock()
+    sandbox.get_screenshots_dir.return_value = None
+    sandbox.supports_port_forwarding.return_value = False
+    tools = create_openshrimp_tools(
+        bot=MagicMock(), chat_id=1, sandbox=sandbox, computer_use=True,
+    )
+    for name in _COMPUTER_TOOL_NAMES:
+        assert name in _names(tools)
+
+    # No sandbox -> no tools regardless of the flag.
+    tools = create_openshrimp_tools(
+        bot=MagicMock(), chat_id=1, computer_use=True,
+    )
+    assert _names(tools) == ["send_file"]
 
 
 def test_port_forward_gated_on_support() -> None:
@@ -145,7 +165,7 @@ def test_read_only_flags() -> None:
     tools = _by_name(create_openshrimp_tools(
         bot=MagicMock(), chat_id=1, thread_id=9,
         db=MagicMock(), config=MagicMock(),
-        sandbox=sandbox, host_bash_workdir="/tmp",
+        sandbox=sandbox, computer_use=True, host_bash_workdir="/tmp",
     ))
 
     # Read-only tools.
@@ -268,3 +288,82 @@ async def test_host_bash_timeout() -> None:
     r = await host_bash({"command": "sleep 5", "timeout_seconds": 1})
     assert r["is_error"] is True
     assert "timed out" in r["content"][0]["text"]
+
+
+# --- computer_screenshot delivery -------------------------------------------
+
+
+def _screenshot_sandbox(screenshots_dir: str | None) -> MagicMock:
+    sandbox = MagicMock()
+    sandbox.get_screenshots_dir.return_value = screenshots_dir
+    sandbox.supports_port_forwarding.return_value = False
+    sandbox.take_screenshot.side_effect = (
+        lambda path: path.write_bytes(b"\x89PNG fake")
+    )
+    return sandbox
+
+
+@pytest.mark.asyncio
+async def test_computer_screenshot_with_shared_dir_reports_path(
+    tmp_path,
+) -> None:
+    bot = MagicMock()
+    bot.send_photo = AsyncMock()
+    sandbox = _screenshot_sandbox(str(tmp_path))
+    handler = _by_name(create_openshrimp_tools(
+        bot=bot, chat_id=1, sandbox=sandbox, computer_use=True,
+    ))["computer_screenshot"].handler
+
+    r = await handler({})
+    assert "is_error" not in r or not r["is_error"]
+    text = r["content"][0]["text"]
+    assert str(tmp_path) in text
+    assert "Read tool" in text
+
+
+@pytest.mark.asyncio
+async def test_computer_screenshot_without_shared_dir_returns_image() -> None:
+    bot = MagicMock()
+    bot.send_photo = AsyncMock()
+    sandbox = _screenshot_sandbox(None)
+    handler = _by_name(create_openshrimp_tools(
+        bot=bot, chat_id=1, sandbox=sandbox, computer_use=True,
+    ))["computer_screenshot"].handler
+
+    r = await handler({})
+    assert r["is_error"] is False
+    image = r["content"][0]
+    assert image["type"] == "image"
+    assert image["mimeType"] == "image/png"
+    import base64 as _b64
+    assert _b64.b64decode(image["data"]) == b"\x89PNG fake"
+    # The temp file is not left behind.
+    written = sandbox.take_screenshot.call_args.args[0]
+    assert not written.exists()
+
+
+# --- context computer-use flag (client_manager gate) ------------------------
+
+
+def test_context_computer_use_enabled_flag_combinations() -> None:
+    from types import SimpleNamespace
+
+    from open_shrimp.client_manager import context_computer_use_enabled
+
+    def ctx(container=None, sandbox=None):
+        return SimpleNamespace(container=container, sandbox=sandbox)
+
+    off = SimpleNamespace(computer_use=False, phone_use=False)
+    on = SimpleNamespace(computer_use=True, phone_use=False)
+    phone = SimpleNamespace(computer_use=False, phone_use=True)
+
+    assert context_computer_use_enabled(ctx()) is False
+    assert context_computer_use_enabled(ctx(sandbox=off)) is False
+    assert context_computer_use_enabled(ctx(sandbox=on)) is True
+    assert context_computer_use_enabled(ctx(sandbox=phone)) is True
+    assert context_computer_use_enabled(
+        ctx(container=SimpleNamespace(computer_use=True))
+    ) is True
+    assert context_computer_use_enabled(
+        ctx(container=SimpleNamespace(computer_use=False))
+    ) is False

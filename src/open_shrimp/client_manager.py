@@ -138,6 +138,21 @@ def resolve_backend(
             return existing.backend
     return _default_backend or get_backend({})
 
+def context_computer_use_enabled(context: "ContextConfig") -> bool:
+    """Whether the context's own config enables computer use.
+
+    The context flag — not a sandbox capability probe — is the signal:
+    backends that serve screenshots from a live frame have no shared
+    screenshots directory, so probing one would miss them.  A phone-use
+    context also carries the computer-use desktop.
+    """
+    return bool(
+        (context.container is not None and context.container.computer_use)
+        or (context.sandbox is not None and context.sandbox.computer_use)
+        or (context.sandbox is not None and context.sandbox.phone_use)
+    )
+
+
 # Idle session timeout: sessions with no activity for this long are closed.
 _IDLE_TIMEOUT: float = 30 * 60  # 30 minutes
 _idle_sweep_task: asyncio.Task[None] | None = None
@@ -430,11 +445,7 @@ async def get_or_create_session(
     _phone_use_enabled = (
         context.sandbox is not None and context.sandbox.phone_use
     )
-    _computer_use_enabled = (
-        (context.container is not None and context.container.computer_use)
-        or (context.sandbox is not None and context.sandbox.computer_use)
-        or _phone_use_enabled
-    )
+    _computer_use_enabled = context_computer_use_enabled(context)
     if _phone_use_enabled and mcp_proxy is not None:
         allowed_tools.extend([
             "mcp__openshrimp__phone_shell",
@@ -644,9 +655,10 @@ async def get_or_create_session(
             "the title again."
         )
 
-    # Check if this sandbox supports computer-use (has a screenshots dir).
+    # Computer use follows the context's flag, not a screenshots-dir probe —
+    # backends that serve screenshots from a live frame have none.
     _computer_use_sandbox = sandbox if (
-        sandbox is not None and sandbox.get_screenshots_dir() is not None
+        sandbox is not None and _computer_use_enabled
     ) else None
     if _computer_use_sandbox is not None:
         system_prompt_parts.append(
@@ -701,6 +713,7 @@ async def get_or_create_session(
                     db=db, config=config,
                     sandbox=sandbox,
                     context_name=context_name,
+                    computer_use=_computer_use_enabled,
                     phone_use=_phone_use_enabled,
                     user_id=user_id,
                     is_private_chat=is_private_chat,
