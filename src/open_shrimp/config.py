@@ -958,7 +958,7 @@ def config_to_dict(config: Config) -> dict[str, Any]:
             if ctx.sandbox.allow_host_escape:
                 sandbox_dict["allow_host_escape"] = True
             # VM fields — only include non-defaults for VM backends.
-            if ctx.sandbox.backend in ("libvirt", "lima"):
+            if ctx.sandbox.backend in ("libvirt", "lima", "hcs"):
                 if ctx.sandbox.memory != 2048:
                     sandbox_dict["memory"] = ctx.sandbox.memory
                 if ctx.sandbox.cpus != 2:

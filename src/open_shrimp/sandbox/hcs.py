@@ -235,6 +235,7 @@ class HcsSandbox:
             memory_mb=self._config.memory,
             cpus=self._config.cpus,
             provision=self._config.provision,
+            computer_use=self._config.computer_use,
         )
 
     def ensure_environment(self, *, log_file: Path | None = None) -> None:
@@ -283,7 +284,10 @@ class HcsSandbox:
         self._save_fingerprint(desired_fp)
         self._log(log_file, "HCS sandbox environment ready.")
 
-    def _ensure_rootfs(self, *, log_file: Path | None) -> None:
+    def _rootfs_template(self) -> Path:
+        """The template VHDX this context's rootfs is seeded from: the
+        operator's ``base_image``, or its baked ``-gui`` desktop variant when
+        the context enables ``computer_use``."""
         base = self._config.base_image
         if not base:
             raise RuntimeError(
@@ -293,8 +297,23 @@ class HcsSandbox:
         base_path = Path(base)
         if not base_path.exists():
             raise RuntimeError(f"HCS base_image not found: {base_path}")
+        if not self._config.computer_use:
+            return base_path
+        gui_path = Path(H.gui_image_path(base))
+        if not gui_path.exists():
+            raise RuntimeError(
+                f"HCS computer-use rootfs template not found: {gui_path} — "
+                "bake it from the base image with "
+                "scripts/build_hcs_gui_rootfs.sh (run as root inside WSL)."
+            )
+        return gui_path
 
-        want = H.rootfs_fingerprint(base)
+    def _ensure_rootfs(self, *, log_file: Path | None) -> None:
+        template = self._rootfs_template()
+
+        want = H.rootfs_fingerprint(
+            str(template), gui=self._config.computer_use,
+        )
         marker = self._sdir / "rootfs.base.sha256"
         have = marker.read_text().strip() if marker.exists() else None
         if self._rootfs_vhdx.exists() and have == want:
@@ -302,7 +321,7 @@ class HcsSandbox:
 
         self._log(log_file, "Seeding per-context rootfs from base image...")
         tmp = self._rootfs_vhdx.with_suffix(".vhdx.tmp")
-        shutil.copyfile(base_path, tmp)
+        shutil.copyfile(template, tmp)
         os.replace(tmp, self._rootfs_vhdx)
         marker.write_text(want)
 
@@ -465,6 +484,20 @@ class HcsSandbox:
             expect="ROOT-MOUNT-OK",
         )
 
+        # 2a. Desktop chroot mounts: pty apps (weston-terminal) need devpts,
+        #     and the wayland/dbus runtime dirs need writable tmpfs.  /tmp and
+        #     /run must be mounted before the step-3 binds land inside them.
+        if self._config.computer_use:
+            ctl(
+                f"mkdir -p {H.MNT_ROOT}/dev/pts {H.MNT_ROOT}/dev/shm "
+                f"{H.MNT_ROOT}/run {H.MNT_ROOT}/tmp; "
+                f"mount -t devpts devpts {H.MNT_ROOT}/dev/pts; "
+                f"mount -t tmpfs tmpfs {H.MNT_ROOT}/dev/shm; "
+                f"mount -t tmpfs tmpfs {H.MNT_ROOT}/run; "
+                f"mount -t tmpfs tmpfs {H.MNT_ROOT}/tmp && echo GUI-MOUNT-OK",
+                expect="GUI-MOUNT-OK",
+            )
+
         # 3. Bind the shares into the chroot at their guest paths.
         ws = self._guest_workspace()
         binds = [
@@ -524,6 +557,11 @@ class HcsSandbox:
         # 7. Push the static network config from the endpoint properties.
         self._configure_network(chan)
 
+        # 8. Bring up the desktop so it is ready before the first RDP-session
+        #    connect and survives across turns.
+        if self._config.computer_use:
+            self._start_desktop(chan)
+
     def _start_exec_agent(self, chan: "ControlChannel") -> None:
         """(Re)start the in-chroot vsock exec server and wait for it to bind.
 
@@ -544,6 +582,34 @@ class HcsSandbox:
             time.sleep(0.25)
         raise RuntimeError("exec agent never bound its vsock port")
 
+    def _start_desktop(self, chan: "ControlChannel") -> None:
+        """(Re)start the in-chroot weston-RDP desktop and wait for its vsock
+        relay to accept.
+
+        Idempotent: a reachable relay means the desktop is already up.  The
+        launch is fire-and-forget with a short tolerated read timeout —
+        ``dbus-launch`` inside the start script keeps a descriptor of the
+        exec connection open, so the launching call never sees EOF.
+        """
+        from open_shrimp.sandbox import hcs_win as W
+
+        assert self._runtime_id is not None
+        if W.vsock_port_reachable(self._runtime_id, H.RDP_PORT):
+            return
+        chan.run(
+            f"sh -c 'setsid chroot {H.MNT_ROOT} /usr/bin/env HOME=/root "
+            f"PATH={H.CHROOT_PATH} /bin/bash {H.GUI_START_SCRIPT} "
+            f"</dev/null >/tmp/start-weston.log 2>&1 &'",
+            tolerate_read_timeout=True, read_timeout=4.0,
+        )
+        for _ in range(120):
+            if W.vsock_port_reachable(self._runtime_id, H.RDP_PORT):
+                return
+            time.sleep(0.5)
+        raise RuntimeError(
+            "weston-rdp desktop never bound its vsock relay port"
+        )
+
     def _reattach_guest(self, *, log_file: Path | None) -> None:
         """Recover a Running compute system whose exec agent died.
 
@@ -557,11 +623,16 @@ class HcsSandbox:
         chan = W.ControlChannel(self._runtime_id, H.CONTROL_PORT)
         try:
             self._start_exec_agent(chan)
+            if self._config.computer_use:
+                self._start_desktop(chan)
         except RuntimeError:
             self._log(log_file, "Reattach failed; rebooting HCS sandbox...")
             self._boot(log_file=log_file)
 
     def _configure_network(self, chan: "ControlChannel") -> None:
+        # Loopback is load-bearing independent of egress (in-guest relays
+        # dial 127.0.0.1), so it comes up even when the endpoint has no IP.
+        chan.run("ip link set lo up")
         props = self._ep_props or self._endpoint_props()
         if not props or not props.get("IPAddress"):
             logger.warning("no endpoint IP; guest egress will be unavailable")
@@ -571,7 +642,6 @@ class HcsSandbox:
         gw = props.get("GatewayAddress")
         dns = [d.strip() for d in (props.get("DNSServerList") or "").split(",")
                if d.strip()] or ["1.1.1.1"]
-        chan.run("ip link set lo up")
         chan.run("ip link set eth0 up")
         chan.run(f"ip addr add {ip}/{prefix} dev eth0")
         if gw:

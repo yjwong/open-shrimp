@@ -140,6 +140,25 @@ def test_config_fingerprint_changes_with_inputs(tmp_path):
     assert H.config_fingerprint(**changed) != fp1
     changed = dict(base, memory_mb=4096)
     assert H.config_fingerprint(**changed) != fp1
+    changed = dict(base, computer_use=True)
+    assert H.config_fingerprint(**changed) != fp1
+
+
+def test_gui_image_path_sits_next_to_base():
+    assert H.gui_image_path(r"C:\images\root.vhdx") == r"C:\images\root-gui.vhdx"
+    assert H.gui_image_path("C:/images/root.vhdx") == r"C:\images\root-gui.vhdx"
+
+
+def test_rootfs_fingerprint_distinguishes_gui(tmp_path):
+    img = tmp_path / "root.vhdx"
+    img.write_bytes(b"x")
+    base_fp = H.rootfs_fingerprint(str(img), gui=False)
+    assert base_fp == H.rootfs_fingerprint(str(img), gui=False)
+    # Same template file, different variant flag -> different identity.
+    assert H.rootfs_fingerprint(str(img), gui=True) != base_fp
+    # Template content drift -> different identity.
+    img.write_bytes(b"xy")
+    assert H.rootfs_fingerprint(str(img), gui=False) != base_fp
 
 
 def test_render_launcher_source_substitutes_and_escapes():

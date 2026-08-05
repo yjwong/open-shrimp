@@ -119,6 +119,10 @@ contexts:
     #   #                          # rebuild, the rootfs is reborn on every boot.
     #   # memory: 2048             # Guest memory in MB (default: 2048)
     #   # cpus: 2                  # Guest vCPUs (default: 2)
+    #   # computer_use: true       # GUI desktop (weston-RDP). Needs the baked
+    #   #                          # <base_image>-gui.vhdx template variant
+    #   #                          # (scripts/build_hcs_gui_rootfs.sh) and
+    #   #                          # wants memory >= 4096, cpus >= 2.
     #   # disk_size: 20            # GB per persistent_paths VHDX (dynamic/sparse)
     #   # persistent_paths:        # Guest dirs backed by a dedicated ext4 VHDX,
     #   #   - /home/claude/.cache  #   mounted by label, surviving rebuilds.

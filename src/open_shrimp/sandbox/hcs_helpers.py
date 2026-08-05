@@ -39,6 +39,10 @@ EXEC_PORT = 0x5001
 #: the sandbox reaches host services (the MCP proxy) that bind 127.0.0.1 — the
 #: HNS NAT gateway forwards guest egress but not inbound to host loopback.
 RELAY_PORT = 0x5002
+#: The guest RDP endpoint of a computer-use context: weston's rdp-backend on
+#: TCP 127.0.0.1:3389 behind an in-guest ``socat VSOCK-LISTEN:3389`` relay,
+#: dialed from the host over AF_HYPERV like every other vsock port.
+RDP_PORT = 3389
 
 #: Plan9 share vsock ports, in declaration order.
 P9_PORT_WORKSPACE = 564
@@ -73,6 +77,11 @@ EXEC_AGENT_MARKER = "OPENSHRIMP-EXEC-AGENT-LISTENING"
 #: PATH exported for everything run inside the rootfs chroot.
 CHROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+#: Desktop bring-up script the computer-use rootfs template bakes in
+#: (weston-rdp + the vsock relay, self-supervising); the provision pass
+#: launches it detached once the guest is mounted.
+GUI_START_SCRIPT = "/usr/local/bin/start-weston.sh"
+
 #: The hvsocket service-GUID template: the vsock port number in the first
 #: dword, the fixed vsock-facb suffix elsewhere.
 def vsock_service_id(port: int) -> str:
@@ -100,6 +109,14 @@ def windows_to_guest_path(win_path: str) -> str:
     if p.drive:
         parts = parts[1:]
     return "/" + "/".join(parts)
+
+
+def gui_image_path(base_image: str) -> str:
+    """Path of the computer-use rootfs template variant that lives next to
+    the operator's ``base_image`` (``root.vhdx`` → ``root-gui.vhdx``),
+    baked by ``scripts/build_hcs_gui_rootfs.sh``."""
+    p = PureWindowsPath(base_image)
+    return str(p.with_name(p.stem + "-gui" + p.suffix))
 
 
 def persistent_vol_label(guest_path: str) -> str:
@@ -291,12 +308,15 @@ def config_fingerprint(
     memory_mb: int,
     cpus: int,
     provision: str | None,
+    computer_use: bool = False,
 ) -> str:
     """SHA-256 over every input whose drift requires terminate + recreate.
 
     Per-boot values (console pipe name, endpoint GUID/MAC, RuntimeId) are
     deliberately excluded — they change on every create without invalidating
-    anything.
+    anything.  ``computer_use`` is included because flipping it swaps the
+    rootfs template (GUI vs non-GUI) under a possibly-running guest, which
+    is only safe through the terminate + recreate path.
     """
     doc = {
         "kernel": _file_stamp(kernel_path),
@@ -308,19 +328,22 @@ def config_fingerprint(
         "memory_mb": memory_mb,
         "cpus": cpus,
         "provision": provision or "",
+        "computer_use": bool(computer_use),
     }
     return hashlib.sha256(
         json.dumps(doc, sort_keys=True).encode()
     ).hexdigest()
 
 
-def rootfs_fingerprint(base_image: str) -> str:
+def rootfs_fingerprint(template_image: str, *, gui: bool = False) -> str:
     """Identity of the rootfs template a context's ``rootfs.vhdx`` was copied
     from.  Drift → the copy is re-seeded (agent state inside it is lost;
-    ``persistent_paths`` volumes are untouched)."""
-    return hashlib.sha256(
-        json.dumps(_file_stamp(Path(base_image))).encode()
-    ).hexdigest()
+    ``persistent_paths`` volumes are untouched).  ``gui`` marks which
+    template variant (computer-use desktop vs plain) the copy came from, so
+    flipping ``computer_use`` re-seeds even if both variants share one file.
+    """
+    doc = [_file_stamp(Path(template_image)), "gui" if gui else "base"]
+    return hashlib.sha256(json.dumps(doc).encode()).hexdigest()
 
 
 # -- launcher (cli_path) -----------------------------------------------------
