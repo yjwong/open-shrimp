@@ -602,22 +602,41 @@ class McpProxy:
             self._http_client,
             self._oauth_provider,
         )
+        # The pre-bound socket is handed to ``serve(sockets=…)`` rather than
+        # ``Config(fd=…)``: uvicorn's fd path rebuilds the socket with
+        # ``socket.fromfd(fd, AF_UNIX, …)``, which does not exist on Windows.
         config = uvicorn.Config(
             app,
             log_level="warning",
             access_log=False,
-            fd=sock.fileno(),
         )
         self._server = uvicorn.Server(config)
 
         self._serve_task = asyncio.create_task(
-            self._server.serve(),
+            self._server.serve(sockets=[sock]),
             name="mcp-proxy-server",
         )
         for _ in range(50):
             if self._server.started:
                 break
+            if self._serve_task.done():
+                break
             await asyncio.sleep(0.05)
+
+        if not self._server.started:
+            # Surface the serve task's failure instead of leaving the bound
+            # socket's kernel backlog accepting handshakes nothing will serve.
+            exc = (
+                self._serve_task.exception()
+                if self._serve_task.done()
+                else None
+            )
+            self._serve_task.cancel()
+            sock.close()
+            self._listen_socket = None
+            raise RuntimeError(
+                "MCP proxy HTTP server failed to start"
+            ) from exc
 
         logger.info("MCP proxy listening on 127.0.0.1:%d", self._port)
 
