@@ -76,6 +76,33 @@ def _initrd_path() -> Path:
     return Path(os.environ.get("OPENSHRIMP_HCS_INITRD", _DEFAULT_INITRD))
 
 
+def _chroot_agent_home(runtime: AgentRuntime | None) -> str:
+    """The chroot path the agent-home share binds to.
+
+    The runtime states its home as an absolute guest path under the image
+    bundle's ``guest_home`` (``/home/claude/.claude``,
+    ``/home/claude/.local/share/opencode``).  The HCS chroot has no such user —
+    everything runs as root — so the *home-relative* tail is re-rooted at
+    :data:`hcs_helpers.CHROOT_HOME`, which is the same ``HOME`` every guest
+    command is given.  Re-rooting the tail rather than taking its basename is
+    what keeps an XDG-shaped home (``.local/share/<agent>``) resolvable from
+    ``HOME``.
+    """
+    if runtime is None or runtime.image_bundle is None:
+        return f"{H.CHROOT_HOME}/.claude"
+    guest_dir = PurePosixPath(runtime.home_mount.guest_dir)
+    try:
+        tail = guest_dir.relative_to(runtime.image_bundle.guest_home)
+    except ValueError:
+        raise RuntimeError(
+            f"Agent runtime {runtime.name!r} declares home "
+            f"{runtime.home_mount.guest_dir!r}, which is not under its image "
+            f"bundle's guest home {runtime.image_bundle.guest_home!r}; the HCS "
+            f"backend cannot re-root it at {H.CHROOT_HOME}."
+        ) from None
+    return str(PurePosixPath(H.CHROOT_HOME) / tail)
+
+
 class HcsSandbox:
     """One HCS compute system for a single context."""
 
@@ -142,6 +169,11 @@ class HcsSandbox:
         bundle = runtime.image_bundle if runtime else None
         self._task_tmp_prefix = bundle.task_tmp_prefix if bundle else "claude"
         self._hcs_install = getattr(bundle, "hcs_install", None) if bundle else None
+        # argv[0] the launcher execs in the guest, and the chroot path the
+        # agent-home share binds to.  Both come off the runtime so the sandbox
+        # layer never spells an agent's name.
+        self._agent_argv0 = bundle.context_binary_name if bundle else "claude"
+        self._guest_agent_home = _chroot_agent_home(runtime)
 
         # Live handles, populated by ensure_running.
         self._runtime_id: str | None = None
@@ -514,7 +546,7 @@ class HcsSandbox:
         ws = self._guest_workspace()
         binds = [
             (H.MNT_WORKSPACE, f"{H.MNT_ROOT}{ws}"),
-            (H.MNT_HOME, f"{H.MNT_ROOT}/root/.claude"),
+            (H.MNT_HOME, f"{H.MNT_ROOT}{self._guest_agent_home}"),
             (H.MNT_CFG, f"{H.MNT_ROOT}{H.CHROOT_CFG_DIR}"),
             (H.MNT_TASK_TMP, f"{H.MNT_ROOT}/tmp/{self._task_tmp_prefix}-0"),
         ]
@@ -557,7 +589,7 @@ class HcsSandbox:
         if self._config.provision:
             ctl(
                 f"sh -c 'chroot {H.MNT_ROOT} /usr/bin/env "
-                f"HOME=/root PATH={H.CHROOT_PATH} "
+                f"HOME={H.CHROOT_HOME} PATH={H.CHROOT_PATH} "
                 f"sh {H.CHROOT_CFG_DIR}/provision.sh; echo PROVISION-DONE'",
                 expect="PROVISION-DONE", read_timeout=600.0,
             )
@@ -583,7 +615,7 @@ class HcsSandbox:
         from open_shrimp.sandbox import hcs_win as W
 
         chan.run(
-            f"chroot {H.MNT_ROOT} /usr/bin/env HOME=/root "
+            f"chroot {H.MNT_ROOT} /usr/bin/env HOME={H.CHROOT_HOME} "
             f"PATH={H.CHROOT_PATH} python3 {H.CHROOT_CFG_DIR}/exec_agent.py "
             f"{H.EXEC_PORT} </dev/null >/tmp/exec-agent.log 2>&1 &",
             tolerate_read_timeout=True, read_timeout=4.0,
@@ -609,7 +641,7 @@ class HcsSandbox:
         if W.vsock_port_reachable(self._runtime_id, H.RDP_PORT):
             return
         chan.run(
-            f"sh -c 'setsid chroot {H.MNT_ROOT} /usr/bin/env HOME=/root "
+            f"sh -c 'setsid chroot {H.MNT_ROOT} /usr/bin/env HOME={H.CHROOT_HOME} "
             f"PATH={H.CHROOT_PATH} /bin/bash {H.GUI_START_SCRIPT} "
             f"</dev/null >/tmp/start-weston.log 2>&1 &'",
             tolerate_read_timeout=True, read_timeout=4.0,
@@ -772,7 +804,7 @@ class HcsSandbox:
         assert self._runtime_id is not None
         return C.run(
             self._runtime_id, H.EXEC_PORT, argv,
-            cwd="/", env={"HOME": "/root", "PATH": H.CHROOT_PATH},
+            cwd="/", env={"HOME": H.CHROOT_HOME, "PATH": H.CHROOT_PATH},
             read_timeout=read_timeout,
         )
 
@@ -793,7 +825,7 @@ class HcsSandbox:
         which ``exec``\\ s it with no shell.  Built once and reused while the
         source is unchanged.
         """
-        env: dict[str, str] = {"HOME": "/root", "PATH": H.CHROOT_PATH}
+        env: dict[str, str] = {"HOME": H.CHROOT_HOME, "PATH": H.CHROOT_PATH}
         for git_key, env_vars in (
             ("user.name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
             ("user.email", ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL")),
@@ -814,7 +846,7 @@ class HcsSandbox:
             "cwd": self._guest_workspace(),
             "env": env,
             "env_passthrough": ["ANTHROPIC_API_KEY"],
-            "argv_prefix": ["claude"],
+            "argv_prefix": [self._agent_argv0],
             "connect_timeout_s": 30.0,
         }
         self._launch_json_file().write_text(
@@ -1197,32 +1229,32 @@ class HcsSandbox:
     def phone_install_apk(self, apk_path: str) -> str:
         raise NotImplementedError("Phone use is not supported on the HCS backend.")
 
-    async def copy_files_in(self, host_paths: list[Path]) -> list[Path]:
+    async def copy_files_in(self, host_paths: list[Path]) -> list[PurePosixPath]:
         """Copy files into the sandbox via the workspace share.
 
         Files are staged under a ``.openshrimp-uploads`` dir in the workspace
         (already 9p-shared into the guest), so the guest path is derived from
         the guest workspace mount.
+
+        Every element is a guest path: the guest is Linux, so they are
+        :class:`PurePosixPath` and keep forward slashes when spliced into the
+        agent's prompt (the host-side ``Path`` is a ``WindowsPath`` here and
+        would stringify with backslashes).  A file that fails to stage still
+        yields its guest path — the share is the same directory either way, so
+        a host path would name something the guest cannot see.
         """
         if not host_paths:
             return []
         uploads = Path(self._project_dir) / ".openshrimp-uploads"
         uploads.mkdir(parents=True, exist_ok=True)
-        ws = self._guest_workspace()
-        result: list[Path] = []
+        guest_uploads = PurePosixPath(self._guest_workspace()) / ".openshrimp-uploads"
+        result: list[PurePosixPath] = []
         for host_path in host_paths:
             try:
-                dest = uploads / host_path.name
-                shutil.copyfile(host_path, dest)
-                # The guest is Linux: return a POSIX path so its string form
-                # keeps forward slashes when spliced into the agent's prompt
-                # (a WindowsPath would stringify with backslashes).
-                result.append(
-                    PurePosixPath(ws) / ".openshrimp-uploads" / host_path.name
-                )
+                shutil.copyfile(host_path, uploads / host_path.name)
             except OSError:
                 logger.warning("failed to stage upload %s", host_path, exc_info=True)
-                result.append(host_path)
+            result.append(guest_uploads / host_path.name)
         return result
 
     # -- port forwarding (dynamic guest→host forwards not yet supported) -----

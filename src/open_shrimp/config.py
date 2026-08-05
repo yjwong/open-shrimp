@@ -313,6 +313,9 @@ def _validate_raw(raw: dict) -> None:
                 f"{sorted(_SANDBOX_BACKENDS)}, got: {backend!r}"
             )
 
+        if backend == "hcs":
+            _validate_hcs_sandbox(name, sandbox)
+
         dockerfile = sandbox.get("dockerfile")
         if dockerfile is not None and not isinstance(dockerfile, str):
             raise ValueError(
@@ -514,6 +517,50 @@ def _validate_raw(raw: dict) -> None:
 
     _validate_events(raw)
     _validate_meetings(raw)
+
+
+#: ``sandbox`` keys the hcs backend has no code path for, each paired with the
+#: value that means "unset" and a phrase naming the capability.  A key left at
+#: its unset value is inert; one set to anything else would read as an enabled
+#: capability that nothing implements, so it is refused rather than dropped.
+_HCS_UNSUPPORTED_KNOBS: tuple[tuple[str, object, str], ...] = (
+    ("virgl", False, "VirGL 3D acceleration"),
+    ("docker_in_docker", False, "Docker-in-Docker"),
+    ("dockerfile", None, "custom Dockerfiles"),
+    ("guest_os", "linux", "non-Linux guests"),
+    ("phone_use", False, "phone use"),
+    ("android", None, "Android tuning"),
+)
+
+#: The smallest processor count HCS accepts, and the step between accepted
+#: counts.  HCS refuses odd topologies outright — ``cpus: 3`` fails
+#: ``HcsCreateComputeSystem`` with a bare HRESULT and EventId 3100, "the
+#: processor topology specified for the virtual machine cannot be supported by
+#: this host" — so the count is checked here, where the operator can act on it.
+_HCS_MIN_CPUS = 2
+_HCS_CPU_STEP = 2
+
+
+def _validate_hcs_sandbox(name: str, sandbox: dict) -> None:
+    """Reject an ``hcs`` sandbox block the backend cannot honour."""
+    for key, unset, capability in _HCS_UNSUPPORTED_KNOBS:
+        if sandbox.get(key, unset) != unset:
+            raise ValueError(
+                f"Context '{name}': sandbox.{key} is not supported on the "
+                f"'hcs' backend, which has no implementation of {capability} "
+                f"— remove the key, or move the context to a backend that "
+                f"does"
+            )
+
+    cpus = sandbox.get("cpus")
+    if isinstance(cpus, int) and not isinstance(cpus, bool):
+        if cpus < _HCS_MIN_CPUS or cpus % _HCS_CPU_STEP:
+            raise ValueError(
+                f"Context '{name}': sandbox.cpus must be an even number of at "
+                f"least {_HCS_MIN_CPUS} on the 'hcs' backend (2, 4, 6, ...), "
+                f"got: {cpus!r} — HCS rejects other processor topologies when "
+                f"the compute system is created"
+            )
 
 
 def _validate_meetings(raw: dict) -> None:

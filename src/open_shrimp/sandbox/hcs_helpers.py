@@ -77,6 +77,12 @@ EXEC_AGENT_MARKER = "OPENSHRIMP-EXEC-AGENT-LISTENING"
 #: PATH exported for everything run inside the rootfs chroot.
 CHROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+#: HOME exported for everything run inside the rootfs chroot.  The chroot has
+#: no unprivileged sandbox user — every guest process is root — so the agent's
+#: home-relative layout is re-rooted here rather than at the runtime's own
+#: guest home.
+CHROOT_HOME = "/root"
+
 #: Desktop bring-up script the computer-use rootfs template bakes in
 #: (weston-rdp + the vsock relay, self-supervising); the provision pass
 #: launches it detached once the guest is mounted.
