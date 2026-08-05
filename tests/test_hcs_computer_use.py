@@ -209,6 +209,143 @@ def test_absent_mingw_bin_dir_is_reported(tmp_path, monkeypatch):
         sb.take_screenshot(tmp_path / "s.png")
 
 
+# -- security-key helper ------------------------------------------------------
+
+HELPER = "openshrimp-security-key-vm-helper"
+
+
+class _FakeGuestExec:
+    """Scriptable guest_exec: first matching substring of the joined argv
+    decides ``(rc, output)``; unmatched commands succeed with empty output."""
+
+    def __init__(self, results: list[tuple[str, tuple[int, str]]] | None = None):
+        self.results = results or []
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, *, read_timeout=120.0):
+        self.calls.append(list(argv))
+        joined = " ".join(argv)
+        for pattern, rc_out in self.results:
+            if pattern in joined:
+                return rc_out
+        return (0, "")
+
+    def joined_calls(self) -> list[str]:
+        return [" ".join(c) for c in self.calls]
+
+
+def _security_key_sandbox(tmp_path, monkeypatch, results=None, **config_extra):
+    sb = _make_sandbox(tmp_path, monkeypatch, **config_extra)
+    fake = _FakeGuestExec(results)
+    monkeypatch.setattr(sb, "guest_exec", fake)
+    forwards: list[int] = []
+    monkeypatch.setattr(sb, "ensure_host_port_forward", forwards.append)
+    return sb, fake, forwards
+
+
+def test_security_key_helper_requires_computer_use(tmp_path, monkeypatch):
+    sb, fake, _ = _security_key_sandbox(
+        tmp_path, monkeypatch, computer_use=False,
+    )
+    with pytest.raises(NotImplementedError, match="computer use"):
+        sb.start_security_key_helper(
+            relay_url="ws://127.0.0.1:8443", session_id="s", token="t",
+        )
+    assert fake.calls == []
+
+
+def test_security_key_helper_requires_running_guest(tmp_path, monkeypatch):
+    sb, fake, _ = _security_key_sandbox(tmp_path, monkeypatch)
+    sb._runtime_id = None
+    with pytest.raises(RuntimeError, match="not running"):
+        sb.start_security_key_helper(
+            relay_url="ws://127.0.0.1:8443", session_id="s", token="t",
+        )
+    assert fake.calls == []
+
+
+def test_security_key_helper_without_uhid_is_actionable(tmp_path, monkeypatch):
+    sb, fake, _ = _security_key_sandbox(
+        tmp_path, monkeypatch, results=[("test -e /dev/uhid", (1, ""))],
+    )
+    with pytest.raises(RuntimeError, match="OPENSHRIMP_HCS_KERNEL"):
+        sb.start_security_key_helper(
+            relay_url="ws://127.0.0.1:8443", session_id="s", token="t",
+        )
+    # Nothing was installed or launched behind the failed probe.
+    assert not any("setsid" in c or "install" in c for c in fake.joined_calls())
+
+
+def test_security_key_helper_launches_when_installed(tmp_path, monkeypatch):
+    ensure_calls: list[str] = []
+    monkeypatch.setattr(
+        hcs_mod, "ensure_security_key_vm_helper",
+        lambda machine: ensure_calls.append(machine),
+    )
+    sb, fake, forwards = _security_key_sandbox(tmp_path, monkeypatch)
+    sb.start_security_key_helper(
+        relay_url="ws://127.0.0.1:8443", session_id="sess-1", token="tok",
+    )
+    # The binary was already on the chroot PATH: no download, no install.
+    assert ensure_calls == []
+    assert not any(c[0] == "install" for c in fake.calls)
+    # The loopback relay port was forwarded for the in-guest helper.
+    assert forwards == [8443]
+    launch = fake.calls[-1]
+    assert launch[:2] == ["sh", "-c"]
+    assert (
+        f"setsid {HELPER} --relay-url ws://127.0.0.1:8443 "
+        "--session-id sess-1 --token tok "
+        "> /tmp/openshrimp-security-key-helper-sess-1.log 2>&1 < /dev/null &"
+    ) == launch[2]
+
+
+def test_security_key_helper_installs_on_first_use(tmp_path, monkeypatch):
+    staged_src = tmp_path / "helper-download"
+    staged_src.write_bytes(b"helper-elf")
+    monkeypatch.setattr(
+        hcs_mod, "ensure_security_key_vm_helper",
+        lambda machine: str(staged_src),
+    )
+    sb, fake, _ = _security_key_sandbox(
+        tmp_path, monkeypatch,
+        results=[
+            (f"command -v {HELPER}", (1, "")),
+            ("uname -m", (0, "x86_64\n")),
+        ],
+    )
+    sb.start_security_key_helper(
+        relay_url="ws://127.0.0.1:8443", session_id="s", token="t",
+    )
+    assert (sb._cfg_dir / HELPER).read_bytes() == b"helper-elf"
+    assert [
+        "install", "-m", "755",
+        f"/run/openshrimp/{HELPER}", f"/usr/local/bin/{HELPER}",
+    ] in fake.calls
+    assert "setsid" in fake.joined_calls()[-1]
+
+
+def test_security_key_helper_launch_failure_raises(tmp_path, monkeypatch):
+    sb, fake, _ = _security_key_sandbox(
+        tmp_path, monkeypatch, results=[("setsid", (1, "boom"))],
+    )
+    with pytest.raises(RuntimeError, match="failed to start: boom"):
+        sb.start_security_key_helper(
+            relay_url="ws://127.0.0.1:8443", session_id="s", token="t",
+        )
+
+
+def test_security_key_helper_skips_forward_for_external_relay(
+    tmp_path, monkeypatch,
+):
+    sb, fake, forwards = _security_key_sandbox(tmp_path, monkeypatch)
+    sb.start_security_key_helper(
+        relay_url="wss://relay.example.com:8443", session_id="s", token="t",
+    )
+    assert forwards == []
+    assert "setsid" in fake.joined_calls()[-1]
+
+
 def test_stop_closes_the_session_before_the_guest_teardown(
     tmp_path, monkeypatch,
 ):

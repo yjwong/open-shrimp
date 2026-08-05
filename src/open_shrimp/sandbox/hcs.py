@@ -34,11 +34,16 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
 from open_shrimp.config import SandboxConfig
+from open_shrimp.security_key.vm_helper_binary import (
+    BINARY_NAME as SECURITY_KEY_HELPER_BINARY,
+    ensure_security_key_vm_helper,
+)
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     AgentRuntime,
@@ -1045,6 +1050,9 @@ class HcsSandbox:
         return frozenset()
 
     def get_text_input_state_path(self) -> Path | None:
+        # The GUI rootfs runs bare weston with no input-method client, so no
+        # on-screen-keyboard state exists to report (same shape as libvirt;
+        # only backends running an input-method monitor expose a state file).
         return None
 
     def get_text_input_active(self) -> bool:
@@ -1074,14 +1082,108 @@ class HcsSandbox:
     def set_clipboard(self, text: str) -> None:
         self._ensure_rdp_session().set_clipboard(text)
 
-    # -- unsupported capabilities --------------------------------------------
-
     def start_security_key_helper(
         self, *, relay_url: str, session_id: str, token: str,
     ) -> None:
-        raise NotImplementedError(
-            "Security-key forwarding is not supported on the HCS backend."
+        """Start the security-key UHID bridge inside the computer-use guest.
+
+        The chroot runs everything as root, so unlike the ssh backends there
+        is no sudo hop and no udev rule to install (root opens the hidraw
+        node directly).  The helper binary is installed on first use (see
+        :meth:`_ensure_security_key_helper_installed`).
+        """
+        if not self._config.computer_use:
+            raise NotImplementedError("security-key helper requires computer use")
+        if self._runtime_id is None:
+            raise RuntimeError(
+                "Cannot start security-key helper: HCS sandbox is not running"
+            )
+        # The WSL-shipped kernel is built with CONFIG_UHID unset — neither
+        # built-in nor a loadable module — so /dev/uhid can never appear
+        # under it and no in-guest provisioning (modprobe/apt) can help.
+        # Only a UHID-enabled replacement kernel makes forwarding possible.
+        rc, _ = self.guest_exec(
+            ["sh", "-c", "test -e /dev/uhid"], read_timeout=10.0,
         )
+        if rc != 0:
+            raise RuntimeError(
+                "security-key forwarding requires /dev/uhid, and the guest "
+                "kernel provides no UHID support (the WSL-shipped kernel is "
+                "built without CONFIG_UHID). Stage a UHID-enabled kernel via "
+                "OPENSHRIMP_HCS_KERNEL to use security-key forwarding."
+            )
+        self._ensure_security_key_helper_installed()
+        self._forward_loopback_relay(relay_url)
+        log_path = f"/tmp/openshrimp-security-key-helper-{session_id}.log"
+        helper_cmd = shlex.join([
+            SECURITY_KEY_HELPER_BINARY,
+            "--relay-url", relay_url,
+            "--session-id", session_id,
+            "--token", token,
+        ])
+        rc, output = self.guest_exec(
+            [
+                "sh", "-c",
+                f"setsid {helper_cmd} > {shlex.quote(log_path)} 2>&1 "
+                "< /dev/null &",
+            ],
+            read_timeout=10.0,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"security-key helper failed to start: {output.strip()}"
+            )
+
+    def _ensure_security_key_helper_installed(self) -> None:
+        """Install the helper binary into the rootfs through the cfg share.
+
+        Idempotent: a binary already on the chroot PATH is kept.  Otherwise
+        the host downloads (or reuses its cached copy of) the prebuilt Linux
+        helper, stages it into the cfg share, and the guest copies it into
+        place — the rootfs is a per-context writable copy, so the install
+        sticks until the rootfs is re-seeded.
+        """
+        rc, _ = self.guest_exec(
+            ["sh", "-c", f"command -v {SECURITY_KEY_HELPER_BINARY}"],
+            read_timeout=10.0,
+        )
+        if rc == 0:
+            return
+        rc, machine = self.guest_exec(["uname", "-m"], read_timeout=10.0)
+        if rc != 0:
+            raise RuntimeError(
+                f"Failed to detect guest architecture for "
+                f"{SECURITY_KEY_HELPER_BINARY}: {machine.strip()}"
+            )
+        helper_path = ensure_security_key_vm_helper(machine.strip())
+        self._cfg_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(helper_path, self._cfg_dir / SECURITY_KEY_HELPER_BINARY)
+        rc, output = self.guest_exec(
+            [
+                "install", "-m", "755",
+                f"{H.CHROOT_CFG_DIR}/{SECURITY_KEY_HELPER_BINARY}",
+                f"/usr/local/bin/{SECURITY_KEY_HELPER_BINARY}",
+            ],
+            read_timeout=30.0,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"Failed to install {SECURITY_KEY_HELPER_BINARY} into the "
+                f"sandbox: {output.strip()}"
+            )
+
+    def _forward_loopback_relay(self, relay_url: str) -> None:
+        """Bridge the relay port into the guest when the URL targets loopback.
+
+        The relay URL is composed from :attr:`host_address` (loopback); the
+        guest reaches the host's loopback only through the guest→host relay,
+        so the port must be forwarded before the helper dials it.
+        """
+        parts = urllib.parse.urlsplit(relay_url)
+        if parts.hostname in ("127.0.0.1", "localhost") and parts.port:
+            self.ensure_host_port_forward(parts.port)
+
+    # -- unsupported capabilities --------------------------------------------
 
     def ensure_phone_running(self) -> None:
         raise NotImplementedError("Phone use is not supported on the HCS backend.")
