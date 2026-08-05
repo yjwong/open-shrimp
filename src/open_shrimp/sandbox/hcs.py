@@ -46,6 +46,7 @@ from open_shrimp.sandbox.agent_runtime import (
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox import hcs_helpers as H
+from open_shrimp.sandbox.hcs_rdp import HcsRdpSession, ensure_helper_exe
 
 if TYPE_CHECKING:
     from open_shrimp.sandbox.hcs_win import ControlChannel
@@ -141,6 +142,9 @@ class HcsSandbox:
         self._runtime_id: str | None = None
         self._ep_props: dict | None = None
         self._forwarded_ports: set[int] = set()
+        # Host-side RDP session for computer-use contexts, created lazily on
+        # the first computer-use call (the desktop relay is already up then).
+        self._rdp_session: HcsRdpSession | None = None
 
     # -- identity helpers -----------------------------------------------------
 
@@ -380,6 +384,8 @@ class HcsSandbox:
 
         self._log(log_file, "Booting HCS sandbox...")
         self._forwarded_ports.clear()  # a fresh VM has no guest relay running
+        # The RDP session dials this boot's RuntimeId; it cannot span boots.
+        self._close_rdp_session()
         self._teardown_stale()
 
         subnet = H.pick_subnet(W.hcn_network_prefixes())
@@ -610,6 +616,65 @@ class HcsSandbox:
             "weston-rdp desktop never bound its vsock relay port"
         )
 
+    def _mingw_bin(self) -> Path:
+        """The MSYS2 mingw64 bin directory from the sandbox config: the
+        FreeRDP DLLs the RDP helper loads at runtime and the gcc/pkgconf
+        toolchain it is built with."""
+        raw = self._config.mingw_bin
+        if not raw:
+            raise RuntimeError(
+                "HCS computer-use requires 'mingw_bin' in the sandbox "
+                "config — the MSYS2 mingw64 bin directory (e.g. "
+                r"C:\msys64\mingw64\bin) with the mingw-w64-x86_64-freerdp, "
+                "-gcc and -pkgconf packages installed."
+            )
+        path = Path(raw)
+        if not path.is_dir():
+            raise RuntimeError(
+                f"HCS sandbox mingw_bin directory not found: {path}"
+            )
+        return path
+
+    def _ensure_rdp_session(self) -> HcsRdpSession:
+        """The live RDP session, created on first use.
+
+        The session dials the current boot's RuntimeId over hvsocket and fans
+        out to every computer-use member; RDP-level drops are reconnected by
+        the session's own helper.  A rebooted guest gets a fresh session —
+        the boot path closes the old one because its target RuntimeId dies
+        with the boot.
+        """
+        if not self._config.computer_use:
+            raise NotImplementedError(
+                "Computer use is not enabled for this HCS context."
+            )
+        if self._rdp_session is not None:
+            return self._rdp_session
+        if self._runtime_id is None:
+            raise RuntimeError(
+                "HCS sandbox is not running; cannot open the RDP session."
+            )
+        mingw_bin = self._mingw_bin()
+        helper_exe = ensure_helper_exe(self._sdir, mingw_bin)
+        session = HcsRdpSession(
+            helper_exe=helper_exe,
+            target=f"hv:{self._runtime_id}",
+            dll_dir=mingw_bin,
+            exec_fn=self.guest_exec,
+        )
+        session.start()
+        self._rdp_session = session
+        return session
+
+    def _close_rdp_session(self) -> None:
+        if self._rdp_session is None:
+            return
+        try:
+            self._rdp_session.stop()
+        except Exception:
+            logger.debug("Error closing HCS RDP session", exc_info=True)
+        self._rdp_session = None
+
     def _reattach_guest(self, *, log_file: Path | None) -> None:
         """Recover a Running compute system whose exec agent died.
 
@@ -791,6 +856,10 @@ class HcsSandbox:
     def stop(self) -> None:
         from open_shrimp.sandbox import hcs_win as W
 
+        # Close the RDP session before touching the guest: its helper holds a
+        # live hvsocket to the compute system about to be terminated.
+        self._close_rdp_session()
+
         rid = self._runtime_id or self._read_runtime_id()
         if rid is not None:
             # Flush before ForcedExit so persistent-volume ext4 journals close
@@ -946,18 +1015,32 @@ class HcsSandbox:
             except OSError:
                 pass
 
-    # -- unsupported capabilities --------------------------------------------
+    # -- computer use (delegated to the RDP session) --------------------------
 
     def get_screenshots_dir(self) -> Path | None:
+        # Screenshots come from the session's live decoded frame; there is no
+        # shared screenshots directory.
         return None
 
     def get_vnc_port(self) -> int | None:
-        return None
+        """Port of the RDP session's loopback RFB front — the existing noVNC
+        proxy and Mini App connect to it unchanged."""
+        if not self._config.computer_use:
+            return None
+        try:
+            return self._ensure_rdp_session().get_vnc_port()
+        except RuntimeError:
+            logger.warning("HCS RDP session unavailable", exc_info=True)
+            return None
 
     def get_vnc_credentials(self) -> tuple[str, str] | None:
+        if self._rdp_session is not None:
+            return self._rdp_session.get_vnc_credentials()
         return None
 
     def get_vnc_quirks(self) -> frozenset[VncQuirk]:
+        if self._rdp_session is not None:
+            return self._rdp_session.get_vnc_quirks()
         return frozenset()
 
     def get_text_input_state_path(self) -> Path | None:
@@ -967,28 +1050,30 @@ class HcsSandbox:
         return False
 
     def take_screenshot(self, output_path: Path) -> None:
-        raise NotImplementedError("Computer use is not supported on the HCS backend.")
+        self._ensure_rdp_session().take_screenshot(output_path)
 
     def send_click(self, x: int, y: int, button: str = "left") -> None:
-        raise NotImplementedError("Computer use is not supported on the HCS backend.")
+        self._ensure_rdp_session().send_click(x, y, button)
 
     def send_type(self, text: str) -> None:
-        raise NotImplementedError("Computer use is not supported on the HCS backend.")
+        self._ensure_rdp_session().send_type(text)
 
     def send_key(self, key_str: str) -> None:
-        raise NotImplementedError("Computer use is not supported on the HCS backend.")
+        self._ensure_rdp_session().send_key(key_str)
 
     def send_scroll(self, x: int, y: int, direction: str, amount: int = 3) -> None:
-        raise NotImplementedError("Computer use is not supported on the HCS backend.")
+        self._ensure_rdp_session().send_scroll(x, y, direction, amount)
 
     def focus_window(self, name: str) -> None:
-        raise NotImplementedError("Computer use is not supported on the HCS backend.")
+        self._ensure_rdp_session().focus_window(name)
 
     def get_clipboard(self) -> str:
-        raise NotImplementedError("Computer use is not supported on the HCS backend.")
+        return self._ensure_rdp_session().get_clipboard()
 
     def set_clipboard(self, text: str) -> None:
-        raise NotImplementedError("Computer use is not supported on the HCS backend.")
+        self._ensure_rdp_session().set_clipboard(text)
+
+    # -- unsupported capabilities --------------------------------------------
 
     def start_security_key_helper(
         self, *, relay_url: str, session_id: str, token: str,

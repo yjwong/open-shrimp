@@ -68,6 +68,11 @@ class SandboxConfig:
     provision: str | None = None  # shell script to run on first boot
     persistent_paths: list[str] = field(default_factory=list)  # guest paths with dedicated qcow2 volumes
 
+    # HCS-specific: the MSYS2 mingw64 bin directory that supplies the FreeRDP
+    # DLLs and the gcc/pkgconf toolchain the computer-use RDP helper is built
+    # with.  Required when computer_use is enabled on the hcs backend.
+    mingw_bin: str | None = None
+
     # Sudo mode — when true, exposes an MCP tool that runs shell commands on
     # the host (outside the sandbox), gated by a per-command Telegram
     # approval prompt that auto-denies after 10 seconds.
@@ -371,6 +376,22 @@ def _validate_raw(raw: dict) -> None:
             raise ValueError(
                 f"Context '{name}': sandbox.phone_use requires "
                 f"backend 'libvirt', got: {backend!r}"
+            )
+
+        mingw_bin = sandbox.get("mingw_bin")
+        if mingw_bin is not None and not isinstance(mingw_bin, str):
+            raise ValueError(
+                f"Context '{name}': sandbox.mingw_bin must be a string, "
+                f"got: {mingw_bin!r}"
+            )
+        if backend == "hcs" and sandbox.get("computer_use") and not mingw_bin:
+            raise ValueError(
+                f"Context '{name}': sandbox.computer_use on the hcs backend "
+                f"requires 'mingw_bin' — the MSYS2 mingw64 bin directory "
+                f"(e.g. C:\\msys64\\mingw64\\bin) with the "
+                f"mingw-w64-x86_64-freerdp, -gcc and -pkgconf packages "
+                f"installed (the FreeRDP DLLs and the toolchain that builds "
+                f"the RDP helper)"
             )
 
         android = sandbox.get("android")
@@ -701,6 +722,7 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
         base_image=raw.get("base_image"),
         provision=raw.get("provision"),
         persistent_paths=persistent_paths,
+        mingw_bin=raw.get("mingw_bin"),
         allow_host_escape=bool(raw.get("allow_host_escape", False)),
     )
 
@@ -971,6 +993,8 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                     sandbox_dict["provision"] = ctx.sandbox.provision
                 if ctx.sandbox.persistent_paths:
                     sandbox_dict["persistent_paths"] = ctx.sandbox.persistent_paths
+                if ctx.sandbox.mingw_bin is not None:
+                    sandbox_dict["mingw_bin"] = ctx.sandbox.mingw_bin
             ctx_dict["sandbox"] = sandbox_dict
         elif ctx.container is not None:
             container_dict: dict[str, Any] = {}
