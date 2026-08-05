@@ -492,7 +492,8 @@ class HcsSandbox:
 
         # 2a. Desktop chroot mounts: pty apps (weston-terminal) need devpts,
         #     and the wayland/dbus runtime dirs need writable tmpfs.  /tmp and
-        #     /run must be mounted before the step-3 binds land inside them.
+        #     /run must be mounted before the share binds below land inside
+        #     them.
         if self._config.computer_use:
             ctl(
                 f"mkdir -p {H.MNT_ROOT}/dev/pts {H.MNT_ROOT}/dev/shm "
