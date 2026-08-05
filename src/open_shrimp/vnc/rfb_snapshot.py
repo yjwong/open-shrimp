@@ -46,7 +46,7 @@ def capture_to_png(
         except OSError:
             pass
 
-    output_path.write_bytes(_encode_png(fb_w, fb_h, bytes(rgba)))
+    output_path.write_bytes(encode_png(fb_w, fb_h, bytes(rgba)))
     return fb_w, fb_h
 
 
@@ -161,7 +161,7 @@ def _blit_bgra_to_rgba(
         rgba[dst_off + 2 : dst_off + row_stride : 4] = src[0::4]
 
 
-def _encode_png(width: int, height: int, rgba: bytes) -> bytes:
+def encode_png(width: int, height: int, rgba: bytes) -> bytes:
     """Encode 8-bit RGBA pixels as a minimal PNG (one IDAT, no filtering)."""
     sig = b"\x89PNG\r\n\x1a\n"
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
