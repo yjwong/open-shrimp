@@ -175,7 +175,9 @@ def test_every_chroot_command_exports_the_same_HOME(tmp_path, monkeypatch):
 def _launch_cfg(tmp_path, monkeypatch, runtime) -> dict:
     sb = _make_sandbox(tmp_path, monkeypatch, runtime=runtime)
     sb._sdir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(sb, "_build_launcher_exe", lambda: sb._launcher_exe())
+    monkeypatch.setattr(
+        sb, "_build_launcher_exe", lambda *, launch_json, exe: exe,
+    )
     sb.build_cli_wrapper()
     return json.loads(sb._launch_json_file().read_text(encoding="utf-8"))
 

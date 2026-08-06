@@ -9,6 +9,9 @@ stays agent-neutral.
 from __future__ import annotations
 
 from open_shrimp.backend.opencode.binary import find_opencode_binary
+from open_shrimp.backend.opencode.hcs_install import (
+    install_opencode_cli_in_hcs,
+)
 from open_shrimp.backend.opencode.libvirt_install import (
     install_opencode_cli_via_ssh,
 )
@@ -36,4 +39,5 @@ def opencode_image_bundle() -> ImageBundle:
         computer_use_build_args=(("INSTALL_CLAUDE_CODE", "false"),),
         libvirt_install=install_opencode_cli_via_ssh,
         lima_install=ensure_opencode_cli_in_vm,
+        hcs_install=install_opencode_cli_in_hcs,
     )

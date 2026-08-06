@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import select
+import queue
 import stat
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -120,27 +121,53 @@ def _wait_for_opencode_ready(
     proc: subprocess.Popen[str], *, log_file: Path | None = None,
     timeout: float = 20.0,
 ) -> None:
+    """Block until the serve process announces it is listening.
+
+    The wait is bounded by *timeout* even while the process is alive and
+    silent, which rules out a blocking read on the calling thread.  A reader
+    thread supplies that bound on every platform: only sockets are selectable
+    on Windows, so a ``select`` over the stdout pipe would work on the VM
+    backends and fail on the HCS one.  The reader stops at the readiness line,
+    and the buffering it stops with belongs to the stream object the drain
+    thread goes on to read — so nothing already read is lost.
+    """
     assert proc.stdout is not None
+    stream = proc.stdout
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def read_until_ready() -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                lines.put(line)
+                if "listening on" in line:
+                    return
+        except (OSError, ValueError):
+            pass
+        lines.put(None)
+
+    threading.Thread(target=read_until_ready, daemon=True).start()
+
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([proc.stdout], [], [], 0.2)
-        if not ready:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("sandboxed opencode serve did not become ready in time")
+        try:
+            line = lines.get(timeout=min(remaining, 0.2))
+        except queue.Empty:
             if proc.poll() is not None:
-                raise RuntimeError("sandboxed opencode serve exited before readiness")
+                raise RuntimeError(
+                    "sandboxed opencode serve exited before readiness"
+                ) from None
             continue
-        line = proc.stdout.readline()
-        if line:
-            stripped = line.rstrip()
-            if stripped:
-                logger.info("[sandbox opencode] %s", stripped)
-                _append_log(log_file, stripped)
-            if "listening on" in stripped:
-                return
-            continue
-        if proc.poll() is not None:
+        if line is None:
             raise RuntimeError("sandboxed opencode serve exited before readiness")
-        time.sleep(0.05)
-    raise RuntimeError("sandboxed opencode serve did not become ready in time")
+        stripped = line.rstrip()
+        if stripped:
+            logger.info("[sandbox opencode] %s", stripped)
+            _append_log(log_file, stripped)
+        if "listening on" in stripped:
+            return
 
 
 def _drain_opencode_output(

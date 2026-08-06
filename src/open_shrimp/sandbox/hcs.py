@@ -8,10 +8,17 @@ Implements the :class:`~open_shrimp.sandbox.base.Sandbox` protocol.  The
 platform-neutral helpers (config JSON, path/label mapping, the launcher
 source) live in :mod:`open_shrimp.sandbox.hcs_helpers`; the ``win32more``
 plumbing lives in :mod:`open_shrimp.sandbox.hcs_win`; the guest-side exec
-server is :mod:`open_shrimp.sandbox.hcs_exec_agent`.  The Claude CLI is
-installed into the rootfs image from npm in-guest (see
-``open_shrimp.backend.claude_sdk.hcs_install``) — the sandbox layer never
-names an agent.
+server is :mod:`open_shrimp.sandbox.hcs_exec_agent`.  A Windows host holds no
+Linux build of any agent CLI to donate, so each is installed into the rootfs
+image from inside the guest by the runtime's ``hcs_install`` hook (see
+``open_shrimp.backend.<agent>.hcs_install``) — the sandbox layer never names
+an agent.
+
+Both launch strategies run over one transport: a compiled launcher exe bridges
+its stdio to the in-guest exec agent.  The wrapped-CLI flavour is that launcher
+as the SDK's ``cli_path``, one process per turn; the served flavour is a second
+launcher variant whose argv is the serve command, one process outliving every
+turn while the endpoint is reached over its own host→guest bridge.
 
 Lifecycle invariants:
 
@@ -38,7 +45,7 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.security_key.vm_helper_binary import (
@@ -48,7 +55,11 @@ from open_shrimp.security_key.vm_helper_binary import (
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     AgentRuntime,
+    GuestMount,
+    ServedEndpoint,
     WrappedCLI,
+    run_served_endpoint,
+    terminate_served_proc,
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox import hcs_helpers as H
@@ -78,31 +89,65 @@ def _initrd_path() -> Path:
     return Path(os.environ.get("OPENSHRIMP_HCS_INITRD", _DEFAULT_INITRD))
 
 
-def _chroot_agent_home(runtime: AgentRuntime | None) -> str:
-    """The chroot path the agent-home share binds to.
+#: Guest path the served launch records its process id at.  It lives in the
+#: cfg share, so a launch and the reap that precedes the next one agree on it
+#: across bot restarts.
+_SERVE_PIDFILE = f"{H.CHROOT_CFG_DIR}/serve.pid"
 
-    The runtime states its home as an absolute guest path under the image
-    bundle's ``guest_home`` (``/home/claude/.claude``,
-    ``/home/claude/.local/share/opencode``).  The HCS chroot has no such user —
-    everything runs as root — so the *home-relative* tail is re-rooted at
-    :data:`hcs_helpers.CHROOT_HOME`, which is the same ``HOME`` every guest
-    command is given.  Re-rooting the tail rather than taking its basename is
-    what keeps an XDG-shaped home (``.local/share/<agent>``) resolvable from
-    ``HOME``.
+#: Prologue the served ``argv_prefix`` wraps the serve argv in: record the
+#: shell's pid, then ``exec`` the server over it, so the recorded pid *is* the
+#: server's.  ``$0`` is the pidfile, ``$@`` the serve argv.  The record is
+#: unconditional (``;``, not ``&&``) — a server that runs unrecorded would be
+#: unreapable, but a server that never starts is worse.
+_SERVE_PROLOGUE = 'printf %s "$$" > "$0"; exec "$@"'
+
+#: Kill the recorded serve process, if it is still the process that recorded
+#: itself.  ``$0`` is the pidfile, ``$1`` the agent's argv[0]; checking that
+#: argv against the live ``/proc`` entry is what stops a pid that was recorded
+#: before a guest reboot and has since been reused from being signalled.
+#: Always exits 0 — nothing to reap is the normal case.
+_SERVE_REAP = (
+    'p=$(cat "$0" 2>/dev/null); [ -n "$p" ] || exit 0; '
+    'grep -qs -- "$1" /proc/$p/cmdline || exit 0; '
+    'kill "$p" 2>/dev/null; '
+    'for _ in 1 2 3 4 5 6 7 8 9 10; do '
+    'kill -0 "$p" 2>/dev/null || exit 0; sleep 0.5; done; '
+    'kill -9 "$p" 2>/dev/null; exit 0'
+)
+
+
+def _chroot_guest_path(guest_path: str, guest_home: str, *, owner: str) -> str:
+    """Re-root one runtime-declared guest path at :data:`hcs_helpers.CHROOT_HOME`.
+
+    A runtime states every guest path — its home, its extra mount points, the
+    guest paths inside its env — under the image bundle's ``guest_home``
+    (``/home/claude/…``, ``/home/openshrimp/…``).  The HCS chroot has no such
+    user; everything runs as root with ``HOME=CHROOT_HOME``.  So the
+    *home-relative* tail is re-rooted there.  Re-rooting the tail rather than
+    taking its basename is what keeps an XDG-shaped path
+    (``.local/share/<agent>``) resolvable from ``HOME``.
     """
-    if runtime is None or runtime.image_bundle is None:
-        return f"{H.CHROOT_HOME}/.claude"
-    guest_dir = PurePosixPath(runtime.home_mount.guest_dir)
     try:
-        tail = guest_dir.relative_to(runtime.image_bundle.guest_home)
+        tail = PurePosixPath(guest_path).relative_to(guest_home)
     except ValueError:
         raise RuntimeError(
-            f"Agent runtime {runtime.name!r} declares home "
-            f"{runtime.home_mount.guest_dir!r}, which is not under its image "
-            f"bundle's guest home {runtime.image_bundle.guest_home!r}; the HCS "
-            f"backend cannot re-root it at {H.CHROOT_HOME}."
+            f"Agent runtime {owner!r} declares guest path {guest_path!r}, "
+            f"which is not under its image bundle's guest home "
+            f"{guest_home!r}; the HCS backend cannot re-root it at "
+            f"{H.CHROOT_HOME}."
         ) from None
     return str(PurePosixPath(H.CHROOT_HOME) / tail)
+
+
+def _chroot_agent_home(runtime: AgentRuntime | None) -> str:
+    """The chroot path the agent-home share binds to."""
+    if runtime is None or runtime.image_bundle is None:
+        return f"{H.CHROOT_HOME}/.claude"
+    return _chroot_guest_path(
+        runtime.home_mount.guest_dir,
+        runtime.image_bundle.guest_home,
+        owner=runtime.name,
+    )
 
 
 class HcsSandbox:
@@ -157,7 +202,14 @@ class HcsSandbox:
                 )
 
         self._sdir = state_dir
-        self._claude_home_dir = self._sdir / "claude-home"
+        # Host side of the agent-home share.  It must be the very dir the
+        # runtime's ``inject`` writes to, or the guest never sees the injected
+        # credentials; without a runtime there is nothing to inject and the
+        # per-context state dir stands in.
+        self._agent_home_dir = (
+            Path(runtime.home_mount.host_dir) if runtime is not None
+            else self._sdir / "claude-home"
+        )
         self._cfg_dir = self._sdir / "cfg"
         self._tmp_dir = self._sdir / "tmp"
         self._rootfs_vhdx = self._sdir / "rootfs.vhdx"
@@ -176,6 +228,23 @@ class HcsSandbox:
         # layer never spells an agent's name.
         self._agent_argv0 = bundle.context_binary_name if bundle else "claude"
         self._guest_agent_home = _chroot_agent_home(runtime)
+
+        # A served-endpoint launch declares extra host dirs to sync into the
+        # guest (the runtime's plugin-config dir, …); each gets its own 9p
+        # share.  The agent home is already shared, so it is filtered out
+        # rather than mounted twice on the same guest path.
+        launch = runtime.launch if runtime else None
+        self._served_mounts: tuple[GuestMount, ...] = (
+            tuple(
+                m for m in launch.home_mounts
+                if Path(m.host_dir) != self._agent_home_dir
+            )
+            if isinstance(launch, ServedEndpoint) else ()
+        )
+        # Served-endpoint state.  ``_served_proc`` is read by the served
+        # client's liveness check via the endpoint's ``owner``.
+        self._served_proc: subprocess.Popen[str] | None = None
+        self._served_endpoint: Any = None
 
         # Live handles, populated by ensure_running.
         self._runtime_id: str | None = None
@@ -209,6 +278,12 @@ class HcsSandbox:
     def _launcher_exe(self) -> Path:
         return self._sdir / "cli-launcher.exe"
 
+    def _served_launch_json_file(self) -> Path:
+        return self._sdir / "launch-served.json"
+
+    def _served_launcher_exe(self) -> Path:
+        return self._sdir / "serve-launcher.exe"
+
     # -- Sandbox protocol: identity ------------------------------------------
 
     @property
@@ -236,12 +311,29 @@ class HcsSandbox:
     def _guest_workspace(self) -> str:
         return H.windows_to_guest_path(self._project_dir)
 
+    def _rebase_guest_path(self, value: str) -> str:
+        """Re-root a runtime-declared guest path at the chroot home.
+
+        The runtime spells every guest path under its bundle's ``guest_home``,
+        and the chroot re-roots that home at :data:`hcs_helpers.CHROOT_HOME`.
+        Mount points and the guest paths carried in the runtime's env must move
+        together, or an env var names a path no bind provides.  A value that is
+        not under the guest home is not a guest home path and is left alone.
+        """
+        bundle = self._runtime.image_bundle if self._runtime else None
+        if bundle is None:
+            return value
+        home = bundle.guest_home
+        if value != home and not value.startswith(home + "/"):
+            return value
+        return _chroot_guest_path(value, home, owner=self._runtime.name)
+
     def _p9_shares(self) -> list[tuple[str, str, int, int]]:
         """``(name, host_path, port, flags)`` per Plan9 share, in the order the
         SCSI-agnostic mount pass consumes them."""
         shares: list[tuple[str, str, int, int]] = [
             ("ws", self._project_dir, H.P9_PORT_WORKSPACE, 0),
-            ("home", str(self._claude_home_dir), H.P9_PORT_HOME, 0),
+            ("home", str(self._agent_home_dir), H.P9_PORT_HOME, 0),
             ("cfg", str(self._cfg_dir), H.P9_PORT_CFG, 0),
             ("tasktmp", str(self._tmp_dir), H.P9_PORT_TASK_TMP, 0),
         ]
@@ -249,7 +341,23 @@ class HcsSandbox:
             shares.append(
                 (f"add{i}", extra, H.P9_PORT_EXTRA_BASE + i, 0)
             )
+        for i, mount in enumerate(self._served_mounts):
+            shares.append(
+                (f"srv{i}", str(mount.host_dir), self._served_share_port(i), 0)
+            )
         return shares
+
+    def _served_share_port(self, index: int) -> int:
+        """Plan9 port of served mount *index* — the extra-share range continues
+        past the additional directories."""
+        return (
+            H.P9_PORT_EXTRA_BASE + len(self._additional_directories) + index
+        )
+
+    def _extra_share_count(self) -> int:
+        """Plan9 shares beyond the fixed four, whose ports run on from
+        :data:`hcs_helpers.P9_PORT_EXTRA_BASE`."""
+        return len(self._additional_directories) + len(self._served_mounts)
 
     def _persistent_paths(self) -> list[str]:
         return list(self._config.persistent_paths)
@@ -292,7 +400,10 @@ class HcsSandbox:
         from open_shrimp.sandbox import hcs_win as W
 
         self._sdir.mkdir(parents=True, exist_ok=True)
-        for d in (self._claude_home_dir, self._cfg_dir, self._tmp_dir):
+        for d in (
+            self._agent_home_dir, self._cfg_dir, self._tmp_dir,
+            *(Path(m.host_dir) for m in self._served_mounts),
+        ):
             d.mkdir(parents=True, exist_ok=True)
 
         if not _kernel_path().exists():
@@ -435,8 +546,13 @@ class HcsSandbox:
         # every host-side bridge listener belongs to the dead RuntimeId.
         self._forwarded_ports.clear()
         self._reset_guest_bridges()
-        # The RDP session dials this boot's RuntimeId; it cannot span boots.
+        # The RDP session and the served launcher both dial this boot's
+        # RuntimeId; neither can span boots, and the serve process they front
+        # dies with the guest.
         self._close_rdp_session()
+        terminate_served_proc(self._served_proc)
+        self._served_proc = None
+        self._served_endpoint = None
         self._teardown_stale()
 
         subnet = H.pick_subnet(W.hcn_network_prefixes())
@@ -530,6 +646,10 @@ class HcsSandbox:
             ctl(f"mkdir -p /mnt/add{i}")
             ctl(f"@mount {H.P9_PORT_EXTRA_BASE + i} add{i} /mnt/add{i} {opts}",
                 expect="MOUNT-OK")
+        for i, mount in enumerate(self._served_mounts):
+            ctl(f"mkdir -p /mnt/srv{i}")
+            ctl(f"@mount {self._served_share_port(i)} srv{i} /mnt/srv{i} {opts}",
+                expect="MOUNT-OK")
 
         # 2. Mount the rootfs VHDX by ext4 label, and proc/sys/dev inside it.
         ctl(
@@ -568,6 +688,11 @@ class HcsSandbox:
             binds.append(
                 (f"/mnt/add{i}", f"{H.MNT_ROOT}{H.windows_to_guest_path(extra)}")
             )
+        for i, mount in enumerate(self._served_mounts):
+            binds.append((
+                f"/mnt/srv{i}",
+                f"{H.MNT_ROOT}{self._rebase_guest_path(mount.guest_mount_point)}",
+            ))
         # Guest paths derive from user config (project dir, additional dirs),
         # which routinely contain spaces on Windows; every interpolated path is
         # shell-quoted so a space or quote cannot split the command or break out.
@@ -781,7 +906,7 @@ class HcsSandbox:
         if self._hcs_install is not None:
             self._hcs_install(self)
         if self._runtime.provision_credentials is not None:
-            self._runtime.provision_credentials(self._claude_home_dir)
+            self._runtime.provision_credentials(self._agent_home_dir)
 
     # Two TCP relays run between host and guest.  They are mirror images and
     # must not be confused:
@@ -829,7 +954,7 @@ class HcsSandbox:
         """
         if guest_port in self._guest_bridge_ports:
             return
-        reserved = H.reserved_vsock_ports(len(self._additional_directories))
+        reserved = H.reserved_vsock_ports(self._extra_share_count())
         if guest_port in reserved:
             raise RuntimeError(
                 f"Guest port {guest_port} cannot be exposed: the HCS backend "
@@ -928,10 +1053,120 @@ class HcsSandbox:
         if isinstance(runtime.launch, WrappedCLI):
             cli_path, cleanup = self.build_cli_wrapper()
             return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup)
+        if isinstance(runtime.launch, ServedEndpoint):
+            return self._start_served_endpoint(runtime, runtime.launch)
         raise NotImplementedError(
-            f"HCS backend supports only the wrapped-CLI launch; got "
-            f"{runtime.launch!r}"
+            f"Unsupported launch strategy: {runtime.launch!r}"
         )
+
+    def _start_served_endpoint(
+        self, runtime: AgentRuntime, launch: ServedEndpoint,
+    ) -> AgentHandle:
+        """Run the serve argv in the guest chroot and reach its port.
+
+        The guest transport is the same launcher the wrapped-CLI flavour uses —
+        a host process bridging its stdio to the in-guest exec agent — built as
+        a second variant with the serve argv as its ``argv_prefix``.  The
+        launch config path is compiled into the launcher, so the two variants
+        need distinct configs *and* distinct executables; neither writes the
+        other's files.
+
+        The minted Basic-auth credential is deliberately kept out of the launch
+        config: the config is durable per-context state, and a live credential
+        written there would outlive the process holding it.  It travels in the
+        launcher process's own environment instead, named (not valued) by
+        ``env_passthrough``, so it lives exactly as long as the process — the
+        same lifetime the SSH backends give it on their command line.
+        """
+        if (
+            self._served_proc is not None
+            and self._served_proc.poll() is None
+            and self._served_endpoint is not None
+        ):
+            return AgentHandle(endpoint=self._served_endpoint)
+        if self._runtime_id is None:
+            raise RuntimeError(
+                "Cannot start served endpoint: HCS sandbox is not running"
+            )
+        self._reap_served_process()
+
+        def spawn(
+            serve_argv: list[str], env: dict[str, str],
+        ) -> subprocess.Popen[str]:
+            # HOME and PATH belong to the chroot, not to the runtime, and are
+            # pinned in the config below; passing them through would also put
+            # POSIX values into the launcher's own Windows environment.
+            guest_env = {
+                key: self._rebase_guest_path(value)
+                for key, value in env.items()
+                if key not in ("HOME", "PATH")
+            }
+            launch_cfg = {
+                "runtime_id_file": str(self._runtime_id_file()),
+                "port": H.EXEC_PORT,
+                "cwd": self._guest_workspace(),
+                "env": {"HOME": H.CHROOT_HOME, "PATH": H.CHROOT_PATH},
+                "env_passthrough": sorted(guest_env),
+                "argv_prefix": [
+                    "/bin/sh", "-c", _SERVE_PROLOGUE, _SERVE_PIDFILE,
+                    *serve_argv,
+                ],
+                "connect_timeout_s": 30.0,
+            }
+            self._served_launch_json_file().write_text(
+                json.dumps(launch_cfg), encoding="utf-8",
+            )
+            exe = self._build_launcher_exe(
+                launch_json=self._served_launch_json_file(),
+                exe=self._served_launcher_exe(),
+            )
+            return subprocess.Popen(
+                [str(exe)],
+                env={**os.environ, **guest_env},
+                # A server reads no stdin, and the launcher pumps whatever it
+                # inherits into the guest — which would be the bot's own
+                # console for the life of the sandbox.
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+        proc, endpoint = run_served_endpoint(
+            runtime,
+            launch,
+            spawn=spawn,
+            reach=self.reach,
+            owner=self,
+            log_label=f"HCS context '{self._context_name}'",
+        )
+        self._served_proc = proc
+        self._served_endpoint = endpoint
+        return AgentHandle(endpoint=endpoint)
+
+    def _reap_served_process(self) -> None:
+        """Kill a serve process left behind by an earlier launcher.
+
+        The serve process outlives a turn and is reached over its own bridge,
+        not the exec connection, so the guest keeps it running when the host
+        launcher dies — including across a bot restart, which reattaches to the
+        live guest instead of rebooting it.  A second serve would then find the
+        guest port taken and exit, so the recorded pid is signalled first.  The
+        kill is conditional on the guest's own process table still showing the
+        agent's argv under that pid, which is what makes a pid recorded before
+        a reboot inert rather than dangerous.
+        """
+        code, out = self.guest_exec(
+            [
+                "/bin/sh", "-c", _SERVE_REAP,
+                _SERVE_PIDFILE, self._agent_argv0,
+            ],
+            read_timeout=30.0,
+        )
+        if code != 0:
+            logger.warning(
+                "HCS served-process reap failed (exit %d): %s", code, out.strip(),
+            )
 
     def build_cli_wrapper(self) -> tuple[str, list[str]]:
         """Write the per-context launch config and compile the launcher exe.
@@ -968,15 +1203,22 @@ class HcsSandbox:
         self._launch_json_file().write_text(
             json.dumps(launch_cfg), encoding="utf-8",
         )
-        exe = self._build_launcher_exe()
+        exe = self._build_launcher_exe(
+            launch_json=self._launch_json_file(), exe=self._launcher_exe(),
+        )
         # The launcher is per-context durable state; the launch json is too.
         # Neither is a session temp, so cleanup_paths stays empty.
         return str(exe), []
 
-    def _build_launcher_exe(self) -> Path:
-        source = H.render_launcher_source(str(self._launch_json_file()))
-        cs_path = self._sdir / "cli-launcher.cs"
-        exe = self._launcher_exe()
+    def _build_launcher_exe(self, *, launch_json: Path, exe: Path) -> Path:
+        """Compile one launcher variant, reusing it while its source stands.
+
+        The launch-config path is compiled into the launcher, so each variant
+        owns a distinct ``(config, source, exe)`` triple and the wrapped-CLI
+        and served launchers coexist per context.
+        """
+        source = H.render_launcher_source(str(launch_json))
+        cs_path = exe.with_suffix(".cs")
         if (
             exe.exists()
             and cs_path.exists()
@@ -1019,9 +1261,14 @@ class HcsSandbox:
     def stop(self) -> None:
         from open_shrimp.sandbox import hcs_win as W
 
-        # Close the RDP session before touching the guest: its helper holds a
-        # live hvsocket to the compute system about to be terminated.
+        # Close every host process holding an hvsocket to the compute system
+        # about to be terminated — the RDP helper and the served launcher —
+        # before touching the guest.  Both must go before the flush, so the
+        # flush and the terminate that follows it stay adjacent.
         self._close_rdp_session()
+        terminate_served_proc(self._served_proc)
+        self._served_proc = None
+        self._served_endpoint = None
 
         rid = self._runtime_id or self._read_runtime_id()
         if rid is not None:
