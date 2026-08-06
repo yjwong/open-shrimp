@@ -642,7 +642,15 @@ class HcsSandbox:
             return out
 
         # 1. Mount the 9p shares (initramfs agent's @mount).
-        opts = "version=9p2000.L,msize=262144"
+        #    cache=mmap is load-bearing, not tuning: v9fs defaults to
+        #    cache=none, which has no writeback page cache and so cannot serve
+        #    a shared mmap at all.  SQLite's WAL index is an mmap of the -shm
+        #    file, so every WAL database on a share — the agent's own session
+        #    corpus among them — fails to open with SQLITE_IOERR_SHMMAP.
+        #    cache=mmap is the narrowest mode that lifts that: it caches file
+        #    pages but not metadata, so a host write to a share is still seen
+        #    by the guest on its next stat, which the credential sync needs.
+        opts = "version=9p2000.L,msize=262144,cache=mmap"
         for name, mnt, port in (
             ("ws", H.MNT_WORKSPACE, H.P9_PORT_WORKSPACE),
             ("home", H.MNT_HOME, H.P9_PORT_HOME),
