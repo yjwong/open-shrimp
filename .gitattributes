@@ -1,0 +1,9 @@
+# Shell scripts must reach the working tree with LF endings on every platform.
+# The HCS guest images are built by running scripts/build_hcs_*.sh inside WSL
+# from a Windows checkout, where Git for Windows' default core.autocrlf=true
+# would otherwise hand bash a CRLF file and it would fail on the first line.
+*.sh text eol=lf
+
+# Same reason: these are read by the Linux guest, not by Windows tools.
+*.c text eol=lf
+*.py text eol=lf
