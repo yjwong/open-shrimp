@@ -353,7 +353,7 @@ def main() -> None:
     if args.subcommand == "doctor":
         from open_shrimp.doctor import run_doctor
 
-        sys.exit(run_doctor())
+        sys.exit(run_doctor(args.config))
 
     if args.subcommand == "update":
         from open_shrimp.updater import run_update_cli

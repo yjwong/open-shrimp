@@ -78,14 +78,14 @@ _DEFAULT_INITRD = r"C:\ProgramData\openshrimp\hcs\initrd.img"
 
 #: Release asset carrying a prebuilt control initramfs, so an operator who
 #: does not want to run the build script has something to stage.
-_INITRD_ASSET = "openshrimp-hcs-initrd.img"
+INITRD_ASSET = "openshrimp-hcs-initrd.img"
 
 
-def _kernel_path() -> Path:
+def kernel_path() -> Path:
     return Path(os.environ.get("OPENSHRIMP_HCS_KERNEL", _DEFAULT_KERNEL))
 
 
-def _initrd_path() -> Path:
+def initrd_path() -> Path:
     """The control-agent initramfs (busybox + the static vsock agent that
     mounts shares and starts the exec server).  Built once in WSL and staged
     by the operator; located via ``OPENSHRIMP_HCS_INITRD`` when not at the
@@ -412,12 +412,12 @@ class HcsSandbox:
         )
 
     def _initrd_ok(self) -> bool:
-        return _initrd_path().exists() and _kernel_path().exists()
+        return initrd_path().exists() and kernel_path().exists()
 
     def _fingerprint(self) -> str:
         return H.config_fingerprint(
-            kernel_path=_kernel_path(),
-            initrd_path=_initrd_path(),
+            kernel_path=kernel_path(),
+            initrd_path=initrd_path(),
             base_image=self._config.base_image,
             project_dir=self._project_dir,
             additional_directories=self._additional_directories,
@@ -440,15 +440,15 @@ class HcsSandbox:
         ):
             d.mkdir(parents=True, exist_ok=True)
 
-        if not _kernel_path().exists():
+        if not kernel_path().exists():
             raise RuntimeError(
-                f"HCS kernel not found at {_kernel_path()} — install WSL "
+                f"HCS kernel not found at {kernel_path()} — install WSL "
                 "(the kernel ships with it) or set OPENSHRIMP_HCS_KERNEL."
             )
-        if not _initrd_path().exists():
+        if not initrd_path().exists():
             raise RuntimeError(
-                f"HCS control initramfs not found at {_initrd_path()} — stage "
-                f"the {_INITRD_ASSET} release asset there, or build one with "
+                f"HCS control initramfs not found at {initrd_path()} — stage "
+                f"the {INITRD_ASSET} release asset there, or build one with "
                 "scripts/build_hcs_initrd.sh (run as root in WSL), or set "
                 "OPENSHRIMP_HCS_INITRD to where it already is."
             )
@@ -616,8 +616,8 @@ class HcsSandbox:
         try:
             config = H.compose_vm_config(
                 owner=self._owner,
-                kernel_path=str(_kernel_path()),
-                initrd_path=str(_initrd_path()),
+                kernel_path=str(kernel_path()),
+                initrd_path=str(initrd_path()),
                 memory_mb=self._config.memory,
                 cpus=self._config.cpus,
                 console_pipe=pipe_name,
@@ -1270,7 +1270,7 @@ class HcsSandbox:
         ):
             return exe
         cs_path.write_text(source, encoding="utf-8")
-        csc = _find_csc()
+        csc = find_csc()
         result = subprocess.run(
             [
                 csc, "/nologo", "/optimize+", "/target:exe",
@@ -1741,7 +1741,7 @@ class HcsSandbox:
             )
 
 
-def _find_csc() -> str:
+def find_csc() -> str:
     """Locate the in-box .NET Framework C# compiler (no toolchain install)."""
     candidates = [
         r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
