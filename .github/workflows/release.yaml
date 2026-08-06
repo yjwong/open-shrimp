@@ -358,6 +358,124 @@ jobs:
             openshrimp-hcs-initrd.img
             openshrimp-hcs-initrd.img.sha256
 
+  build-hcs-base-rootfs:
+    # The guest userland the HCS sandbox backend chroots into: an ext4 volume
+    # labelled `clauderoot`, in VHDX form, which is what a context's
+    # `base_image` points at.  debootstrap, loop mounts and chroot are Linux
+    # work even though a Windows host consumes the result, so the operator
+    # downloads this asset instead of standing up a root shell in WSL to bake
+    # one by hand.
+    name: Build HCS base rootfs
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build base rootfs
+        # The ext4 image, the VHDX converted from it and the copy at the
+        # output path coexist, which the runner's guaranteed free space
+        # absorbs.  Both paths are on the OS disk: the /mnt temp disk is the
+        # smaller of the two and cannot hold the build.
+        run: |
+          sudo PUBLISH=1 WORK="$RUNNER_TEMP/hcs-base" \
+            bash scripts/build_hcs_base_rootfs.sh \
+            "$PWD/openshrimp-hcs-base-rootfs.vhdx"
+
+      - name: Check the image fits a release asset
+        # A release rejects any file of 2 GiB or more.  Failing here names the
+        # image that outgrew the limit; failing at upload time would not.
+        run: |
+          asset=openshrimp-hcs-base-rootfs.vhdx.zst
+          size=$(stat -c %s "$asset")
+          echo "$asset: $((size / 1024 / 1024)) MiB"
+          if [ "$size" -ge 2147483648 ]; then
+            echo "::error::$asset is 2 GiB or larger; a release will reject it"
+            exit 1
+          fi
+
+      - name: Upload base rootfs
+        # Only the compressed form travels.  The raw VHDX is several times
+        # larger, and both the release asset and the next job take the .zst.
+        uses: actions/upload-artifact@v7
+        with:
+          name: hcs-base-rootfs
+          # The artifact only has to outlive the jobs that consume it — the
+          # computer-use build and the release upload, both minutes later.
+          # The published release asset is the copy that is kept.
+          retention-days: 7
+          path: |
+            openshrimp-hcs-base-rootfs.vhdx.zst
+            openshrimp-hcs-base-rootfs.vhdx.zst.sha256
+
+  build-hcs-gui-rootfs:
+    # The computer-use variant of the guest rootfs: the base image plus weston
+    # on its RDP backend, the AF_VSOCK relay and a browser.  A context with
+    # computer use enabled boots this in place of the base image, so the two
+    # ship together.  It builds in its own job rather than after the base in
+    # one: the images are large enough that each needs a whole runner disk.
+    name: Build HCS computer-use rootfs
+    runs-on: ubuntu-latest
+    needs: build-hcs-base-rootfs
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Reclaim runner disk
+        # The base image, the grown ext4 image holding the desktop stack, the
+        # VHDX converted from it and the copy at the output path are all live
+        # at once — several times what the base rootfs build needs, and close
+        # enough to the free space a runner guarantees to be worth the margin.
+        # None of the preinstalled language toolchains are used here.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache
+          df -h /
+
+      - name: Download base rootfs
+        uses: actions/download-artifact@v8
+        with:
+          name: hcs-base-rootfs
+
+      - name: Unpack base rootfs
+        # The GUI build bakes into a copy of the base image, so it consumes
+        # exactly the artifact published for operators; verifying the checksum
+        # here proves the published asset is the one that was built against.
+        run: |
+          sha256sum -c openshrimp-hcs-base-rootfs.vhdx.zst.sha256
+          zstd -d --rm openshrimp-hcs-base-rootfs.vhdx.zst
+          rm -f openshrimp-hcs-base-rootfs.vhdx.zst.sha256
+
+      - name: Build computer-use rootfs
+        run: |
+          sudo PUBLISH=1 WORK="$RUNNER_TEMP/hcs-gui" \
+            bash scripts/build_hcs_gui_rootfs.sh \
+            "$PWD/openshrimp-hcs-base-rootfs.vhdx" \
+            "$PWD/openshrimp-hcs-gui-rootfs.vhdx"
+          rm -f openshrimp-hcs-base-rootfs.vhdx
+
+      - name: Check the image fits a release asset
+        # The desktop stack makes this the largest asset the project ships;
+        # a release rejects any file of 2 GiB or more.
+        run: |
+          asset=openshrimp-hcs-gui-rootfs.vhdx.zst
+          size=$(stat -c %s "$asset")
+          echo "$asset: $((size / 1024 / 1024)) MiB"
+          if [ "$size" -ge 2147483648 ]; then
+            echo "::error::$asset is 2 GiB or larger; a release will reject it"
+            exit 1
+          fi
+
+      - name: Upload computer-use rootfs
+        uses: actions/upload-artifact@v7
+        with:
+          name: hcs-gui-rootfs
+          # Superseded by the published release asset once the release job
+          # has collected it.
+          retention-days: 7
+          path: |
+            openshrimp-hcs-gui-rootfs.vhdx.zst
+            openshrimp-hcs-gui-rootfs.vhdx.zst.sha256
+
   build-hcs-rdp-helper:
     # The RDP helper for HCS computer use, shipped with every FreeRDP DLL it
     # loads.  Building it here is what makes `mingw_bin` optional: an operator
@@ -769,6 +887,8 @@ jobs:
       - build-virtiofsd
       - build-security-key-helper
       - build-hcs-initrd
+      - build-hcs-base-rootfs
+      - build-hcs-gui-rootfs
       - build-hcs-rdp-helper
       - build-limactl
       - build-macos-app
@@ -791,6 +911,8 @@ jobs:
             artifacts/moonshine-stt-*
             artifacts/openshrimp-security-key-vm-helper-*
             artifacts/openshrimp-hcs-initrd.img*
+            artifacts/openshrimp-hcs-base-rootfs.vhdx.zst*
+            artifacts/openshrimp-hcs-gui-rootfs.vhdx.zst*
             artifacts/openshrimp-hcs-rdp-helper-*
             artifacts/virtiofsd-*
             artifacts/OpenShrimp-*.dmg
