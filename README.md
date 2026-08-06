@@ -156,6 +156,11 @@ curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/opensh
 chmod +x openshrimp
 ```
 
+```powershell
+# Windows x86_64 (PowerShell) — includes the HCS sandbox backend
+curl.exe -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-windows-x86_64.exe -o openshrimp.exe
+```
+
 On first run, the binary will automatically set up an isolated Python environment and install dependencies. If no config file exists, an interactive setup wizard walks you through creating one. Subsequent runs start instantly.
 
 ### Option 2: From Source

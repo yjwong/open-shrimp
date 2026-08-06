@@ -63,7 +63,7 @@ from open_shrimp.sandbox.agent_runtime import (
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox import hcs_helpers as H
-from open_shrimp.sandbox.hcs_rdp import HcsRdpSession, ensure_helper_exe
+from open_shrimp.sandbox.hcs_rdp import HcsRdpSession, ensure_rdp_helper
 from open_shrimp.sandbox.port_forward import allocate_host_port, new_forward_id
 
 if TYPE_CHECKING:
@@ -801,18 +801,17 @@ class HcsSandbox:
             "weston-rdp desktop never bound its vsock relay port"
         )
 
-    def _mingw_bin(self) -> Path:
-        """The MSYS2 mingw64 bin directory from the sandbox config: the
-        FreeRDP DLLs the RDP helper loads at runtime and the gcc/pkgconf
-        toolchain it is built with."""
+    def _mingw_bin(self) -> Path | None:
+        """The MSYS2 mingw64 bin directory from the sandbox config, or ``None``.
+
+        Optional: it is only the fallback source of the RDP helper — the
+        gcc/pkgconf toolchain that builds it and the FreeRDP DLLs it then
+        loads.  A configured directory that does not exist is still an error;
+        it can only be a typo.
+        """
         raw = self._config.mingw_bin
         if not raw:
-            raise RuntimeError(
-                "HCS computer-use requires 'mingw_bin' in the sandbox "
-                "config — the MSYS2 mingw64 bin directory (e.g. "
-                r"C:\msys64\mingw64\bin) with the mingw-w64-x86_64-freerdp, "
-                "-gcc and -pkgconf packages installed."
-            )
+            return None
         path = Path(raw)
         if not path.is_dir():
             raise RuntimeError(
@@ -839,12 +838,11 @@ class HcsSandbox:
             raise RuntimeError(
                 "HCS sandbox is not running; cannot open the RDP session."
             )
-        mingw_bin = self._mingw_bin()
-        helper_exe = ensure_helper_exe(self._sdir, mingw_bin)
+        helper_exe, dll_dir = ensure_rdp_helper(self._sdir, self._mingw_bin())
         session = HcsRdpSession(
             helper_exe=helper_exe,
             target=f"hv:{self._runtime_id}",
-            dll_dir=mingw_bin,
+            dll_dir=dll_dir,
             exec_fn=self.guest_exec,
         )
         session.start()

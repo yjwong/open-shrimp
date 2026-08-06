@@ -3,7 +3,9 @@ sandbox's delegation to the host-side RDP session (mocked — no guest)."""
 
 from __future__ import annotations
 
+import io
 import sys
+import zipfile
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,6 +17,7 @@ from open_shrimp.config import (
     config_to_dict,
 )
 from open_shrimp.sandbox import hcs as hcs_mod
+from open_shrimp.sandbox import hcs_rdp
 from open_shrimp.sandbox.hcs import HcsSandbox
 
 MINGW = r"C:\msys64\mingw64\bin"
@@ -46,14 +49,25 @@ def test_hcs_computer_use_with_mingw_bin_validates():
     _validate_raw(_hcs_raw({"computer_use": True, "mingw_bin": MINGW}))
 
 
-def test_hcs_computer_use_without_mingw_bin_rejected():
-    with pytest.raises(ValueError, match="mingw_bin"):
-        _validate_raw(_hcs_raw({"computer_use": True}))
+def test_hcs_computer_use_without_mingw_bin_validates():
+    # The RDP helper ships prebuilt; a toolchain is only the build-from-source
+    # fallback, so computer use does not require one.
+    _validate_raw(_hcs_raw({"computer_use": True}))
 
 
 def test_mingw_bin_must_be_a_string():
     with pytest.raises(ValueError, match="mingw_bin must be a string"):
         _validate_raw(_hcs_raw({"computer_use": True, "mingw_bin": 3}))
+
+
+def test_mingw_bin_rejected_on_another_backend():
+    raw = _hcs_raw()
+    sandbox = raw["contexts"]["default"]["sandbox"]
+    sandbox["backend"] = "docker"
+    sandbox.pop("base_image")
+    sandbox["mingw_bin"] = MINGW
+    with pytest.raises(ValueError, match="applies only to the hcs backend"):
+        _validate_raw(raw)
 
 
 def test_hcs_without_computer_use_needs_no_mingw_bin():
@@ -119,8 +133,10 @@ def _make_sandbox(tmp_path, monkeypatch, **config_extra) -> HcsSandbox:
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(hcs_mod, "HcsRdpSession", _FakeSession)
     monkeypatch.setattr(
-        hcs_mod, "ensure_helper_exe",
-        lambda out_dir, mingw_bin: out_dir / "hcs_rdp_helper.exe",
+        hcs_mod, "ensure_rdp_helper",
+        lambda out_dir, mingw_bin: (
+            out_dir / "hcs_rdp_helper.exe", mingw_bin or out_dir,
+        ),
     )
     defaults: dict = {
         "backend": "hcs",
@@ -195,10 +211,12 @@ def test_not_running_guest_raises_and_vnc_port_degrades(tmp_path, monkeypatch):
     assert sb.get_vnc_port() is None
 
 
-def test_missing_mingw_bin_config_is_actionable(tmp_path, monkeypatch):
+def test_session_starts_without_a_toolchain(tmp_path, monkeypatch):
+    # No mingw_bin: helper resolution is handed None and the session still
+    # comes up on whatever the prebuilt bundle resolves to.
     sb = _make_sandbox(tmp_path, monkeypatch, mingw_bin=None)
-    with pytest.raises(RuntimeError, match="mingw_bin"):
-        sb.take_screenshot(tmp_path / "s.png")
+    assert sb.get_vnc_port() == 5901
+    assert sb._rdp_session.kwargs["dll_dir"] == tmp_path / "state"
 
 
 def test_absent_mingw_bin_dir_is_reported(tmp_path, monkeypatch):
@@ -207,6 +225,120 @@ def test_absent_mingw_bin_dir_is_reported(tmp_path, monkeypatch):
     )
     with pytest.raises(RuntimeError, match="not found"):
         sb.take_screenshot(tmp_path / "s.png")
+
+
+# -- RDP helper resolution ----------------------------------------------------
+
+
+@pytest.fixture
+def helper_env(tmp_path, monkeypatch):
+    """Isolate helper resolution: an empty bundle directory, no override, and
+    a download that fails unless a test says otherwise."""
+    bundle = tmp_path / "bundle"
+    monkeypatch.delenv("OPENSHRIMP_HCS_RDP_HELPER", raising=False)
+    monkeypatch.setattr(hcs_rdp, "shipped_helper_dir", lambda: bundle)
+    monkeypatch.setattr(
+        hcs_rdp, "download_shipped_helper",
+        lambda: (_ for _ in ()).throw(RuntimeError("no network")),
+    )
+    return bundle
+
+
+def _record_build(monkeypatch) -> list[tuple]:
+    built: list[tuple] = []
+
+    def fake_build(out_dir, mingw_bin):
+        built.append((out_dir, mingw_bin))
+        return out_dir / "hcs_rdp_helper.exe"
+
+    monkeypatch.setattr(hcs_rdp, "build_helper_exe", fake_build)
+    return built
+
+
+def test_shipped_helper_wins_over_the_toolchain(tmp_path, monkeypatch, helper_env):
+    helper_env.mkdir()
+    exe = helper_env / "hcs_rdp_helper.exe"
+    exe.write_text("x")
+    built = _record_build(monkeypatch)
+    mingw = tmp_path / "mingw64-bin"
+    assert hcs_rdp.ensure_rdp_helper(tmp_path / "state", mingw) == (
+        exe, helper_env,
+    )
+    assert built == []
+
+
+def test_env_override_names_the_exe_or_its_directory(
+    tmp_path, monkeypatch, helper_env,
+):
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    exe = staged / "hcs_rdp_helper.exe"
+    exe.write_text("x")
+    monkeypatch.setenv("OPENSHRIMP_HCS_RDP_HELPER", str(staged))
+    assert hcs_rdp.ensure_rdp_helper(tmp_path / "state", None) == (exe, staged)
+    monkeypatch.setenv("OPENSHRIMP_HCS_RDP_HELPER", str(exe))
+    assert hcs_rdp.ensure_rdp_helper(tmp_path / "state", None) == (exe, staged)
+
+
+def test_env_override_pointing_nowhere_is_an_error(
+    tmp_path, monkeypatch, helper_env,
+):
+    monkeypatch.setenv("OPENSHRIMP_HCS_RDP_HELPER", str(tmp_path / "nope"))
+    with pytest.raises(RuntimeError, match="OPENSHRIMP_HCS_RDP_HELPER"):
+        hcs_rdp.ensure_rdp_helper(tmp_path / "state", None)
+
+
+def test_local_build_is_the_fallback(tmp_path, monkeypatch, helper_env):
+    built = _record_build(monkeypatch)
+    mingw = tmp_path / "mingw64-bin"
+    state = tmp_path / "state"
+    assert hcs_rdp.ensure_rdp_helper(state, mingw) == (
+        state / "hcs_rdp_helper.exe", mingw,
+    )
+    assert built == [(state, mingw)]
+
+
+def test_neither_source_names_both_remedies(tmp_path, monkeypatch, helper_env):
+    with pytest.raises(RuntimeError) as excinfo:
+        hcs_rdp.ensure_rdp_helper(tmp_path / "state", None)
+    message = str(excinfo.value)
+    assert hcs_rdp.HELPER_ASSET in message
+    assert "mingw_bin" in message
+    assert "no network" in message
+
+
+def test_download_unpacks_the_whole_bundle(tmp_path, monkeypatch):
+    bundle = tmp_path / "bundle"
+    monkeypatch.setattr(hcs_rdp, "shipped_helper_dir", lambda: bundle)
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("hcs_rdp_helper.exe", "exe")
+        zf.writestr("libfreerdp3.dll", "dll")
+    monkeypatch.setattr(
+        hcs_rdp.urllib.request, "urlopen",
+        lambda req, timeout=None: io.BytesIO(payload.getvalue()),
+    )
+    exe = hcs_rdp.download_shipped_helper()
+    assert exe == bundle / "hcs_rdp_helper.exe"
+    # The DLLs are the point: the exe alone would not load.
+    assert (bundle / "libfreerdp3.dll").read_text() == "dll"
+    assert not list(bundle.glob("*.tmp"))
+
+
+def test_download_of_an_archive_without_the_exe_is_an_error(
+    tmp_path, monkeypatch,
+):
+    bundle = tmp_path / "bundle"
+    monkeypatch.setattr(hcs_rdp, "shipped_helper_dir", lambda: bundle)
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("readme.txt", "nothing useful")
+    monkeypatch.setattr(
+        hcs_rdp.urllib.request, "urlopen",
+        lambda req, timeout=None: io.BytesIO(payload.getvalue()),
+    )
+    with pytest.raises(RuntimeError, match="contains no hcs_rdp_helper.exe"):
+        hcs_rdp.download_shipped_helper()
 
 
 # -- security-key helper ------------------------------------------------------

@@ -387,14 +387,15 @@ def _validate_raw(raw: dict) -> None:
                 f"Context '{name}': sandbox.mingw_bin must be a string, "
                 f"got: {mingw_bin!r}"
             )
-        if backend == "hcs" and sandbox.get("computer_use") and not mingw_bin:
+        # mingw_bin is optional even with computer_use: the RDP helper ships
+        # prebuilt with its FreeRDP DLLs, and a toolchain is only the
+        # source-install fallback for building it.  It is meaningless anywhere
+        # but the hcs backend, so reject it there rather than ignore it.
+        if mingw_bin and backend != "hcs":
             raise ValueError(
-                f"Context '{name}': sandbox.computer_use on the hcs backend "
-                f"requires 'mingw_bin' — the MSYS2 mingw64 bin directory "
-                f"(e.g. C:\\msys64\\mingw64\\bin) with the "
-                f"mingw-w64-x86_64-freerdp, -gcc and -pkgconf packages "
-                f"installed (the FreeRDP DLLs and the toolchain that builds "
-                f"the RDP helper)"
+                f"Context '{name}': sandbox.mingw_bin applies only to the "
+                f"hcs backend (it builds the Windows RDP helper), got "
+                f"backend: {backend!r}"
             )
 
         android = sandbox.get("android")

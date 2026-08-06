@@ -71,6 +71,12 @@ jobs:
     name: Build ${{ matrix.artifact }}
     needs: build-sdist
     runs-on: ${{ matrix.os }}
+    # Every step below is a POSIX shell script (realpath, $GITHUB_OUTPUT
+    # appends, `if [ ... ]`); pwsh is the Windows runner's default, so pin
+    # bash for all of them — git-bash ships on the Windows image.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -95,6 +101,15 @@ jobs:
             sdist_artifact: sdist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
             rust_target: x86_64-apple-darwin
+          # The `hcs` extra is what makes the Windows build worth shipping:
+          # win32more, the binding the HCS sandbox backend drives Windows'
+          # Host Compute Service through.  It is Windows-only, so it appears
+          # on no other entry.
+          - os: windows-latest
+            artifact: openshrimp-windows-x86_64.exe
+            sdist_artifact: sdist-openshrimp
+            exec_code: "from open_shrimp.main import main; main()"
+            features: "hcs"
           # moonshine-stt
           - os: ubuntu-latest
             artifact: moonshine-stt-linux-x86_64
@@ -143,7 +158,12 @@ jobs:
 
       - name: Get sdist filename
         id: sdist
-        run: echo "filename=$(realpath dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+        run: |
+          FILE=$(realpath dist/*.tar.gz)
+          # PyApp is a native program: on Windows it cannot open the
+          # `/d/a/...` path git-bash's realpath hands back.
+          if [ "$RUNNER_OS" = "Windows" ]; then FILE=$(cygpath -w "$FILE"); fi
+          echo "filename=$FILE" >> "$GITHUB_OUTPUT"
 
       - name: Build with PyApp
         env:
@@ -161,7 +181,10 @@ jobs:
           fi
 
       - name: Rename binary
-        run: mv dist/pyapp/bin/pyapp dist/${{ matrix.artifact }}
+        run: |
+          SRC=dist/pyapp/bin/pyapp
+          if [ -f "$SRC.exe" ]; then SRC="$SRC.exe"; fi
+          mv "$SRC" "dist/${{ matrix.artifact }}"
 
       - name: Import signing certificate
         if: runner.os == 'macOS'
@@ -310,6 +333,102 @@ jobs:
         with:
           name: security-key-vm-helper
           path: openshrimp-security-key-vm-helper-linux-*
+
+  build-hcs-initrd:
+    # The control initramfs the HCS sandbox backend boots its guests with:
+    # busybox plus the static vsock control agent.  Its build is Linux work
+    # (gcc -static, mknod, cpio) even though a Windows host consumes it, so
+    # the operator downloads this asset instead of standing up a WSL build.
+    name: Build HCS control initramfs
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build initramfs
+        run: |
+          sudo PUBLISH=1 bash scripts/build_hcs_initrd.sh \
+            "$PWD/openshrimp-hcs-initrd.img"
+
+      - name: Upload initramfs
+        uses: actions/upload-artifact@v7
+        with:
+          name: hcs-initrd
+          path: |
+            openshrimp-hcs-initrd.img
+            openshrimp-hcs-initrd.img.sha256
+
+  build-hcs-rdp-helper:
+    # The RDP helper for HCS computer use, shipped with every FreeRDP DLL it
+    # loads.  Building it here is what makes `mingw_bin` optional: an operator
+    # without an MSYS2 toolchain gets this bundle, and the runtime falls back
+    # to compiling from source only for a source install.
+    name: Build HCS RDP helper
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-freerdp
+            mingw-w64-x86_64-pkgconf
+            zip
+
+      - name: Build helper
+        # Same compile the runtime fallback performs (sandbox/hcs_rdp.py);
+        # keep the flags in step with it.
+        run: |
+          mkdir -p bundle
+          gcc src/open_shrimp/sandbox/hcs_rdp_helper.c \
+            -o bundle/hcs_rdp_helper.exe -D__STDC_NO_THREADS__ -O2 \
+            $(pkgconf --cflags --libs freerdp-client3 freerdp3 winpr3) \
+            -lws2_32
+
+      - name: Bundle the FreeRDP DLLs
+        # ldd resolves the PE's imports transitively, so one pass collects the
+        # whole closure.  Only the /mingw64 ones travel; the rest are Windows'
+        # own and are already on the target machine.
+        run: |
+          cd bundle
+          ldd hcs_rdp_helper.exe | awk '/mingw64/ {print $3}' | sort -u | \
+            while read -r dll; do cp -n "$dll" .; done
+          ls -l
+
+      - name: Verify the bundle needs no toolchain
+        shell: pwsh
+        # The whole point of the bundle is that the DLLs beside the exe are
+        # enough, so run it with MSYS2 off PATH.  With a DLL missing the
+        # loader kills the process (exit -1073741515) before it prints
+        # anything; with the bundle complete, argc < 3 prints usage and
+        # exits 2.
+        run: |
+          $env:PATH = "$env:SystemRoot\system32;$env:SystemRoot"
+          $out = & .\bundle\hcs_rdp_helper.exe 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 2 -or $out -notmatch 'usage:') {
+            throw "RDP helper bundle is not self-contained (exit $LASTEXITCODE)"
+          }
+
+      - name: Package the bundle
+        # The runtime unpacks this archive whole and expects the exe at its
+        # top level, next to the DLLs (sandbox/hcs_rdp.py: HELPER_ASSET).
+        run: |
+          cd bundle
+          zip -r ../openshrimp-hcs-rdp-helper-windows-x86_64.zip .
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: hcs-rdp-helper
+          path: openshrimp-hcs-rdp-helper-windows-x86_64.zip
 
   build-limactl:
     # Builds the bundled `limactl` from upstream Lima at the version
@@ -645,7 +764,14 @@ jobs:
   release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-binary, build-virtiofsd, build-security-key-helper, build-limactl, build-macos-app]
+    needs:
+      - build-binary
+      - build-virtiofsd
+      - build-security-key-helper
+      - build-hcs-initrd
+      - build-hcs-rdp-helper
+      - build-limactl
+      - build-macos-app
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -664,6 +790,8 @@ jobs:
             artifacts/openshrimp-*
             artifacts/moonshine-stt-*
             artifacts/openshrimp-security-key-vm-helper-*
+            artifacts/openshrimp-hcs-initrd.img*
+            artifacts/openshrimp-hcs-rdp-helper-*
             artifacts/virtiofsd-*
             artifacts/OpenShrimp-*.dmg
             artifacts/*.tar.gz

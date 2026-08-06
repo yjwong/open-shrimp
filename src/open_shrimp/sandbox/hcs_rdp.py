@@ -7,8 +7,9 @@ member.
 
 Split of responsibilities:
 
-- ``hcs_rdp_helper.c`` (compiled once with MSYS2 mingw64 gcc against
-  libfreerdp3, see :func:`ensure_helper_exe`) owns the RDP wire session:
+- ``hcs_rdp_helper.c`` (shipped prebuilt with its FreeRDP DLLs, or compiled
+  once with MSYS2 mingw64 gcc against libfreerdp3 — see
+  :func:`ensure_rdp_helper`) owns the RDP wire session:
   it dials ``AF_HYPERV`` to the guest's vsock RDP relay through an
   in-process TCP shim, decodes frames into a memory framebuffer, injects
   input PDUs, and reconnects when the RDP session drops.  It exposes a
@@ -28,13 +29,20 @@ Split of responsibilities:
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import socket
 import struct
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
+
+from platformdirs import user_data_path
 
 from open_shrimp.sandbox.hcs_rdp_keymap import (
     combo_scancodes,
@@ -804,12 +812,121 @@ class HcsRdpSession:
             raise RuntimeError(f"wl-copy failed: {out.strip()}")
 
 
-# -- Helper build ------------------------------------------------------------
+# -- Helper resolution -------------------------------------------------------
 
 _HELPER_SOURCE = Path(__file__).with_name("hcs_rdp_helper.c")
 
+#: The prebuilt helper is published as one archive holding the exe and every
+#: FreeRDP DLL it loads, so an operator needs no toolchain at all.
+HELPER_EXE_NAME = "hcs_rdp_helper.exe"
+HELPER_ASSET = "openshrimp-hcs-rdp-helper-windows-x86_64.zip"
+_REPO = "yjwong/open-shrimp"
+HELPER_DOWNLOAD_URL = (
+    f"https://github.com/{_REPO}/releases/latest/download/{HELPER_ASSET}"
+)
 
-def ensure_helper_exe(out_dir: Path, mingw_bin: Path) -> Path:
+
+def shipped_helper_dir() -> Path:
+    """Where a downloaded bundle is unpacked.  Per-user, not per-context: the
+    bundle is host state shared by every computer-use sandbox."""
+    return user_data_path("openshrimp") / "hcs-rdp-helper"
+
+
+def find_shipped_helper() -> Path | None:
+    """The prebuilt helper if one is already staged, else ``None``.
+
+    ``OPENSHRIMP_HCS_RDP_HELPER`` names either the exe or the directory
+    holding it (its DLLs sit alongside); when it is set and resolves to
+    nothing, that is an error rather than a silent fall-through to a download
+    the operator did not ask for.
+    """
+    override = os.environ.get("OPENSHRIMP_HCS_RDP_HELPER")
+    if override:
+        path = Path(override)
+        exe = path / HELPER_EXE_NAME if path.is_dir() else path
+        if not exe.is_file():
+            raise RuntimeError(
+                f"OPENSHRIMP_HCS_RDP_HELPER is set to {override!r}, which is "
+                f"neither the RDP helper exe nor a directory containing "
+                f"{HELPER_EXE_NAME}."
+            )
+        return exe
+    cached = shipped_helper_dir() / HELPER_EXE_NAME
+    return cached if cached.is_file() else None
+
+
+def download_shipped_helper() -> Path:
+    """Fetch the released helper bundle and unpack it; return the exe.
+
+    The archive is extracted whole — the exe alone is not runnable, because
+    the FreeRDP DLLs shipped beside it are what the loader resolves against.
+    """
+    target_dir = shipped_helper_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Downloading the HCS RDP helper from %s ...", HELPER_DOWNLOAD_URL)
+    req = urllib.request.Request(
+        HELPER_DOWNLOAD_URL, headers={"Accept": "application/octet-stream"},
+    )
+    tmp = target_dir / f"{HELPER_ASSET}.tmp"
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            with open(tmp, "wb") as f:
+                shutil.copyfileobj(resp, f)
+        with zipfile.ZipFile(tmp) as zf:
+            zf.extractall(target_dir)
+    except (OSError, urllib.error.URLError, zipfile.BadZipFile) as exc:
+        raise RuntimeError(
+            f"Failed to download the HCS RDP helper from "
+            f"{HELPER_DOWNLOAD_URL}: {exc}"
+        ) from exc
+    finally:
+        tmp.unlink(missing_ok=True)
+    exe = target_dir / HELPER_EXE_NAME
+    if not exe.is_file():
+        raise RuntimeError(
+            f"The HCS RDP helper archive at {HELPER_DOWNLOAD_URL} contains no "
+            f"{HELPER_EXE_NAME}."
+        )
+    return exe
+
+
+def ensure_rdp_helper(
+    out_dir: Path, mingw_bin: Path | None,
+) -> tuple[Path, Path]:
+    """Resolve the RDP helper exe and the directory its DLLs load from.
+
+    A prebuilt helper wins over a local build: it ships with the FreeRDP DLLs
+    it was linked against, so it is the path that works on a machine with no
+    toolchain.  Compiling from source is the fallback for a source install,
+    and needs ``mingw_bin``.  With neither, the error names both — supplying
+    one of them is the only thing that makes computer use work.
+    """
+    shipped = find_shipped_helper()
+    download_error: str | None = None
+    if shipped is None:
+        try:
+            shipped = download_shipped_helper()
+        except RuntimeError as exc:
+            download_error = str(exc)
+    if shipped is not None:
+        return shipped, shipped.parent
+    if mingw_bin is not None:
+        logger.info("%s; building the helper locally instead.", download_error)
+        return build_helper_exe(out_dir, mingw_bin), mingw_bin
+    raise RuntimeError(
+        "HCS computer use needs the RDP helper, and neither of the two ways "
+        "to get one is available. Supply either: (1) the prebuilt bundle — "
+        f"download {HELPER_ASSET} from an OpenShrimp release and unpack it "
+        f"into {shipped_helper_dir()}, or point OPENSHRIMP_HCS_RDP_HELPER at "
+        "a directory holding it; or (2) a toolchain to build it from source "
+        r"— set sandbox.mingw_bin to an MSYS2 mingw64 bin directory (e.g. "
+        r"C:\msys64\mingw64\bin) with the mingw-w64-x86_64-freerdp, -gcc and "
+        f"-pkgconf packages installed. Fetching the bundle was tried first "
+        f"and failed: {download_error}"
+    )
+
+
+def build_helper_exe(out_dir: Path, mingw_bin: Path) -> Path:
     """Compile the native RDP helper if missing or stale; return its path.
 
     Requires an MSYS2 mingw64 toolchain (``gcc``, ``pkgconf``) with the
@@ -818,7 +935,7 @@ def ensure_helper_exe(out_dir: Path, mingw_bin: Path) -> Path:
     launcher-exe build strategy.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    exe = out_dir / "hcs_rdp_helper.exe"
+    exe = out_dir / HELPER_EXE_NAME
     staged_src = out_dir / "hcs_rdp_helper.c"
     source = _HELPER_SOURCE.read_text(encoding="utf-8")
     if (
@@ -828,8 +945,6 @@ def ensure_helper_exe(out_dir: Path, mingw_bin: Path) -> Path:
     ):
         return exe
     staged_src.write_text(source, encoding="utf-8")
-
-    import os
 
     # gcc's subprograms (cc1, the linker) resolve their DLLs through PATH;
     # invoking the toolchain by absolute path alone dies without output.

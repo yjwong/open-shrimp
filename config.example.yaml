@@ -127,9 +127,10 @@ contexts:
     #   #                          # (scripts/build_hcs_gui_rootfs.sh) and
     #   #                          # wants memory >= 4096, cpus >= 2.
     #   # mingw_bin: C:\msys64\mingw64\bin
-    #   #                          # REQUIRED with computer_use. The MSYS2
-    #   #                          # mingw64 bin dir supplying the FreeRDP DLLs
-    #   #                          # + the toolchain that builds the RDP helper:
+    #   #                          # OPTIONAL. The RDP helper is downloaded
+    #   #                          # prebuilt with its FreeRDP DLLs; set this
+    #   #                          # only to build it from source instead — the
+    #   #                          # MSYS2 mingw64 bin dir with:
     #   #                          # pacman -S mingw-w64-x86_64-freerdp
     #   #                          #   mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf
     #   # disk_size: 20            # GB per persistent_paths VHDX (dynamic/sparse)
