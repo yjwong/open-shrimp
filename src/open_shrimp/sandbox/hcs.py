@@ -33,6 +33,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -52,6 +53,7 @@ from open_shrimp.sandbox.agent_runtime import (
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox import hcs_helpers as H
 from open_shrimp.sandbox.hcs_rdp import HcsRdpSession, ensure_helper_exe
+from open_shrimp.sandbox.port_forward import allocate_host_port, new_forward_id
 
 if TYPE_CHECKING:
     from open_shrimp.sandbox.hcs_win import ControlChannel
@@ -179,6 +181,13 @@ class HcsSandbox:
         self._runtime_id: str | None = None
         self._ep_props: dict | None = None
         self._forwarded_ports: set[int] = set()
+        # Host→guest state: guest ports whose in-guest bridge listener is up,
+        # the host port reach() settled on per guest port, and the runtime
+        # forwards keyed by forward id.  All three are per-boot.
+        self._guest_bridge_ports: set[int] = set()
+        self._reached_ports: dict[int, int] = {}
+        self._port_forwards: dict[str, PortForward] = {}
+        self._port_forward_lock = threading.Lock()
         # Host-side RDP session for computer-use contexts, created lazily on
         # the first computer-use call (the desktop relay is already up then).
         self._rdp_session: HcsRdpSession | None = None
@@ -371,6 +380,8 @@ class HcsSandbox:
         shutil.copyfile(exec_src, self._cfg_dir / "exec_agent.py")
         relay_src = Path(__file__).with_name("hcs_host_relay.py")
         shutil.copyfile(relay_src, self._cfg_dir / "host_relay.py")
+        bridge_src = Path(__file__).with_name("hcs_guest_bridge.py")
+        shutil.copyfile(bridge_src, self._cfg_dir / "guest_bridge.py")
         provision = self._config.provision
         (self._cfg_dir / "provision.sh").write_text(
             provision or "", encoding="utf-8", newline="\n",
@@ -420,7 +431,10 @@ class HcsSandbox:
         from open_shrimp.sandbox import hcs_win as W
 
         self._log(log_file, "Booting HCS sandbox...")
-        self._forwarded_ports.clear()  # a fresh VM has no guest relay running
+        # A fresh VM runs neither relay direction's guest-side listener, and
+        # every host-side bridge listener belongs to the dead RuntimeId.
+        self._forwarded_ports.clear()
+        self._reset_guest_bridges()
         # The RDP session dials this boot's RuntimeId; it cannot span boots.
         self._close_rdp_session()
         self._teardown_stale()
@@ -769,6 +783,19 @@ class HcsSandbox:
         if self._runtime.provision_credentials is not None:
             self._runtime.provision_credentials(self._claude_home_dir)
 
+    # Two TCP relays run between host and guest.  They are mirror images and
+    # must not be confused:
+    #
+    #   ensure_host_port_forward(host_port) — guest→host.  The guest listens on
+    #     its own loopback, dials the host over vsock, and the host bridges to a
+    #     host service (the MCP proxy).  The guest names the port, so the host
+    #     side validates it against an allow-list.
+    #   _bridge_guest_port(guest_port, host_port) — host→guest.  The host
+    #     listens on its own loopback, dials the guest over hvsocket, and the
+    #     guest bridges to a guest service (reach(), runtime port forwards).
+    #     The host names the port, so there is no allow-list; the host-side
+    #     listener binds loopback only.
+
     def ensure_host_port_forward(self, host_port: int) -> None:
         """Make host ``127.0.0.1:host_port`` reachable from the guest.
 
@@ -790,6 +817,95 @@ class HcsSandbox:
             tolerate_read_timeout=True, read_timeout=4.0,
         )
         self._forwarded_ports.add(host_port)
+
+    def _start_guest_bridge_listener(self, guest_port: int) -> None:
+        """Start the in-guest vsock listener fronting ``127.0.0.1:guest_port``.
+
+        Waits for the listener to bind so the first client through the bridge
+        is not refused.  Idempotent both ways: within one process by the tracked
+        port set, and across processes by the reachability probe — a guest
+        listener left by an earlier bot run is adopted rather than relaunched
+        onto a vsock port it already holds.
+        """
+        if guest_port in self._guest_bridge_ports:
+            return
+        reserved = H.reserved_vsock_ports(len(self._additional_directories))
+        if guest_port in reserved:
+            raise RuntimeError(
+                f"Guest port {guest_port} cannot be exposed: the HCS backend "
+                f"addresses a guest service over vsock port {guest_port}, which "
+                "one of its own host↔guest channels already occupies."
+            )
+        from open_shrimp.sandbox import hcs_win as W
+
+        assert self._runtime_id is not None
+        if W.vsock_port_reachable(self._runtime_id, guest_port):
+            self._guest_bridge_ports.add(guest_port)
+            return
+        chan = W.ControlChannel(self._runtime_id, H.CONTROL_PORT)
+        # Fire-and-forget with a short read timeout: the backgrounded listener
+        # inherits the command's output stream, so the control agent's
+        # read-to-EOF framing never EOFs while it lives.  The redirection is
+        # the outer initramfs shell's — the log lands in the initramfs /tmp,
+        # not the chroot's.
+        chan.run(
+            f"sh -c 'chroot {H.MNT_ROOT} /usr/bin/env PATH={H.CHROOT_PATH} "
+            f"python3 {H.CHROOT_CFG_DIR}/guest_bridge.py {guest_port} "
+            f"</dev/null >/tmp/guest-bridge-{guest_port}.log 2>&1 &'",
+            tolerate_read_timeout=True, read_timeout=4.0,
+        )
+        for _ in range(20):
+            if W.vsock_port_reachable(self._runtime_id, guest_port):
+                self._guest_bridge_ports.add(guest_port)
+                return
+            time.sleep(0.25)
+        raise RuntimeError(
+            f"The in-guest bridge listener for guest port {guest_port} never "
+            f"bound its vsock port"
+        )
+
+    def _bridge_guest_port(self, guest_port: int, host_port: int) -> None:
+        """Expose guest ``127.0.0.1:guest_port`` as host ``127.0.0.1:host_port``."""
+        if self._runtime_id is None:
+            raise RuntimeError(
+                "Cannot expose a guest port: HCS sandbox is not running"
+            )
+        from open_shrimp.sandbox import hcs_win as W
+
+        self._start_guest_bridge_listener(guest_port)
+        W.open_guest_port_bridge(self._runtime_id, host_port, guest_port)
+
+    def _close_bridge_listener(self, host_port: int) -> None:
+        """Close the host-side listener of one host→guest bridge.
+
+        The in-guest listener for the guest port stays up: it is one idle vsock
+        accept loop shared by every bridge to that port, and only the host can
+        dial it.
+        """
+        rid = self._runtime_id
+        if rid is None:
+            return
+        from open_shrimp.sandbox import hcs_win as W
+
+        W.close_guest_port_bridge(rid, host_port)
+
+    def _reset_guest_bridges(self) -> None:
+        """Drop every host→guest bridge and the state tracking it.
+
+        Each host-side listener is bound to one boot's RuntimeId and each
+        in-guest listener dies with the guest, so a boot or a teardown must
+        close the host-side listeners too — otherwise they keep host ports
+        bound with nothing behind them.
+        """
+        rid = self._runtime_id or self._read_runtime_id()
+        if rid is not None:
+            from open_shrimp.sandbox import hcs_win as W
+
+            W.close_guest_port_bridges(rid)
+        self._guest_bridge_ports.clear()
+        self._reached_ports.clear()
+        with self._port_forward_lock:
+            self._port_forwards.clear()
 
     def guest_exec(
         self, argv: list[str], *, read_timeout: float = 120.0,
@@ -885,9 +1001,18 @@ class HcsSandbox:
         return exe
 
     def reach(self, guest_port: int) -> str:
-        raise NotImplementedError(
-            "The HCS backend has no served-endpoint / reach() support."
-        )
+        """Expose guest ``127.0.0.1:guest_port`` on host loopback.
+
+        Idempotent per guest port for the life of one boot: repeated calls
+        return the same endpoint instead of stacking a listener per call, so a
+        caller may re-resolve an endpoint freely.
+        """
+        host_port = self._reached_ports.get(guest_port)
+        if host_port is None:
+            host_port = allocate_host_port(None, guest_port)
+            self._bridge_guest_port(guest_port, host_port)
+            self._reached_ports[guest_port] = host_port
+        return f"127.0.0.1:{host_port}"
 
     # -- Sandbox protocol: teardown ------------------------------------------
 
@@ -939,6 +1064,7 @@ class HcsSandbox:
 
         if rid is not None:
             W.close_host_relay(rid)
+        self._reset_guest_bridges()
         self._runtime_id = None
         self._forwarded_ports.clear()
         self._runtime_id_file().unlink(missing_ok=True)
@@ -1257,27 +1383,71 @@ class HcsSandbox:
             result.append(guest_uploads / host_path.name)
         return result
 
-    # -- port forwarding (dynamic guest→host forwards not yet supported) -----
+    # -- port forwarding (host→guest bridges, one listener per forward) -------
 
     def supports_port_forwarding(self) -> bool:
-        return False
+        return True
 
     def add_port_forward(
         self, guest_port: int, requested_host_port: int | None,
         scope_key: str | None, description: str | None,
     ) -> PortForward:
-        raise NotImplementedError(
-            "Runtime port forwarding is not yet supported on the HCS backend."
+        """Expose a guest port on host loopback for the life of one scope.
+
+        Each forward owns its own host-side listener, so removing one never
+        disturbs another that happens to share the guest port.
+        """
+        host_port = allocate_host_port(requested_host_port, guest_port)
+        self._bridge_guest_port(guest_port, host_port)
+        forward = PortForward(
+            id=new_forward_id(),
+            guest_port=guest_port,
+            host_port=host_port,
+            scope_key=scope_key,
+            description=description,
         )
+        with self._port_forward_lock:
+            self._port_forwards[forward.id] = forward
+        logger.info(
+            "Opened HCS port forward %s: guest=%d -> host 127.0.0.1:%d",
+            forward.id, guest_port, host_port,
+        )
+        return forward
 
     def remove_port_forward(self, forward_id: str) -> bool:
-        return False
+        with self._port_forward_lock:
+            forward = self._port_forwards.pop(forward_id, None)
+        if forward is None:
+            return False
+        self._close_bridge_listener(forward.host_port)
+        logger.info(
+            "Removed HCS port forward %s (guest=%d host=%d)",
+            forward.id, forward.guest_port, forward.host_port,
+        )
+        return True
 
     def list_port_forwards(self, scope_key: str | None = None) -> list[PortForward]:
-        return []
+        with self._port_forward_lock:
+            forwards = list(self._port_forwards.values())
+        return [
+            f for f in forwards
+            if scope_key is None or f.scope_key == scope_key
+        ]
 
     def cleanup_port_forwards(self, scope_key: str | None = None) -> None:
-        return None
+        with self._port_forward_lock:
+            victims = [
+                f for f in self._port_forwards.values()
+                if scope_key is None or f.scope_key == scope_key
+            ]
+            for f in victims:
+                self._port_forwards.pop(f.id, None)
+        for f in victims:
+            self._close_bridge_listener(f.host_port)
+            logger.info(
+                "Cleaned up HCS port forward %s (guest=%d host=%d)",
+                f.id, f.guest_port, f.host_port,
+            )
 
 
 def _find_csc() -> str:

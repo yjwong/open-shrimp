@@ -7,6 +7,9 @@ target port as a 2-byte big-endian header, and pipes the two halves.  The host
 half (``hcs_win.ensure_host_relay``) accepts on ``AF_HYPERV`` and bridges to
 ``127.0.0.1:<port>`` on the host.
 
+The opposite direction — the host reaching a *guest* service — is
+``hcs_guest_bridge.py`` plus ``hcs_win.open_guest_port_bridge``.
+
 This exists because the HNS NAT gateway forwards guest egress to the internet
 but does not expose the host's own loopback listeners — so the agent CLI
 reaches the OpenShrimp MCP proxy (host ``127.0.0.1``) through this relay, with

@@ -51,6 +51,24 @@ P9_PORT_CFG = 566
 P9_PORT_TASK_TMP = 567
 P9_PORT_EXTRA_BASE = 568
 
+
+def reserved_vsock_ports(extra_shares: int = 0) -> frozenset[int]:
+    """The vsock ports the backend's own channels occupy.
+
+    A host→guest bridge addresses a guest service by reusing its TCP port
+    number as the vsock port (the convention the in-guest RDP relay follows),
+    so a guest service listening on one of these cannot be bridged — the
+    guest-side bridge listener would collide with the channel already bound
+    there.  *extra_shares* is the count of additional-directory Plan9 shares,
+    whose ports run on from :data:`P9_PORT_EXTRA_BASE`.
+    """
+    return frozenset({
+        CONTROL_PORT, EXEC_PORT, RELAY_PORT, RDP_PORT,
+        P9_PORT_WORKSPACE, P9_PORT_HOME, P9_PORT_CFG, P9_PORT_TASK_TMP,
+        *range(P9_PORT_EXTRA_BASE, P9_PORT_EXTRA_BASE + extra_shares),
+    })
+
+
 #: Guest-side mount points (outside the rootfs chroot).
 MNT_WORKSPACE = "/mnt/ws"
 MNT_HOME = "/mnt/home"

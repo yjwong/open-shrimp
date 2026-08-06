@@ -49,6 +49,7 @@ from win32more.Windows.Win32.System.HostComputeSystem import (
     HcsWaitForOperationResult,
 )
 
+from open_shrimp.sandbox import hcs_port_bridge as B
 from open_shrimp.sandbox.hcs_helpers import vsock_service_id
 
 logger = logging.getLogger(__name__)
@@ -703,22 +704,6 @@ def register_guest_comm_service(port: int, name: str) -> None:
         winreg.SetValueEx(key, "ElementName", 0, winreg.REG_SZ, name)
 
 
-def _relay_pipe(src: socket.socket, dst: socket.socket) -> None:
-    try:
-        while True:
-            data = src.recv(65536)
-            if not data:
-                break
-            dst.sendall(data)
-    except OSError:
-        pass
-    finally:
-        try:
-            dst.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
-
-
 def _relay_handle(conn: socket.socket) -> None:
     upstream = None
     try:
@@ -742,9 +727,9 @@ def _relay_handle(conn: socket.socket) -> None:
     except OSError:
         conn.close()
         return
-    t = threading.Thread(target=_relay_pipe, args=(conn, upstream), daemon=True)
+    t = threading.Thread(target=B.pipe, args=(conn, upstream), daemon=True)
     t.start()
-    _relay_pipe(upstream, conn)
+    B.pipe(upstream, conn)
     conn.close()
     upstream.close()
 
@@ -792,21 +777,29 @@ def ensure_host_relay(runtime_id: str) -> None:
 def close_host_relay(runtime_id: str) -> None:
     """Close the relay listener for a torn-down VM.
 
-    Closing the socket makes the ``_relay_accept`` loop's ``accept`` raise and
+    Retiring the socket makes the ``_relay_accept`` loop's ``accept`` return and
     the thread exit, so a bot that rebuilds sandboxes does not leak a listener
     + thread per dead RuntimeId.
     """
     with _host_relay_lock:
         srv = _host_relay_sockets.pop(runtime_id, None)
-    if srv is not None:
-        try:
-            srv.close()
-        except OSError:
-            pass
+    B.close_listener(srv)
 
 
-def vsock_port_reachable(runtime_id: str, port: int, timeout: float = 3.0) -> bool:
-    """True when something in the guest accepts on vsock *port*."""
+# ---------------------------------------------------------------------------
+# Host→guest bridge (host half): the AF_HYPERV dial behind a loopback listener
+# ---------------------------------------------------------------------------
+
+
+def hvsocket_connect(
+    runtime_id: str, port: int, timeout: float = 10.0,
+) -> socket.socket:
+    """Dial guest vsock *port* on one VM and return the connected socket.
+
+    The caller owns the socket.  It comes back in blocking mode with no
+    timeout: a bridged stream lives as long as the client keeps it open, so a
+    read deadline would tear down an idle-but-live connection.
+    """
     s = socket.socket(
         socket.AF_HYPERV, socket.SOCK_STREAM, socket.HV_PROTOCOL_RAW,
     )
@@ -821,8 +814,48 @@ def vsock_port_reachable(runtime_id: str, port: int, timeout: float = 3.0) -> bo
             pass
         s.settimeout(timeout)
         s.connect((runtime_id, vsock_service_id(port)))
-        return True
+    except OSError:
+        s.close()
+        raise
+    s.settimeout(None)
+    return s
+
+
+def open_guest_port_bridge(
+    runtime_id: str, host_port: int, guest_port: int,
+) -> None:
+    """Bridge host ``127.0.0.1:host_port`` to guest ``127.0.0.1:guest_port``.
+
+    The opposite direction of :func:`ensure_host_relay`: here the host listens
+    on its own loopback and dials the guest, so no service GUID is registered —
+    ``GuestCommunicationServices`` is the guest→host allow-list and applies only
+    to host listeners on ``AF_HYPERV``.  The guest-side listener
+    (``guest_bridge.py``) must already be serving the matching vsock port.
+
+    Idempotent per ``(runtime_id, host_port)``; raises :class:`OSError` when the
+    host port cannot be bound.
+    """
+    B.open_bridge(
+        runtime_id,
+        host_port,
+        lambda: hvsocket_connect(runtime_id, guest_port),
+    )
+
+
+def close_guest_port_bridge(runtime_id: str, host_port: int) -> bool:
+    """Close one host→guest bridge listener; ``True`` when one was live."""
+    return B.close_bridge(runtime_id, host_port)
+
+
+def close_guest_port_bridges(runtime_id: str) -> None:
+    """Close every host→guest bridge listener of one VM."""
+    B.close_owner_bridges(runtime_id)
+
+
+def vsock_port_reachable(runtime_id: str, port: int, timeout: float = 3.0) -> bool:
+    """True when something in the guest accepts on vsock *port*."""
+    try:
+        hvsocket_connect(runtime_id, port, timeout).close()
     except OSError:
         return False
-    finally:
-        s.close()
+    return True
