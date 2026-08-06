@@ -112,12 +112,12 @@ contexts:
   my-project:
     directory: /home/you/projects/my-project
     sandbox:
-      backend: docker   # docker (Linux), libvirt (Linux VM), or lima (macOS VM)
+      backend: docker   # docker (Linux), libvirt (Linux VM), lima (macOS VM), hcs (Windows VM)
 ```
 
 Session state is stored separately per context under `~/.config/openshrimp/containers/`, so sandboxed contexts don't interfere with each other or your host agent state (e.g. `~/.claude`).
 
-On Linux, use `backend: docker` or `backend: libvirt`. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework.
+On Linux, use `backend: docker` or `backend: libvirt`. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework. On Windows, use `backend: hcs` for a Linux guest on the Host Compute Service — this one needs guest images you build yourself, so read the [HCS sandbox guide](https://shrimp.wong.place/guides/hcs-sandbox/) before enabling it.
 
 OpenCode contexts use a separate `openshrimp-opencode:latest` image — see [Agent Backends](#agent-backends).
 
@@ -160,6 +160,8 @@ chmod +x openshrimp
 # Windows x86_64 (PowerShell) — includes the HCS sandbox backend
 curl.exe -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-windows-x86_64.exe -o openshrimp.exe
 ```
+
+> **Note:** The Windows binary bundles the HCS sandbox backend, but a sandboxed context also needs a guest image you build yourself. See the [HCS sandbox guide](https://shrimp.wong.place/guides/hcs-sandbox/).
 
 On first run, the binary will automatically set up an isolated Python environment and install dependencies. If no config file exists, an interactive setup wizard walks you through creating one. Subsequent runs start instantly.
 
@@ -263,7 +265,7 @@ When a tool needs approval, you get three options: **Allow** (once), **Accept al
 
 ## Agent Backends
 
-The top-level `backend:` key picks the agent runtime that drives OpenShrimp. Two ship: `claude_sdk` (the default — the Claude Agent SDK) and `opencode` ([`sst/opencode`](https://github.com/sst/opencode) over its HTTP serve API, supporting OpenAI, Anthropic, and Google models). Any context can override the global choice with its own `backend:` key. Note this agent `backend:` is a different setting from the sandbox `backend:` (`docker`/`libvirt`/`lima`) described under [Container Isolation](#container-isolation).
+The top-level `backend:` key picks the agent runtime that drives OpenShrimp. Two ship: `claude_sdk` (the default — the Claude Agent SDK) and `opencode` ([`sst/opencode`](https://github.com/sst/opencode) over its HTTP serve API, supporting OpenAI, Anthropic, and Google models). Any context can override the global choice with its own `backend:` key. Note this agent `backend:` is a different setting from the sandbox `backend:` (`docker`/`libvirt`/`lima`/`hcs`) described under [Container Isolation](#container-isolation).
 
 OpenCode isn't bundled, so satisfy three preconditions on the host first:
 

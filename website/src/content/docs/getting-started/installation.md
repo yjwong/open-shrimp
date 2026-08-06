@@ -43,6 +43,14 @@ curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/opensh
 chmod +x openshrimp
 ```
 
+### Windows x86_64
+
+This build includes the [HCS sandbox backend](/guides/hcs-sandbox/), which runs a context in a Linux guest on the Host Compute Service. Sandboxing is optional — the bot runs without it — but if you want it, the guide covers the guest images you have to build first.
+
+```powershell
+curl.exe -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-windows-x86_64.exe -o openshrimp.exe
+```
+
 All binaries and source archives are also available on the [GitHub Releases](https://github.com/yjwong/open-shrimp/releases) page.
 
 ## macOS App

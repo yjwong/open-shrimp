@@ -19,6 +19,16 @@ This is optional if you have authenticated the Claude CLI via OAuth (`claude log
 For systemd services, set the API key in the unit file's `Environment=` directive or use `EnvironmentFile=` to load it from a file. See [systemd deployment](/deployment/systemd/) for details.
 :::
 
+## HCS sandbox overrides
+
+These apply only to contexts on the [HCS sandbox backend](/guides/hcs-sandbox/), and only when an artifact is not where the backend looks for it by default.
+
+| Variable | Description |
+|----------|-------------|
+| `OPENSHRIMP_HCS_KERNEL` | Kernel the guest boots. Defaults to WSL's, at `C:\Program Files\WSL\tools\kernel` |
+| `OPENSHRIMP_HCS_INITRD` | Control initramfs. Defaults to `C:\ProgramData\openshrimp\hcs\initrd.img` |
+| `OPENSHRIMP_HCS_RDP_HELPER` | Directory holding an RDP helper bundle you staged yourself, instead of the one downloaded automatically |
+
 ## Internal variables
 
 These are used internally by OpenShrimp and generally don't need to be set manually.

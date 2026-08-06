@@ -9,7 +9,7 @@ Computer use gives Claude a headless desktop environment inside the sandbox. Cla
 
 ## Requirements
 
-- A sandbox with `computer_use: true` (Docker or Libvirt — not macOS)
+- A sandbox with `computer_use: true` — supported on every sandbox backend: Docker, Libvirt, Lima, and [HCS](/guides/hcs-sandbox/)
 - The `review` section configured for Mini Apps (needed for VNC viewer)
 
 ## Setup
@@ -111,6 +111,13 @@ The `/vnc` command requires the `review` section to be configured with either `p
 - Input via QMP (QEMU Machine Protocol) — mouse events, key presses
 - Window focus not directly supported (use `Alt+Tab` or similar key combos)
 - VNC port auto-assigned from QEMU's VNC server
+
+### HCS (Windows)
+
+- The guest runs weston with its RDP backend; the host drives it over RDP and serves the VNC Mini App from that surface
+- Screenshots, input, and clipboard all travel over the RDP connection
+- Window focus not directly supported (use `Alt+Tab` or similar key combos)
+- Needs a desktop guest image you build yourself — see the [HCS sandbox guide](/guides/hcs-sandbox/)
 
 ## Tips
 
