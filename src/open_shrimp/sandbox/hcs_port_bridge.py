@@ -105,7 +105,7 @@ def open_bridge(owner: str, host_port: int, dial: Dial) -> None:
         threading.Thread(target=_accept, args=(srv, dial), daemon=True).start()
         _listeners[key] = srv
     logger.info(
-        "HCS host→guest bridge listening on 127.0.0.1:%d for %s",
+        "HCS host->guest bridge listening on 127.0.0.1:%d for %s",
         host_port, owner,
     )
 
@@ -127,7 +127,7 @@ def close_owner_bridges(owner: str) -> None:
             _listeners.pop(key, None)
     for key, srv in victims:
         close_listener(srv)
-        logger.info("Closed HCS host→guest bridge on 127.0.0.1:%d", key[1])
+        logger.info("Closed HCS host->guest bridge on 127.0.0.1:%d", key[1])
 
 
 def bridged_host_ports(owner: str) -> list[int]:
