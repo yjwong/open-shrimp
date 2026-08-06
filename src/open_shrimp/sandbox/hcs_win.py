@@ -92,9 +92,21 @@ _advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
 _advapi32.ConvertSidToStringSidW.argtypes = [
     ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p),
 ]
+_advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+_advapi32.ConvertStringSidToSidW.argtypes = [
+    wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p),
+]
+_advapi32.CheckTokenMembership.restype = wintypes.BOOL
+_advapi32.CheckTokenMembership.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
+]
 
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER = 1
+
+#: Well-known groups the Host Compute Service grants management rights to.
+_SID_ADMINISTRATORS = "S-1-5-32-544"
+_SID_HYPERV_ADMINISTRATORS = "S-1-5-32-578"
 
 _HCN = importlib.import_module(
     "win32more.Windows.Win32.System.HostComputeNetwork"
@@ -130,6 +142,44 @@ def current_user_sid() -> str:
             _kernel32.LocalFree(str_ptr)
     finally:
         _kernel32.CloseHandle(token)
+
+
+def _token_has_group(sid_string: str) -> bool:
+    """Whether the effective token holds ``sid_string`` as an *enabled* group.
+
+    ``CheckTokenMembership`` honours the deny-only flag, so a UAC-filtered
+    token answers no for the privileged groups it carries deny-only — which
+    is the answer that matters, since the kernel's own access check reads the
+    same token the same way.
+    """
+    sid = ctypes.c_void_p()
+    if not _advapi32.ConvertStringSidToSidW(sid_string, ctypes.byref(sid)):
+        raise OSError(ctypes.get_last_error(), "ConvertStringSidToSid failed")
+    try:
+        member = wintypes.BOOL()
+        if not _advapi32.CheckTokenMembership(None, sid, ctypes.byref(member)):
+            raise OSError(
+                ctypes.get_last_error(), "CheckTokenMembership failed",
+            )
+        return bool(member.value)
+    finally:
+        _kernel32.LocalFree(sid)
+
+
+def can_manage_compute_systems() -> bool:
+    """Whether this process may drive HCS, or would be refused at create.
+
+    ``HcsCreateComputeSystem`` access-checks the caller against Administrators
+    and Hyper-V Administrators, returning a bare ``0x8037011B`` to a caller in
+    neither.  Membership is probed against the effective token rather than the
+    account, so an unelevated process whose account is privileged reads as
+    unprivileged here — exactly as it will at create time.  Raises ``OSError``
+    if the probe itself cannot run.
+    """
+    return any(
+        _token_has_group(sid)
+        for sid in (_SID_ADMINISTRATORS, _SID_HYPERV_ADMINISTRATORS)
+    )
 
 
 def hvsocket_connect_sddl() -> str:

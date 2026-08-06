@@ -120,6 +120,34 @@ _SERVE_REAP = (
 )
 
 
+def _require_hyperv_rights(win: Any) -> None:
+    """Refuse a host whose token HCS will turn away at create time.
+
+    Failing here keeps the operator from meeting the requirement as a bare
+    HRESULT out of ``HcsCreateComputeSystem``.  A probe that cannot answer is
+    not an answer of "no": the sandbox still gets its chance to boot, since a
+    broken probe must not ground a host that would have worked.
+    """
+    try:
+        permitted = win.can_manage_compute_systems()
+    except OSError:
+        logger.warning(
+            "Could not determine whether this process may manage Hyper-V; "
+            "continuing — a create failing with 0x8037011B means it may not",
+            exc_info=True,
+        )
+        return
+    if not permitted:
+        raise RuntimeError(
+            "HCS needs Hyper-V management rights that this process does not "
+            "have — run OpenShrimp elevated (right-click, Run as "
+            "administrator), or add the account it runs as to the 'Hyper-V "
+            "Administrators' group and sign out and back in so the new "
+            "membership reaches its logon token. Without one of the two, "
+            "creating the sandbox fails with a bare 0x8037011B."
+        )
+
+
 def _chroot_guest_path(guest_path: str, guest_home: str, *, owner: str) -> str:
     """Re-root one runtime-declared guest path at :data:`hcs_helpers.CHROOT_HOME`.
 
@@ -402,6 +430,8 @@ class HcsSandbox:
 
     def ensure_environment(self, *, log_file: Path | None = None) -> None:
         from open_shrimp.sandbox import hcs_win as W
+
+        _require_hyperv_rights(W)
 
         self._sdir.mkdir(parents=True, exist_ok=True)
         for d in (
