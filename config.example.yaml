@@ -114,9 +114,11 @@ contexts:
     #   # backend: hcs
     #   # base_image: C:\path\to\rootfs.vhdx  # REQUIRED. An ext4 VHDX labelled
     #   #                          # `clauderoot` holding the Linux userland +
-    #   #                          # Node.js + the agent CLI. Copied per context
-    #   #                          # (the guest root); persistent_paths survive a
-    #   #                          # rebuild, the rootfs is reborn on every boot.
+    #   #                          # Node.js (scripts/build_hcs_base_rootfs.sh
+    #   #                          # builds one; the agent CLI installs itself
+    #   #                          # in-guest). Copied per context (the guest
+    #   #                          # root); persistent_paths survive a rebuild,
+    #   #                          # the rootfs is reborn on every boot.
     #   # memory: 2048             # Guest memory in MB (default: 2048)
     #   # cpus: 2                  # Guest vCPUs (default: 2). Must be even —
     #   #                          # HCS refuses other processor topologies.
@@ -137,7 +139,9 @@ contexts:
     #   #   npm install -g some-tool
     #   # The WSL-shipped kernel and a control initramfs are located via
     #   # OPENSHRIMP_HCS_KERNEL / OPENSHRIMP_HCS_INITRD when not at their
-    #   # defaults (C:\Program Files\WSL\tools\kernel and the staged initrd).
+    #   # defaults (C:\Program Files\WSL\tools\kernel and the staged initrd;
+    #   # scripts/build_hcs_initrd.sh builds the latter, and the release
+    #   # publishes it as openshrimp-hcs-initrd.img).
     #   # The bot's account must be in Administrators or Hyper-V Administrators.
     # mcp:                          # Per-context MCP server overlay (opencode only).
     #                               # Honoured by `backend: opencode`; ignored by the

@@ -76,6 +76,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_KERNEL = r"C:\Program Files\WSL\tools\kernel"
 _DEFAULT_INITRD = r"C:\ProgramData\openshrimp\hcs\initrd.img"
 
+#: Release asset carrying a prebuilt control initramfs, so an operator who
+#: does not want to run the build script has something to stage.
+_INITRD_ASSET = "openshrimp-hcs-initrd.img"
+
 
 def _kernel_path() -> Path:
     return Path(os.environ.get("OPENSHRIMP_HCS_KERNEL", _DEFAULT_KERNEL))
@@ -413,8 +417,10 @@ class HcsSandbox:
             )
         if not _initrd_path().exists():
             raise RuntimeError(
-                f"HCS control initramfs not found at {_initrd_path()} — "
-                "build it in WSL and stage it, or set OPENSHRIMP_HCS_INITRD."
+                f"HCS control initramfs not found at {_initrd_path()} — stage "
+                f"the {_INITRD_ASSET} release asset there, or build one with "
+                "scripts/build_hcs_initrd.sh (run as root in WSL), or set "
+                "OPENSHRIMP_HCS_INITRD to where it already is."
             )
 
         desired_fp = self._fingerprint()
@@ -452,8 +458,10 @@ class HcsSandbox:
         base = self._config.base_image
         if not base:
             raise RuntimeError(
-                "HCS sandbox requires 'base_image' (the rootfs VHDX with the "
-                "guest userland + Node + agent CLI) in the context config."
+                "HCS sandbox requires 'base_image' (the ext4 VHDX labelled "
+                f"{H.ROOTFS_LABEL!r} holding the guest userland + Node) in "
+                "the context config — build one with "
+                "scripts/build_hcs_base_rootfs.sh."
             )
         base_path = Path(base)
         if not base_path.exists():

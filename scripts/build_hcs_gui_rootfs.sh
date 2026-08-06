@@ -18,17 +18,24 @@
 #
 # The backend selects this variant instead of base_image whenever the
 # context sets `computer_use: true` (see sandbox/hcs.py); everything else
-# about the guest (label, layout, agent CLI) is inherited from the base.
+# about the guest (label, layout, agent CLI) is inherited from the base, which
+# scripts/build_hcs_base_rootfs.sh produces.
 #
-# Run as root inside a WSL distro on the Windows host (loop mounts, chroot,
-# network):
-#   wsl -d <distro> -- sudo bash build_hcs_gui_rootfs.sh \
+# Run as root on any Linux with loop mounts, chroot and network — a WSL distro
+# on the Windows host, or a CI runner that publishes the result:
+#   sudo bash build_hcs_gui_rootfs.sh \
 #       /mnt/c/images/claude-root.vhdx [/mnt/c/images/claude-root-gui.vhdx]
+#
+# Knobs: WORK (scratch directory — the build needs a few GB, so point it at a
+# filesystem that has them).  With PUBLISH=1 a zstd-compressed copy and a
+# `.sha256` are written alongside the VHDX, which is the form the release job
+# uploads so an operator downloads this image instead of baking it.
 set -eu
 
 BASE=${1:?usage: build_hcs_gui_rootfs.sh base.vhdx [out-gui.vhdx]}
 OUT=${2:-$(dirname "$BASE")/$(basename "$BASE" .vhdx)-gui.vhdx}
 SIZE=12G
+WORK=${WORK:-/root/hcs-gui-build}
 [ "$(id -u)" = 0 ] || { echo "must run as root (loop mount, chroot)"; exit 1; }
 [ -f "$BASE" ] || { echo "missing base image: $BASE"; exit 1; }
 
@@ -36,13 +43,14 @@ need_pkgs=""
 command -v qemu-img >/dev/null || need_pkgs="$need_pkgs qemu-utils"
 command -v resize2fs >/dev/null || need_pkgs="$need_pkgs e2fsprogs"
 command -v wget >/dev/null || need_pkgs="$need_pkgs wget"
+[ -n "${PUBLISH:-}" ] && ! command -v zstd >/dev/null && need_pkgs="$need_pkgs zstd"
 if [ -n "$need_pkgs" ]; then
     apt-get update -qq
     # shellcheck disable=SC2086
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $need_pkgs >/dev/null
 fi
 
-W=/root/hcs-gui-build
+W=$WORK
 RAW=$W/rootfs.raw
 MNT=$W/mnt
 mkdir -p "$MNT"
@@ -92,13 +100,17 @@ chroot "$MNT" /usr/bin/env HOME=/root DEBIAN_FRONTEND=noninteractive \
     apt-get update 2>&1 | tail -3
     apt-get install -y --no-install-recommends \
       weston libfreerdp-server2-2 socat openssl ca-certificates \
-      xkb-data dbus dbus-x11 xdg-utils wget wl-clipboard \
+      python3 xkb-data dbus dbus-x11 xdg-utils wget wl-clipboard \
       fonts-dejavu-core fonts-liberation fonts-noto-core fonts-noto-cjk \
       fonts-noto-color-emoji \
       2>&1 | tail -5
     echo "weston: $(weston --version)"
     ls -l /usr/lib/x86_64-linux-gnu/libweston-13/rdp-backend.so
-    command -v socat weston-terminal xdg-open wl-copy wl-paste
+    # python3 is named explicitly in the package set above rather than left to
+    # arrive as another package transitive dependency: the host->guest bridge and
+    # the guest->host relay are launched as `python3 <script>`, so a variant
+    # without it boots into a sandbox whose port forwarding cannot start.
+    command -v socat weston-terminal xdg-open wl-copy wl-paste python3
   '
 
 echo "=== Google Chrome (deb, not snap) ==="
@@ -210,7 +222,16 @@ echo "=== raw -> dynamic VHDX ==="
 VL=$W/gui.vhdx
 qemu-img convert -O vhdx -o subformat=dynamic "$RAW" "$VL"
 qemu-img info "$VL" | sed -n '1,5p'
+mkdir -p "$(dirname "$OUT")"
 cp "$VL" "$OUT"
 rm -f "$RAW" "$VL"
+
+if [ -n "${PUBLISH:-}" ]; then
+    echo "=== publish: zstd + sha256 ==="
+    zstd -q -f -12 -T0 "$OUT" -o "$OUT.zst"
+    (cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT").zst") > "$OUT.zst.sha256"
+    cat "$OUT.zst.sha256"
+    ls -l "$OUT.zst"
+fi
 ls -l "$OUT"
 echo "HCS-GUI-ROOTFS-OK out=$OUT"
