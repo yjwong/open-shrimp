@@ -915,14 +915,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # These patterns must not overlap.  A file matched twice is
+          # uploaded twice concurrently, and the second upload deletes the
+          # asset the first just created — a race that fails the whole step
+          # with a bare "Not Found" once it lands badly.  `openshrimp-*`
+          # already covers the security-key helper, the HCS initrd, both
+          # rootfs images and the RDP helper, so none of those get a line.
           files: |
             artifacts/openshrimp-*
             artifacts/moonshine-stt-*
-            artifacts/openshrimp-security-key-vm-helper-*
-            artifacts/openshrimp-hcs-initrd.img*
-            artifacts/openshrimp-hcs-base-rootfs.vhdx.zst*
-            artifacts/openshrimp-hcs-gui-rootfs.vhdx.zst*
-            artifacts/openshrimp-hcs-rdp-helper-*
             artifacts/virtiofsd-*
             artifacts/OpenShrimp-*.dmg
             artifacts/*.tar.gz
