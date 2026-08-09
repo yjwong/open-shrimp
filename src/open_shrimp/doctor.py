@@ -13,6 +13,7 @@ is nothing to check on a host that configures no HCS context.
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import sys
@@ -168,15 +169,26 @@ def _check_hcs_kernel(config: Config | None) -> tuple[bool, str]:
 
 
 def _check_hcs_initrd(config: Config | None) -> tuple[bool, str]:
+    """The control initramfs, which the backend downloads when none is staged.
+
+    A check must not fetch anything, so an absent initramfs passes on the
+    strength of that download.  Only ``OPENSHRIMP_HCS_INITRD`` pointing at
+    nothing fails: it suppresses the download, leaving no path to an image.
+    """
     from open_shrimp.sandbox.hcs import INITRD_ASSET, initrd_path
 
     path = initrd_path()
     if path.exists():
         return True, f"found at {path}"
-    return False, (
-        f"not found at {path} \u2014 stage the {INITRD_ASSET} release asset there, "
-        "or build one with scripts/build_hcs_initrd.sh (run as root in WSL), "
-        "or set OPENSHRIMP_HCS_INITRD (required for HCS sandbox)"
+    if os.environ.get("OPENSHRIMP_HCS_INITRD"):
+        return False, (
+            f"OPENSHRIMP_HCS_INITRD points at {path}, which does not exist "
+            "\u2014 unset it to download the released initramfs instead, or build "
+            "one with scripts/build_hcs_initrd.sh (run as root in WSL)"
+        )
+    return True, (
+        f"not staged \u2014 the {INITRD_ASSET} release asset will be downloaded to "
+        f"{path} on first use"
     )
 
 
@@ -191,8 +203,15 @@ def _check_csc(config: Config | None) -> tuple[bool, str]:
 
 def _check_hcs_base_image(config: Config | None) -> tuple[bool, str]:
     """The per-context rootfs template, plus its baked ``-gui`` variant where
-    the context enables computer use."""
-    from open_shrimp.sandbox.hcs_helpers import ROOTFS_LABEL, gui_image_path
+    the context enables computer use.
+
+    A context with no ``base_image`` boots the released rootfs, so it is
+    reported as a pending download rather than a problem; only an operator who
+    named their own image can be missing one.
+    """
+    from open_shrimp.sandbox.hcs import BASE_ROOTFS_ASSET, GUI_ROOTFS_ASSET
+    from open_shrimp.sandbox.hcs_assets import asset_dir
+    from open_shrimp.sandbox.hcs_helpers import gui_image_path
 
     sandboxes = _hcs_sandboxes(config)
     if not sandboxes:
@@ -202,11 +221,16 @@ def _check_hcs_base_image(config: Config | None) -> tuple[bool, str]:
     found: list[str] = []
     for name, sandbox in sandboxes:
         if not sandbox.base_image:
-            problems.append(
-                f"{name}: no sandbox.base_image (an ext4 VHDX labelled "
-                f"{ROOTFS_LABEL!r} holding the guest userland; build one with "
-                "scripts/build_hcs_base_rootfs.sh)"
-            )
+            gui = sandbox.computer_use
+            asset = GUI_ROOTFS_ASSET if gui else BASE_ROOTFS_ASSET
+            cached = asset_dir() / ("gui-rootfs.vhdx" if gui else "base-rootfs.vhdx")
+            if cached.exists():
+                found.append(f"{name}: {cached} (downloaded)")
+            else:
+                found.append(
+                    f"{name}: no sandbox.base_image — the {asset} release "
+                    f"asset will be downloaded to {cached} on first use"
+                )
             continue
         if not Path(sandbox.base_image).exists():
             problems.append(f"{name}: not found at {sandbox.base_image}")

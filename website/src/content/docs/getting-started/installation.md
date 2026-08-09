@@ -45,7 +45,7 @@ chmod +x openshrimp
 
 ### Windows x86_64
 
-This build includes the [HCS sandbox backend](/guides/hcs-sandbox/), which runs a context in a Linux guest on the Host Compute Service. Sandboxing is optional — the bot runs without it — but if you want it, the guide covers the guest images you have to build first.
+This build includes the [HCS sandbox backend](/guides/hcs-sandbox/), which runs a context in a Linux guest on the Host Compute Service. Sandboxing is optional — the bot runs without it — and when you enable it the guest image is downloaded on first boot; the guide covers the requirements.
 
 ```powershell
 curl.exe -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-windows-x86_64.exe -o openshrimp.exe

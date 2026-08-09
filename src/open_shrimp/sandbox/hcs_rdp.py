@@ -30,19 +30,18 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import socket
 import struct
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
 from platformdirs import user_data_path
+
+from open_shrimp.sandbox import hcs_assets as A
 
 from open_shrimp.sandbox.hcs_rdp_keymap import (
     combo_scancodes,
@@ -820,10 +819,7 @@ _HELPER_SOURCE = Path(__file__).with_name("hcs_rdp_helper.c")
 #: FreeRDP DLL it loads, so an operator needs no toolchain at all.
 HELPER_EXE_NAME = "hcs_rdp_helper.exe"
 HELPER_ASSET = "openshrimp-hcs-rdp-helper-windows-x86_64.zip"
-_REPO = "yjwong/open-shrimp"
-HELPER_DOWNLOAD_URL = (
-    f"https://github.com/{_REPO}/releases/latest/download/{HELPER_ASSET}"
-)
+HELPER_DOWNLOAD_URL = A.release_asset_url(HELPER_ASSET)
 
 
 def shipped_helper_dir() -> Path:
@@ -863,24 +859,18 @@ def download_shipped_helper() -> Path:
     """
     target_dir = shipped_helper_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("Downloading the HCS RDP helper from %s ...", HELPER_DOWNLOAD_URL)
-    req = urllib.request.Request(
-        HELPER_DOWNLOAD_URL, headers={"Accept": "application/octet-stream"},
-    )
-    tmp = target_dir / f"{HELPER_ASSET}.tmp"
+    archive = target_dir / HELPER_ASSET
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            with open(tmp, "wb") as f:
-                shutil.copyfileobj(resp, f)
-        with zipfile.ZipFile(tmp) as zf:
+        A.download_release_asset(HELPER_ASSET, archive)
+        with zipfile.ZipFile(archive) as zf:
             zf.extractall(target_dir)
-    except (OSError, urllib.error.URLError, zipfile.BadZipFile) as exc:
+    except (OSError, zipfile.BadZipFile) as exc:
         raise RuntimeError(
-            f"Failed to download the HCS RDP helper from "
+            f"Failed to unpack the HCS RDP helper from "
             f"{HELPER_DOWNLOAD_URL}: {exc}"
         ) from exc
     finally:
-        tmp.unlink(missing_ok=True)
+        archive.unlink(missing_ok=True)
     exe = target_dir / HELPER_EXE_NAME
     if not exe.is_file():
         raise RuntimeError(

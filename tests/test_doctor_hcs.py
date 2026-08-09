@@ -154,15 +154,30 @@ def test_the_initramfs_is_found_where_the_environment_points(monkeypatch, tmp_pa
     assert str(initrd) in detail
 
 
-def test_a_missing_initramfs_names_the_asset_and_the_build_script(
+def test_an_override_pointing_at_nothing_is_the_one_failure(
     monkeypatch, tmp_path,
 ):
+    """The override suppresses the download, so it is the only way to have no
+    path to an initramfs at all."""
     monkeypatch.setenv("OPENSHRIMP_HCS_INITRD", str(tmp_path / "absent"))
     ok, detail = doctor._check_hcs_initrd(None)
     assert not ok
-    assert "openshrimp-hcs-initrd.img" in detail
-    assert "scripts/build_hcs_initrd.sh" in detail
     assert "OPENSHRIMP_HCS_INITRD" in detail
+    assert "scripts/build_hcs_initrd.sh" in detail
+
+
+def test_an_unstaged_initramfs_reports_the_pending_download(
+    monkeypatch, tmp_path,
+):
+    """Nothing is fetched by a check, so an absent initramfs passes on the
+    strength of the download the backend will do."""
+    monkeypatch.delenv("OPENSHRIMP_HCS_INITRD", raising=False)
+    monkeypatch.setattr(
+        "open_shrimp.sandbox.hcs.initrd_path", lambda: tmp_path / "absent",
+    )
+    ok, detail = doctor._check_hcs_initrd(None)
+    assert ok
+    assert "openshrimp-hcs-initrd.img" in detail
 
 
 # -- csc ----------------------------------------------------------------------
@@ -219,11 +234,31 @@ def test_a_base_image_that_is_not_there_fails(tmp_path):
     assert "C:/absent.vhdx" in detail
 
 
-def test_an_hcs_context_with_no_base_image_names_the_build_script():
+def test_an_hcs_context_with_no_base_image_reports_the_pending_download(
+    tmp_path, monkeypatch,
+):
+    """No ``base_image`` is the ordinary case, not a problem: the released
+    rootfs is downloaded on first boot."""
+    monkeypatch.setattr(
+        "open_shrimp.sandbox.hcs_assets.asset_dir", lambda: tmp_path,
+    )
     ok, detail = doctor._check_hcs_base_image(_config(work=SandboxConfig(backend="hcs")))
-    assert not ok
-    assert "scripts/build_hcs_base_rootfs.sh" in detail
-    assert "clauderoot" in detail
+    assert ok
+    assert "openshrimp-hcs-base-rootfs.vhdx.zst" in detail
+
+
+def test_a_computer_use_context_with_no_base_image_names_the_gui_asset(
+    tmp_path, monkeypatch,
+):
+    """The desktop image is fetched instead of the base one, not alongside."""
+    monkeypatch.setattr(
+        "open_shrimp.sandbox.hcs_assets.asset_dir", lambda: tmp_path,
+    )
+    config = _config(work=SandboxConfig(backend="hcs", computer_use=True))
+    ok, detail = doctor._check_hcs_base_image(config)
+    assert ok
+    assert "openshrimp-hcs-gui-rootfs.vhdx.zst" in detail
+    assert "base-rootfs" not in detail
 
 
 def test_computer_use_also_needs_the_baked_gui_template(tmp_path):

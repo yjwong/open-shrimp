@@ -26,7 +26,7 @@ These apply only to contexts on the [HCS sandbox backend](/guides/hcs-sandbox/),
 | Variable | Description |
 |----------|-------------|
 | `OPENSHRIMP_HCS_KERNEL` | Kernel the guest boots. Defaults to WSL's, at `C:\Program Files\WSL\tools\kernel` |
-| `OPENSHRIMP_HCS_INITRD` | Control initramfs. Defaults to `C:\ProgramData\openshrimp\hcs\initrd.img` |
+| `OPENSHRIMP_HCS_INITRD` | Control initramfs you built yourself, instead of the one downloaded automatically. Unset, a copy staged at `C:\ProgramData\openshrimp\hcs\initrd.img` is used if present, and the released asset is downloaded otherwise |
 | `OPENSHRIMP_HCS_RDP_HELPER` | Directory holding an RDP helper bundle you staged yourself, instead of the one downloaded automatically |
 
 ## Internal variables

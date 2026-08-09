@@ -17,6 +17,7 @@ from open_shrimp.config import (
     config_to_dict,
 )
 from open_shrimp.sandbox import hcs as hcs_mod
+from open_shrimp.sandbox import hcs_assets
 from open_shrimp.sandbox import hcs_rdp
 from open_shrimp.sandbox.hcs import HcsSandbox
 
@@ -315,14 +316,14 @@ def test_download_unpacks_the_whole_bundle(tmp_path, monkeypatch):
         zf.writestr("hcs_rdp_helper.exe", "exe")
         zf.writestr("libfreerdp3.dll", "dll")
     monkeypatch.setattr(
-        hcs_rdp.urllib.request, "urlopen",
+        hcs_assets.urllib.request, "urlopen",
         lambda req, timeout=None: io.BytesIO(payload.getvalue()),
     )
     exe = hcs_rdp.download_shipped_helper()
     assert exe == bundle / "hcs_rdp_helper.exe"
     # The DLLs are the point: the exe alone would not load.
     assert (bundle / "libfreerdp3.dll").read_text() == "dll"
-    assert not list(bundle.glob("*.tmp"))
+    assert not (bundle / hcs_rdp.HELPER_ASSET).exists()
 
 
 def test_download_of_an_archive_without_the_exe_is_an_error(
@@ -334,7 +335,7 @@ def test_download_of_an_archive_without_the_exe_is_an_error(
     with zipfile.ZipFile(payload, "w") as zf:
         zf.writestr("readme.txt", "nothing useful")
     monkeypatch.setattr(
-        hcs_rdp.urllib.request, "urlopen",
+        hcs_assets.urllib.request, "urlopen",
         lambda req, timeout=None: io.BytesIO(payload.getvalue()),
     )
     with pytest.raises(RuntimeError, match="contains no hcs_rdp_helper.exe"):

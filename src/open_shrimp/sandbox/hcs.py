@@ -44,6 +44,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +63,7 @@ from open_shrimp.sandbox.agent_runtime import (
     terminate_served_proc,
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
+from open_shrimp.sandbox import hcs_assets as A
 from open_shrimp.sandbox import hcs_helpers as H
 from open_shrimp.sandbox.hcs_rdp import HcsRdpSession, ensure_rdp_helper
 from open_shrimp.sandbox.port_forward import allocate_host_port, new_forward_id
@@ -76,9 +78,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_KERNEL = r"C:\Program Files\WSL\tools\kernel"
 _DEFAULT_INITRD = r"C:\ProgramData\openshrimp\hcs\initrd.img"
 
-#: Release asset carrying a prebuilt control initramfs, so an operator who
-#: does not want to run the build script has something to stage.
+#: Release assets carrying the prebuilt guest artifacts.  Each is a Linux
+#: build product a Windows host cannot bake for itself, so the backend fetches
+#: them rather than making the operator stage them by hand; the computer-use
+#: rootfs already contains the base userland, so a desktop context downloads
+#: only the one image.
 INITRD_ASSET = "openshrimp-hcs-initrd.img"
+BASE_ROOTFS_ASSET = "openshrimp-hcs-base-rootfs.vhdx.zst"
+GUI_ROOTFS_ASSET = "openshrimp-hcs-gui-rootfs.vhdx.zst"
 
 
 def kernel_path() -> Path:
@@ -87,10 +94,40 @@ def kernel_path() -> Path:
 
 def initrd_path() -> Path:
     """The control-agent initramfs (busybox + the static vsock agent that
-    mounts shares and starts the exec server).  Built once in WSL and staged
-    by the operator; located via ``OPENSHRIMP_HCS_INITRD`` when not at the
-    default."""
-    return Path(os.environ.get("OPENSHRIMP_HCS_INITRD", _DEFAULT_INITRD))
+    mounts shares and starts the exec server).
+
+    Resolution order: the ``OPENSHRIMP_HCS_INITRD`` override, then a copy
+    staged under ``ProgramData``, then the managed cache the released asset is
+    downloaded into.  The download location is last so an initramfs the
+    operator built and staged always wins over one that would be fetched.
+    """
+    override = os.environ.get("OPENSHRIMP_HCS_INITRD")
+    if override:
+        return Path(override)
+    staged = Path(_DEFAULT_INITRD)
+    if staged.exists():
+        return staged
+    return A.asset_dir() / "initrd.img"
+
+
+def ensure_initrd(log: Callable[[str], None] | None = None) -> Path:
+    """The control initramfs, downloading the released asset if none is
+    staged.  An ``OPENSHRIMP_HCS_INITRD`` that resolves to nothing is an error
+    rather than a silent fall-through to a download the operator did not ask
+    for — pointing the override at a path is a statement about which
+    initramfs to boot."""
+    path = initrd_path()
+    if path.is_file():
+        return path
+    if os.environ.get("OPENSHRIMP_HCS_INITRD"):
+        raise RuntimeError(
+            f"OPENSHRIMP_HCS_INITRD is set to {path}, which does not exist. "
+            "Unset it to download the released control initramfs, or build "
+            "one with scripts/build_hcs_initrd.sh (run as root in WSL)."
+        )
+    return A.ensure_asset(
+        INITRD_ASSET, path, description="the HCS control initramfs", log=log,
+    )
 
 
 #: Guest path the served launch records its process id at.  It lives in the
@@ -445,13 +482,7 @@ class HcsSandbox:
                 f"HCS kernel not found at {kernel_path()} — install WSL "
                 "(the kernel ships with it) or set OPENSHRIMP_HCS_KERNEL."
             )
-        if not initrd_path().exists():
-            raise RuntimeError(
-                f"HCS control initramfs not found at {initrd_path()} — stage "
-                f"the {INITRD_ASSET} release asset there, or build one with "
-                "scripts/build_hcs_initrd.sh (run as root in WSL), or set "
-                "OPENSHRIMP_HCS_INITRD to where it already is."
-            )
+        ensure_initrd(lambda msg: self._log(log_file, msg))
 
         desired_fp = self._fingerprint()
         saved_fp = self._load_fingerprint()
@@ -481,18 +512,18 @@ class HcsSandbox:
         self._save_fingerprint(desired_fp)
         self._log(log_file, "HCS sandbox environment ready.")
 
-    def _rootfs_template(self) -> Path:
-        """The template VHDX this context's rootfs is seeded from: the
-        operator's ``base_image``, or its baked ``-gui`` desktop variant when
-        the context enables ``computer_use``."""
+    def _rootfs_template(self, *, log_file: Path | None = None) -> Path:
+        """The template VHDX this context's rootfs is seeded from.
+
+        An operator's own ``base_image`` wins, and a computer-use context
+        boots the ``-gui`` variant baked beside it.  With no ``base_image``
+        configured the released rootfs is downloaded into the managed cache
+        instead, which is what makes an HCS context work with nothing staged
+        by hand.
+        """
         base = self._config.base_image
         if not base:
-            raise RuntimeError(
-                "HCS sandbox requires 'base_image' (the ext4 VHDX labelled "
-                f"{H.ROOTFS_LABEL!r} holding the guest userland + Node) in "
-                "the context config — build one with "
-                "scripts/build_hcs_base_rootfs.sh."
-            )
+            return self._managed_rootfs(log_file=log_file)
         base_path = Path(base)
         if not base_path.exists():
             raise RuntimeError(f"HCS base_image not found: {base_path}")
@@ -507,8 +538,33 @@ class HcsSandbox:
             )
         return gui_path
 
+    def _managed_rootfs(self, *, log_file: Path | None) -> Path:
+        """The released rootfs template, downloading it if it is not cached.
+
+        A computer-use context fetches the desktop image directly rather than
+        the base plus a bake: the published ``-gui`` asset is built *from* the
+        published base, so it already carries the guest userland and only one
+        multi-gigabyte download is ever needed.
+        """
+        def log(msg: str) -> None:
+            self._log(log_file, msg)
+
+        if self._config.computer_use:
+            return A.ensure_asset(
+                GUI_ROOTFS_ASSET,
+                A.asset_dir() / "gui-rootfs.vhdx",
+                description="the HCS computer-use guest rootfs",
+                log=log,
+            )
+        return A.ensure_asset(
+            BASE_ROOTFS_ASSET,
+            A.asset_dir() / "base-rootfs.vhdx",
+            description="the HCS guest rootfs",
+            log=log,
+        )
+
     def _ensure_rootfs(self, *, log_file: Path | None) -> None:
-        template = self._rootfs_template()
+        template = self._rootfs_template(log_file=log_file)
 
         want = H.rootfs_fingerprint(
             str(template), gui=self._config.computer_use,

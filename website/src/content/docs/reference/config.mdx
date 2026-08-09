@@ -164,7 +164,7 @@ Run the Claude CLI inside an isolated environment. When a sandbox is enabled, al
 | `memory` | int | No | `2048` | Memory ceiling in MB (Libvirt and Lima backends) |
 | `cpus` | int | No | `2` | Number of vCPUs (Libvirt and Lima backends) |
 | `disk_size` | int | No | `20` | Disk size in GB for qcow2 overlay (Libvirt and Lima backends) |
-| `base_image` | string | No | `null` | Path to base qcow2/cloud image (Libvirt backend only) |
+| `base_image` | string | No | `null` | Path to a base image you supply — qcow2 for Libvirt, VHDX for HCS. Both backends download one when unset |
 | `provision` | string | No | `null` | Shell script to run on first boot (Libvirt and Lima backends) |
 
 ### Docker backend

@@ -103,8 +103,9 @@ jobs:
             rust_target: x86_64-apple-darwin
           # The `hcs` extra is what makes the Windows build worth shipping:
           # win32more, the binding the HCS sandbox backend drives Windows'
-          # Host Compute Service through.  It is Windows-only, so it appears
-          # on no other entry.
+          # Host Compute Service through, and zstandard, which unpacks the
+          # guest rootfs images the jobs below publish.  It is Windows-only,
+          # so it appears on no other entry.
           - os: windows-latest
             artifact: openshrimp-windows-x86_64.exe
             sdist_artifact: sdist-openshrimp

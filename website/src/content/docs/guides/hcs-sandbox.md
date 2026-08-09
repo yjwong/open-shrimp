@@ -9,14 +9,14 @@ The HCS sandbox runs the agent inside a Linux virtual machine on Windows, drivin
 
 The guest is a plain Linux userland on a VHDX, booted directly with the kernel WSL ships. It is not a WSL distro and does not appear in `wsl -l`.
 
-:::caution[Read the guest images section before you start]
-Two of the three artifacts a guest boots from are not published — you build them yourself with scripts that need root inside WSL and several GB of scratch space. Everything else installs from a download. Budget for that step.
+:::note[The first boot downloads a guest image]
+Nothing needs staging by hand, but a context's first boot fetches a rootfs image of roughly a gigabyte (more with computer use) and unpacks it. It happens once per machine; every context after that seeds from the same cached copy.
 :::
 
 ## Requirements
 
 - **Windows 11**, Home or Pro. The Hyper-V role is *not* required; the `VirtualMachinePlatform` optional feature is what HCS actually needs, and installing WSL enables it.
-- **WSL installed.** The guest boots the kernel WSL ships at `C:\Program Files\WSL\tools\kernel`. You do not need to run anything in WSL to *use* the sandbox — but you do to *build* its images, and the kernel has to be on disk either way. Point `OPENSHRIMP_HCS_KERNEL` elsewhere if you stage your own.
+- **WSL installed.** The guest boots the kernel WSL ships at `C:\Program Files\WSL\tools\kernel`. Nothing is ever *run* in WSL — the kernel file just has to be on disk. Point `OPENSHRIMP_HCS_KERNEL` elsewhere if you stage your own.
 - **OpenShrimp with the `hcs` extra.** The `openshrimp-windows-x86_64.exe` binary from [Releases](https://github.com/yjwong/open-shrimp/releases) bundles it. From source, install the extra explicitly — it pulls in `win32more`, the binding the backend calls Windows through:
 
   ```powershell
@@ -31,44 +31,17 @@ Run `openshrimp doctor` at any point — it checks each of the above, plus the g
 
 ## Guest images
 
-A guest boots from three artifacts. They are handled very differently, and only one of them arrives on its own:
+A guest boots from three artifacts, and none of them needs staging by hand:
 
 | Artifact | Where it comes from |
 |----------|---------------------|
 | **Kernel** | WSL's, found automatically. Override with `OPENSHRIMP_HCS_KERNEL`. |
-| **Control initramfs** | Published as the `openshrimp-hcs-initrd.img` release asset — but **you stage it by hand**. Nothing downloads it for you. |
-| **Base rootfs VHDX** | **You build it.** Not published anywhere. |
+| **Control initramfs** | Downloaded from the release on first use, into `%LOCALAPPDATA%\openshrimp\hcs\initrd.img`. |
+| **Rootfs VHDX** | Downloaded from the release on first use, into `%LOCALAPPDATA%\openshrimp\hcs\`. |
 
-### Stage the control initramfs
+Both downloads are checksum-verified and cached per machine, not per context: each context copies its own guest root from the cached template, so only the first boot on a host pays for them.
 
-Download `openshrimp-hcs-initrd.img` from the [latest release](https://github.com/yjwong/open-shrimp/releases) and put it at `C:\ProgramData\openshrimp\hcs\initrd.img`, or anywhere you like with `OPENSHRIMP_HCS_INITRD` pointing at it:
-
-```powershell
-New-Item -ItemType Directory -Force C:\ProgramData\openshrimp\hcs
-curl.exe -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-hcs-initrd.img `
-  -o C:\ProgramData\openshrimp\hcs\initrd.img
-```
-
-If you would rather build it, `scripts/build_hcs_initrd.sh` does so — as root, on any Linux including a WSL distro. It is busybox plus a small statically linked control agent, so the build is quick.
-
-### Build the base rootfs
-
-This is the one real chore. The rootfs is the Linux userland the agent runs in: an ext4 VHDX labelled `clauderoot` carrying Python, Node.js, and the certificate and download tools the in-guest agent installer needs. No CI job publishes it, so you build it once:
-
-```bash
-# in a WSL distro, as root
-sudo bash scripts/build_hcs_base_rootfs.sh /mnt/c/images/claude-root.vhdx
-```
-
-What to expect:
-
-- **Root is mandatory** — the build uses loop mounts and `chroot`.
-- **Several GB of scratch space.** The default work directory is `/root/hcs-base-build`; set `WORK` to a filesystem that has room. The image itself is a 6 GB sparse ext4 volume (`SIZE`).
-- **Network access**, to debootstrap an Ubuntu release (`SUITE`, `MIRROR`) and fetch Node.js.
-
-The agent CLI is deliberately not baked in — it installs itself inside the guest on first provision, so one image serves either agent backend.
-
-Then point a context at the result:
+That means a working context needs nothing but a directory and a backend:
 
 ```yaml
 contexts:
@@ -77,10 +50,34 @@ contexts:
     description: "My project"
     sandbox:
       backend: hcs
+```
+
+The rootfs is the Linux userland the agent runs in: an ext4 VHDX labelled `clauderoot` carrying Python, Node.js, and the certificate and download tools the in-guest agent installer needs. The agent CLI is deliberately not baked in — it installs itself inside the guest on first provision, so one image serves either agent backend.
+
+The image is a template. Each context gets its own copy as its guest root, and that copy is reborn on every boot — only `persistent_paths` survive.
+
+### Building your own images instead
+
+Set `base_image` and the download is skipped entirely; that path is for an operator who wants a different userland in the guest.
+
+```bash
+# in a WSL distro, as root
+sudo bash scripts/build_hcs_base_rootfs.sh /mnt/c/images/claude-root.vhdx
+```
+
+```yaml
+    sandbox:
+      backend: hcs
       base_image: C:\images\claude-root.vhdx
 ```
 
-The base image is a template. Each context gets its own copy as its guest root, and that copy is reborn on every boot — only `persistent_paths` survive.
+What to expect from the build:
+
+- **Root is mandatory** — it uses loop mounts and `chroot`.
+- **Several GB of scratch space.** The default work directory is `/root/hcs-base-build`; set `WORK` to a filesystem that has room. The image itself is a 6 GB sparse ext4 volume (`SIZE`).
+- **Network access**, to debootstrap an Ubuntu release (`SUITE`, `MIRROR`) and fetch Node.js.
+
+`scripts/build_hcs_initrd.sh` likewise builds the control initramfs — busybox plus a small statically linked control agent, so it is quick — and `OPENSHRIMP_HCS_INITRD` points the backend at the result. Setting that variable suppresses the download, so a path that does not exist is an error rather than a silent fall back to the released image.
 
 ## Guest configuration
 
@@ -107,14 +104,16 @@ Each entry in `persistent_paths` gets its own ext4 VHDX, mounted by label and un
 
 ## Computer use
 
-`computer_use: true` boots a desktop variant of your rootfs, so it needs a second image baked from the first:
+`computer_use: true` boots a desktop variant of the rootfs — weston on its RDP backend, Google Chrome, fonts and clipboard tools — which is a separate, larger image. With no `base_image` set it is downloaded like the plain one, and it is downloaded *instead of*, not in addition to: the desktop image is built from the base and already carries the whole userland.
+
+If you build your own images, bake the desktop variant from your base:
 
 ```bash
 # in a WSL distro, as root — takes the base image as input
 sudo bash scripts/build_hcs_gui_rootfs.sh /mnt/c/images/claude-root.vhdx
 ```
 
-That writes `claude-root-gui.vhdx` next to the base image, which is exactly where the backend looks for it — a 12 GB variant carrying weston with its RDP backend, Google Chrome, fonts, and clipboard tools. Same requirements as the base build: root, loop mounts, network, and scratch space in `WORK`. Like the base rootfs, it is not published; you bake it yourself.
+That writes `claude-root-gui.vhdx` next to the base image, which is exactly where the backend looks for it. Same requirements as the base build: root, loop mounts, network, and scratch space in `WORK`.
 
 ```yaml
 contexts:
@@ -122,7 +121,6 @@ contexts:
     directory: C:\Users\you\Documents\browser-project
     sandbox:
       backend: hcs
-      base_image: C:\images\claude-root.vhdx
       computer_use: true
       memory: 4096          # a desktop wants headroom
       cpus: 2
@@ -131,7 +129,7 @@ review:
   tunnel: cloudflared       # needed for the VNC Mini App
 ```
 
-The host talks to the guest desktop over RDP through a small helper. **That helper is downloaded automatically**, prebuilt and bundled with the FreeRDP libraries it loads — it is the one HCS artifact that fetches itself. `mingw_bin` is therefore optional, and only worth setting if you want to compile the helper from source instead:
+The host talks to the guest desktop over RDP through a small helper, which is downloaded prebuilt and bundled with the FreeRDP libraries it loads. `mingw_bin` is therefore optional, and only worth setting if you want to compile the helper from source instead:
 
 ```yaml
     sandbox:
