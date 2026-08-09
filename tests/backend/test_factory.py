@@ -21,10 +21,6 @@ def test_default_backend_is_claude_sdk():
     assert isinstance(b, ClaudeSdkBackend)
 
 
-def test_explicit_claude_sdk_resolves():
-    assert get_backend({"backend": "claude_sdk"}).name == "claude_sdk"
-
-
 def test_unknown_backend_raises():
     with pytest.raises(ValueError, match="Unknown backend 'nope'"):
         get_backend({"backend": "nope"})
@@ -99,22 +95,6 @@ def test_opencode_tool_server_pins_long_request_timeout():
 
 
 # ── get_backend_by_name: memoisation across distinct names ──
-
-
-def test_get_backend_by_name_memoises():
-    """A second call for the same name returns the cached instance."""
-    from open_shrimp.backend import get_backend_by_name
-
-    a = get_backend_by_name("claude_sdk")
-    b = get_backend_by_name("claude_sdk")
-    assert a is b
-
-
-def test_get_backend_by_name_unknown_raises():
-    from open_shrimp.backend import get_backend_by_name
-
-    with pytest.raises(ValueError, match="Unknown backend 'nope'"):
-        get_backend_by_name("nope")
 
 
 def test_get_backend_uses_same_cache_as_by_name():

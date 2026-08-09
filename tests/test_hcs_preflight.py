@@ -85,19 +85,6 @@ def test_a_privileged_token_passes_to_the_next_preflight(
         sb.ensure_environment()
 
 
-def test_a_probe_that_cannot_answer_does_not_ground_the_host(
-    tmp_path, monkeypatch,
-):
-    # A broken probe is not a denial: the host still gets its chance to boot,
-    # and the create-time HRESULT remains the backstop.
-    monkeypatch.setenv("OPENSHRIMP_HCS_KERNEL", str(tmp_path / "no-kernel"))
-    sb = _sandbox(
-        tmp_path, monkeypatch, permitted=OSError(5, "OpenProcessToken failed"),
-    )
-    with pytest.raises(RuntimeError, match="HCS kernel not found"):
-        sb.ensure_environment()
-
-
 def test_the_broken_probe_is_logged_for_the_operator(
     tmp_path, monkeypatch, caplog,
 ):

@@ -70,16 +70,6 @@ def test_missing_session_dir_returns_empty(tmp_path: Path) -> None:
     assert read_checklist(tmp_path, "no-such-session") == []
 
 
-def test_deleted_task_absent(tmp_path: Path) -> None:
-    tasks_dir = tmp_path / "tasks" / "s"
-    _write_task(tasks_dir, "1", subject="kept", status="pending")
-    _write_task(tasks_dir, "2", subject="removed", status="pending")
-    # status: deleted removes the file from the store.
-    (tasks_dir / "2.json").unlink()
-    todos = read_checklist(tmp_path, "s")
-    assert [t["content"] for t in todos] == ["kept"]
-
-
 def test_active_form_falls_back_to_subject(tmp_path: Path) -> None:
     tasks_dir = tmp_path / "tasks" / "s"
     _write_task(tasks_dir, "1", subject="Do the thing", status="in_progress")

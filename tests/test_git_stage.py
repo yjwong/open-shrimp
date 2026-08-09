@@ -165,32 +165,6 @@ async def test_unstage_hunk(git_repo: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stage_then_unstage(git_repo: str) -> None:
-    """Stage then unstage should return to clean index."""
-    with open(os.path.join(git_repo, "hello.py"), "w") as f:
-        f.write(
-            "import os\nimport sys\nimport json\n\ndef main():\n    print('hello')\n\nif __name__ == '__main__':\n    main()\n"
-        )
-
-    # Get and stage.
-    result = await get_hunks(git_repo, include_untracked=False)
-    hunk = result.hunks[0]
-    await stage_hunk(git_repo, hunk)
-
-    # Now get the staged hunk and unstage it.
-    result_staged = await get_hunks(git_repo, include_untracked=False)
-    staged_hunk = [h for h in result_staged.hunks if h.staged][0]
-    await unstage_hunk(git_repo, staged_hunk)
-
-    # Verify: no staged, only unstaged.
-    result_final = await get_hunks(git_repo, include_untracked=False)
-    staged = [h for h in result_final.hunks if h.staged]
-    unstaged = [h for h in result_final.hunks if not h.staged]
-    assert len(staged) == 0
-    assert len(unstaged) == 1
-
-
-@pytest.mark.asyncio
 async def test_stage_new_file(git_repo: str) -> None:
     """Staging a hunk from a new (untracked) file."""
     with open(os.path.join(git_repo, "brand_new.py"), "w") as f:

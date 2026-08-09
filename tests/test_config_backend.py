@@ -36,8 +36,8 @@ def test_absent_backend_defaults_to_claude_sdk():
 
 
 def test_explicit_backend_parsed():
-    cfg = _parse(_base_raw(backend="claude_sdk"))
-    assert cfg.backend == "claude_sdk"
+    cfg = _parse(_base_raw(backend="opencode"))
+    assert cfg.backend == "opencode"
 
 
 def test_unknown_backend_fails_validation():
@@ -52,14 +52,6 @@ def test_valid_backend_passes_validation():
 def test_default_backend_omitted_from_serialized_dict():
     cfg = _parse(_base_raw())
     assert "backend" not in config_to_dict(cfg)
-
-
-def test_non_default_backend_round_trips():
-    # No second backend is registered yet, so claude_sdk is the only valid
-    # value; assert the serializer's omit-when-default rule rather than a
-    # round-trip of a non-default name.
-    cfg = _parse(_base_raw(backend="claude_sdk"))
-    assert config_to_dict(cfg).get("backend") is None
 
 
 # ── per-context backend override ──
@@ -91,21 +83,17 @@ def test_context_backend_unknown_fails_validation():
         _validate_raw(raw)
 
 
-def test_context_backend_known_passes_validation():
-    raw = _base_raw_with_context_backend("claude_sdk")
-    _validate_raw(raw)  # no raise
-
-
 def test_effective_backend_inherits_top_level():
     cfg = _parse(_base_raw())
     assert effective_backend(cfg.contexts["default"], cfg) == "claude_sdk"
 
 
 def test_effective_backend_uses_override():
-    raw = _base_raw_with_context_backend("claude_sdk")
+    raw = _base_raw_with_context_backend("opencode", backend="claude_sdk")
+    # OpenCode-backed contexts require a provider-qualified model.
+    raw["contexts"]["default"]["model"] = "openai/gpt-5.5"
     cfg = _parse(raw)
-    # The override is explicit even though it matches the top-level default.
-    assert effective_backend(cfg.contexts["default"], cfg) == "claude_sdk"
+    assert effective_backend(cfg.contexts["default"], cfg) == "opencode"
 
 
 def test_default_context_backend_omitted_from_serialized_dict():

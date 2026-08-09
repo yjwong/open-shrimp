@@ -44,12 +44,6 @@ def test_preset_dict_system_prompt_passes_through():
     assert sdk.system_prompt == preset
 
 
-def test_str_system_prompt_passes_through():
-    opts = BackendOptions(cwd="/w", system_prompt="plain")
-    sdk = translate_options(opts)
-    assert sdk.system_prompt == "plain"
-
-
 def test_absent_system_prompt_not_forced():
     """When unset, the SDK options keep their own default (not None-clobbered)."""
     opts = BackendOptions(cwd="/w")

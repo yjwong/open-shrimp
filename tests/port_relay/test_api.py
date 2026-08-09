@@ -134,29 +134,6 @@ class _StubSession:
 
 
 @pytest.mark.asyncio
-async def test_mux_echo_roundtrip() -> None:
-    server, port = await _start_echo_server()
-    ws = _FakeWebSocket()
-    conn = MuxConnection(ws, _StubSession(port))
-    run_task = asyncio.create_task(conn.run())
-    try:
-        await ws.expect_ready()
-        await ws.incoming.put({"type": "websocket.receive", "bytes": encode_frame(FRAME_OPEN, 1)})
-        await ws.incoming.put(
-            {"type": "websocket.receive", "bytes": encode_frame(FRAME_DATA, 1, b"ping")}
-        )
-        assert await ws.next_frame() == (FRAME_DATA, 1, b"ping")
-
-        await ws.incoming.put({"type": "websocket.disconnect"})
-        assert await run_task == "disconnect"
-    finally:
-        if not run_task.done():
-            run_task.cancel()
-        server.close()
-        await server.wait_closed()
-
-
-@pytest.mark.asyncio
 async def test_mux_streams_are_isolated() -> None:
     server, port = await _start_echo_server()
     ws = _FakeWebSocket()

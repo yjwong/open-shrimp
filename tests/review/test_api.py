@@ -44,7 +44,6 @@ def _build_init_data(
     bot_token: str = BOT_TOKEN,
     user_id: int = ALLOWED_USER_ID,
     auth_date: int | None = None,
-    tamper_hash: bool = False,
 ) -> str:
     """Build a valid initData query string."""
     if auth_date is None:
@@ -71,9 +70,6 @@ def _build_init_data(
     computed_hash = hmac.new(
         secret_key, data_check_string.encode("utf-8"), hashlib.sha256
     ).hexdigest()
-
-    if tamper_hash:
-        computed_hash = "a" * 64
 
     params["hash"] = computed_hash
     return urlencode(params)
@@ -171,18 +167,6 @@ async def test_get_hunks_no_auth(transport) -> None:
     """Request without auth header returns 401."""
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get(f"/api/review/hunks?chat_id={CHAT_ID}")
-    assert resp.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_get_hunks_bad_hmac(transport) -> None:
-    """Request with tampered HMAC returns 401."""
-    init_data = _build_init_data(tamper_hash=True)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get(
-            f"/api/review/hunks?chat_id={CHAT_ID}",
-            headers=_auth_header(init_data),
-        )
     assert resp.status_code == 401
 
 

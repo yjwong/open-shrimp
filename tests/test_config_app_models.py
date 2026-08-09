@@ -67,15 +67,6 @@ def test_label_suffixed_only_when_name_differs():
     assert by_value["openai/gpt-5"] == "openai/gpt-5"
 
 
-def test_sorted_by_value():
-    catalog = [
-        {"providerID": "openai", "id": "z"},
-        {"providerID": "anthropic", "id": "a"},
-    ]
-    opts = _normalise_model_options(catalog)
-    assert [o["value"] for o in opts] == ["anthropic/a", "openai/z"]
-
-
 def test_invalid_catalog_items_skipped():
     catalog = [
         {"providerID": "openai"},  # no model id

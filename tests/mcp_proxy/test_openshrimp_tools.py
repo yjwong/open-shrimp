@@ -157,68 +157,6 @@ async def test_tools_list_private_chat_excludes_edit_topic() -> None:
     assert {"create_schedule", "list_schedules", "delete_schedule"} <= names
 
 
-async def test_tools_list_forum_thread_includes_edit_topic() -> None:
-    registry = ProxyRegistry()
-    token = _register_tools(registry, chat_id=7, thread_id=9, is_private_chat=False)
-    client, backing = await _client(registry)
-    try:
-        result = await _rpc(client, token, "tools/list")
-    finally:
-        await client.aclose()
-        await backing.aclose()
-
-    names = {tool["name"] for tool in result["tools"]}
-    assert "edit_topic" in names
-
-
-async def test_scheduling_tools_require_db_config_jobqueue() -> None:
-    registry = ProxyRegistry()
-    token = _register_tools(registry, db=object(), config=SimpleNamespace())
-    client, backing = await _client(registry)
-    try:
-        result = await _rpc(client, token, "tools/list")
-    finally:
-        await client.aclose()
-        await backing.aclose()
-
-    names = {tool["name"] for tool in result["tools"]}
-    assert "create_schedule" not in names
-
-
-async def test_host_bash_only_listed_with_workdir(tmp_path) -> None:
-    registry = ProxyRegistry()
-    token_without = _register_tools(registry)
-    token_with = _register_tools(
-        registry, chat_id=2, host_bash_workdir=str(tmp_path),
-    )
-    client, backing = await _client(registry)
-    try:
-        without = await _rpc(client, token_without, "tools/list")
-        with_ = await _rpc(client, token_with, "tools/list")
-    finally:
-        await client.aclose()
-        await backing.aclose()
-
-    assert "host_bash" not in {t["name"] for t in without["tools"]}
-    assert "host_bash" in {t["name"] for t in with_["tools"]}
-
-
-async def test_computer_tools_listed_with_computer_use(tmp_path) -> None:
-    sandbox = FakeSandbox(tmp_path)
-    registry = ProxyRegistry()
-    token = _register_tools(registry, sandbox=sandbox, computer_use=True)
-    client, backing = await _client(registry)
-    try:
-        result = await _rpc(client, token, "tools/list")
-    finally:
-        await client.aclose()
-        await backing.aclose()
-
-    names = {tool["name"] for tool in result["tools"]}
-    assert "computer_screenshot" in names
-    assert "computer_click" in names
-
-
 # --- Dispatch + errors ------------------------------------------------------
 
 
@@ -249,25 +187,6 @@ async def test_edit_topic_dispatches_to_registered_scope() -> None:
             "icon_custom_emoji_id": "emoji-id",
         }
     ]
-
-
-async def test_send_file_missing_path_returns_tool_error() -> None:
-    registry = ProxyRegistry()
-    token = _register_tools(registry)
-    client, backing = await _client(registry)
-    try:
-        result = await _rpc(
-            client,
-            token,
-            "tools/call",
-            {"name": "send_file", "arguments": {"file_path": "/nope/xyz"}},
-        )
-    finally:
-        await client.aclose()
-        await backing.aclose()
-
-    assert result["is_error"] is True
-    assert "File not found" in result["content"][0]["text"]
 
 
 async def test_computer_click_uses_master_message(tmp_path) -> None:

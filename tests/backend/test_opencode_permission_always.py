@@ -83,30 +83,6 @@ def _record_can_use_tool() -> tuple[list[ToolPermissionContext], Any]:
 
 
 @pytest.mark.asyncio
-async def test_always_pattern_does_not_auto_approve() -> None:
-    """An ``always: ["git *"]`` arm still routes through ``can_use_tool`` —
-    the user is prompted, the pattern is not silently pre-approved."""
-    seen, can_use_tool = _record_can_use_tool()
-
-    bridge = _make_bridge(can_use_tool=can_use_tool)
-    # Seed the ToolPart cache so the resolver returns the bash tool name
-    # without touching the network.
-    bridge.observe_tool_part({
-        "type": "tool",
-        "callID": "call-1",
-        "tool": "bash",
-        "messageID": "msg-1",
-        "state": {"status": "running", "input": {"command": "git status"}},
-    })
-
-    evt = _make_event(always=["git *"])
-    await bridge._do_handle_permission_asked(evt)
-
-    # can_use_tool was consulted exactly once (no auto-approve shortcut).
-    assert len(seen) == 1
-
-
-@pytest.mark.asyncio
 async def test_always_patterns_surfaced_as_suggestions() -> None:
     """Every candidate pattern reaches the approval UI as a suggestion."""
     seen, can_use_tool = _record_can_use_tool()

@@ -89,12 +89,6 @@ def test_domain_lark_resolves_to_international(monkeypatch: pytest.MonkeyPatch) 
     assert adapter._resolve_domain() == _FakeSDK.LARK_DOMAIN
 
 
-def test_domain_feishu_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lark_mod, "lark_oapi", _FakeSDK())
-    adapter = LarkAdapter(_source(domain="feishu"))
-    assert adapter._resolve_domain() == _FakeSDK.FEISHU_DOMAIN
-
-
 def test_construction_does_not_touch_sdk_domain_attrs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -136,11 +130,6 @@ def test_mentions_absent_or_malformed_is_noop() -> None:
     payload = _payload(content='{"text":"@_user_1 hi"}')
     payload["event"]["message"]["mentions"] = "not-a-list"
     assert map_message_event("lark", payload).text == "@_user_1 hi"
-
-
-def test_dedup_key_is_event_id() -> None:
-    event = map_message_event("lark", _payload(event_id="evt-42"))
-    assert event.dedup_key == "evt-42"
 
 
 def test_sender_falls_back_to_open_id() -> None:

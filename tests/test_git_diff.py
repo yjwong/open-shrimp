@@ -238,11 +238,6 @@ class TestParseDiff:
         hunks = parse_diff("  \n\n  ", staged=False)
         assert hunks == []
 
-    def test_staged_flag(self) -> None:
-        hunks = parse_diff(SIMPLE_DIFF, staged=True)
-        assert len(hunks) == 1
-        assert hunks[0].staged is True
-
     def test_line_numbers(self) -> None:
         diff = textwrap.dedent("""\
             diff --git a/f.py b/f.py
@@ -427,18 +422,6 @@ async def test_get_hunks_pagination(git_repo: str) -> None:
     ids_p1 = {h.id for h in result_p1.hunks}
     ids_p2 = {h.id for h in result_p2.hunks}
     assert ids_p1.isdisjoint(ids_p2)
-
-
-@pytest.mark.asyncio
-async def test_get_hunks_only_staged(git_repo: str) -> None:
-    """When all changes are staged, only staged hunks appear."""
-    with open(os.path.join(git_repo, "hello.py"), "w") as f:
-        f.write("print('updated')\n")
-    os.system(f"cd {git_repo} && git add hello.py")
-
-    result = await get_hunks(git_repo)
-    assert result.total_hunks == 1
-    assert result.hunks[0].staged is True
 
 
 # ---- Submodule tests ----

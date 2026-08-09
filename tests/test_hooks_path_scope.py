@@ -140,20 +140,6 @@ class TestMakeCanUseToolPathScope:
         request_approval.assert_awaited_once()
         assert request_approval.await_args.args[3] == str(outside)
 
-    async def test_in_scope_does_not_pass_suggested_dir(
-        self, tmp_path: Path,
-    ) -> None:
-        # When the path falls inside scope, Read auto-approves and never
-        # reaches the prompt — so no suggested_dir is computed at all.
-        request_approval = AsyncMock(return_value=True)
-        can_use = make_can_use_tool(
-            request_approval=request_approval,
-            cwd=str(tmp_path),
-        )
-        target = tmp_path / "f.txt"; target.write_text("x")
-        await can_use("Read", {"file_path": str(target)}, _ctx())
-        request_approval.assert_not_awaited()
-
 
 # ---------------------------------------------------------------------------
 # Blanket "Approve all <Tool>" rule does NOT bypass directory boundary

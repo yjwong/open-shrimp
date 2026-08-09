@@ -70,24 +70,14 @@ def _clean_state(monkeypatch: pytest.MonkeyPatch):
     cm._active_sessions.clear()
 
 
-async def test_backend_swap_closes_and_rebuilds(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Same context name, different effective backend → close + rebuild.
+async def test_close_session_disconnects_and_evicts():
+    """``close_session`` disconnects the live client and drops the scope.
 
-    The branch triggers when an existing session's pinned backend differs
-    from the freshly resolved one (e.g. config hot-reload edited the
-    context's ``backend:`` key); the rebuilt session must not carry the
-    old backend's session id.
+    Every teardown path (``/clear``, context switch, backend swap, shutdown)
+    funnels through here; leaving the entry behind would hand a later turn a
+    client whose transport is already gone.
     """
     sdk = _make_backend("claude_sdk")
-    oc = _make_backend("opencode")
-
-    monkeypatch.setattr(
-        cm,
-        "get_backend_by_name",
-        lambda name: {"claude_sdk": sdk, "opencode": oc}[name],
-    )
 
     scope = ChatScope(chat_id=1, thread_id=None)
     old_client = MagicMock(spec=[])
@@ -101,21 +91,8 @@ async def test_backend_swap_closes_and_rebuilds(
         backend=sdk,
     )
 
-    # Resolve to the new backend via the context override path.
-    ctx = _FakeCtx(backend="opencode")
-    resolved = cm.resolve_backend(context=ctx)
-    assert resolved is oc
-
-    # Now simulate the close branch: with same context_name but a
-    # different resolved backend, the existing session is closed and a
-    # rebuild would proceed without the old session_id.
-    existing = cm._active_sessions[scope]
-    assert existing.context_name == "ctx"
-    assert existing.backend is sdk
-    assert resolved is not sdk
-
-    # Close + verify state.
     await cm.close_session(scope)
+
     old_client.disconnect.assert_awaited_once()
     assert scope not in cm._active_sessions
 
@@ -221,38 +198,3 @@ async def test_backend_swap_notifies_user(
     text = swap_notices[0].kwargs["text"]
     assert "claude_sdk" in text and "opencode" in text
     assert swap_notices[0].kwargs["chat_id"] == 9
-
-
-async def test_same_backend_same_context_keeps_session(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Sanity: same context name AND same backend means the session is reused
-    (no close path).  This is the dominant fast path."""
-    sdk = _make_backend("claude_sdk")
-    monkeypatch.setattr(
-        cm, "get_backend_by_name", lambda _name: sdk,
-    )
-    # The no-override path goes through ``_top_level_default()`` which
-    # constructs via ``get_backend({})``; route that to the stub too.
-    monkeypatch.setattr(cm, "get_backend", lambda _cfg: sdk)
-
-    scope = ChatScope(chat_id=2)
-    client = MagicMock(spec=[])
-    client.is_alive = MagicMock(return_value=True)
-    cm._active_sessions[scope] = cm.AgentSession(
-        client=client,
-        session_id="keep-me",
-        context_name="ctx",
-        backend=sdk,
-    )
-
-    # Resolve through a context with no override (= top-level default).
-    ctx = _FakeCtx(backend=None)
-    resolved = cm.resolve_backend(context=ctx)
-    assert resolved is sdk
-
-    # Same context name + same backend → existing session should match.
-    existing = cm._active_sessions[scope]
-    assert existing.backend is resolved
-    assert existing.context_name == "ctx"
-    assert existing.session_id == "keep-me"

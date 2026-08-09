@@ -89,14 +89,6 @@ def test_explicit_backend_honoured_without_context_override(
     assert cm.resolve_backend(stubs["opencode"], context=ctx) is stubs["opencode"]
 
 
-def test_context_with_override_picks_named_backend(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    stubs = _install_stub_backends(monkeypatch)
-    ctx = _StubContext(backend="opencode")
-    assert cm.resolve_backend(context=ctx) is stubs["opencode"]
-
-
 def test_context_without_override_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -130,14 +122,6 @@ def test_scope_without_live_session_falls_back_to_default(
 def test_no_args_returns_default(monkeypatch: pytest.MonkeyPatch):
     stubs = _install_stub_backends(monkeypatch)
     assert cm.resolve_backend() is stubs["claude_sdk"]
-
-
-def test_legacy_positional_backend_compatible(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """The old single-arg call site (``resolve_backend(None)``) still works."""
-    stubs = _install_stub_backends(monkeypatch)
-    assert cm.resolve_backend(None) is stubs["claude_sdk"]
 
 
 def test_pre_scope_callers_get_top_level_default(

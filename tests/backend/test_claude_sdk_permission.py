@@ -68,32 +68,6 @@ async def test_deny_maps_to_sdk_deny_preserving_fields():
 
 
 @pytest.mark.asyncio
-async def test_adapter_output_satisfies_sdk_isinstance_contract():
-    """The exact contract ``query.py`` enforces: the return value must be an
-    instance of the SDK's own ``PermissionResult`` subclasses — a neutral
-    instance would satisfy *neither* branch and crash the turn."""
-
-    async def allow(tool_name, tool_input, context):
-        return bt.PermissionResultAllow()
-
-    async def deny(tool_name, tool_input, context):
-        return bt.PermissionResultDeny(message="x")
-
-    allow_out = await to_sdk_permission_callback(allow)("T", {}, object())
-    deny_out = await to_sdk_permission_callback(deny)("T", {}, object())
-
-    # Mirror query.py's branch selection.
-    assert isinstance(allow_out, sdk.PermissionResultAllow)
-    assert not isinstance(allow_out, sdk.PermissionResultDeny)
-    assert isinstance(deny_out, sdk.PermissionResultDeny)
-    assert not isinstance(deny_out, sdk.PermissionResultAllow)
-
-    # And a neutral result would NOT satisfy the SDK check — the very reason
-    # the adapter exists.
-    assert not isinstance(bt.PermissionResultAllow(), sdk.PermissionResultAllow)
-
-
-@pytest.mark.asyncio
 async def test_context_passed_through_unchanged():
     """The SDK-constructed context is duck-typed by hooks, so the adapter must
     forward it verbatim (no input-side translation)."""

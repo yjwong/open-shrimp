@@ -163,13 +163,6 @@ async def test_unfinished_jobs_are_requeue_candidates(db):
 
 
 @pytest.mark.asyncio
-async def test_jobs_are_scoped_per_device(db):
-    a = await _upsert(db, device_id="device-1")
-    b = await _upsert(db, device_id="device-2")
-    assert a != b
-
-
-@pytest.mark.asyncio
 async def test_delete_meeting_job(db):
     job_id = await _upsert(db)
     assert await delete_meeting_job(

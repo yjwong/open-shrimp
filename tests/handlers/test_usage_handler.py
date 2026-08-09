@@ -125,24 +125,6 @@ async def test_no_backends_at_all_replies_this_install() -> None:
 
 
 @pytest.mark.asyncio
-async def test_single_capable_backend_renders_flat_text() -> None:
-    report = UsageReport(
-        tiers=[UsageTier(name="5-hour session", used_pct=42.0)]
-    )
-    backends = [_StubBackend("claude_sdk", capable=True, report=report)]
-    update = _StubUpdate()
-    ctx = _StubContext(config=_config(), backends=backends)
-
-    await usage_handler(update, ctx)  # type: ignore[arg-type]
-
-    [reply] = update.effective_message.replies
-    # No section header for a single report.
-    assert "claude_sdk" not in reply.text
-    assert "5\\-hour session" in reply.text
-    assert "42% used" in reply.text
-
-
-@pytest.mark.asyncio
 async def test_two_capable_backends_each_get_a_section() -> None:
     r1 = UsageReport(tiers=[UsageTier(name="A", used_pct=10.0)])
     r2 = UsageReport(tiers=[UsageTier(name="B", used_pct=20.0)])

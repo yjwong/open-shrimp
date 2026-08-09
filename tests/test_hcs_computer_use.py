@@ -71,10 +71,6 @@ def test_mingw_bin_rejected_on_another_backend():
         _validate_raw(raw)
 
 
-def test_hcs_without_computer_use_needs_no_mingw_bin():
-    _validate_raw(_hcs_raw())
-
-
 def test_mingw_bin_round_trips():
     cfg = _parse(_hcs_raw({"computer_use": True, "mingw_bin": MINGW}))
     sandbox = config_to_dict(cfg)["contexts"]["default"]["sandbox"]

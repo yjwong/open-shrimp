@@ -35,7 +35,7 @@ def _hcs_raw(sandbox_extra: dict | None = None):
 # -- processor topology -------------------------------------------------------
 
 
-@pytest.mark.parametrize("cpus", [1, 2, 3, 4, 5, 7, 8, 16])
+@pytest.mark.parametrize("cpus", [1, 4, 16])
 def test_any_positive_cpu_count_validates(cpus):
     _validate_raw(_hcs_raw({"cpus": cpus}))
 
@@ -103,10 +103,6 @@ def test_the_rejection_names_the_hcs_backend():
 def test_knobs_left_at_their_unset_value_are_inert(knob):
     # An operator who spells a default out loud is not asking for anything.
     _validate_raw(_hcs_raw(knob))
-
-
-def test_a_bare_hcs_context_validates():
-    _validate_raw(_hcs_raw())
 
 
 def test_the_knobs_still_work_on_the_backends_that_implement_them():

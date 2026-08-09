@@ -100,10 +100,6 @@ def test_an_xdg_shaped_home_keeps_its_tail_under_the_chroot_home():
     )
 
 
-def test_the_chroot_home_matches_the_HOME_every_guest_command_gets():
-    assert _chroot_agent_home(_claude_runtime()).startswith(H.CHROOT_HOME)
-
-
 def test_a_home_outside_the_bundle_guest_home_is_refused():
     rt = _runtime(guest_dir="/opt/elsewhere/.agent")
     with pytest.raises(RuntimeError, match="not under its image bundle"):

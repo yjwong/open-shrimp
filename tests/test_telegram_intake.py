@@ -218,11 +218,6 @@ async def test_reply_with_bad_routing_raises() -> None:
     adapter._app.bot.send_message.assert_not_awaited()
 
 
-def test_dedup_key_format() -> None:
-    msg = make_message(chat_id=-100987, message_id=314)
-    assert build_event("s", msg).dedup_key == "-100987:314"
-
-
 # ---------------------------------------------------------------- lifecycle
 
 

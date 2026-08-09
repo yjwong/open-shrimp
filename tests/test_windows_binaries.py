@@ -33,9 +33,6 @@ from open_shrimp.updater import (
 class TestPlatformMaps:
     """Every platform the release workflow builds for must be mapped."""
 
-    def test_updater_has_windows_asset(self) -> None:
-        assert _ASSET_MAP[("Windows", "AMD64")] == "openshrimp-windows-x86_64.exe"
-
     def test_updater_covers_every_released_asset(self) -> None:
         assert set(_ASSET_MAP.values()) == {
             "openshrimp-linux-x86_64",

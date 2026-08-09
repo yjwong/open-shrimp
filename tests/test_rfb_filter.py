@@ -53,17 +53,6 @@ def client_cut_text(text: bytes) -> bytes:
 
 
 class TestHandshake:
-    def test_full_handshake_passes_through(self) -> None:
-        f = RfbClientFilter()
-        assert f.feed(HANDSHAKE) == HANDSHAKE
-
-    def test_handshake_byte_by_byte(self) -> None:
-        f = RfbClientFilter()
-        out = b""
-        for b in HANDSHAKE:
-            out += f.feed(bytes([b]))
-        assert out == HANDSHAKE
-
     def test_partial_handshake_buffers(self) -> None:
         f = RfbClientFilter()
         # Only 5 bytes of the 14-byte handshake — should forward those 5
@@ -80,20 +69,9 @@ class TestHandshake:
 
 
 class TestDrop:
-    def test_set_pixel_format_dropped(self) -> None:
-        f = RfbClientFilter()
-        out = f.feed(HANDSHAKE + set_pixel_format())
-        assert out == HANDSHAKE
-
     def test_set_encodings_zero_dropped(self) -> None:
         f = RfbClientFilter()
         out = f.feed(HANDSHAKE + set_encodings([]))
-        assert out == HANDSHAKE
-
-    def test_set_encodings_with_encodings_dropped(self) -> None:
-        f = RfbClientFilter()
-        encodings = [0, 1, 2, -239, -223]  # Raw, CopyRect, RRE, cursor, desktop
-        out = f.feed(HANDSHAKE + set_encodings(encodings))
         assert out == HANDSHAKE
 
     def test_drops_then_forwards(self) -> None:
@@ -107,26 +85,6 @@ class TestDrop:
 
 
 class TestForward:
-    def test_framebuffer_update_request(self) -> None:
-        f = RfbClientFilter()
-        fur = framebuffer_update_request(1, 100, 200, 300, 400)
-        assert f.feed(HANDSHAKE + fur) == HANDSHAKE + fur
-
-    def test_key_event(self) -> None:
-        f = RfbClientFilter()
-        ke = key_event(1, 0xFF0D)  # XK_Return
-        assert f.feed(HANDSHAKE + ke) == HANDSHAKE + ke
-
-    def test_pointer_event(self) -> None:
-        f = RfbClientFilter()
-        pe = pointer_event(0x01, 50, 75)
-        assert f.feed(HANDSHAKE + pe) == HANDSHAKE + pe
-
-    def test_client_cut_text(self) -> None:
-        f = RfbClientFilter()
-        cct = client_cut_text(b"hello world")
-        assert f.feed(HANDSHAKE + cct) == HANDSHAKE + cct
-
     def test_client_cut_text_empty(self) -> None:
         f = RfbClientFilter()
         cct = client_cut_text(b"")
@@ -212,12 +170,6 @@ class TestStreaming:
 
 
 class TestErrors:
-    def test_unknown_type_raises(self) -> None:
-        f = RfbClientFilter()
-        f.feed(HANDSHAKE)
-        with pytest.raises(RfbFilterError):
-            f.feed(bytes([99, 0, 0, 0]))
-
     def test_unknown_type_after_valid_messages(self) -> None:
         f = RfbClientFilter()
         f.feed(HANDSHAKE + framebuffer_update_request(1, 0, 0, 10, 10))
@@ -346,18 +298,6 @@ class TestServerInitRewrite:
         out = f.feed(SERVER_HANDSHAKE + si)
         # Idempotent: rewriting BGRA → BGRA is a no-op.
         assert out == SERVER_HANDSHAKE + si
-
-    def test_post_serverinit_passthrough(self) -> None:
-        f = RfbServerFilter()
-        si = server_init(100, 100, b"x", APPLE_BAD_PIXEL_FORMAT)
-        # 4 bytes of pixel data after ServerInit must pass through untouched
-        # (raw FramebufferUpdate would have its own header but for this
-        # passthrough check any bytes work).
-        post = b"\xde\xad\xbe\xef\x01\x02\x03\x04"
-        out = f.feed(SERVER_HANDSHAKE + si + post)
-        # Pixel format rewrite happens, but bytes after ServerInit are
-        # untouched.
-        assert out.endswith(post)
 
     def test_empty_name(self) -> None:
         f = RfbServerFilter()

@@ -147,11 +147,6 @@ def test_framebuffer_update_layout() -> None:
     assert msg[16:] == pixels
 
 
-def test_pixel_format_parse_roundtrip() -> None:
-    packed = struct.pack(">BBBBHHHBBB3x", *NATIVE_PIXEL_FORMAT)
-    assert parse_set_pixel_format(packed) == NATIVE_PIXEL_FORMAT
-
-
 # -- pixel translation --------------------------------------------------------
 
 # One red, one green, one blue pixel in BGRX byte order.

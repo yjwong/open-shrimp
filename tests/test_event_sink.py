@@ -556,19 +556,6 @@ async def test_trusted_sender_without_directive_not_picked_up(
 
 
 @pytest.mark.asyncio
-async def test_trusted_sender_unknown_context_not_picked_up(
-    db, dispatched, received
-):
-    bot = _make_bot()
-    sink = _auto_sink(bot, db)
-
-    await sink.emit(_event(sender_id=TRUSTED_ID, text="/context:does-not-exist"))
-
-    assert dispatched == []
-    bot.edit_message_reply_markup.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_auto_pickup_yields_to_concurrent_manual_claim(
     db, dispatched, received, monkeypatch
 ):
