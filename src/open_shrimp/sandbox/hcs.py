@@ -448,6 +448,25 @@ class HcsSandbox:
             and (self._sdir / "config.sha256").exists()
         )
 
+    def _check_processor_topology(self) -> None:
+        """Refuse a vCPU count this host cannot back with logical processors.
+
+        HCS accepts any count from 1 up to the host's logical processor count,
+        and fails ``HcsCreateComputeSystem`` above it with a bare
+        ``0x80004005`` whose only clue is EventId 3100 buried in the result
+        document.  Checking first turns that into a message naming both
+        numbers.  Note that a *client* Windows edition uses at most two
+        sockets, so a host given many single-core sockets reports far fewer
+        logical processors than its hypervisor was configured with.
+        """
+        host_cpus = os.cpu_count()
+        if host_cpus and self._config.cpus > host_cpus:
+            raise RuntimeError(
+                f"sandbox.cpus is {self._config.cpus} but this host has only "
+                f"{host_cpus} logical processors — HCS refuses a virtual "
+                f"processor count above the host's."
+            )
+
     def _initrd_ok(self) -> bool:
         return initrd_path().exists() and kernel_path().exists()
 
@@ -482,6 +501,7 @@ class HcsSandbox:
                 f"HCS kernel not found at {kernel_path()} — install WSL "
                 "(the kernel ships with it) or set OPENSHRIMP_HCS_KERNEL."
             )
+        self._check_processor_topology()
         ensure_initrd(lambda msg: self._log(log_file, msg))
 
         desired_fp = self._fingerprint()

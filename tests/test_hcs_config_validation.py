@@ -1,7 +1,9 @@
 """Per-backend config validation for ``sandbox.backend: hcs``.
 
 Covers the two ways an hcs context can be wrong at load time: a processor
-count HCS will refuse at create, and a knob the backend has no code path for.
+count no host can back, and a knob the backend has no code path for.  The
+host-relative ceiling on that count is the backend's to enforce, not this
+layer's — a config file is not tied to the machine that loads it.
 """
 
 from __future__ import annotations
@@ -33,27 +35,15 @@ def _hcs_raw(sandbox_extra: dict | None = None):
 # -- processor topology -------------------------------------------------------
 
 
-@pytest.mark.parametrize("cpus", [2, 4, 6, 8, 16])
-def test_even_cpu_counts_validate(cpus):
+@pytest.mark.parametrize("cpus", [1, 2, 3, 4, 5, 7, 8, 16])
+def test_any_positive_cpu_count_validates(cpus):
     _validate_raw(_hcs_raw({"cpus": cpus}))
-
-
-@pytest.mark.parametrize("cpus", [1, 3, 5, 7, 15])
-def test_odd_cpu_counts_are_rejected(cpus):
-    with pytest.raises(ValueError, match="sandbox.cpus must be an even number"):
-        _validate_raw(_hcs_raw({"cpus": cpus}))
 
 
 @pytest.mark.parametrize("cpus", [0, -2])
 def test_non_positive_cpu_counts_are_rejected(cpus):
-    with pytest.raises(ValueError, match="at least 2"):
+    with pytest.raises(ValueError, match="at least 1"):
         _validate_raw(_hcs_raw({"cpus": cpus}))
-
-
-def test_the_cpu_message_names_what_is_supported():
-    with pytest.raises(ValueError) as exc:
-        _validate_raw(_hcs_raw({"cpus": 3}))
-    assert "2, 4, 6" in str(exc.value)
 
 
 def test_the_default_cpu_count_is_supportable():
@@ -67,9 +57,9 @@ def test_a_non_integer_cpu_count_still_reports_the_type_error():
         _validate_raw(_hcs_raw({"cpus": "4"}))
 
 
-def test_odd_cpu_counts_are_fine_on_other_backends():
+def test_other_backends_keep_their_own_cpu_rules():
     raw = _hcs_raw()
-    raw["contexts"]["default"]["sandbox"] = {"backend": "libvirt", "cpus": 3}
+    raw["contexts"]["default"]["sandbox"] = {"backend": "libvirt", "cpus": 0}
     _validate_raw(raw)
 
 

@@ -533,13 +533,10 @@ _HCS_UNSUPPORTED_KNOBS: tuple[tuple[str, object, str], ...] = (
     ("android", None, "Android tuning"),
 )
 
-#: The smallest processor count HCS accepts, and the step between accepted
-#: counts.  HCS refuses odd topologies outright — ``cpus: 3`` fails
-#: ``HcsCreateComputeSystem`` with a bare HRESULT and EventId 3100, "the
-#: processor topology specified for the virtual machine cannot be supported by
-#: this host" — so the count is checked here, where the operator can act on it.
-_HCS_MIN_CPUS = 2
-_HCS_CPU_STEP = 2
+#: The smallest processor count HCS accepts.  Its upper bound is the host's
+#: logical processor count — a property of the machine rather than of the
+#: config file, so the backend checks it against the running host instead.
+_HCS_MIN_CPUS = 1
 
 
 def _validate_hcs_sandbox(name: str, sandbox: dict) -> None:
@@ -555,12 +552,10 @@ def _validate_hcs_sandbox(name: str, sandbox: dict) -> None:
 
     cpus = sandbox.get("cpus")
     if isinstance(cpus, int) and not isinstance(cpus, bool):
-        if cpus < _HCS_MIN_CPUS or cpus % _HCS_CPU_STEP:
+        if cpus < _HCS_MIN_CPUS:
             raise ValueError(
-                f"Context '{name}': sandbox.cpus must be an even number of at "
-                f"least {_HCS_MIN_CPUS} on the 'hcs' backend (2, 4, 6, ...), "
-                f"got: {cpus!r} — HCS rejects other processor topologies when "
-                f"the compute system is created"
+                f"Context '{name}': sandbox.cpus must be at least "
+                f"{_HCS_MIN_CPUS} on the 'hcs' backend, got: {cpus!r}"
             )
 
 

@@ -120,8 +120,8 @@ contexts:
     #   #                          # root); persistent_paths survive a rebuild,
     #   #                          # the rootfs is reborn on every boot.
     #   # memory: 2048             # Guest memory in MB (default: 2048)
-    #   # cpus: 2                  # Guest vCPUs (default: 2). Must be even —
-    #   #                          # HCS refuses other processor topologies.
+    #   # cpus: 2                  # Guest vCPUs (default: 2). HCS refuses a
+    #   #                          # count above the host's logical processors.
     #   # computer_use: true       # GUI desktop (weston-RDP). Needs the baked
     #   #                          # <base_image>-gui.vhdx template variant
     #   #                          # (scripts/build_hcs_gui_rootfs.sh) and

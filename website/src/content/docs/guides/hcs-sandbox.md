@@ -88,7 +88,7 @@ contexts:
       backend: hcs
       base_image: C:\images\claude-root.vhdx
       memory: 4096            # MB (default: 2048)
-      cpus: 4                 # vCPUs (default: 2) — must be even
+      cpus: 4                 # vCPUs (default: 2) — at most the host's
       disk_size: 20           # GB per persistent volume (sparse)
       persistent_paths:
         - /home/claude/.cache
@@ -96,7 +96,7 @@ contexts:
         npm install -g typescript
 ```
 
-`cpus` **must be an even number of at least 2**. HCS rejects odd processor topologies outright, so OpenShrimp refuses them when the config loads rather than letting the create fail with a bare error code.
+`cpus` **may not exceed the host's logical processor count** — HCS rejects a larger processor topology with a bare error code, so OpenShrimp checks it against the host before creating the guest. Any count from 1 up to that limit is accepted. Note that client editions of Windows use at most two CPU sockets, so a Windows host that is itself a VM may see far fewer logical processors than its hypervisor was configured to give it.
 
 Each entry in `persistent_paths` gets its own ext4 VHDX, mounted by label and untouched by rebuilds — that is where package caches and anything else worth keeping belong. Changing any sandbox field rebuilds the guest; the persistent volumes survive.
 
