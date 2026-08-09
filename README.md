@@ -117,7 +117,7 @@ contexts:
 
 Session state is stored separately per context under `~/.config/openshrimp/containers/`, so sandboxed contexts don't interfere with each other or your host agent state (e.g. `~/.claude`).
 
-On Linux, use `backend: docker` or `backend: libvirt`. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework. On Windows, use `backend: hcs` for a Linux guest on the Host Compute Service — this one needs guest images you build yourself, so read the [HCS sandbox guide](https://shrimp.wong.place/guides/hcs-sandbox/) before enabling it.
+On Linux, use `backend: docker` or `backend: libvirt`. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework. On Windows, use `backend: hcs` for a Linux guest on the Host Compute Service — guest images download automatically on first boot, but the host has its own prerequisites, so read the [HCS sandbox guide](https://shrimp.wong.place/guides/hcs-sandbox/) before enabling it.
 
 OpenCode contexts use a separate `openshrimp-opencode:latest` image — see [Agent Backends](#agent-backends).
 
@@ -161,7 +161,7 @@ chmod +x openshrimp
 curl.exe -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-windows-x86_64.exe -o openshrimp.exe
 ```
 
-> **Note:** The Windows binary bundles the HCS sandbox backend, but a sandboxed context also needs a guest image you build yourself. See the [HCS sandbox guide](https://shrimp.wong.place/guides/hcs-sandbox/).
+> **Note:** The Windows binary bundles the HCS sandbox backend. Guest images download on first boot, but a sandboxed context still needs Hyper-V rights and WSL's kernel — see the [HCS sandbox guide](https://shrimp.wong.place/guides/hcs-sandbox/).
 
 On first run, the binary will automatically set up an isolated Python environment and install dependencies. If no config file exists, an interactive setup wizard walks you through creating one. Subsequent runs start instantly.
 

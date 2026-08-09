@@ -161,11 +161,11 @@ Run the Claude CLI inside an isolated environment. When a sandbox is enabled, al
 | `docker_in_docker` | bool | No | `false` | Enable rootless Docker inside the container (Docker backend only) |
 | `dockerfile` | string | No | `null` | Path to a custom Dockerfile (Docker backend only) |
 | `computer_use` | bool | No | `false` | Enable GUI interaction with a headless desktop |
-| `memory` | int | No | `2048` | Memory ceiling in MB (Libvirt and Lima backends) |
-| `cpus` | int | No | `2` | Number of vCPUs (Libvirt and Lima backends) |
-| `disk_size` | int | No | `20` | Disk size in GB for qcow2 overlay (Libvirt and Lima backends) |
+| `memory` | int | No | `2048` | Memory ceiling in MB (Libvirt, Lima, and HCS backends) |
+| `cpus` | int | No | `2` | Number of vCPUs (Libvirt, Lima, and HCS backends). HCS requires an even count of at least 2 |
+| `disk_size` | int | No | `20` | Disk size in GB for the qcow2 overlay (Libvirt, Lima) or each dynamic VHDX volume (HCS) |
 | `base_image` | string | No | `null` | Path to a base image you supply — qcow2 for Libvirt, VHDX for HCS. Both backends download one when unset |
-| `provision` | string | No | `null` | Shell script to run on first boot (Libvirt and Lima backends) |
+| `provision` | string | No | `null` | Shell script to run on first boot (Libvirt, Lima, and HCS backends) |
 
 ### Docker backend
 

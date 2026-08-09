@@ -158,5 +158,5 @@ A few `sandbox:` keys have no meaning on HCS — `virgl`, `docker_in_docker`, `d
 | Variable | Purpose |
 |----------|---------|
 | `OPENSHRIMP_HCS_KERNEL` | Kernel to boot, when not WSL's at its default path |
-| `OPENSHRIMP_HCS_INITRD` | Control initramfs, when not at `C:\ProgramData\openshrimp\hcs\initrd.img` |
+| `OPENSHRIMP_HCS_INITRD` | Control initramfs you built yourself. Unset, a copy staged at `C:\ProgramData\openshrimp\hcs\initrd.img` wins if present, and the released asset is downloaded to the cache otherwise |
 | `OPENSHRIMP_HCS_RDP_HELPER` | Directory holding an RDP helper bundle you staged yourself |

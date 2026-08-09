@@ -115,9 +115,9 @@ The `/vnc` command requires the `review` section to be configured with either `p
 ### HCS (Windows)
 
 - The guest runs weston with its RDP backend; the host drives it over RDP and serves the VNC Mini App from that surface
-- Screenshots, input, and clipboard all travel over the RDP connection
+- Screenshots and input travel over the RDP connection; clipboard goes over the guest exec channel via `wl-copy`/`wl-paste`
 - Window focus not directly supported (use `Alt+Tab` or similar key combos)
-- Needs a desktop guest image you build yourself — see the [HCS sandbox guide](/guides/hcs-sandbox/)
+- The desktop guest image downloads automatically on first boot — see the [HCS sandbox guide](/guides/hcs-sandbox/)
 
 ## Tips
 
