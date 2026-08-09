@@ -11,16 +11,16 @@ import json
 import logging
 import os
 import platform
-import stat
 import tempfile
-from pathlib import Path
 
-from platformdirs import user_data_path
+from open_shrimp.binaries import (
+    BIN_DIR,
+    find_binary,
+    local_binary_path,
+    make_executable,
+)
 
 logger = logging.getLogger(__name__)
-
-# Directory where we download moonshine-stt if not found in $PATH.
-_BIN_DIR = user_data_path("openshrimp") / "bin"
 
 # GitHub release URL — uses the same repo as OpenShrimp.
 _REPO = "yjwong/open-shrimp"
@@ -31,22 +31,14 @@ _BINARY_MAP: dict[tuple[str, str], str] = {
     ("Linux", "x86_64"): "moonshine-stt-linux-x86_64",
     ("Linux", "aarch64"): "moonshine-stt-linux-aarch64",
     ("Darwin", "arm64"): "moonshine-stt-macos-aarch64",
+    ("Darwin", "x86_64"): "moonshine-stt-macos-x86_64",
+    ("Windows", "AMD64"): "moonshine-stt-windows-x86_64.exe",
 }
 
 
 def _find_moonshine_stt() -> str | None:
     """Find the moonshine-stt binary, checking our bin dir first, then $PATH."""
-    local_bin = _BIN_DIR / "moonshine-stt"
-    if local_bin.is_file() and os.access(local_bin, os.X_OK):
-        return str(local_bin)
-
-    import shutil
-
-    path = shutil.which("moonshine-stt")
-    if path:
-        return path
-
-    return None
+    return find_binary("moonshine-stt")
 
 
 async def _download_moonshine_stt() -> str:
@@ -68,8 +60,8 @@ async def _download_moonshine_stt() -> str:
             f"directory in the open-shrimp repository."
         )
 
-    _BIN_DIR.mkdir(parents=True, exist_ok=True)
-    target = _BIN_DIR / "moonshine-stt"
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    target = local_binary_path("moonshine-stt")
     url = f"{_DOWNLOAD_BASE}/{binary_name}"
 
     logger.info("Downloading moonshine-stt from %s ...", url)
@@ -79,18 +71,19 @@ async def _download_moonshine_stt() -> str:
     async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
-            tmp = target.with_suffix(".tmp")
+            tmp = target.with_name(target.name + ".tmp")
             try:
                 with open(tmp, "wb") as f:
                     async for chunk in resp.aiter_bytes(chunk_size=65536):
                         f.write(chunk)
-                tmp.rename(target)
+                # Not Path.rename: that refuses an existing destination on
+                # Windows, so a re-download would fail.
+                os.replace(tmp, target)
             except BaseException:
                 tmp.unlink(missing_ok=True)
                 raise
 
-    # Make executable.
-    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(target)
     logger.info("moonshine-stt downloaded to %s", target)
     return str(target)
 

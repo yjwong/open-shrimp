@@ -13,37 +13,25 @@ is nothing to check on a host that configures no HCS context.
 
 from __future__ import annotations
 
-import os
 import platform
 import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from platformdirs import user_data_path
-
+from open_shrimp.binaries import find_binary
 from open_shrimp.config import Config, SandboxConfig, load_config
-
-_BIN_DIR = user_data_path("openshrimp") / "bin"
-
-
-def _find_managed_or_path(name: str) -> str | None:
-    """Check managed bin dir then $PATH for *name*."""
-    local_bin = _BIN_DIR / name
-    if local_bin.is_file() and os.access(local_bin, os.X_OK):
-        return str(local_bin)
-    return shutil.which(name)
 
 
 def _check_moonshine_stt(config: Config | None) -> tuple[bool, str]:
-    path = _find_managed_or_path("moonshine-stt")
+    path = find_binary("moonshine-stt")
     if path:
         return True, f"found at {path}"
     return False, "not found (voice transcription unavailable)"
 
 
 def _check_cloudflared(config: Config | None) -> tuple[bool, str]:
-    path = _find_managed_or_path("cloudflared")
+    path = find_binary("cloudflared")
     if path:
         return True, f"found at {path}"
     return False, "not found (tunnel support unavailable)"

@@ -128,6 +128,10 @@ jobs:
             sdist_artifact: sdist-moonshine-stt
             exec_code: "from moonshine_stt.main import main; main()"
             rust_target: x86_64-apple-darwin
+          - os: windows-latest
+            artifact: moonshine-stt-windows-x86_64.exe
+            sdist_artifact: sdist-moonshine-stt
+            exec_code: "from moonshine_stt.main import main; main()"
 
     steps:
       - uses: actions/checkout@v6

@@ -2,7 +2,11 @@
 
 Periodically checks GitHub Releases for newer versions, notifies allowed
 users via Telegram, and -- upon confirmation -- downloads the new binary,
-replaces the running executable in-place, and restarts the process.
+puts it at the path the process was launched from, and restarts.
+
+The replacement is an overwrite where the OS allows one and a rename-aside
+where it does not; either way the launched path holds the new binary before
+the restart, so the restart needs no knowledge of which happened.
 """
 
 from __future__ import annotations
@@ -34,7 +38,13 @@ _ASSET_MAP: dict[tuple[str, str], str] = {
     ("Linux", "x86_64"): "openshrimp-linux-x86_64",
     ("Linux", "aarch64"): "openshrimp-linux-aarch64",
     ("Darwin", "arm64"): "openshrimp-macos-aarch64",
+    ("Darwin", "x86_64"): "openshrimp-macos-x86_64",
+    ("Windows", "AMD64"): "openshrimp-windows-x86_64.exe",
 }
+
+# Name the running binary is renamed to when it cannot be overwritten in
+# place.  Windows keeps an image section open on a running executable.
+_DISPLACED_SUFFIX = ".old"
 
 
 # ── Data ──
@@ -173,13 +183,62 @@ async def check_for_update() -> UpdateInfo | None:
 # ── Download and replace ──
 
 
+def purge_displaced_binary() -> None:
+    """Remove a binary left behind by a previous self-replace.
+
+    The displaced image stays mapped for as long as the process that was
+    running it lives, so removal is best-effort and retried on every
+    startup and before every replace.
+    """
+    target = pyapp_binary_path()
+    if target is None:
+        return
+    displaced = target.with_name(target.name + _DISPLACED_SUFFIX)
+    try:
+        displaced.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.debug("Displaced binary %s not removable yet: %s", displaced, exc)
+
+
+def _install_binary(new: Path, target: Path) -> None:
+    """Move the downloaded *new* binary over the running *target*.
+
+    Windows holds an open image section on a running executable, so
+    overwriting it is denied outright — but renaming it away is permitted,
+    and the name is what the restart re-launches.  The displaced image is
+    cleaned up by :func:`purge_displaced_binary` once nothing maps it.
+    """
+    if sys.platform != "win32":
+        new.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        os.replace(new, target)
+        return
+
+    displaced = target.with_name(target.name + _DISPLACED_SUFFIX)
+    os.replace(target, displaced)
+    try:
+        os.replace(new, target)
+    except BaseException:
+        os.replace(displaced, target)
+        raise
+
+
+async def _stream_to_file(update_info: UpdateInfo, dest: Path) -> None:
+    """Stream the release asset to *dest*."""
+    import httpx
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=300.0) as client:
+        async with client.stream("GET", update_info.download_url) as resp:
+            resp.raise_for_status()
+            with open(dest, "wb") as f:
+                async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    f.write(chunk)
+
+
 async def download_and_replace(update_info: UpdateInfo) -> None:
-    """Download the new binary and atomically replace the running one.
+    """Download the new binary and put it in place of the running one.
 
     Raises on failure (permission error, disk space, network, etc.).
     """
-    import httpx
-
     target = pyapp_binary_path()
     if target is None:
         raise RuntimeError(
@@ -187,6 +246,9 @@ async def download_and_replace(update_info: UpdateInfo) -> None:
             "Ensure the binary was built with PYAPP_PASS_LOCATION=1."
         )
     tmp = target.with_name(f".{target.name}.update.tmp")
+
+    # Free the displaced-binary name before it is needed again.
+    purge_displaced_binary()
 
     logger.info(
         "Downloading update %s from %s -> %s",
@@ -196,21 +258,8 @@ async def download_and_replace(update_info: UpdateInfo) -> None:
     )
 
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=300.0
-        ) as client:
-            async with client.stream("GET", update_info.download_url) as resp:
-                resp.raise_for_status()
-                with open(tmp, "wb") as f:
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
-                        f.write(chunk)
-
-        # Copy permissions from old binary.
-        old_mode = target.stat().st_mode
-        tmp.chmod(old_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-        # Atomic replace.
-        tmp.rename(target)
+        await _stream_to_file(update_info, tmp)
+        _install_binary(tmp, target)
         logger.info("Binary updated successfully to %s", update_info.version)
 
     except BaseException:

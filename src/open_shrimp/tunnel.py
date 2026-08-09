@@ -10,16 +10,16 @@ import asyncio
 import logging
 import os
 import platform
-import stat
-import sys
 from pathlib import Path
 
-from platformdirs import user_data_path
+from open_shrimp.binaries import (
+    BIN_DIR,
+    find_binary,
+    local_binary_path,
+    make_executable,
+)
 
 logger = logging.getLogger(__name__)
-
-# Directory where we download cloudflared if not found in $PATH.
-_BIN_DIR = user_data_path("openshrimp") / "bin"
 
 # GitHub release URL template for cloudflared binaries.
 _DOWNLOAD_BASE = "https://github.com/cloudflare/cloudflared/releases/latest/download"
@@ -44,19 +44,7 @@ def _get_binary_name() -> str | None:
 
 def _find_cloudflared() -> str | None:
     """Find the cloudflared binary, checking our bin dir first, then $PATH."""
-    # Check our managed bin dir.
-    local_bin = _BIN_DIR / "cloudflared"
-    if local_bin.is_file() and os.access(local_bin, os.X_OK):
-        return str(local_bin)
-
-    # Check $PATH via `which`.
-    import shutil
-
-    path = shutil.which("cloudflared")
-    if path:
-        return path
-
-    return None
+    return find_binary("cloudflared")
 
 
 async def _download_cloudflared() -> str:
@@ -76,8 +64,8 @@ async def _download_cloudflared() -> str:
             f"https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
         )
 
-    _BIN_DIR.mkdir(parents=True, exist_ok=True)
-    target = _BIN_DIR / "cloudflared"
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    target = local_binary_path("cloudflared")
     url = f"{_DOWNLOAD_BASE}/{binary_name}"
 
     logger.info("Downloading cloudflared from %s ...", url)
@@ -88,8 +76,7 @@ async def _download_cloudflared() -> str:
     else:
         await _download_file(url, target)
 
-    # Make executable.
-    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(target)
     logger.info("cloudflared downloaded to %s", target)
     return str(target)
 
@@ -101,12 +88,14 @@ async def _download_file(url: str, dest: Path) -> None:
     async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
-            tmp = dest.with_suffix(".tmp")
+            tmp = dest.with_name(dest.name + ".tmp")
             try:
                 with open(tmp, "wb") as f:
                     async for chunk in resp.aiter_bytes(chunk_size=65536):
                         f.write(chunk)
-                tmp.rename(dest)
+                # Not Path.rename: that refuses an existing destination on
+                # Windows, so a re-download would fail.
+                os.replace(tmp, dest)
             except BaseException:
                 tmp.unlink(missing_ok=True)
                 raise

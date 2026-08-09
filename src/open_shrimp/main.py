@@ -337,6 +337,12 @@ def main() -> None:
 
     args = _parse_args()
 
+    # A previous update may have left the superseded binary on disk because
+    # the process still running it had it mapped.  Nothing maps it now.
+    from open_shrimp.updater import purge_displaced_binary
+
+    purge_displaced_binary()
+
     # Handle install/uninstall subcommands
     if args.subcommand == "install":
         from open_shrimp.service import install_service

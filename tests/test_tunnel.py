@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import platform
 import stat
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from open_shrimp import binaries
 from open_shrimp.tunnel import (
-    _BIN_DIR,
     _find_cloudflared,
     _get_binary_name,
     _parse_tunnel_url,
@@ -43,6 +41,12 @@ class TestGetBinaryName:
             mock_platform.machine.return_value = "arm64"
             assert _get_binary_name() == "cloudflared-darwin-arm64.tgz"
 
+    def test_windows_amd64(self) -> None:
+        with patch("open_shrimp.tunnel.platform") as mock_platform:
+            mock_platform.system.return_value = "Windows"
+            mock_platform.machine.return_value = "AMD64"
+            assert _get_binary_name() == "cloudflared-windows-amd64.exe"
+
     def test_unsupported_platform(self) -> None:
         with patch("open_shrimp.tunnel.platform") as mock_platform:
             mock_platform.system.return_value = "FreeBSD"
@@ -55,18 +59,20 @@ class TestFindCloudflared:
 
     def test_finds_in_bin_dir(self, tmp_path: Path) -> None:
         """Should find cloudflared in our managed bin directory."""
-        fake_bin = tmp_path / "cloudflared"
+        # Named the way this platform's download writes it — bare on POSIX,
+        # cloudflared.exe on Windows.
+        fake_bin = tmp_path / f"cloudflared{binaries.EXE_SUFFIX}"
         fake_bin.write_text("#!/bin/sh\n")
         fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IXUSR)
 
-        with patch("open_shrimp.tunnel._BIN_DIR", tmp_path):
+        with patch("open_shrimp.binaries.BIN_DIR", tmp_path):
             result = _find_cloudflared()
             assert result == str(fake_bin)
 
     def test_finds_in_path(self) -> None:
         """Should fall back to $PATH lookup."""
         with (
-            patch("open_shrimp.tunnel._BIN_DIR", Path("/nonexistent")),
+            patch("open_shrimp.binaries.BIN_DIR", Path("/nonexistent")),
             patch("shutil.which", return_value="/usr/bin/cloudflared"),
         ):
             result = _find_cloudflared()
@@ -75,7 +81,7 @@ class TestFindCloudflared:
     def test_not_found(self) -> None:
         """Should return None if not found anywhere."""
         with (
-            patch("open_shrimp.tunnel._BIN_DIR", Path("/nonexistent")),
+            patch("open_shrimp.binaries.BIN_DIR", Path("/nonexistent")),
             patch("shutil.which", return_value=None),
         ):
             result = _find_cloudflared()
