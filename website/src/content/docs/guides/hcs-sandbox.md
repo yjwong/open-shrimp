@@ -23,7 +23,7 @@ Nothing needs staging by hand, but a context's first boot fetches a rootfs image
   uv sync --extra hcs        # or: pip install "open-shrimp[hcs]"
   ```
 
-- **Elevation.** The account running the bot must be a local Administrator with the process running elevated, or a member of **Hyper-V Administrators**. Without one of those, Windows refuses to create the compute system at all. Adding the account to Hyper-V Administrators is the option that avoids running the bot elevated; the membership only takes effect after a sign-out.
+- **Hyper-V rights.** The account running the bot must be a member of **Hyper-V Administrators**, or be a local Administrator with the process running elevated. Without one of those, Windows refuses to create the compute system at all. Prefer the group: it is the least privilege HCS accepts, and it means the bot never runs elevated. Windows checks the membership against the process token, so it only takes effect after a sign-out and back in.
 
 Nothing else needs installing. The host-side launcher the agent CLI is invoked through is compiled with the in-box .NET Framework compiler that ships with Windows, so there is no toolchain to set up.
 

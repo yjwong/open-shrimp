@@ -151,8 +151,8 @@ def _check_hyperv_rights(config: Config | None) -> tuple[bool, str]:
         return True, "this token is in Administrators or Hyper-V Administrators"
     return False, (
         "this token is in neither Administrators nor Hyper-V Administrators \u2014 "
-        "HCS refuses to create a compute system (0x8037011B); run elevated or "
-        "add the account to Hyper-V Administrators and sign out and back in"
+        "HCS refuses to create a compute system (0x8037011B); add the account "
+        "to Hyper-V Administrators and sign out and back in, or run elevated"
     )
 
 

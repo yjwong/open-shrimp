@@ -177,10 +177,11 @@ def _require_hyperv_rights(win: Any) -> None:
     if not permitted:
         raise RuntimeError(
             "HCS needs Hyper-V management rights that this process does not "
-            "have — run OpenShrimp elevated (right-click, Run as "
-            "administrator), or add the account it runs as to the 'Hyper-V "
+            "have — add the account it runs as to the 'Hyper-V "
             "Administrators' group and sign out and back in so the new "
-            "membership reaches its logon token. Without one of the two, "
+            "membership reaches its logon token, which is the least privilege "
+            "HCS accepts; running OpenShrimp elevated (right-click, Run as "
+            "administrator) also satisfies it. Without one of the two, "
             "creating the sandbox fails with a bare 0x8037011B."
         )
 
