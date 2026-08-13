@@ -339,7 +339,14 @@ async def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await proc.communicate()
-    return stdout.decode(), stderr.decode(), proc.returncode
+    # Diff output carries file contents verbatim, so it is only UTF-8 by
+    # convention — a single latin-1 byte in a working-tree file must not take
+    # down the whole review.
+    return (
+        stdout.decode(errors="replace"),
+        stderr.decode(errors="replace"),
+        proc.returncode,
+    )
 
 
 async def _get_untracked_files(cwd: str) -> list[str]:
@@ -364,6 +371,11 @@ def _is_binary_file(path: Path, sample_size: int = 8192) -> bool:
 
 
 _MAX_UNTRACKED_DIFF_SIZE = 1_000_000  # 1 MB
+
+# Each `git diff --no-index` child holds a handful of descriptors (two pipes
+# plus a pidfd), so an unbounded fan-out over the untracked-file list exhausts
+# the process fd limit on any tree with a few hundred untracked files.
+_UNTRACKED_DIFF_CONCURRENCY = asyncio.Semaphore(16)
 
 
 async def _diff_untracked_files(cwd: str, files: list[str]) -> str:
@@ -399,10 +411,11 @@ async def _diff_untracked_files(cwd: str, files: list[str]) -> str:
 
     # Diff text files concurrently via git.
     async def _diff_one(file_path: str) -> str:
-        stdout, _, rc = await _run_git(
-            cwd, "diff", "--no-index", "--no-color", "-U3", "--",
-            "/dev/null", file_path,
-        )
+        async with _UNTRACKED_DIFF_CONCURRENCY:
+            stdout, _, rc = await _run_git(
+                cwd, "diff", "--no-index", "--no-color", "-U3", "--",
+                "/dev/null", file_path,
+            )
         # --no-index exits 1 when there are differences (not an error).
         if rc not in (0, 1):
             logger.warning("git diff --no-index failed for %s (rc=%d)", file_path, rc)

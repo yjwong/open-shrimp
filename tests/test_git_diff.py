@@ -1,6 +1,7 @@
 """Tests for git diff parsing and hunk extraction."""
 
 import os
+import resource
 import textwrap
 
 import pytest
@@ -382,6 +383,33 @@ async def test_get_hunks_untracked_files(git_repo: str) -> None:
     new_hunks = [h for h in result.hunks if h.file_path == "new_file.txt"]
     assert len(new_hunks) == 1
     assert new_hunks[0].is_new_file is True
+
+
+@pytest.mark.asyncio
+async def test_get_hunks_untracked_non_utf8(git_repo: str) -> None:
+    """A latin-1 byte in an untracked file must not fail the whole request."""
+    with open(os.path.join(git_repo, "cp1252.log"), "wb") as f:
+        f.write(b"start \x97 end\n")
+
+    result = await get_hunks(git_repo, include_untracked=True)
+    assert [h for h in result.hunks if h.file_path == "cp1252.log"]
+
+
+@pytest.mark.asyncio
+async def test_get_hunks_untracked_many_files(git_repo: str) -> None:
+    """Hundreds of untracked files must stay within the process fd limit."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
+    try:
+        for i in range(400):
+            with open(os.path.join(git_repo, f"f{i}.txt"), "w") as f:
+                f.write(f"content {i}\n")
+
+        result = await get_hunks(git_repo, include_untracked=True, limit=1000)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    assert len([h for h in result.hunks if h.file_path.startswith("f")]) == 400
 
 
 @pytest.mark.asyncio
