@@ -7,6 +7,7 @@ import android.content.ServiceConnection
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import com.topjohnwu.superuser.NoShellException
 import com.topjohnwu.superuser.Shell
 import com.topjohnwu.superuser.ipc.RootService
 import place.wong.shrimp.companion.WhatsAppReaderService
@@ -24,6 +25,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 object WhatsAppReader {
     private const val CONNECT_TIMEOUT_SECONDS = 60L
     private const val SHELL_TIMEOUT_SECONDS = 20L
+
+    private const val ROOT_DENIED =
+        "WhatsApp reader: root access denied — grant it in your root manager, then reopen this app"
 
     private val shellConfigured = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
@@ -53,11 +57,7 @@ object WhatsAppReader {
         live()?.let { return it }
 
         configureShell()
-        // Asking the shell first turns a denied grant into an error naming it,
-        // rather than a bind that silently never completes.
-        if (!Shell.getShell().isRoot) {
-            throw IllegalStateException("Root access was denied")
-        }
+        requireRoot()
 
         val latch = CountDownLatch(1)
         var bound: IWhatsAppReader? = null
@@ -72,6 +72,7 @@ object WhatsAppReader {
                 // attempt is never held up by a lock it cannot influence.
                 latch.countDown()
                 forget(this)
+                LogStore.add("WhatsApp reader: the root process stopped")
             }
         }
         val intent = Intent(context.applicationContext, WhatsAppReaderService::class.java)
@@ -79,13 +80,15 @@ object WhatsAppReader {
         main.post { RootService.bind(intent, newConnection) }
         if (!latch.await(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
             main.post { RootService.unbind(newConnection) }
-            throw IllegalStateException("The root reader did not start within ${CONNECT_TIMEOUT_SECONDS}s")
+            fail("WhatsApp reader: the root process did not start within ${CONNECT_TIMEOUT_SECONDS}s")
         }
-        val connected = bound ?: throw IllegalStateException("The root reader disconnected while starting")
+        val connected = bound
+            ?: fail("WhatsApp reader: the root process disconnected while starting")
         synchronized(this) {
             reader = connected
             connection = newConnection
         }
+        LogStore.add("WhatsApp reader connected")
         return connected
     }
 
@@ -93,6 +96,36 @@ object WhatsAppReader {
     fun disconnect() {
         val stale = synchronized(this) { connection?.also { clear() } } ?: return
         main.post { RootService.unbind(stale) }
+        LogStore.add("WhatsApp reader disconnected")
+    }
+
+    /**
+     * Stop unless this app can run as root.
+     *
+     * Checked before the bind rather than after: a denial that is not caught
+     * here becomes a bind that never completes and reports itself only as a
+     * timeout a minute later.
+     *
+     * A refusal lasts as long as the process. Dropping libsu's cached shell so
+     * a fresh one is built does not lift it, and neither does avoiding
+     * `isAppGrantedRoot`, which memoises its first answer — a process that has
+     * been refused keeps being refused, while a newly started one is granted
+     * immediately. So root given to a running app cannot reach it until the
+     * app is restarted, which is what [ROOT_DENIED] asks the user to do.
+     */
+    private fun requireRoot() {
+        val rooted = try {
+            Shell.getShell().isRoot
+        } catch (e: NoShellException) {
+            fail("WhatsApp reader: this device has no usable shell")
+        }
+        if (!rooted) fail(ROOT_DENIED)
+    }
+
+    /** Report *message* where the user can see it, then raise it to the caller. */
+    private fun fail(message: String): Nothing {
+        LogStore.add(message)
+        throw IllegalStateException(message)
     }
 
     /** The current reader if its process is still alive, else null. */
