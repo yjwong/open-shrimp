@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!--
+          Reachable from `adb shell am broadcast`, which is why it is exported;
+          the DUMP permission is what keeps it to the shell, since no ordinary
+          app holds it. Debug builds only — the release manifest has no
+          entry point into the root reader.
+        -->
+        <receiver
+            android:name=".WhatsAppProbeReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="place.wong.shrimp.companion.PROBE_WHATSAPP" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

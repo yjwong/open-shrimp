@@ -54,6 +54,11 @@
             android:exported="false"
             android:foregroundServiceType="mediaProcessing" />
 
+        <!-- Bound into a uid-0 process by libsu, not started by the system. -->
+        <service
+            android:name=".WhatsAppReaderService"
+            android:exported="false" />
+
         <service
             android:name=".ShrimpFirebaseMessagingService"
             android:exported="false">

@@ -2,6 +2,7 @@ plugins {
     id "com.android.application"
     id "org.jetbrains.kotlin.android"
     id "org.jetbrains.kotlin.plugin.compose"
+    id "org.jetbrains.kotlin.plugin.parcelize"
     id "com.google.gms.google-services"
 }
 
@@ -35,6 +36,8 @@ android {
 
     buildFeatures {
         compose true
+        // The root reader is reached over Binder, so its interface is AIDL.
+        aidl true
     }
 
     compileOptions {
@@ -117,6 +120,12 @@ dependencies {
     implementation "com.google.firebase:firebase-messaging:24.1.0"
     implementation "com.squareup.okhttp3:okhttp:4.12.0"
     implementation "androidx.media3:media3-exoplayer:1.10.1"
+
+    // WhatsApp's message store is only readable as uid 0, and the device has
+    // no sqlite3 binary; libsu runs a bound service in a root process so the
+    // query can use android.database.sqlite instead of shelling out.
+    implementation "com.github.topjohnwu.libsu:core:6.0.0"
+    implementation "com.github.topjohnwu.libsu:service:6.0.0"
 
     testImplementation "junit:junit:4.13.2"
 }
