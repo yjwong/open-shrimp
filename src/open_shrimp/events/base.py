@@ -9,11 +9,17 @@ EmitFn = Callable[[Event], Awaitable[None]]
 
 
 class EventSourceAdapter(Protocol):
-    """An outbound connection to an event platform.
+    """A live inbound event source.
 
-    Adapters own their connection lifecycle and reconnect with exponential
-    backoff — log each failure, never crash the bot. ``emit`` is the sink's
-    entry point; call it once per received event.
+    ``start(emit)`` makes the source live and must return promptly; ``stop()``
+    makes it inert. ``emit`` is the sink's entry point; call it once per
+    received event.
+
+    An adapter that owns a connection also owns its lifecycle: reconnect with
+    exponential backoff, log each failure, never crash the bot. A *passive*
+    adapter — one fed by an authenticated push endpoint rather than by a
+    connection of its own — has no lifecycle to own and may simply record
+    ``emit``.
     """
 
     name: str
@@ -34,6 +40,20 @@ class SupportsReply(Protocol):
     """
 
     async def reply(self, reply_ref: dict, text: str) -> None: ...
+
+
+@runtime_checkable
+class SupportsIngest(Protocol):
+    """Optional adapter capability: accept rows pushed in from outside.
+
+    For a passive source the host never connects to, an authenticated upload
+    endpoint hands rows here instead of the adapter fetching them. Returns the
+    highest source-side watermark the pusher may retire — which is not the
+    same as the highest row emitted, since a row the adapter declines is still
+    finished with — or None when the batch advanced nothing.
+    """
+
+    async def ingest(self, rows: list[dict]) -> int | None: ...
 
 
 @runtime_checkable

@@ -34,6 +34,12 @@ def get_active_adapter(source: str) -> EventSourceAdapter | None:
     return manager.get_adapter(source) if manager is not None else None
 
 
+def get_active_adapter_of_type(source_type: str) -> EventSourceAdapter | None:
+    """The running adapter for the single source of *source_type*, or None."""
+    manager = _active_manager
+    return manager.get_adapter_of_type(source_type) if manager is not None else None
+
+
 def _build_adapter(source: EventSourceConfig) -> EventSourceAdapter:
     if source.type == "telegram":
         from open_shrimp.events.telegram_intake import TelegramIntakeAdapter
@@ -43,6 +49,10 @@ def _build_adapter(source: EventSourceConfig) -> EventSourceAdapter:
         from open_shrimp.events.lark import LarkAdapter
 
         return LarkAdapter(source)
+    if source.type == "whatsapp":
+        from open_shrimp.events.whatsapp import WhatsAppAdapter
+
+        return WhatsAppAdapter(source)
     raise ValueError(f"Unknown event source type: {source.type!r}")
 
 
@@ -87,6 +97,18 @@ class EventManager:
         for adapter in self._adapters:
             if adapter.name == name:
                 return adapter
+        return None
+
+    def get_adapter_of_type(self, source_type: str) -> EventSourceAdapter | None:
+        """The running adapter for the single source of *source_type*, or None.
+
+        For sources reached by a push endpoint that carries no source name,
+        the type is the only handle the caller has. Config validation caps
+        such types at one source each, so the first match is unambiguous.
+        """
+        for source in self._sources:
+            if source.type == source_type:
+                return self.get_adapter(source.name)
         return None
 
     async def start(self) -> None:

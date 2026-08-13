@@ -144,7 +144,7 @@ class AndroidCompanionConfig:
 @dataclass
 class EventSourceConfig:
     name: str
-    type: str  # "telegram" or "lark"
+    type: str  # "telegram", "lark", or "whatsapp"
     # type: telegram
     token: str | None = None
     allowed_chats: list[int] = field(default_factory=list)
@@ -178,7 +178,7 @@ class EventsConfig:
     timezone: str | None = None
 
 
-_EVENT_SOURCE_TYPES = {"telegram", "lark"}
+_EVENT_SOURCE_TYPES = {"telegram", "lark", "whatsapp"}
 
 
 @dataclass
@@ -605,6 +605,7 @@ def _validate_events(raw: dict) -> None:
 
     main_token = raw["telegram"]["token"]
     seen_names: set[str] = set()
+    whatsapp_name: str | None = None
     for i, source in enumerate(sources):
         if not isinstance(source, dict):
             raise ValueError(f"events.sources[{i}] must be a mapping")
@@ -714,6 +715,18 @@ def _validate_events(raw: dict) -> None:
                     f"'lark-oapi' package — install with "
                     f"'uv sync --extra lark'"
                 )
+        elif stype == "whatsapp":
+            # Chat selection lives in the companion app, so that messages from
+            # unselected chats never leave the phone; nothing to configure
+            # here.  The upload endpoint carries no source name and finds the
+            # adapter by type, so a second source would be unreachable.
+            if whatsapp_name is not None:
+                raise ValueError(
+                    f"events.sources: only one 'whatsapp' source is supported "
+                    f"(the companion's upload endpoint carries no source "
+                    f"name), got {whatsapp_name!r} and {name!r}"
+                )
+            whatsapp_name = name
 
 
 def _parse_sandbox_config(raw: dict) -> SandboxConfig:

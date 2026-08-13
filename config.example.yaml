@@ -255,6 +255,21 @@ default_context: default
 #       # Lark app must use Event Subscription in "Long Connection" (WebSocket)
 #       # mode and subscribe to im.message.receive_v1. Add the bot to the
 #       # target chat and release an app version for it to take effect.
+#     - name: whatsapp            # requires the paired Android companion
+#       type: whatsapp
+#       trusted_senders:          # WhatsApp JIDs. The companion resolves LIDs
+#         - "6591234567@s.whatsapp.net"   # to phone JIDs, so this is the form
+#                                 # you will normally want...
+#         - "123456789012345@lid" # ...with a raw LID as the fallback for the
+#                                 # rare sender that does not resolve. Both are
+#                                 # stable ids; display names are never matched.
+#       # No chat allowlist here: you pick the chats in the companion app, so
+#       # messages from every other chat never leave the phone. The companion
+#       # reads WhatsApp's own on-device database behind root and POSTs
+#       # batches to /api/whatsapp/messages; nothing here talks to WhatsApp.
+#       # Read-only — WhatsApp events carry no reply route, so picked-up
+#       # topics get no reply_inbound_event tool. Only one whatsapp source
+#       # may be configured.
 
 # Optional: meeting transcription (Android companion). The phone records and
 # transcribes meetings fully on-device, then uploads the diarized transcript

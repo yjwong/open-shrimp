@@ -925,6 +925,11 @@ def create_review_app(
 
     routes.extend(create_meetings_routes())
 
+    # Android companion WhatsApp message-batch upload endpoint.
+    from open_shrimp.whatsapp_api import create_whatsapp_routes
+
+    routes.extend(create_whatsapp_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db

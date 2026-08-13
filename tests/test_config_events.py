@@ -129,9 +129,30 @@ def test_lark_source_missing_app_id_rejected():
 def test_unknown_source_type_rejected():
     events = {
         "chat_id": 1,
-        "sources": [{"name": "x", "type": "whatsapp"}],
+        "sources": [{"name": "x", "type": "signal"}],
     }
     with pytest.raises(ValueError, match="type must be one of"):
+        _validate_raw(_base_raw(events))
+
+
+def test_whatsapp_source_needs_no_extra_fields():
+    """Chat selection lives in the companion app, not in this config."""
+    events = {
+        "chat_id": 1,
+        "sources": [{"name": "whatsapp", "type": "whatsapp"}],
+    }
+    _validate_raw(_base_raw(events))
+
+
+def test_second_whatsapp_source_rejected():
+    events = {
+        "chat_id": 1,
+        "sources": [
+            {"name": "wa-personal", "type": "whatsapp"},
+            {"name": "wa-work", "type": "whatsapp"},
+        ],
+    }
+    with pytest.raises(ValueError, match="only one 'whatsapp' source"):
         _validate_raw(_base_raw(events))
 
 
