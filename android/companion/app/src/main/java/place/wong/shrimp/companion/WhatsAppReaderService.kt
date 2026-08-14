@@ -4,11 +4,17 @@ import android.content.Intent
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
+import android.os.FileObserver
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
+import android.os.RemoteException
 import android.os.StatFs
+import android.os.SystemClock
 import android.util.Log
 import com.topjohnwu.superuser.ipc.RootService
 import place.wong.shrimp.companion.data.IWhatsAppReader
+import place.wong.shrimp.companion.data.IWhatsAppWatcher
 import place.wong.shrimp.companion.data.WhatsAppBatch
 import place.wong.shrimp.companion.data.WhatsAppChat
 import place.wong.shrimp.companion.data.WhatsAppChats
@@ -92,6 +98,27 @@ class WhatsAppReaderService : RootService() {
 
         private var latestId = 0L
 
+        /**
+         * Guards the log watch, and deliberately not the lock every other
+         * call takes: a burst settles while a refresh is running more often
+         * than not, and a watcher that had to wait for the snapshot lock to
+         * say "something happened" would be waiting on the very call it is
+         * trying to trigger. Nothing holding this ever asks for that one, so
+         * the two cannot close a cycle.
+         */
+        private val watching = Any()
+
+        private var log: LogWatch? = null
+
+        @Volatile
+        private var watcher: IWhatsAppWatcher? = null
+
+        /** Drop the watch when the app that asked for it goes away. */
+        private val watcherDied = IBinder.DeathRecipient {
+            Log.i(TAG, "The watching process died; the log watch is dropped")
+            unwatch()
+        }
+
         @Synchronized
         override fun refresh(): Long {
             if (!store.liveExists) {
@@ -144,6 +171,69 @@ class WhatsAppReaderService : RootService() {
         }
 
         @Synchronized
+        override fun resolveChats(jids: Array<String>?): LongArray {
+            val db = requireDatabase()
+            val wanted = jids.orEmpty().filter { it.isNotEmpty() }.distinct()
+            if (wanted.isEmpty()) return LongArray(0)
+            require(wanted.size <= WhatsAppQuery.MAX_CHATS) {
+                "A selection of ${wanted.size} chats is past the ceiling of ${WhatsAppQuery.MAX_CHATS}"
+            }
+            val ids = ArrayList<Long>(wanted.size)
+            query {
+                // Bound values go against SQLite's variable ceiling, which a
+                // selection of every chat on a real phone is within reach of;
+                // the chunk is what keeps the answer independent of how many
+                // chats someone ticked.
+                for (chunk in wanted.chunked(RESOLVE_CHUNK)) {
+                    db.rawQuery(WhatsAppQuery.resolveChats(chunk.size), chunk.toTypedArray()).use { c ->
+                        while (c.moveToNext()) ids.add(c.getLong(0))
+                    }
+                }
+            }
+            Log.i(TAG, "Resolved ${wanted.size} JIDs to ${ids.size} chat row ids")
+            return ids.toLongArray()
+        }
+
+        override fun watch(watcher: IWhatsAppWatcher?): Unit = synchronized(watching) {
+            unwatch()
+            if (watcher == null) return
+            try {
+                watcher.asBinder().linkToDeath(watcherDied, 0)
+            } catch (e: RemoteException) {
+                Log.i(TAG, "The watching process was already gone")
+                return
+            }
+            this.watcher = watcher
+            log = LogWatch(File(LIVE_STORE + WAL_SUFFIX), ::logSettled).also { it.start() }
+            Log.i(TAG, "Watching the message log")
+        }
+
+        override fun unwatch(): Unit = synchronized(watching) {
+            val stale = watcher
+            watcher = null
+            log?.stop()
+            log = null
+            if (stale != null) {
+                try {
+                    stale.asBinder().unlinkToDeath(watcherDied, 0)
+                } catch (e: NoSuchElementException) {
+                    // Already gone, which is what unlinking was for.
+                }
+                Log.i(TAG, "Stopped watching the message log")
+            }
+        }
+
+        /** One burst of log activity has settled; say so, and no more. */
+        private fun logSettled() {
+            try {
+                watcher?.onStoreChanged()
+            } catch (e: RemoteException) {
+                Log.i(TAG, "The watching process is unreachable; the log watch is dropped")
+                unwatch()
+            }
+        }
+
+        @Synchronized
         override fun messagesAfter(cursor: Long, chatRowIds: LongArray, limit: Int): WhatsAppBatch {
             val db = requireDatabase()
             if (chatRowIds.isEmpty()) {
@@ -183,8 +273,16 @@ class WhatsAppReaderService : RootService() {
             return WhatsAppBatch(rows, next)
         }
 
+        /**
+         * Give up the snapshot and everything held against it.
+         *
+         * Not on the interface: the snapshot belongs to the binding, so this
+         * is what the last unbind does and not something one caller may do to
+         * another.
+         */
         @Synchronized
-        override fun close() {
+        fun close() {
+            unwatch()
             store.close()
             contacts.close()
             latestId = 0L
@@ -540,6 +638,67 @@ class WhatsAppReaderService : RootService() {
 
     }
 
+    /**
+     * Turns writes to WhatsApp's write-ahead log into one call per burst.
+     *
+     * The mask is `IN_MODIFY`. WhatsApp holds the log open for as long as it
+     * runs, so close-write never fires and a watch built on it reads as a
+     * quiet phone rather than as a watch that cannot work. Only the log is
+     * watched: most events on the database itself are reads.
+     *
+     * Coalescing is not a nicety. A single arriving message modifies the log
+     * dozens of times over a few seconds, and a call per event is a snapshot
+     * refresh per event. So a burst is answered once, after [QUIET_MS] with
+     * nothing further — and after [CEILING_MS] regardless, because a log that
+     * never falls quiet would otherwise never be answered at all.
+     *
+     * Every field is touched from the one handler thread: the observer's
+     * callback arrives on a thread of its own, and posting rather than
+     * locking keeps the timer's state single-threaded.
+     */
+    private class LogWatch(log: File, private val onSettled: () -> Unit) {
+        private val thread = HandlerThread("whatsapp-log").apply { start() }
+        private val handler = Handler(thread.looper)
+
+        /** When the current burst's first write landed, or 0 between bursts. */
+        private var burstStarted = 0L
+
+        private val settled = Runnable {
+            burstStarted = 0L
+            onSettled()
+        }
+
+        private val observer = object : FileObserver(log, MODIFY) {
+            override fun onEvent(event: Int, path: String?) {
+                handler.post(::touched)
+            }
+        }
+
+        fun start() = observer.startWatching()
+
+        fun stop() {
+            observer.stopWatching()
+            handler.removeCallbacks(settled)
+            thread.quitSafely()
+        }
+
+        private fun touched() {
+            val now = SystemClock.elapsedRealtime()
+            if (burstStarted == 0L) burstStarted = now
+            handler.removeCallbacks(settled)
+            val remaining = (burstStarted + CEILING_MS - now).coerceAtLeast(0)
+            handler.postDelayed(settled, minOf(QUIET_MS, remaining))
+        }
+
+        private companion object {
+            /** How long the log has to stay still before a burst counts as over. */
+            const val QUIET_MS = 500L
+
+            /** How long a burst may go on before it is answered anyway. */
+            const val CEILING_MS = 5_000L
+        }
+    }
+
     /** The header fields of a database, which move only when it is written. */
     private data class StoreMark(val changeCounter: Int, val validFor: Int, val size: Long)
 
@@ -678,6 +837,9 @@ class WhatsAppReaderService : RootService() {
         private const val ROW_OVERHEAD_CHARS = 64
 
         private const val MAX_ROWS = 500
+
+        /** How many JIDs one resolution statement binds, under SQLite's variable ceiling. */
+        private const val RESOLVE_CHUNK = 500
 
         /**
          * Per-field cap on free text.

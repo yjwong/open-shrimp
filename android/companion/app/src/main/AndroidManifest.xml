@@ -59,6 +59,16 @@
             android:name=".WhatsAppReaderService"
             android:exported="false" />
 
+        <!--
+          Foreground because it holds Binder calls into the root process open
+          for seconds at a time, and the system kills a cached process that
+          does rather than waiting for it.
+        -->
+        <service
+            android:name=".WhatsAppWatcherService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <service
             android:name=".ShrimpFirebaseMessagingService"
             android:exported="false">

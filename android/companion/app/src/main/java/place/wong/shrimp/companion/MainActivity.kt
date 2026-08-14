@@ -13,6 +13,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import kotlinx.coroutines.flow.MutableStateFlow
 import place.wong.shrimp.companion.data.LogStore
+import place.wong.shrimp.companion.data.Prefs
 import place.wong.shrimp.companion.ui.CompanionApp
 import place.wong.shrimp.companion.ui.theme.CompanionTheme
 
@@ -40,6 +41,7 @@ class MainActivity : ComponentActivity() {
             LogStore.add("Ready. Pair with /pair, then use Find pending session when OpenShrimp is waiting for a security key.")
         }
         readPushIntent(intent)
+        resumeWhatsAppWatching()
 
         setContent {
             CompanionTheme {
@@ -89,6 +91,18 @@ class MainActivity : ComponentActivity() {
             pushPortForwardSessionId.value = it
             intent.removeExtra(EXTRA_PUSH_PORT_FORWARD_SESSION_ID)
         }
+    }
+
+    /**
+     * Put the WhatsApp watcher back if it is meant to be running.
+     *
+     * Opening the app is where this happens because it is the earliest place
+     * it can: a data-sync foreground service may not be started from
+     * BOOT_COMPLETED, and this one has nothing else that would wake it. Asking
+     * for a service that is already running changes nothing.
+     */
+    private fun resumeWhatsAppWatching() {
+        if (Prefs(this).whatsappWatch) WhatsAppWatcherService.start(this)
     }
 
     private fun requestNotificationPermissionIfNeeded() {

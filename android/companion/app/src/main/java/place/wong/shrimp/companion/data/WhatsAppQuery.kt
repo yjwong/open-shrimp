@@ -84,6 +84,30 @@ object WhatsAppQuery {
     """.trimIndent()
 
     /**
+     * The chat rows a selection of JIDs names, as a statement with *count*
+     * placeholders to bind them to.
+     *
+     * JIDs are bound rather than spliced: unlike the row ids below they are
+     * text off the database, and text that reaches a statement by
+     * concatenation is a statement someone else can write.
+     *
+     * Deliberately without the hidden filter the listing carries. That filter
+     * decides what a person may be offered; this answers what a person has
+     * already chosen, and narrowing it here would let a chat quietly stop
+     * being read because WhatsApp reclassified it.
+     */
+    fun resolveChats(count: Int): String {
+        require(count in 1..MAX_CHATS) { "A resolution of $count chats is outside 1..$MAX_CHATS" }
+        val placeholders = List(count) { "?" }.joinToString(",")
+        return """
+            SELECT DISTINCT c._id AS id
+            FROM chat c
+            JOIN jid cj ON cj._id = c.jid_row_id
+            WHERE cj.raw_string IN ($placeholders)
+        """.trimIndent()
+    }
+
+    /**
      * Contact names, out of the separate database that holds them.
      *
      * Read as its own statement rather than joined in: `wa.db` is a different
@@ -165,4 +189,34 @@ object WhatsAppQuery {
             // that cannot retire an id that was never looked at.
             else -> cursor
         }
+
+    /**
+     * The cursor to keep once the host has answered an uploaded batch.
+     *
+     * *acknowledged* is the highest id the host says it is done with, and it
+     * is the only thing that may move the cursor past a row that left the
+     * phone: the host's own dedup does not survive a restart, so the phone's
+     * watermark is the durable one and it may not run ahead of what was
+     * accepted.
+     *
+     * When the whole batch drained, the phone may go further than the host
+     * did — on to *batchCursor*, which counts the ids the query walked past
+     * and filtered out. Those never reached the host and never will, so
+     * waiting for it to acknowledge them would leave the cursor trailing them
+     * forever.
+     *
+     * Anything less means the host stopped part-way, so the cursor stops
+     * exactly there and the rest of the batch is offered again. A null answer
+     * retires nothing.
+     */
+    fun acknowledgedCursor(
+        cursor: Long,
+        batchCursor: Long,
+        lastUploaded: Long,
+        acknowledged: Long?,
+    ): Long = when {
+        acknowledged == null -> cursor
+        acknowledged >= lastUploaded -> maxOf(cursor, batchCursor)
+        else -> maxOf(cursor, acknowledged)
+    }
 }

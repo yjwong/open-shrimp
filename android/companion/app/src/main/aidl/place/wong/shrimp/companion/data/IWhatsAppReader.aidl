@@ -1,5 +1,6 @@
 package place.wong.shrimp.companion.data;
 
+import place.wong.shrimp.companion.data.IWhatsAppWatcher;
 import place.wong.shrimp.companion.data.WhatsAppBatch;
 import place.wong.shrimp.companion.data.WhatsAppChats;
 
@@ -7,6 +8,11 @@ import place.wong.shrimp.companion.data.WhatsAppChats;
  * The uid-0 side of the WhatsApp message reader. Implemented by
  * WhatsAppReaderService; every call blocks the caller for as long as the root
  * process takes, so none of these may be invoked from the main thread.
+ *
+ * There is no way to close the snapshot from here on purpose. The snapshot
+ * belongs to the binding, not to any one caller: it is deleted when the last
+ * client unbinds, and a call that deleted it out from under the others is
+ * exactly what the app-side lease exists to prevent.
  */
 interface IWhatsAppReader {
     /**
@@ -33,6 +39,33 @@ interface IWhatsAppReader {
     WhatsAppChats chats();
 
     /**
+     * The chat row ids the given JIDs name in the open snapshot, for
+     * messagesAfter. Duplicates and JIDs the store does not carry contribute
+     * nothing, so a selection that names no surviving chat resolves to nothing
+     * and reads nothing.
+     *
+     * Asked of the store directly rather than worked out from chats(), which
+     * costs a fifth of a second and a two-hundred-kilobyte transaction, and
+     * which is bounded by that transaction — a selected chat past the bound
+     * would silently stop being read.
+     */
+    long[] resolveChats(in String[] jids);
+
+    /**
+     * Call watcher whenever WhatsApp's write-ahead log settles after being
+     * written, until unwatch() or the caller's process dies. Replaces any
+     * watcher already registered.
+     *
+     * The watch lives here because nothing but uid 0 can see the log at all.
+     * Its mask is IN_MODIFY: WhatsApp holds the log open, so close-write never
+     * fires and a watch built on it would silently never trigger.
+     */
+    void watch(IWhatsAppWatcher watcher);
+
+    /** Stop watching the log. */
+    void unwatch();
+
+    /**
      * Inbound messages with _id greater than cursor, oldest first, at most
      * limit of them, from the chats named by chatRowIds and no others. Fewer
      * may come back than the snapshot holds: the batch is also bounded by how
@@ -43,7 +76,4 @@ interface IWhatsAppReader {
      * back silence, not the user's whole history.
      */
     WhatsAppBatch messagesAfter(long cursor, in long[] chatRowIds, int limit);
-
-    /** Close the snapshot and delete it from disk. */
-    void close();
 }

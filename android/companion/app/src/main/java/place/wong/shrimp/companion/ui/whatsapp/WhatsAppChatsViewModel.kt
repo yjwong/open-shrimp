@@ -24,32 +24,28 @@ sealed interface ChatsState {
 }
 
 /**
- * The chat picker's state, and the root connection behind it.
+ * The chat picker's state, and the claim on the root reader behind it.
  *
- * The connection is held for as long as the screen is: behind it sits a copy
- * of the whole message store, which costs seconds to make and nothing to keep,
- * so making it once per visit rather than once per query is the difference
- * between a screen that opens and one that stalls. Dropping the connection
- * deletes the copy, and that happens the moment the screen goes away.
+ * The lease is held for as long as the screen is: behind it sits a copy of the
+ * whole message store, which costs seconds to make and nothing to keep, so
+ * making it once per visit rather than once per query is the difference
+ * between a screen that opens and one that stalls.
+ *
+ * Taking it here rather than inside the load is what makes leaving mid-load a
+ * non-event. The screen's lifetime is known where the screen is built, and the
+ * blocking work says nothing about it: a load that is still connecting when
+ * the screen goes finds the lease released and stops, and the reader outlives
+ * this only for as long as something else is holding it.
  */
 class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = Prefs(app)
+    private val lease = WhatsAppReader.acquire(app)
 
     private val _state = MutableStateFlow<ChatsState>(ChatsState.Loading(STEP_CONNECT))
     val state: StateFlow<ChatsState> = _state.asStateFlow()
 
     private val _selected = MutableStateFlow(prefs.whatsappChats)
     val selected: StateFlow<Set<String>> = _selected.asStateFlow()
-
-    /**
-     * Whether the screen has gone away.
-     *
-     * A load cannot be interrupted — it is blocking root work — so leaving
-     * mid-load has to be settled afterwards, by whichever of the two finishes
-     * last dropping the connection.
-     */
-    @Volatile
-    private var gone = false
 
     init {
         load()
@@ -59,17 +55,15 @@ class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = ChatsState.Loading(STEP_CONNECT)
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val reader = WhatsAppReader.connect(getApplication())
+                val reader = lease.reader()
                 _state.value = ChatsState.Loading(STEP_SNAPSHOT)
                 reader.refresh()
                 _state.value = ChatsState.Loading(STEP_LIST)
                 _state.value = ChatsState.Ready(reader.chats())
             } catch (e: Exception) {
-                // connect() has already said why in the log; this is the same
+                // reader() has already said why in the log; this is the same
                 // sentence again where the user is looking.
                 _state.value = ChatsState.Failed(e.message ?: "The chat list could not be read")
-            } finally {
-                if (gone) WhatsAppReader.disconnect()
             }
         }
     }
@@ -91,8 +85,7 @@ class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
-        gone = true
-        WhatsAppReader.disconnect()
+        lease.close()
     }
 
     private companion object {

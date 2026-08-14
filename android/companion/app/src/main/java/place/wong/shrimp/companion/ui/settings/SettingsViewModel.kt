@@ -3,6 +3,7 @@ package place.wong.shrimp.companion.ui.settings
 import android.app.Application
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
+import place.wong.shrimp.companion.WhatsAppWatcherService
 import place.wong.shrimp.companion.data.Forwarding
 import place.wong.shrimp.companion.data.LogStore
 import place.wong.shrimp.companion.data.Prefs
@@ -30,6 +31,21 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     /** How many chats the WhatsApp reader is allowed to see. */
     fun whatsappChatCount(): Int = prefs.whatsappChatCount
+
+    fun whatsappWatching(): Boolean = prefs.whatsappWatch
+
+    /**
+     * Turn the WhatsApp watcher on or off, and remember which.
+     *
+     * The preference is what survives a restart; the service is what does the
+     * work. Both are set here so a phone that comes back up reads what it was
+     * reading before rather than nothing.
+     */
+    fun setWhatsAppWatching(on: Boolean) {
+        prefs.whatsappWatch = on
+        val app = getApplication<Application>()
+        if (on) WhatsAppWatcherService.start(app) else WhatsAppWatcherService.stop(app)
+    }
 
     fun clearLog() = LogStore.clear()
 }

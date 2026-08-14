@@ -16,11 +16,15 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Holds the app's single connection to the uid-0 message reader.
+ * Holds the app's single connection to the uid-0 message reader, and shares it
+ * between everything that wants one at the same time.
  *
  * Starting the root process costs a `su` grant and a process launch, and the
- * reader keeps a snapshot open behind it, so the connection is shared rather
- * than made per read. Dropping it deletes the snapshot.
+ * reader keeps a copy of the whole message store behind it, so the connection
+ * is shared rather than made per read. Dropping it deletes that copy — which
+ * is why it is dropped by counting rather than by whoever says so last. The
+ * picker and the WAL watcher both want the reader, and a picker closing must
+ * not delete the snapshot the watcher is part-way through reading.
  */
 object WhatsAppReader {
     private const val CONNECT_TIMEOUT_SECONDS = 60L
@@ -42,15 +46,54 @@ object WhatsAppReader {
     private var reader: IWhatsAppReader? = null
     private var connection: ServiceConnection? = null
 
+    /** How many leases are outstanding. The connection lives while this is above zero. */
+    private var holders = 0
+
     /**
-     * The reader, starting the root process if it is not already up.
+     * One holder's claim on the reader, held for as long as the holder lives.
      *
-     * Blocks: the grant is a user prompt and the reads behind it run for
-     * seconds, so this must not be called from the main thread. Throws
-     * [IllegalStateException] if root is unavailable or the service never
-     * connects.
+     * Taking a lease is cheap and cannot fail; [reader] is where the root
+     * process is started and where a refusal is reported. The split is what
+     * makes the lifetime and the work independent: a caller states how long it
+     * wants the reader from wherever that is known — a ViewModel's
+     * construction, a service's `onCreate` — while the blocking connect
+     * happens on a worker thread that may still be inside it when the holder
+     * decides to let go.
      */
-    fun connect(context: Context): IWhatsAppReader = synchronized(connecting) {
+    class Lease internal constructor(private val context: Context) : AutoCloseable {
+        private val released = AtomicBoolean(false)
+
+        /**
+         * The reader, starting the root process if it is not already up.
+         *
+         * Blocks: the grant is a user prompt and the reads behind it run for
+         * seconds, so this must not be called from the main thread. Throws
+         * [IllegalStateException] if root is unavailable, if the service never
+         * connects, or if this lease has been released.
+         */
+        fun reader(): IWhatsAppReader {
+            check(!released.get()) { "WhatsApp reader: this lease has been released" }
+            return connect(context)
+        }
+
+        /** Let go. The root process stops once no lease is left. */
+        override fun close() {
+            if (released.compareAndSet(false, true)) release()
+        }
+    }
+
+    /**
+     * Claim the reader for the caller's lifetime.
+     *
+     * Cheap and non-blocking, so it can be called from anywhere — including
+     * the main thread, which is where a lifetime is usually known.
+     */
+    fun acquire(context: Context): Lease {
+        synchronized(this) { holders += 1 }
+        return Lease(context.applicationContext)
+    }
+
+    private fun connect(context: Context): IWhatsAppReader = synchronized(connecting) {
         check(Looper.myLooper() != Looper.getMainLooper()) {
             "connect blocks on a root prompt; call it from a worker thread"
         }
@@ -85,6 +128,13 @@ object WhatsAppReader {
         val connected = bound
             ?: fail("WhatsApp reader: the root process disconnected while starting")
         synchronized(this) {
+            if (holders == 0) {
+                // Every holder let go while this was starting. Keeping the
+                // connection would leave a copy of the message store on disk
+                // with nobody left to delete it.
+                main.post { RootService.unbind(newConnection) }
+                fail("WhatsApp reader: the last lease was released while the root process was starting")
+            }
             reader = connected
             connection = newConnection
         }
@@ -92,9 +142,18 @@ object WhatsAppReader {
         return connected
     }
 
-    /** Drop the connection, which stops the root process and deletes its snapshot. */
-    fun disconnect() {
-        val stale = synchronized(this) { connection?.also { clear() } } ?: return
+    /**
+     * Give up one lease, dropping the connection with the last of them.
+     *
+     * Dropping it stops the root process and deletes its snapshot, so it
+     * happens when nothing is holding the reader and not before.
+     */
+    private fun release() {
+        val stale = synchronized(this) {
+            holders -= 1
+            if (holders > 0) return
+            connection?.also { clear() }
+        } ?: return
         main.post { RootService.unbind(stale) }
         LogStore.add("WhatsApp reader disconnected")
     }

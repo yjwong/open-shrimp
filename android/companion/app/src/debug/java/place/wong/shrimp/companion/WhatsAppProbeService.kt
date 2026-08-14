@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
 import place.wong.shrimp.companion.data.IWhatsAppReader
+import place.wong.shrimp.companion.data.IWhatsAppWatcher
 import place.wong.shrimp.companion.data.WhatsAppChat
 import place.wong.shrimp.companion.data.WhatsAppChats
 import place.wong.shrimp.companion.data.WhatsAppIdentity
@@ -35,7 +36,9 @@ import place.wong.shrimp.companion.data.WhatsAppReader
  * selects every chat the listing offers, which is what makes its aggregates
  * comparable across runs; `--ela chats 1,2,3` reads a selection of row ids
  * instead, and `--ei wait <seconds>` holds the snapshot open so a message can
- * land while it is held.
+ * land while it is held. `--ei watch <seconds>` adds a spell of watching the
+ * log, which is the only way to see the wake path work without a message
+ * leaving the phone.
  */
 class WhatsAppProbeService : Service() {
 
@@ -49,22 +52,35 @@ class WhatsAppProbeService : Service() {
         val batches = intent?.getIntExtra(EXTRA_BATCHES, 1) ?: 1
         val selection = intent?.getLongArrayExtra(EXTRA_CHATS)
         val wait = intent?.getIntExtra(EXTRA_WAIT, 0) ?: 0
+        val watch = intent?.getIntExtra(EXTRA_WATCH, 0) ?: 0
+        // Held for the run, like every other holder of the reader: the probe
+        // is one caller among several now, and its finishing must not delete a
+        // snapshot the watcher is reading.
+        val lease = WhatsAppReader.acquire(this)
         Thread({
             try {
-                probe(cursor, limit, batches, selection, wait)
+                probe(lease, cursor, limit, batches, selection, wait, watch)
             } catch (e: Exception) {
                 Log.e(TAG, "Probe failed: ${e.message}")
             } finally {
-                WhatsAppReader.disconnect()
+                lease.close()
                 stopSelf(startId)
             }
         }, "whatsapp-probe").start()
         return START_NOT_STICKY
     }
 
-    private fun probe(cursor: Long, limit: Int, batches: Int, selection: LongArray?, wait: Int) {
+    private fun probe(
+        lease: WhatsAppReader.Lease,
+        cursor: Long,
+        limit: Int,
+        batches: Int,
+        selection: LongArray?,
+        wait: Int,
+        watch: Int,
+    ) {
         val started = System.currentTimeMillis()
-        val reader: IWhatsAppReader = WhatsAppReader.connect(this)
+        val reader: IWhatsAppReader = lease.reader()
         Log.i(TAG, "Connected to the root reader in ${System.currentTimeMillis() - started} ms")
 
         refresh(reader, "first")
@@ -85,13 +101,18 @@ class WhatsAppProbeService : Service() {
         Log.i(TAG, "Selection: ${chats.size} of ${all.size} chats")
 
         // The picker stores JIDs, not row ids, so the trip a real selection
-        // takes is jid -> row id against whichever snapshot is open. Round-trip
-        // it here: resolving every listed chat's JID has to give back exactly
-        // the row ids the listing carried, or a stored selection would silently
-        // read a different set of chats than the one that was ticked.
-        val resolved = listed.rowIdsFor(listed.chats.map { it.jid }.toSet())
-        Log.i(TAG, "JIDs resolved to row ids: ${resolved.size}, matching the listing: ${resolved.contentEquals(all)}")
-        val unknown = listed.rowIdsFor(setOf("no-such-chat@${WhatsAppIdentity.PHONE_SERVER}"))
+        // takes is jid -> row id, asked of the store. Round-trip it here:
+        // resolving every listed chat's JID has to give back exactly the row
+        // ids the listing carried, or a stored selection would silently read a
+        // different set of chats than the one that was ticked.
+        val resolveStarted = System.currentTimeMillis()
+        val resolved = reader.resolveChats(listed.chats.map { it.jid }.toTypedArray())
+        Log.i(
+            TAG,
+            "Resolved ${resolved.size} row ids in ${System.currentTimeMillis() - resolveStarted} ms, " +
+                "matching the listing: ${resolved.sorted() == all.sorted()}",
+        )
+        val unknown = reader.resolveChats(arrayOf("no-such-chat@${WhatsAppIdentity.PHONE_SERVER}"))
         Log.i(TAG, "An unknown JID resolves to ${unknown.size} row ids")
 
         // A negative cursor asks for a recent window instead of the oldest
@@ -134,8 +155,46 @@ class WhatsAppProbeService : Service() {
             Log.i(TAG, "Picked up ${caught.messages.size} rows the refresh brought in")
         }
 
-        reader.close()
-        Log.i(TAG, "Snapshot closed and deleted")
+        if (watch > 0) watchLog(reader, chats, limit, watch)
+    }
+
+    /**
+     * Watch the log for *seconds*, and report what each wake found.
+     *
+     * This is the wake path end to end without the network: the root process
+     * says the log settled, and the probe answers as the watcher would — one
+     * refresh, one read. What it proves is the timing and the coalescing, so
+     * what it reports is when each wake arrived and how much it carried.
+     */
+    private fun watchLog(reader: IWhatsAppReader, chats: LongArray, limit: Int, seconds: Int) {
+        val woken = java.util.concurrent.LinkedBlockingQueue<Long>()
+        val started = System.currentTimeMillis()
+        val watcher = object : IWhatsAppWatcher.Stub() {
+            override fun onStoreChanged() {
+                woken.offer(System.currentTimeMillis() - started)
+            }
+        }
+        reader.watch(watcher)
+        Log.i(TAG, "--- watching the log for ${seconds}s ---")
+        var cursor = reader.latestMessageId()
+        var wakes = 0
+        var carried = 0
+        while (System.currentTimeMillis() - started < seconds * 1000L) {
+            val at = woken.poll(1, java.util.concurrent.TimeUnit.SECONDS) ?: continue
+            wakes++
+            val refreshStarted = System.currentTimeMillis()
+            val bytes = reader.refresh()
+            val batch = reader.messagesAfter(cursor, chats, limit)
+            carried += batch.messages.size
+            cursor = batch.cursor
+            Log.i(
+                TAG,
+                "wake $wakes at ${at}ms: ${bytes / KB} KB refreshed in " +
+                    "${System.currentTimeMillis() - refreshStarted} ms, ${batch.messages.size} rows",
+            )
+        }
+        reader.unwatch()
+        Log.i(TAG, "--- $wakes wakes over ${seconds}s carried $carried rows ---")
     }
 
     /** One refresh, reported as what it cost rather than what it holds. */
@@ -238,6 +297,7 @@ class WhatsAppProbeService : Service() {
         const val EXTRA_BATCHES = "batches"
         const val EXTRA_CHATS = "chats"
         const val EXTRA_WAIT = "wait"
+        const val EXTRA_WATCH = "watch"
 
         fun start(context: Context, extras: Bundle?) {
             val intent = Intent(context, WhatsAppProbeService::class.java)

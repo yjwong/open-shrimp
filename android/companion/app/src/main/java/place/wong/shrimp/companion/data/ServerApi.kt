@@ -6,6 +6,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -193,6 +194,34 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
         signedPost("$baseUrl/api/meetings/transcripts", deviceId, "Transcript upload failed", body)
     }
 
+    /**
+     * Push a batch of WhatsApp messages, returning the highest id the phone
+     * may retire — or null if the host acknowledged none of them.
+     *
+     * The rows have already been narrowed to the selected chats by the SQL
+     * that read them, so this is a transport and not a filter. It stays a
+     * single request per batch and the caller paginates: every accepted row
+     * costs the host a Telegram round trip inside the request, and a batch
+     * that outran the client's patience would be re-sent forever against a
+     * watermark that never moved.
+     */
+    suspend fun uploadWhatsAppMessages(
+        baseUrl: String,
+        deviceId: String,
+        messages: List<WhatsAppMessage>,
+    ): Long? = withContext(Dispatchers.IO) {
+        val rows = JSONArray()
+        for (message in messages) rows.put(message.toJson())
+        val body = JSONObject().put("messages", rows).toString()
+        val text = signedPost(
+            "$baseUrl/api/whatsapp/messages",
+            deviceId,
+            "WhatsApp message upload failed",
+            body,
+        )
+        (JSONObject(text).opt("cursor") as? Number)?.toLong()
+    }
+
     /** Remove a previously uploaded meeting's transcript and notes from the host. */
     suspend fun deleteUploadedMeeting(
         baseUrl: String,
@@ -249,6 +278,30 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
 
     companion object {
         private val JSON = "application/json".toMediaType()
+
+        /**
+         * One row, under the host's wire names.
+         *
+         * A null field is left out rather than sent as null — the host reads
+         * every one of these with a default and an absent key is the same
+         * answer. `from_me` is the exception: it is always present and always
+         * false, because the host gates on it and cannot tell an absent key
+         * from a denial.
+         */
+        private fun WhatsAppMessage.toJson(): JSONObject = JSONObject()
+            .put("id", id)
+            .put("key_id", keyId)
+            .put("from_me", fromMe)
+            .put("timestamp", timestamp)
+            .put("message_type", messageType)
+            .put("text", text)
+            .put("chat_jid", chatJid)
+            .put("chat_subject", chatSubject)
+            .put("sender_jid", senderJid)
+            .put("sender_name", senderName)
+            .put("mime_type", mimeType)
+            .put("caption", caption)
+            .put("file_path", filePath)
 
         private fun urlEncode(value: String): String =
             URLEncoder.encode(value, StandardCharsets.UTF_8.name())

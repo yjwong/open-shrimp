@@ -78,4 +78,82 @@ class WhatsAppQueryTest {
     fun `nothing read and nothing exhausted stands still`() {
         assertEquals(800, WhatsAppQuery.nextCursor(cursor = 800, lastRowId = null, exhausted = false, latestId = 999))
     }
+
+    @Test
+    fun `chats are resolved by bound JID, not by spliced text`() {
+        val sql = WhatsAppQuery.resolveChats(3)
+        assertTrue(sql.contains("cj.raw_string IN (?,?,?)"))
+    }
+
+    @Test
+    fun `resolution does not narrow a selection by what the picker would offer`() {
+        // The hidden filter decides what may be offered. Applying it here
+        // would let a chat someone already chose stop being read because
+        // WhatsApp reclassified it, with nothing saying so.
+        assertTrue(!WhatsAppQuery.resolveChats(1).contains("hidden"))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `resolving no chats at all is refused rather than read as every chat`() {
+        WhatsAppQuery.resolveChats(0)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `resolving past the ceiling is refused`() {
+        WhatsAppQuery.resolveChats(WhatsAppQuery.MAX_CHATS + 1)
+    }
+
+    @Test
+    fun `a fully accepted batch retires the rows the query filtered out too`() {
+        // The host answers with the last row it was sent; the ids between that
+        // and the batch cursor were dropped on the phone and never offered.
+        assertEquals(
+            999,
+            WhatsAppQuery.acknowledgedCursor(
+                cursor = 800,
+                batchCursor = 999,
+                lastUploaded = 880,
+                acknowledged = 880,
+            ),
+        )
+    }
+
+    @Test
+    fun `a batch the host gave up part-way through stops exactly there`() {
+        assertEquals(
+            850,
+            WhatsAppQuery.acknowledgedCursor(
+                cursor = 800,
+                batchCursor = 999,
+                lastUploaded = 880,
+                acknowledged = 850,
+            ),
+        )
+    }
+
+    @Test
+    fun `a batch the host accepted nothing of retires nothing`() {
+        assertEquals(
+            800,
+            WhatsAppQuery.acknowledgedCursor(
+                cursor = 800,
+                batchCursor = 999,
+                lastUploaded = 880,
+                acknowledged = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `an answer behind the cursor cannot drag it back`() {
+        assertEquals(
+            800,
+            WhatsAppQuery.acknowledgedCursor(
+                cursor = 800,
+                batchCursor = 999,
+                lastUploaded = 880,
+                acknowledged = 700,
+            ),
+        )
+    }
 }

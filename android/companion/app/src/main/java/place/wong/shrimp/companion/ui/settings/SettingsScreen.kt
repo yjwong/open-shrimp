@@ -3,6 +3,7 @@ package place.wong.shrimp.companion.ui.settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -18,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -28,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -52,8 +55,10 @@ fun SettingsScreen(
     // Re-read on resume rather than once: the picker is the other screen that
     // writes this, and coming back from it is exactly when it has changed.
     var selectedChats by remember { mutableIntStateOf(0) }
+    var watching by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) {
         selectedChats = vm.whatsappChatCount()
+        watching = vm.whatsappWatching()
         onPauseOrDispose { }
     }
 
@@ -101,6 +106,27 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedButton(onClick = onOpenWhatsAppChats) { Text("Choose chats to read") }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Send new messages as they arrive",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Switch(
+                        checked = watching,
+                        // Nothing to watch for is nothing to turn on, and a
+                        // switch that could be left on over an empty selection
+                        // would claim to be reading when it is not.
+                        enabled = selectedChats > 0,
+                        onCheckedChange = {
+                            watching = it
+                            vm.setWhatsAppWatching(it)
+                        },
+                    )
+                }
             }
 
             Section("Advanced") {
