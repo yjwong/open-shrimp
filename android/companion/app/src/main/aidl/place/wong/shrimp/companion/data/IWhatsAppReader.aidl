@@ -1,6 +1,6 @@
 package place.wong.shrimp.companion.data;
 
-import place.wong.shrimp.companion.data.WhatsAppMessage;
+import place.wong.shrimp.companion.data.WhatsAppBatch;
 
 /**
  * The uid-0 side of the WhatsApp message reader. Implemented by
@@ -9,20 +9,33 @@ import place.wong.shrimp.companion.data.WhatsAppMessage;
  */
 interface IWhatsAppReader {
     /**
-     * Replace the private snapshot with a fresh copy of the live message
-     * store, and open it. Returns the number of bytes copied.
+     * Bring the private snapshot up to date with the live message store, and
+     * open it. Returns the number of bytes copied, which is 0 when the store
+     * has not been written since the last call — a caller woken by log
+     * activity that carried nothing new pays almost nothing to find that out.
      */
-    long snapshot();
+    long refresh();
 
     /** Highest message._id in the snapshot, the watermark a first read starts from. */
     long latestMessageId();
 
     /**
-     * Inbound messages with _id greater than cursor, oldest first, at most
-     * limit of them. Fewer may come back than the snapshot holds: the batch is
-     * also bounded by how much text fits in one Binder transaction.
+     * Row ids of every chat in the snapshot, ascending. The domain a selection
+     * is chosen from; the ids mean nothing off this device.
      */
-    List<WhatsAppMessage> messagesAfter(long cursor, int limit);
+    long[] chats();
+
+    /**
+     * Inbound messages with _id greater than cursor, oldest first, at most
+     * limit of them, from the chats named by chatRowIds and no others. Fewer
+     * may come back than the snapshot holds: the batch is also bounded by how
+     * much text fits in one Binder transaction.
+     *
+     * An empty selection reads nothing and retires nothing. It is never
+     * "every chat" — a caller that has not loaded its selection yet has to get
+     * back silence, not the user's whole history.
+     */
+    WhatsAppBatch messagesAfter(long cursor, in long[] chatRowIds, int limit);
 
     /** Close the snapshot and delete it from disk. */
     void close();

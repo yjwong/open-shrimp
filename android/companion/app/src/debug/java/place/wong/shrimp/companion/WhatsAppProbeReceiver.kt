@@ -16,14 +16,21 @@ import place.wong.shrimp.companion.data.WhatsAppReader
  * body, no caption, no JID, no group subject — is ever written out; the
  * counts below are what tells us the query and the identity rules work.
  *
- *   adb shell am broadcast -a place.wong.shrimp.companion.PROBE_WHATSAPP \
+ *   adb shell am broadcast -n place.wong.shrimp.companion/.WhatsAppProbeReceiver \
+ *     -a place.wong.shrimp.companion.PROBE_WHATSAPP \
  *     --el cursor 0 --ei limit 50 --ei batches 20
+ *
+ * With no `chats` extra the probe selects every chat in the snapshot, which is
+ * what makes its aggregates comparable across runs; `--ela chats 1,2,3` reads
+ * a selection instead.
  */
 class WhatsAppProbeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val cursor = intent.getLongExtra("cursor", -1L)
         val limit = intent.getIntExtra("limit", 50)
         val batches = intent.getIntExtra("batches", 1)
+        val selection = intent.getLongArrayExtra("chats")
+        val wait = intent.getIntExtra("wait", 0)
         val app = context.applicationContext
         // onReceive returns immediately and the work runs detached, rather
         // than holding the broadcast open with goAsync. A process is delivered
@@ -33,7 +40,7 @@ class WhatsAppProbeReceiver : BroadcastReceiver() {
         // the root process exits before it ever arrives.
         Thread({
             try {
-                probe(app, cursor, limit, batches)
+                probe(app, cursor, limit, batches, selection, wait)
             } catch (e: Exception) {
                 Log.e(TAG, "Probe failed: ${e.message}")
             } finally {
@@ -42,19 +49,29 @@ class WhatsAppProbeReceiver : BroadcastReceiver() {
         }, "whatsapp-probe").start()
     }
 
-    private fun probe(context: Context, cursor: Long, limit: Int, batches: Int) {
+    private fun probe(
+        context: Context,
+        cursor: Long,
+        limit: Int,
+        batches: Int,
+        selection: LongArray?,
+        wait: Int,
+    ) {
         val started = System.currentTimeMillis()
         val reader: IWhatsAppReader = WhatsAppReader.connect(context)
         Log.i(TAG, "Connected to the root reader in ${System.currentTimeMillis() - started} ms")
 
-        val copyStarted = System.currentTimeMillis()
-        val bytes = reader.snapshot()
-        Log.i(
-            TAG,
-            "Snapshot: ${bytes / MB} MB in ${System.currentTimeMillis() - copyStarted} ms",
-        )
+        refresh(reader, "first")
+        // Back to back with the one above, so nothing can have changed. This
+        // is the wake the WAL watcher will spend most of its life doing.
+        refresh(reader, "second")
+
         val latest = reader.latestMessageId()
         Log.i(TAG, "Highest message id in the snapshot: $latest")
+
+        val all = reader.chats()
+        val chats = selection ?: all
+        Log.i(TAG, "Selection: ${chats.size} of ${all.size} chats")
 
         // A negative cursor asks for a recent window instead of the oldest
         // messages: recent traffic is almost entirely LID-addressed, which is
@@ -65,18 +82,48 @@ class WhatsAppProbeReceiver : BroadcastReceiver() {
         val tally = Tally()
         for (batch in 1..batches) {
             val queryStarted = System.currentTimeMillis()
-            val rows = reader.messagesAfter(at, limit)
-            if (rows.isEmpty()) {
-                Log.i(TAG, "No rows after $at; snapshot exhausted after ${batch - 1} batches")
+            val read = reader.messagesAfter(at, chats, limit)
+            // The batch carries the cursor: it is past rows the query filtered
+            // out as well as the ones it returned, so it is not the last row's
+            // id whenever anything was skipped.
+            at = read.cursor
+            if (read.messages.isEmpty()) {
+                Log.i(TAG, "No rows after the cursor; snapshot exhausted after ${batch - 1} batches")
                 break
             }
-            tally.add(rows, System.currentTimeMillis() - queryStarted)
-            // Rows come back in id order, so the last one is the watermark.
-            at = rows.last().id
+            tally.add(read.messages, System.currentTimeMillis() - queryStarted)
         }
         tally.report(at)
+
+        // Whatever WhatsApp did while the probe ran is what this one has to
+        // absorb — a log copy if it only appended, a full copy if it
+        // checkpointed. A wait is what makes that a test rather than a
+        // coincidence: it holds the snapshot open long enough for a message to
+        // land, so the refresh has something to pick up and the watermark
+        // below says whether it did.
+        if (wait > 0) {
+            Log.i(TAG, "Holding the snapshot for ${wait}s")
+            Thread.sleep(wait * 1000L)
+        }
+        refresh(reader, "third")
+        val moved = reader.latestMessageId()
+        Log.i(TAG, "Watermark: $latest -> $moved")
+        if (moved > latest) {
+            val caught = reader.messagesAfter(latest, chats, limit)
+            Log.i(TAG, "Picked up ${caught.messages.size} rows the refresh brought in")
+        }
+
         reader.close()
         Log.i(TAG, "Snapshot closed and deleted")
+    }
+
+    /** One refresh, reported as what it cost rather than what it holds. */
+    private fun refresh(reader: IWhatsAppReader, which: String) {
+        val started = System.currentTimeMillis()
+        val bytes = reader.refresh()
+        val elapsed = System.currentTimeMillis() - started
+        val cost = if (bytes == 0L) "nothing to copy" else "${bytes / KB} KB"
+        Log.i(TAG, "Refresh ($which): $cost in $elapsed ms")
     }
 
     /** Counts only — never a value read out of the database. */
@@ -124,7 +171,7 @@ class WhatsAppProbeReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "WhatsAppProbe"
-        private const val MB = 1024L * 1024L
+        private const val KB = 1024L
         private const val RECENT_WINDOW = 20_000L
     }
 }
