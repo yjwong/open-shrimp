@@ -12,6 +12,7 @@ import place.wong.shrimp.companion.data.IWhatsAppReader
 import place.wong.shrimp.companion.data.WhatsAppBatch
 import place.wong.shrimp.companion.data.WhatsAppChat
 import place.wong.shrimp.companion.data.WhatsAppChats
+import place.wong.shrimp.companion.data.FileDelta
 import place.wong.shrimp.companion.data.WhatsAppContacts
 import place.wong.shrimp.companion.data.WhatsAppIdentity
 import place.wong.shrimp.companion.data.WhatsAppMessage
@@ -37,10 +38,13 @@ import java.io.RandomAccessFile
  * — the WAL has to replay for recent messages to be visible at all — and
  * WhatsApp's own file is only ever read byte for byte.
  *
- * The copy is half a gigabyte, so it is made once and then kept: a refresh
- * that finds the live store unwritten does nothing at all, and one that finds
- * only new log frames copies the log alone. That is what lets a caller be
- * woken by every flicker of log activity, most of which carries no message.
+ * The copy is half a gigabyte, so it is made once and then kept up to date in
+ * place. A refresh that finds the live store unwritten does nothing at all,
+ * and one that finds it changed rewrites only the pages that differ — a
+ * message moves a fraction of a percent of a store this size, and rewriting
+ * the whole file for it would cost the flash hundreds of megabytes a message.
+ * That is what lets a caller be woken by every flicker of log activity, most
+ * of which carries no message.
  *
  * A second, far smaller database holds the contact names, and is copied under
  * the same rules — but only when the chat listing asks for it, so that the
@@ -100,10 +104,7 @@ class WhatsAppReaderService : RootService() {
                 Log.i(TAG, "Refresh: the store has not been written since the snapshot")
                 return 0
             }
-            if (store.isOpen && mark == store.storeMark && log != null && store.canReplay(log)) {
-                return openStore("Refresh") { store.replayLog(log) }
-            }
-            return openStore("Snapshot") { store.take(mark, log) }
+            return openStore("Refresh") { store.sync(mark, log) }
         }
 
         @Synchronized
@@ -237,7 +238,7 @@ class WhatsAppReaderService : RootService() {
             val log = contacts.liveLogMark()
             if (contacts.holds(mark, log)) return
             val started = System.currentTimeMillis()
-            val copied = contacts.take(mark, log)
+            val copied = contacts.sync(mark, log)
             Log.i(TAG, "Contacts: $copied bytes in ${System.currentTimeMillis() - started} ms")
         }
 
@@ -289,14 +290,14 @@ class WhatsAppReaderService : RootService() {
      * looked like when the copy was taken.
      *
      * Both databases this service reads are held under one discipline: never
-     * open the live file, copy it and its log as a pair, open the copy
-     * read-write in WAL mode, and discard a copy that failed part-way. That
-     * discipline is written once, here.
+     * open the live file, bring the copy and its log into line as a pair, open
+     * the copy read-write in WAL mode, and discard a copy that failed
+     * part-way. That discipline is written once, here.
      *
      * Policy is deliberately not here. How stale a copy has to be before it is
-     * retaken, and whether a grown log is replayed onto the copy or answered
-     * by copying the pair again, differ between the two databases and belong
-     * to [Reader], which is the side that knows what each copy costs.
+     * worth syncing, and which call is allowed to pay for it, differ between
+     * the two databases and belong to [Reader], which is the side that knows
+     * what each copy costs.
      */
     private class Snapshot(private val live: File, private val held: File) {
         private var db: SQLiteDatabase? = null
@@ -308,13 +309,8 @@ class WhatsAppReaderService : RootService() {
          * it checkpoints — a record of the source, and so of what the copy
          * already holds.
          */
-        var storeMark: StoreMark? = null
-            private set
-
-        var logMark: LogMark? = null
-            private set
-
-        val isOpen: Boolean get() = db != null
+        private var storeMark: StoreMark? = null
+        private var logMark: LogMark? = null
 
         val liveExists: Boolean get() = live.isFile
 
@@ -331,51 +327,49 @@ class WhatsAppReaderService : RootService() {
             db != null && mark == storeMark && log == logMark
 
         /**
-         * Copy the database and its log afresh, replacing whatever is held,
-         * and open the copy. Returns the bytes moved.
+         * Bring the held copy into line with the live database, and open it.
+         * Returns the bytes written.
+         *
+         * Only the pages that differ are written. The whole file is read to
+         * find them, but reads do not wear flash and cost less than the writes
+         * they replace: a message changes a fraction of a percent of a store
+         * this size, so this is the difference between rewriting half a
+         * gigabyte every time one arrives and rewriting a few hundred
+         * kilobytes.
+         *
+         * The log is copied whole on every sync rather than replayed
+         * incrementally. It is capped at a small fixed size, so copying it is
+         * cheaper than deciding whether it could have been replayed — and free
+         * of the failure that decision could get wrong, where a log the copy
+         * could not absorb read as "nothing new" rather than as an error and
+         * the caller retired ids it never saw.
+         *
+         * Writing the live file's own bytes over the copy is also what keeps
+         * the copy a WAL database. Our own read-write handle checkpoints it
+         * and rewrites its header; the next sync restores the header the live
+         * file has, so the log dropped beside it always has something to
+         * replay onto.
          */
-        fun take(mark: StoreMark, log: LogMark?): Long {
-            close()
+        fun sync(mark: StoreMark, log: LogMark?): Long {
+            // The handle goes first. SQLite reaches the log through the -shm
+            // index it built at open, so neither the database nor the log may
+            // be rewritten underneath it. Closing also checkpoints the copy,
+            // so what is compared below is a settled file.
+            db?.close()
+            db = null
             held.parentFile?.mkdirs()
-            // Anything that fails from here leaves a partial copy of the
+            // Anything that fails from here leaves a half-updated copy of the
             // user's data behind, so every exit but the successful one
             // discards it.
             try {
-                requireSpace(mark.size + (log?.size ?: 0L))
-                // The database and its log are copied as a pair: the log holds
-                // every commit since the last checkpoint, which on a live
-                // store is most of a day's traffic. The -shm file is not
-                // copied because SQLite rebuilds it from the log.
-                var copied = copyFile(live, held)
-                if (log != null) copied += copyFile(liveLog, heldLog)
+                heldShm.delete()
+                requireSpace(mark, log)
+                var written = writeDelta()
+                written += syncLog(log)
                 db = open()
                 storeMark = mark
                 logMark = log
-                return copied
-            } catch (e: Throwable) {
-                close()
-                throw e
-            }
-        }
-
-        /** Replay the live log onto the copy already held, and reopen. */
-        fun replayLog(log: LogMark): Long {
-            // The handle has to go first. SQLite reaches the log through the
-            // -shm index it built at open, so a log replaced underneath a live
-            // handle would be read through an index that no longer describes
-            // it. Closing also checkpoints the copy, which is what makes
-            // replaying the whole log onto it correct rather than merely
-            // cheap: the frames it already absorbed are written again, byte
-            // for byte, and only the frames past them are new.
-            db?.close()
-            db = null
-            try {
-                heldShm.delete()
-                requireSpace(log.size)
-                val copied = copyFile(liveLog, heldLog)
-                db = open()
-                logMark = log
-                return copied
+                return written
             } catch (e: Throwable) {
                 close()
                 throw e
@@ -383,23 +377,58 @@ class WhatsAppReaderService : RootService() {
         }
 
         /**
-         * Whether *log* can be replayed onto the copy instead of taking it
-         * again.
+         * Overwrite the pages of the held copy that differ from the live file,
+         * and nothing else. Returns the bytes written.
          *
-         * Every answer here fails towards a full copy, because the failure to
-         * avoid is silent: a log the copy cannot absorb reads as "nothing new"
-         * rather than as an error, and the caller retires the ids it never saw.
-         *
-         * The copy has to still be a WAL database, or a log beside it is
-         * ignored. And *log* has to be the log the copy already holds, grown,
-         * rather than a new one — equal salts mean no checkpoint has restarted
-         * it, so every frame the copy absorbed still sits at the offset it was
-         * absorbed from and everything past that is new.
+         * With no copy yet there is nothing to compare against, so the first
+         * sync is a plain copy.
          */
-        fun canReplay(log: LogMark): Boolean {
-            if (!isWalDatabase()) return false
-            val heldLog = logMark ?: return true
-            return log.salt == heldLog.salt && log.size >= heldLog.size
+        private fun writeDelta(): Long =
+            try {
+                // With no copy yet there is nothing to compare against, so the
+                // first sync is a plain copy.
+                if (!held.isFile || held.length() == 0L) {
+                    copyFile(live, held)
+                } else {
+                    FileDelta.write(live, held, pageSize(), COPY_BUFFER)
+                }
+            } catch (e: IOException) {
+                throw IllegalStateException("Could not update the copy of ${live.name}: ${e.message}")
+            }
+
+        /** Put the live log beside the copy, or take away the one that is there. */
+        private fun syncLog(log: LogMark?): Long {
+            if (log == null) {
+                heldLog.delete()
+                return 0
+            }
+            return copyFile(liveLog, heldLog)
+        }
+
+        /**
+         * The page size the live database was built with, from its header.
+         *
+         * Comparing at the database's own page size is what keeps the delta
+         * small: SQLite rewrites whole pages, so any finer unit finds the same
+         * changes and any coarser one drags untouched neighbours along.
+         */
+        private fun pageSize(): Int {
+            try {
+                RandomAccessFile(live, "r").use { raf ->
+                    if (raf.length() < SQLITE_HEADER_BYTES) return FileDelta.DEFAULT_PAGE_BYTES
+                    raf.seek(PAGE_SIZE_OFFSET)
+                    // The field holds 512..32768, or 1 standing for the one
+                    // size too large to fit in two bytes.
+                    val declared = (raf.readUnsignedByte() shl 8) or raf.readUnsignedByte()
+                    return when {
+                        declared == 1 -> MAX_PAGE_BYTES
+                        declared >= MIN_PAGE_BYTES -> declared
+                        else -> FileDelta.DEFAULT_PAGE_BYTES
+                    }
+                }
+            } catch (e: IOException) {
+                return FileDelta.DEFAULT_PAGE_BYTES
+            }
         }
 
         fun close() {
@@ -439,10 +468,18 @@ class WhatsAppReaderService : RootService() {
                 throw IllegalStateException("Snapshot is unreadable: ${e.message}")
             }
 
-        private fun requireSpace(needed: Long) {
+        /**
+         * Stop unless there is room for what this sync will add.
+         *
+         * A delta writes in place, so what is needed is only what the copy
+         * does not already hold: the file's growth, and the log — which SQLite
+         * then needs room to checkpoint into the copy. With no copy yet, the
+         * growth is the whole file.
+         */
+        private fun requireSpace(mark: StoreMark, log: LogMark?) {
+            val existing = if (held.isFile) held.length() else 0L
+            val needed = maxOf(0L, mark.size - existing) + (log?.size ?: 0L)
             val free = StatFs(held.parent).availableBytes
-            // The copy has to land whole, and SQLite then needs room to
-            // checkpoint the log into it.
             if (free < needed + needed / 4) {
                 throw IllegalStateException(
                     "Not enough free space for a snapshot: need ${needed / MB} MB, have ${free / MB} MB",
@@ -501,18 +538,6 @@ class WhatsAppReaderService : RootService() {
             }
         }
 
-        /** Whether the copy is still a database a log can be replayed onto. */
-        private fun isWalDatabase(): Boolean {
-            try {
-                RandomAccessFile(held, "r").use { raf ->
-                    if (raf.length() < SQLITE_HEADER_BYTES) return false
-                    raf.seek(WRITE_VERSION_OFFSET)
-                    return raf.readByte().toInt() == WAL_FILE_FORMAT
-                }
-            } catch (e: IOException) {
-                return false
-            }
-        }
     }
 
     /** The header fields of a database, which move only when it is written. */
@@ -628,12 +653,14 @@ class WhatsAppReaderService : RootService() {
 
         /** Offsets into the SQLite header, which is the first 100 bytes of a database. */
         private const val SQLITE_HEADER_BYTES = 100L
-        private const val WRITE_VERSION_OFFSET = 18L
+        private const val PAGE_SIZE_OFFSET = 16L
         private const val CHANGE_COUNTER_OFFSET = 24L
         private const val VALID_FOR_OFFSET = 92L
 
-        /** The write-format byte of a database whose writes go to a log. */
-        private const val WAL_FILE_FORMAT = 2
+        /** The extremes of the page size SQLite allows. */
+        private const val MIN_PAGE_BYTES = 512
+        private const val MAX_PAGE_BYTES = 65536
+        private const val DEFAULT_PAGE_BYTES = 4096
 
         /** The log header, and the salt pair inside it that names the log. */
         private const val WAL_HEADER_BYTES = 32L
