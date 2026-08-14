@@ -13,8 +13,11 @@ object WhatsAppIdentity {
     const val IMPLIED_SENDER = 0L
     const val LID_SERVER = "lid"
 
+    /** The server of a JID that carries a phone number. */
+    const val PHONE_SERVER = "s.whatsapp.net"
+
     /** JID servers that name one person rather than a group or a feed. */
-    val DIRECT_SERVERS = setOf("s.whatsapp.net", LID_SERVER)
+    val DIRECT_SERVERS = setOf(PHONE_SERVER, LID_SERVER)
 
     /**
      * A LID replaced by the phone JID `jid_map` maps it to.

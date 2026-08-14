@@ -23,6 +23,78 @@ object WhatsAppQuery {
     const val MAX_CHATS = 20_000
 
     /**
+     * Message types the feed can carry, as a SQL list.
+     *
+     * An allowlist mirroring `ACCEPTED_TYPES` in the host's
+     * `open_shrimp/events/whatsapp.py`, which owns it: the host knows how to
+     * render each type, and this is the set it can draw. It fails closed —
+     * type 7 is system chatter, 15 is revoked, and a dozen rare types are
+     * unidentified.
+     *
+     * Shared by both queries below. The picker counts what a chat would
+     * deliver, so a chat that would deliver nothing has to read as empty
+     * there, and it can only do that if the two lists cannot drift apart.
+     */
+    const val ACCEPTED_TYPES = "0, 1, 2, 3, 4, 5, 9, 13, 20"
+
+    /**
+     * How far back a chat counts as recently active, in message ids.
+     *
+     * Ids are handed out across every chat at once, so a span of them is a
+     * span of the account's whole traffic rather than of any one conversation.
+     */
+    const val RECENT_WINDOW = 20_000L
+
+    /**
+     * Every chat the picker may offer, most recently active first.
+     *
+     * Hidden chats are excluded. `chat` holds thousands of rows that are
+     * roster entries rather than conversations — an address book WhatsApp has
+     * seen, not a list anyone has talked to — and the flag WhatsApp keeps them
+     * out of its own chat list with is the one that separates them here. The
+     * invariant that makes this safe rather than merely tidy: a hidden chat
+     * has never received an inbound message of an accepted type, so no message
+     * that could reach the feed lives in one.
+     *
+     * `recent_messages` is what the chat has lately been delivering, so a chat
+     * can be judged by its noise before it is picked rather than after. It is
+     * bounded below by *recentFrom* because an unbounded count is not a count
+     * a screen can wait for: without a floor the subquery has to walk every
+     * message of every chat, which on a real store runs to seconds, while a
+     * floor lets it seek straight into the index on `(chat_row_id, _id)` and
+     * read only the window.
+     */
+    fun chats(recentFrom: Long): String = """
+        SELECT c._id AS id,
+               cj.raw_string AS jid,
+               cpj.raw_string AS phone_jid,
+               c.subject,
+               COALESCE(c.sort_timestamp, 0) AS sort_timestamp,
+               (SELECT COUNT(*) FROM message m
+                 WHERE m.chat_row_id = c._id
+                   AND m._id > $recentFrom
+                   AND m.from_me = 0
+                   AND m.message_type IN ($ACCEPTED_TYPES)) AS recent_messages
+        FROM chat c
+        JOIN jid cj ON cj._id = c.jid_row_id
+        LEFT JOIN jid_map cm ON cm.lid_row_id = c.jid_row_id
+        LEFT JOIN jid cpj ON cpj._id = cm.jid_row_id
+        WHERE COALESCE(c.hidden, 0) = 0
+        ORDER BY sort_timestamp DESC, c._id DESC
+    """.trimIndent()
+
+    /**
+     * Contact names, out of the separate database that holds them.
+     *
+     * Read as its own statement rather than joined in: `wa.db` is a different
+     * file, and attaching it would put the chat listing across two snapshots
+     * that are refreshed on different schedules. One small table read into a
+     * map keeps the join in Kotlin, where the choice between the several names
+     * a contact carries is testable.
+     */
+    const val CONTACTS = "SELECT jid, display_name, wa_name, nickname FROM wa_contacts"
+
+    /**
      * Inbound messages after a cursor, from the selected chats, oldest first.
      *
      * Three filters run in SQL. The chat selection is the one that makes the
@@ -30,11 +102,7 @@ object WhatsAppQuery {
      * chats selected in the companion UI", and this clause is where that is
      * enforced, before a row is read out of the snapshot rather than after it
      * has been uploaded. Outbound rows are dropped here too, so the user's own
-     * words never leave the phone. The type list is an allowlist mirroring
-     * `ACCEPTED_TYPES` in the host's `open_shrimp/events/whatsapp.py`, which
-     * owns it: the host knows how to render each type, and this is the set it
-     * can draw. It fails closed — type 7 is system chatter, 15 is revoked, and
-     * a dozen rare types are unidentified.
+     * words never leave the phone. The third is [ACCEPTED_TYPES].
      *
      * The ids are spliced because they are `long`s, which cannot carry
      * anything but digits, and because a bound list would put the selection
@@ -67,7 +135,7 @@ object WhatsAppQuery {
             WHERE m._id > ?
               AND m.chat_row_id IN (${chatRowIds.joinToString(",")})
               AND m.from_me = 0
-              AND m.message_type IN (0, 1, 2, 3, 4, 5, 9, 13, 20)
+              AND m.message_type IN ($ACCEPTED_TYPES)
             ORDER BY m._id
             LIMIT ?
         """.trimIndent()

@@ -37,8 +37,9 @@ data class WhatsAppMessage(
      */
     val senderJid: String?,
     /**
-     * Null. Display names live in `wa.db`, which this snapshot does not cover;
-     * the host falls back to the JID.
+     * Null. Display names live in a second database that is copied only when
+     * the chat picker asks for it, so the message path has none; the host
+     * falls back to the JID.
      */
     val senderName: String?,
     val mimeType: String?,

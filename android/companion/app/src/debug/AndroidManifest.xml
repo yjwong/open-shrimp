@@ -15,5 +15,16 @@
                 <action android:name="place.wong.shrimp.companion.PROBE_WHATSAPP" />
             </intent-filter>
         </receiver>
+
+        <!--
+          The probe runs here rather than on a thread the receiver leaves
+          behind: a process with no running component is cached, and the
+          system kills a cached process that holds a Binder call open instead
+          of waiting for it.
+        -->
+        <service
+            android:name=".WhatsAppProbeService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

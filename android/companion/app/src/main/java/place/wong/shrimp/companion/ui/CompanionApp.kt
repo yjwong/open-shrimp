@@ -12,6 +12,7 @@ import place.wong.shrimp.companion.ui.meetings.MeetingDetailScreen
 import place.wong.shrimp.companion.ui.meetings.MeetingsScreen
 import place.wong.shrimp.companion.ui.pairing.PairingScreen
 import place.wong.shrimp.companion.ui.settings.SettingsScreen
+import place.wong.shrimp.companion.ui.whatsapp.WhatsAppChatsScreen
 
 object Routes {
     const val HOME = "home"
@@ -19,6 +20,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val MEETINGS = "meetings"
     const val MEETING_DETAIL = "meetings/{id}"
+    const val WHATSAPP_CHATS = "whatsapp/chats"
 
     fun meetingDetail(id: String) = "meetings/$id"
 }
@@ -71,7 +73,11 @@ fun CompanionApp(
             SettingsScreen(
                 onBack = { navController.popBackStack() },
                 onOpenPairing = { navController.navigate(Routes.PAIRING) },
+                onOpenWhatsAppChats = { navController.navigate(Routes.WHATSAPP_CHATS) },
             )
+        }
+        composable(Routes.WHATSAPP_CHATS) {
+            WhatsAppChatsScreen(onBack = { navController.popBackStack() })
         }
     }
 }

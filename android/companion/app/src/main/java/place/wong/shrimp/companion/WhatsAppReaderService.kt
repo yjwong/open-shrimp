@@ -10,6 +10,9 @@ import android.util.Log
 import com.topjohnwu.superuser.ipc.RootService
 import place.wong.shrimp.companion.data.IWhatsAppReader
 import place.wong.shrimp.companion.data.WhatsAppBatch
+import place.wong.shrimp.companion.data.WhatsAppChat
+import place.wong.shrimp.companion.data.WhatsAppChats
+import place.wong.shrimp.companion.data.WhatsAppContacts
 import place.wong.shrimp.companion.data.WhatsAppIdentity
 import place.wong.shrimp.companion.data.WhatsAppMessage
 import place.wong.shrimp.companion.data.WhatsAppQuery
@@ -39,6 +42,10 @@ import java.io.RandomAccessFile
  * only new log frames copies the log alone. That is what lets a caller be
  * woken by every flicker of log activity, most of which carries no message.
  *
+ * A second, far smaller database holds the contact names, and is copied under
+ * the same rules — but only when the chat listing asks for it, so that the
+ * message path stays as cheap as it has to be.
+ *
  * Progress is reported through [Log] rather than the `LogStore` the rest of
  * the app writes to: this runs in its own root process, where that object is a
  * different instance from the one the Settings screen observes.
@@ -65,42 +72,38 @@ class WhatsAppReaderService : RootService() {
     }
 
     /**
-     * The Binder implementation. Serialised throughout: the snapshot and the
-     * open handle are single shared state, and Binder delivers calls on a
+     * The Binder implementation. Serialised throughout: the snapshots and the
+     * open handles are single shared state, and Binder delivers calls on a
      * thread pool.
+     *
+     * It owns the policy — how stale a copy has to be before it is retaken,
+     * and which of the two databases is worth refreshing on which call. The
+     * mechanics of holding a copy live in [Snapshot].
      */
     private class Reader(private val dir: File) : IWhatsAppReader.Stub() {
-        private var db: SQLiteDatabase? = null
-        private var latestId = 0L
+        private val store = Snapshot(File(LIVE_STORE), File(dir, SNAPSHOT_STORE))
 
-        /**
-         * What the live store looked like when its bytes were last copied.
-         *
-         * Not a description of the snapshot's own bytes, which SQLite rewrites
-         * as it checkpoints — a record of the source, and so of what the
-         * snapshot already holds.
-         */
-        private var storeMark: StoreMark? = null
-        private var logMark: LogMark? = null
+        /** Contact names, copied only once someone has asked for them. */
+        private val contacts = Snapshot(File(LIVE_CONTACTS), File(dir, SNAPSHOT_CONTACTS))
+
+        private var latestId = 0L
 
         @Synchronized
         override fun refresh(): Long {
-            val live = File(LIVE_STORE)
-            val liveLog = File(LIVE_STORE + WAL_SUFFIX)
-            if (!live.isFile) {
+            if (!store.liveExists) {
                 throw IllegalStateException("WhatsApp message store is not on this device")
             }
-            val store = storeMarkOf(live)
+            val mark = store.liveMark()
                 ?: throw IllegalStateException("The message store is too short to hold a SQLite header")
-            val log = logMarkOf(liveLog)
-            if (db != null && store == storeMark) {
-                if (log == logMark) {
-                    Log.i(TAG, "Refresh: the store has not been written since the snapshot")
-                    return 0
-                }
-                if (log != null && canReplay(log)) return copyLog(liveLog, log)
+            val log = store.liveLogMark()
+            if (store.holds(mark, log)) {
+                Log.i(TAG, "Refresh: the store has not been written since the snapshot")
+                return 0
             }
-            return copyStore(live, liveLog, store, log)
+            if (store.isOpen && mark == store.storeMark && log != null && store.canReplay(log)) {
+                return openStore("Refresh") { store.replayLog(log) }
+            }
+            return openStore("Snapshot") { store.take(mark, log) }
         }
 
         @Synchronized
@@ -110,16 +113,33 @@ class WhatsAppReaderService : RootService() {
         }
 
         @Synchronized
-        override fun chats(): LongArray {
+        override fun chats(): WhatsAppChats {
             val db = requireDatabase()
-            return query {
-                db.rawQuery(CHAT_IDS, null).use { c ->
-                    val ids = LongArray(c.count)
-                    var at = 0
-                    while (c.moveToNext()) ids[at++] = c.getLong(0)
-                    ids
+            refreshContacts()
+            val names = contactNames()
+            val sql = WhatsAppQuery.chats(recentFrom = latestId - WhatsAppQuery.RECENT_WINDOW)
+            val listed = query {
+                db.rawQuery(sql, null).use { c ->
+                    val columns = ChatColumns(c)
+                    val rows = ArrayList<WhatsAppChat>(c.count)
+                    var omitted = 0
+                    var budget = MAX_CHAT_CHARS
+                    while (c.moveToNext()) {
+                        val row = columns.read(c, names) ?: continue
+                        rows.add(row)
+                        budget -= row.parcelChars()
+                        if (budget <= 0) {
+                            // Ordered by recency, so what is dropped is the
+                            // oldest — and the count says how much.
+                            omitted = c.count - c.position - 1
+                            break
+                        }
+                    }
+                    WhatsAppChats(rows, omitted)
                 }
             }
+            Log.i(TAG, "Listed ${listed.chats.size} chats, ${names.size} contacts known, ${listed.omitted} omitted")
+            return listed
         }
 
         @Synchronized
@@ -164,93 +184,91 @@ class WhatsAppReaderService : RootService() {
 
         @Synchronized
         override fun close() {
-            db?.close()
-            db = null
+            store.close()
+            contacts.close()
             latestId = 0L
-            storeMark = null
-            logMark = null
             dir.deleteRecursively()
         }
 
-        /** Copy the store and its log afresh, replacing whatever is held. */
-        private fun copyStore(live: File, liveLog: File, store: StoreMark, log: LogMark?): Long {
-            close()
-            if (!dir.mkdirs()) {
-                throw IllegalStateException("Could not create the snapshot directory")
-            }
-            // Anything that fails from here leaves a partial copy of the user's
-            // messages behind, so every exit but the successful one discards it.
+        /**
+         * Take a copy of the store, and read the watermark that goes with it.
+         *
+         * The two travel together, and a failure discards both: a copy whose
+         * watermark was not read would report the previous copy's highest id,
+         * and a caller that trusted it would retire ids it never saw.
+         */
+        private fun openStore(what: String, take: () -> Long): Long {
+            val started = System.currentTimeMillis()
             try {
-                requireSpace(store.size + (log?.size ?: 0L))
-                val started = System.currentTimeMillis()
-                var copied = copy(live, File(dir, SNAPSHOT_STORE))
-                // The database and its log are copied as a pair: the log holds
-                // every message committed since the last checkpoint, which on a
-                // live store is most of a day's traffic. The -shm file is not
-                // copied because SQLite rebuilds it from the log.
-                if (log != null) {
-                    copied += copy(liveLog, File(dir, SNAPSHOT_STORE + WAL_SUFFIX))
+                val copied = take()
+                latestId = query {
+                    store.database()!!.rawQuery(LATEST_MESSAGE_ID, null).use { c ->
+                        if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L
+                    }
                 }
-                openDatabase()
-                storeMark = store
-                logMark = log
-                Log.i(TAG, "Snapshot: $copied bytes in ${System.currentTimeMillis() - started} ms")
+                Log.i(TAG, "$what: $copied bytes in ${System.currentTimeMillis() - started} ms")
                 return copied
             } catch (e: Throwable) {
-                close()
-                throw e
-            }
-        }
-
-        /** Replay the live log onto the store already copied, and reopen. */
-        private fun copyLog(liveLog: File, log: LogMark): Long {
-            // The handle has to go first. SQLite reaches the log through the
-            // -shm index it built at open, so a log replaced underneath a live
-            // handle would be read through an index that no longer describes
-            // it. Closing also checkpoints the snapshot, which is what makes
-            // replaying the whole log onto it correct rather than merely
-            // cheap: the frames it already absorbed are written again, byte
-            // for byte, and only the frames past them are new.
-            db?.close()
-            db = null
-            try {
-                File(dir, SNAPSHOT_STORE + SHM_SUFFIX).delete()
-                requireSpace(log.size)
-                val started = System.currentTimeMillis()
-                val copied = copy(liveLog, File(dir, SNAPSHOT_STORE + WAL_SUFFIX))
-                openDatabase()
-                logMark = log
-                Log.i(TAG, "Refresh: $copied log bytes in ${System.currentTimeMillis() - started} ms")
-                return copied
-            } catch (e: Throwable) {
-                close()
+                store.close()
+                latestId = 0L
                 throw e
             }
         }
 
         /**
-         * Whether *log* can be replayed onto the snapshot instead of copying
-         * the store again.
+         * Bring the contact copy up to date, if there is one to be had.
          *
-         * Every answer here fails towards a full copy, because the failure to
-         * avoid is silent: a log the snapshot cannot absorb reads as "no new
-         * messages" rather than as an error, and the caller retires the ids it
-         * never saw.
+         * Called from [chats] rather than from [refresh] on purpose. The
+         * message path is woken by every flicker of log activity and has to
+         * stay as cheap as finding out nothing happened; the contact database
+         * moves for its own reasons, none of which are a message arriving, and
+         * only the picker ever reads it.
          *
-         * The snapshot has to still be a WAL database, or a log beside it is
-         * ignored. And *log* has to be the log the snapshot already holds,
-         * grown, rather than a new one — equal salts mean no checkpoint has
-         * restarted it, so every frame the snapshot absorbed still sits at the
-         * offset it was absorbed from and everything past that is new.
+         * A change in either file is answered by copying the pair again rather
+         * than by replaying the log, because there is nothing worth saving:
+         * this database is three orders of magnitude smaller than the store.
+         *
+         * A device with no contact database is not an error — every chat falls
+         * back to its subject, its number, or its JID.
          */
-        private fun canReplay(log: LogMark): Boolean {
-            if (!isWalDatabase(File(dir, SNAPSHOT_STORE))) return false
-            val held = logMark ?: return true
-            return log.salt == held.salt && log.size >= held.size
+        private fun refreshContacts() {
+            if (!contacts.liveExists) return
+            val mark = contacts.liveMark() ?: return
+            val log = contacts.liveLogMark()
+            if (contacts.holds(mark, log)) return
+            val started = System.currentTimeMillis()
+            val copied = contacts.take(mark, log)
+            Log.i(TAG, "Contacts: $copied bytes in ${System.currentTimeMillis() - started} ms")
+        }
+
+        /** Every JID that has a name, and the name to show for it. */
+        private fun contactNames(): Map<String, String> {
+            val db = contacts.database() ?: return emptyMap()
+            return query {
+                db.rawQuery(WhatsAppQuery.CONTACTS, null).use { c ->
+                    val jidCol = c.getColumnIndexOrThrow("jid")
+                    val displayCol = c.getColumnIndexOrThrow("display_name")
+                    val waNameCol = c.getColumnIndexOrThrow("wa_name")
+                    val nicknameCol = c.getColumnIndexOrThrow("nickname")
+                    val names = HashMap<String, String>(c.count)
+                    while (c.moveToNext()) {
+                        val jid = c.getString(jidCol) ?: continue
+                        val name = WhatsAppContacts.name(
+                            displayName = c.getString(displayCol),
+                            waName = c.getString(waNameCol),
+                            nickname = c.getString(nicknameCol),
+                        ) ?: continue
+                        // A JID can carry more than one contact row; the first
+                        // that names it is the one shown.
+                        names.putIfAbsent(jid, name)
+                    }
+                    names
+                }
+            }
         }
 
         private fun requireDatabase(): SQLiteDatabase =
-            db ?: throw IllegalStateException("No snapshot is open; call refresh() first")
+            store.database() ?: throw IllegalStateException("No snapshot is open; call refresh() first")
 
         /**
          * Run a snapshot query, reporting failure in a form Binder can carry.
@@ -264,35 +282,165 @@ class WhatsAppReaderService : RootService() {
             } catch (e: SQLiteException) {
                 throw IllegalStateException("Snapshot query failed: ${e.message}")
             }
+    }
 
-        private fun openDatabase() {
-            val file = File(dir, SNAPSHOT_STORE)
-            db = try {
-                // Write-ahead logging is asked for rather than left to the
-                // platform default, which would set the connection's journal
-                // mode on open and convert the snapshot to a rollback journal
-                // — checkpointing it away from WAL mode, so that the next log
-                // dropped beside it would have nothing to replay onto.
+    /**
+     * A private copy of one live database, and a record of what the live file
+     * looked like when the copy was taken.
+     *
+     * Both databases this service reads are held under one discipline: never
+     * open the live file, copy it and its log as a pair, open the copy
+     * read-write in WAL mode, and discard a copy that failed part-way. That
+     * discipline is written once, here.
+     *
+     * Policy is deliberately not here. How stale a copy has to be before it is
+     * retaken, and whether a grown log is replayed onto the copy or answered
+     * by copying the pair again, differ between the two databases and belong
+     * to [Reader], which is the side that knows what each copy costs.
+     */
+    private class Snapshot(private val live: File, private val held: File) {
+        private var db: SQLiteDatabase? = null
+
+        /**
+         * What the live file looked like when its bytes were last copied.
+         *
+         * Not a description of the copy's own bytes, which SQLite rewrites as
+         * it checkpoints — a record of the source, and so of what the copy
+         * already holds.
+         */
+        var storeMark: StoreMark? = null
+            private set
+
+        var logMark: LogMark? = null
+            private set
+
+        val isOpen: Boolean get() = db != null
+
+        val liveExists: Boolean get() = live.isFile
+
+        fun database(): SQLiteDatabase? = db
+
+        /** The live file's identity, or null if it is too short to have one. */
+        fun liveMark(): StoreMark? = storeMarkOf(live)
+
+        /** The live log's identity, or null when there is no log to copy. */
+        fun liveLogMark(): LogMark? = logMarkOf(liveLog)
+
+        /** Whether a copy is open and was taken from exactly this state. */
+        fun holds(mark: StoreMark, log: LogMark?): Boolean =
+            db != null && mark == storeMark && log == logMark
+
+        /**
+         * Copy the database and its log afresh, replacing whatever is held,
+         * and open the copy. Returns the bytes moved.
+         */
+        fun take(mark: StoreMark, log: LogMark?): Long {
+            close()
+            held.parentFile?.mkdirs()
+            // Anything that fails from here leaves a partial copy of the
+            // user's data behind, so every exit but the successful one
+            // discards it.
+            try {
+                requireSpace(mark.size + (log?.size ?: 0L))
+                // The database and its log are copied as a pair: the log holds
+                // every commit since the last checkpoint, which on a live
+                // store is most of a day's traffic. The -shm file is not
+                // copied because SQLite rebuilds it from the log.
+                var copied = copyFile(live, held)
+                if (log != null) copied += copyFile(liveLog, heldLog)
+                db = open()
+                storeMark = mark
+                logMark = log
+                return copied
+            } catch (e: Throwable) {
+                close()
+                throw e
+            }
+        }
+
+        /** Replay the live log onto the copy already held, and reopen. */
+        fun replayLog(log: LogMark): Long {
+            // The handle has to go first. SQLite reaches the log through the
+            // -shm index it built at open, so a log replaced underneath a live
+            // handle would be read through an index that no longer describes
+            // it. Closing also checkpoints the copy, which is what makes
+            // replaying the whole log onto it correct rather than merely
+            // cheap: the frames it already absorbed are written again, byte
+            // for byte, and only the frames past them are new.
+            db?.close()
+            db = null
+            try {
+                heldShm.delete()
+                requireSpace(log.size)
+                val copied = copyFile(liveLog, heldLog)
+                db = open()
+                logMark = log
+                return copied
+            } catch (e: Throwable) {
+                close()
+                throw e
+            }
+        }
+
+        /**
+         * Whether *log* can be replayed onto the copy instead of taking it
+         * again.
+         *
+         * Every answer here fails towards a full copy, because the failure to
+         * avoid is silent: a log the copy cannot absorb reads as "nothing new"
+         * rather than as an error, and the caller retires the ids it never saw.
+         *
+         * The copy has to still be a WAL database, or a log beside it is
+         * ignored. And *log* has to be the log the copy already holds, grown,
+         * rather than a new one — equal salts mean no checkpoint has restarted
+         * it, so every frame the copy absorbed still sits at the offset it was
+         * absorbed from and everything past that is new.
+         */
+        fun canReplay(log: LogMark): Boolean {
+            if (!isWalDatabase()) return false
+            val heldLog = logMark ?: return true
+            return log.salt == heldLog.salt && log.size >= heldLog.size
+        }
+
+        fun close() {
+            db?.close()
+            db = null
+            storeMark = null
+            logMark = null
+            held.delete()
+            heldLog.delete()
+            heldShm.delete()
+        }
+
+        private val liveLog: File get() = File(live.path + WAL_SUFFIX)
+        private val heldLog: File get() = File(held.path + WAL_SUFFIX)
+        private val heldShm: File get() = File(held.path + SHM_SUFFIX)
+
+        /**
+         * Open the copy, read-write and in WAL mode.
+         *
+         * Write-ahead logging is asked for rather than left to the platform
+         * default, which would set the connection's journal mode on open and
+         * convert the copy to a rollback journal — checkpointing it away from
+         * WAL mode, so that the next log dropped beside it would have nothing
+         * to replay onto.
+         */
+        private fun open(): SQLiteDatabase =
+            try {
                 SQLiteDatabase.openDatabase(
-                    file.path,
+                    held.path,
                     null,
                     SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING,
                 )
             } catch (e: SQLiteException) {
-                // The live store is copied while WhatsApp is writing to it, so
-                // a torn copy is a real outcome rather than a broken invariant.
-                // Retrying takes a fresh one.
+                // A live database is copied while its owner is writing to it,
+                // so a torn copy is a real outcome rather than a broken
+                // invariant. Retrying takes a fresh one.
                 throw IllegalStateException("Snapshot is unreadable: ${e.message}")
             }
-            latestId = query {
-                requireDatabase().rawQuery(LATEST_MESSAGE_ID, null).use { c ->
-                    if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L
-                }
-            }
-        }
 
         private fun requireSpace(needed: Long) {
-            val free = StatFs(dir.path).availableBytes
+            val free = StatFs(held.parent).availableBytes
             // The copy has to land whole, and SQLite then needs room to
             // checkpoint the log into it.
             if (free < needed + needed / 4) {
@@ -303,23 +451,24 @@ class WhatsAppReaderService : RootService() {
         }
 
         /** Copy *from* to *to*, returning the bytes moved. */
-        private fun copy(from: File, to: File): Long =
+        private fun copyFile(from: File, to: File): Long =
             try {
                 FileInputStream(from).use { input ->
                     FileOutputStream(to).use { output -> input.copyTo(output, COPY_BUFFER) }
                 }
             } catch (e: IOException) {
-                throw IllegalStateException("Could not copy the message store: ${e.message}")
+                throw IllegalStateException("Could not copy ${from.name}: ${e.message}")
             }
 
         /**
-         * The live store's identity, or null if it is too short to have one.
+         * The identity of a live database, or null if it is too short to have
+         * one.
          *
          * In WAL mode the main file is written by nothing but a checkpoint,
          * and every checkpoint carries page 1 — which holds both of these
          * counters, and whose change counter the writer bumps in each
          * transaction. So an unchanged pair means the main file has not moved
-         * under the snapshot, and everything new is in the log.
+         * under the copy, and everything new is in the log.
          */
         private fun storeMarkOf(file: File): StoreMark? {
             try {
@@ -332,11 +481,10 @@ class WhatsAppReaderService : RootService() {
                     return StoreMark(counter, validFor, raf.length())
                 }
             } catch (e: IOException) {
-                throw IllegalStateException("Could not read the message store header: ${e.message}")
+                throw IllegalStateException("Could not read the ${file.name} header: ${e.message}")
             }
         }
 
-        /** The live log's identity, or null when there is no log to copy. */
         private fun logMarkOf(file: File): LogMark? {
             if (!file.isFile || file.length() < WAL_HEADER_BYTES) return null
             try {
@@ -349,14 +497,14 @@ class WhatsAppReaderService : RootService() {
                     return LogMark(raf.readLong(), raf.length(), file.lastModified())
                 }
             } catch (e: IOException) {
-                throw IllegalStateException("Could not read the message log header: ${e.message}")
+                throw IllegalStateException("Could not read the ${file.name} log header: ${e.message}")
             }
         }
 
-        /** Whether *file* is still a database a log can be replayed onto. */
-        private fun isWalDatabase(file: File): Boolean {
+        /** Whether the copy is still a database a log can be replayed onto. */
+        private fun isWalDatabase(): Boolean {
             try {
-                RandomAccessFile(file, "r").use { raf ->
+                RandomAccessFile(held, "r").use { raf ->
                     if (raf.length() < SQLITE_HEADER_BYTES) return false
                     raf.seek(WRITE_VERSION_OFFSET)
                     return raf.readByte().toInt() == WAL_FILE_FORMAT
@@ -367,7 +515,7 @@ class WhatsAppReaderService : RootService() {
         }
     }
 
-    /** The header fields of a store, which move only when the store is written. */
+    /** The header fields of a database, which move only when it is written. */
     private data class StoreMark(val changeCounter: Int, val validFor: Int, val size: Long)
 
     /** Which log it is, and how far it has been written. */
@@ -424,19 +572,61 @@ class WhatsAppReaderService : RootService() {
         }
     }
 
+    /** Column indices for the chat listing, resolved once per query. */
+    private class ChatColumns(c: Cursor) {
+        private val idCol = c.getColumnIndexOrThrow("id")
+        private val jidCol = c.getColumnIndexOrThrow("jid")
+        private val phoneJidCol = c.getColumnIndexOrThrow("phone_jid")
+        private val subjectCol = c.getColumnIndexOrThrow("subject")
+        private val sortTimestampCol = c.getColumnIndexOrThrow("sort_timestamp")
+        private val recentMessagesCol = c.getColumnIndexOrThrow("recent_messages")
+
+        /** The row, or null for a chat with no JID, which nothing could select. */
+        fun read(c: Cursor, names: Map<String, String>): WhatsAppChat? {
+            val jid = c.getString(jidCol) ?: return null
+            // A chat keyed by a LID is the same conversation as the number
+            // behind it, and that is where its contact row will be.
+            val phoneJid = c.getString(phoneJidCol) ?: jid
+            return WhatsAppChat(
+                rowId = c.getLong(idCol),
+                jid = jid,
+                name = WhatsAppContacts.chatName(
+                    subject = c.getString(subjectCol),
+                    mappedName = names[phoneJid],
+                    rawName = names[jid],
+                ),
+                phone = WhatsAppContacts.phone(phoneJid),
+                lastActivity = c.getLong(sortTimestampCol),
+                recentMessages = c.getInt(recentMessagesCol),
+            )
+        }
+    }
+
     companion object {
         private const val TAG = "WhatsAppReader"
 
         private const val LIVE_STORE = "/data/data/com.whatsapp/databases/msgstore.db"
+
+        /**
+         * Where display names live — a different database from the messages.
+         *
+         * Small enough that copying it costs nothing next to the store, which
+         * is what makes labelling a one-to-one chat possible at all: `chat`
+         * knows only a JID, and recent traffic is addressed by LID, so without
+         * this a picker would list opaque numbers.
+         */
+        private const val LIVE_CONTACTS = "/data/data/com.whatsapp/databases/wa.db"
+
         private const val WAL_SUFFIX = "-wal"
         private const val SHM_SUFFIX = "-shm"
         private const val SNAPSHOT_DIR = "whatsapp-snapshot"
         private const val SNAPSHOT_STORE = "msgstore.db"
+        private const val SNAPSHOT_CONTACTS = "wa.db"
 
         private const val COPY_BUFFER = 1 shl 20
         private const val MB = 1024L * 1024L
 
-        /** Offsets into the SQLite header, which is the first 100 bytes of a store. */
+        /** Offsets into the SQLite header, which is the first 100 bytes of a database. */
         private const val SQLITE_HEADER_BYTES = 100L
         private const val WRITE_VERSION_OFFSET = 18L
         private const val CHANGE_COUNTER_OFFSET = 24L
@@ -473,9 +663,17 @@ class WhatsAppReaderService : RootService() {
          */
         private const val MAX_TEXT_CHARS = 16_000
 
-        private const val LATEST_MESSAGE_ID = "SELECT max(_id) FROM message"
+        /**
+         * Ceiling on one chat listing, in the same currency as [MAX_BATCH_CHARS].
+         *
+         * Larger, because the listing is one transaction that has to carry the
+         * whole picker rather than a page of it, and each row is a label and a
+         * JID rather than a message body. Overshooting it drops the least
+         * recently active chats, and [WhatsAppChats.omitted] says how many.
+         */
+        private const val MAX_CHAT_CHARS = 300_000
 
-        private const val CHAT_IDS = "SELECT _id FROM chat ORDER BY _id"
+        private const val LATEST_MESSAGE_ID = "SELECT max(_id) FROM message"
 
         /** Strings this row will write into the parcel, plus its fixed cost. */
         private fun WhatsAppMessage.parcelChars(): Int =
@@ -483,5 +681,8 @@ class WhatsAppReaderService : RootService() {
                 (text?.length ?: 0) + (caption?.length ?: 0) + (keyId?.length ?: 0) +
                 (chatJid?.length ?: 0) + (chatSubject?.length ?: 0) +
                 (senderJid?.length ?: 0) + (mimeType?.length ?: 0) + (filePath?.length ?: 0)
+
+        private fun WhatsAppChat.parcelChars(): Int =
+            ROW_OVERHEAD_CHARS + jid.length + (name?.length ?: 0) + (phone?.length ?: 0)
     }
 }

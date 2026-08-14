@@ -21,6 +21,26 @@ class Prefs(context: Context) {
     val isPaired: Boolean
         get() = serverId.isNotEmpty()
 
+    /**
+     * The chats whose messages may be read, as raw chat JIDs.
+     *
+     * Empty is the honest default and reads nothing: a selection that has not
+     * been made is not "everything". Kept as JIDs rather than the row ids the
+     * query wants — see [WhatsAppChat].
+     */
+    val whatsappChats: Set<String>
+        // getStringSet hands back the stored instance, which callers must not
+        // modify; the copy is what makes it safe to hold.
+        get() = sp.getStringSet(KEY_WHATSAPP_CHATS, null)?.toSet() ?: emptySet()
+
+    /** How many chats are selected, without copying the set to find out. */
+    val whatsappChatCount: Int
+        get() = sp.getStringSet(KEY_WHATSAPP_CHATS, null)?.size ?: 0
+
+    fun saveWhatsAppChats(jids: Set<String>) {
+        sp.edit().putStringSet(KEY_WHATSAPP_CHATS, jids).apply()
+    }
+
     fun savePairing(baseUrl: String, deviceId: String, deviceName: String, serverId: String) {
         sp.edit()
             .putString(KEY_BASE_URL, baseUrl)
@@ -36,5 +56,6 @@ class Prefs(context: Context) {
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_DEVICE_NAME = "device_name"
         private const val KEY_SERVER_ID = "server_id"
+        private const val KEY_WHATSAPP_CHATS = "whatsapp_chats"
     }
 }

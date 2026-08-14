@@ -1,6 +1,7 @@
 package place.wong.shrimp.companion.data;
 
 import place.wong.shrimp.companion.data.WhatsAppBatch;
+import place.wong.shrimp.companion.data.WhatsAppChats;
 
 /**
  * The uid-0 side of the WhatsApp message reader. Implemented by
@@ -20,10 +21,16 @@ interface IWhatsAppReader {
     long latestMessageId();
 
     /**
-     * Row ids of every chat in the snapshot, ascending. The domain a selection
-     * is chosen from; the ids mean nothing off this device.
+     * Every chat a selection may be made from, most recently active first,
+     * each labelled well enough for a person to recognise. Contact names come
+     * from a second, much smaller database, which this brings up to date on
+     * the way past; refresh() deliberately leaves it alone, because the
+     * message path is woken constantly and names are wanted only here.
+     *
+     * The row ids mean nothing off this device, and nothing beyond the life of
+     * the store they were read from — a selection is kept as JIDs.
      */
-    long[] chats();
+    WhatsAppChats chats();
 
     /**
      * Inbound messages with _id greater than cursor, oldest first, at most

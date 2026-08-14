@@ -23,6 +23,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -30,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import place.wong.shrimp.companion.data.LogStore
@@ -40,11 +42,20 @@ import place.wong.shrimp.companion.ui.rememberApprover
 fun SettingsScreen(
     onBack: () -> Unit,
     onOpenPairing: () -> Unit,
+    onOpenWhatsAppChats: () -> Unit,
     vm: SettingsViewModel = viewModel(),
 ) {
     val logs by LogStore.lines.collectAsStateWithLifecycle()
     var manualUrl by rememberSaveable { mutableStateOf("") }
     var manualError by remember { mutableStateOf<String?>(null) }
+
+    // Re-read on resume rather than once: the picker is the other screen that
+    // writes this, and coming back from it is exactly when it has changed.
+    var selectedChats by remember { mutableIntStateOf(0) }
+    LifecycleResumeEffect(Unit) {
+        selectedChats = vm.whatsappChatCount()
+        onPauseOrDispose { }
+    }
 
     val approve = rememberApprover(
         onApproved = vm::onManualApproved,
@@ -78,6 +89,18 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedButton(onClick = onOpenPairing) { Text("Re-pair this phone") }
+            }
+
+            Section("WhatsApp") {
+                Text(
+                    if (selectedChats == 0) {
+                        "No chats are selected, so no WhatsApp messages are read."
+                    } else {
+                        "$selectedChats chats are being read."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedButton(onClick = onOpenWhatsAppChats) { Text("Choose chats to read") }
             }
 
             Section("Advanced") {

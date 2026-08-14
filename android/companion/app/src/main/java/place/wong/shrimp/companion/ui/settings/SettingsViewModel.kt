@@ -28,5 +28,8 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         LogStore.add("Manual forwarding requested")
     }
 
+    /** How many chats the WhatsApp reader is allowed to see. */
+    fun whatsappChatCount(): Int = prefs.whatsappChatCount
+
     fun clearLog() = LogStore.clear()
 }

@@ -29,6 +29,30 @@ class WhatsAppQueryTest {
     }
 
     @Test
+    fun `the chat listing offers only chats WhatsApp itself lists`() {
+        val sql = WhatsAppQuery.chats(recentFrom = 0)
+        assertTrue(sql.contains("COALESCE(c.hidden, 0) = 0"))
+        assertTrue(sql.contains("ORDER BY sort_timestamp DESC"))
+    }
+
+    @Test
+    fun `the listing counts the same messages the tail query would deliver`() {
+        val counted = WhatsAppQuery.chats(recentFrom = 856_332)
+            .substringAfter("SELECT COUNT(*) FROM message m")
+            .substringBefore(") AS recent_messages")
+        assertTrue(counted.contains("m.from_me = 0"))
+        assertTrue(counted.contains("m.message_type IN (${WhatsAppQuery.ACCEPTED_TYPES})"))
+        assertTrue(WhatsAppQuery.messagesAfter(longArrayOf(1)).contains("m.from_me = 0"))
+    }
+
+    @Test
+    fun `the recent count is bounded, because an unbounded one walks every message`() {
+        // The floor is what lets the count seek into the index on
+        // (chat_row_id, _id) instead of scanning a chat's whole history.
+        assertTrue(WhatsAppQuery.chats(recentFrom = 856_332).contains("m._id > 856332"))
+    }
+
+    @Test
     fun `a batch cut short by its limit retires only the rows it carried`() {
         assertEquals(880, WhatsAppQuery.nextCursor(cursor = 800, lastRowId = 880, exhausted = false, latestId = 999))
     }
