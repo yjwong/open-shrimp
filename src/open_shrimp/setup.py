@@ -5,11 +5,18 @@ from __future__ import annotations
 import glob as globmod
 import os
 import random
-import readline
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+# readline is a Unix-only stdlib extension.  Windows ships no equivalent, so
+# path completion is absent there and the prompts fall back to plain input().
+try:
+    import readline
+except ImportError:
+    readline = None  # type: ignore[assignment]
 
 from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
 
@@ -28,6 +35,34 @@ def _path_completer(text: str, state: int) -> str | None:
         home = os.path.expanduser("~")
         matches = ["~" + m[len(home):] if m.startswith(home) else m for m in matches]
     return matches[state] if state < len(matches) else None
+
+
+@contextmanager
+def _path_completion() -> Iterator[bool]:
+    """Bind tab to filesystem path completion, restoring the old completer after.
+
+    Yields:
+        Whether completion is actually active, so callers can word their
+        prompts accordingly.
+    """
+    if readline is None:
+        yield False
+        return
+
+    old_completer = readline.get_completer()
+    old_delims = readline.get_completer_delims()
+    readline.set_completer(_path_completer)
+    readline.set_completer_delims(" \t\n")
+    # libedit (macOS) uses different syntax from GNU readline (Linux).
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+    try:
+        yield True
+    finally:
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delims)
 
 
 # The wizard writes a Claude SDK config, so it offers that backend's catalog.
@@ -138,24 +173,12 @@ def _prompt_context() -> tuple[str, dict[str, Any]]:
 
     name = _prompt("Context name (e.g. my-project)", default="default", validator=_validate_context_name)
 
-    # Enable path completion for the directory prompt.
-    old_completer = readline.get_completer()
-    old_delims = readline.get_completer_delims()
-    readline.set_completer(_path_completer)
-    readline.set_completer_delims(" \t\n")
-    # libedit (macOS) uses different syntax from GNU readline (Linux).
-    if "libedit" in (readline.__doc__ or ""):
-        readline.parse_and_bind("bind ^I rl_complete")
-    else:
-        readline.parse_and_bind("tab: complete")
-    try:
+    with _path_completion() as completes:
+        hint = ", tab to autocomplete" if completes else ""
         directory = _prompt(
-            "Project directory (absolute path, tab to autocomplete)",
+            f"Project directory (absolute path{hint})",
             validator=_validate_directory,
         )
-    finally:
-        readline.set_completer(old_completer)
-        readline.set_completer_delims(old_delims)
     description = _prompt("Short description", default="Default context")
 
     # Model selection
