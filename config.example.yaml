@@ -257,16 +257,19 @@ default_context: default
 #       # target chat and release an app version for it to take effect.
 #     - name: whatsapp            # requires the paired Android companion
 #       type: whatsapp
-#       trusted_senders:          # WhatsApp JIDs. The companion resolves LIDs
-#         - "6591234567@s.whatsapp.net"   # to phone JIDs, so this is the form
-#                                 # you will normally want...
-#         - "123456789012345@lid" # ...with a raw LID as the fallback for the
-#                                 # rare sender that does not resolve. Both are
-#                                 # stable ids; display names are never matched.
-#       # No chat allowlist here: you pick the chats in the companion app, so
+#       context: default          # where a handed-over chat is worked on. The
+#                                 # companion's "send to agent" button opens a
+#                                 # topic in this context; omit for
+#                                 # default_context.
+#       # No trusted_senders here, and it is rejected if you add it: a
+#       # /context: directive is honored because the message was addressed to
+#       # the bot, and nothing on WhatsApp is. The feed carries conversations
+#       # between other people, so no string in one is ever a command.
+#       # No chat allowlist here either: you pick the chats in the companion app, so
 #       # messages from every other chat never leave the phone. The companion
 #       # reads WhatsApp's own on-device database behind root and POSTs
-#       # batches to /api/whatsapp/messages; nothing here talks to WhatsApp.
+#       # batches to /api/whatsapp/messages, or one whole chat to
+#       # /api/whatsapp/handovers; nothing here talks to WhatsApp.
 #       # Read-only — WhatsApp events carry no reply route, so picked-up
 #       # topics get no reply_inbound_event tool. Only one whatsapp source
 #       # may be configured.

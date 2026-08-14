@@ -25,7 +25,7 @@ from open_shrimp.events.pickup import (
     PICK_PAGE_PREFIX,
     PICKUP_PREFIX,
     _build_picker,
-    _topic_deep_link,
+    topic_deep_link,
     handle_pickup_callback,
     parse_context_directive,
     pickup_keyboard,
@@ -784,12 +784,12 @@ async def test_reply_tool_echo_failure_does_not_fail_reply(db, monkeypatch):
 
 
 def test_deep_link_dm_topic_uses_resolve():
-    assert _topic_deep_link("shrimpbot", 21491458, 664065) == (
+    assert topic_deep_link("shrimpbot", 21491458, 664065) == (
         "tg://resolve?domain=shrimpbot&post=664065"
     )
 
 
 def test_deep_link_supergroup_topic_uses_privatepost():
-    assert _topic_deep_link("shrimpbot", -1003834076567, 42) == (
+    assert topic_deep_link("shrimpbot", -1003834076567, 42) == (
         "tg://privatepost?channel=3834076567&post=42"
     )

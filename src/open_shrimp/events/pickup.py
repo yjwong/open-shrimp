@@ -231,7 +231,7 @@ def _build_picker(
     return InlineKeyboardMarkup(buttons)
 
 
-def _topic_deep_link(bot_username: str, chat_id: int, thread_id: int) -> str:
+def topic_deep_link(bot_username: str, chat_id: int, thread_id: int) -> str:
     """Deep link that opens a forum topic directly in the Telegram app.
 
     tg:// (not https://t.me) avoids the browser app-link round-trip.  DM
@@ -285,7 +285,7 @@ def picked_up_markup(
     Shared by the manual pick-up path and the trusted-sender auto-pickup path
     so a claimed event's inbox button reaches the same end state either way.
     """
-    url = _topic_deep_link(bot_username, chat_id, thread_id)
+    url = topic_deep_link(bot_username, chat_id, thread_id)
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(f"✅ Picked up ({ctx_name}) → open", url=url)]]
     )

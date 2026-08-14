@@ -9,6 +9,11 @@ class Event:
     sender: str | None  # human-readable sender ("Alice", "group Foo / Bob")
     text: str | None  # extracted plain text, if the payload had one
     raw: dict | None  # full payload for the JSON fallback
+    # Short stand-in for ``text`` on the inbox card, when the full content is
+    # too bulky to post as Telegram messages.  Display only: the persisted row
+    # keeps ``text`` whole, so the agent still reads everything through
+    # read_inbound_event.  None means the card carries the content itself.
+    summary: str | None = None
     dedup_key: str | None = None  # platform event/message id
     # Platform-stable sender identity (Lark open_id, Telegram numeric user id
     # as str). Distinct from ``sender``, which is an attacker-controlled

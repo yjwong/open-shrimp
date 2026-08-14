@@ -24,11 +24,13 @@ from open_shrimp.db import (
     prune_inbound_events,
     set_inbound_event_delivery,
 )
+from open_shrimp.events.base import DeliveryOutcome
 from open_shrimp.events.pickup import (
     parse_context_directive,
     picked_up_markup,
     pickup_keyboard,
     spawn_pickup_topic,
+    topic_deep_link,
 )
 from open_shrimp.events.types import Event
 from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, escape, gfm_to_telegram
@@ -55,10 +57,16 @@ def _header(event: Event) -> str:
 
 
 def _render(event: Event) -> list[str]:
-    """Render an event into MarkdownV2 message chunks (each <= 4096 chars)."""
+    """Render an event into MarkdownV2 message chunks (each <= 4096 chars).
+
+    A ``summary`` stands in for the body when the source gave one: the card is
+    a notification, and a bulky payload would otherwise arrive as a run of
+    chunked messages in the inbox topic.  What is persisted is unaffected.
+    """
     header = _header(event)
-    if event.text is not None:
-        return gfm_to_telegram(f"**{header}**\n\n{event.text}")
+    body = event.summary or event.text
+    if body is not None:
+        return gfm_to_telegram(f"**{header}**\n\n{body}")
 
     bold = f"*{escape(header)}*"
     payload = json.dumps(event.raw, indent=2, ensure_ascii=False)
@@ -194,8 +202,14 @@ class EventSink:
             )
         return getattr(message, "message_id", None)
 
-    async def emit(self, event: Event) -> None:
-        """Render and deliver an event.  Never raises."""
+    async def emit(self, event: Event) -> DeliveryOutcome:
+        """Render and deliver an event.  Never raises.
+
+        The returned :class:`DeliveryOutcome` says where the event landed, for
+        the callers whose own caller is a request waiting on a destination.
+        An event that was dropped — duplicate, or a delivery failure — reports
+        Nones rather than raising.
+        """
         try:
             if self._is_duplicate(event):
                 logger.debug(
@@ -203,7 +217,7 @@ class EventSink:
                     event.dedup_key,
                     event.source,
                 )
-                return
+                return DeliveryOutcome(None, None, None, None)
             chunks = _render(event)
             thread_id = await self._resolve_topic(event.source)
             event_id = await self._persist(event, thread_id)
@@ -233,12 +247,12 @@ class EventSink:
             # A trusted sender's /context: directive auto-picks-up the event —
             # same claim/spawn path as a manual button tap. On any failure it
             # leaves the normal Pick up button in place.
-            auto_picked = False
+            pickup_thread_id: int | None = None
             if (
                 event.source in self._pickup_sources
                 and message_id is not None
             ):
-                auto_picked = await self._maybe_auto_pickup(
+                pickup_thread_id = await self._maybe_auto_pickup(
                     event, event_id, message_id
                 )
 
@@ -247,56 +261,70 @@ class EventSink:
             # non-pickup events have no operator workflow to be pending on.
             # Skipped when auto-picked: spawn_pickup_topic already sent the
             # picked-up notice, so a receipt would double up.
-            if event.source in self._pickup_sources and not auto_picked:
+            if event.source in self._pickup_sources and pickup_thread_id is None:
                 from open_shrimp.events.progress import (
                     RECEIVED_NOTICE,
                     notify_source,
                 )
 
                 await notify_source(event.source, event.reply_ref, RECEIVED_NOTICE)
+
+            # Where a human should tap to reach this event: the working topic
+            # if one was spawned, otherwise the inbox card itself.
+            landed = pickup_thread_id if pickup_thread_id is not None else thread_id
+            return DeliveryOutcome(
+                event_id=event_id,
+                thread_id=thread_id,
+                pickup_thread_id=pickup_thread_id,
+                deep_link=topic_deep_link(
+                    self._bot.username, self._chat_id, landed
+                ),
+            )
         except Exception:
             logger.exception(
                 "Failed to deliver event from source %r; dropping", event.source
             )
+            return DeliveryOutcome(None, None, None, None)
 
     async def _maybe_auto_pickup(
         self, event: Event, event_id: int, message_id: int
-    ) -> bool:
+    ) -> int | None:
         """Claim + spawn a pick-up topic for a trusted, directive-carrying event.
 
-        Trust is keyed on the platform-stable ``sender_id`` (never the
-        display name); the ``/context:`` directive is only honored after that
-        check passes and only if it names a defined context. Returns True iff
-        the event was claimed and a topic spawned. Never raises.
+        Trust is keyed on the platform-stable ``sender_id`` (never the display
+        name); the ``/context:`` directive is only honored after that check
+        passes and only if it names a defined context.  Returns the spawned
+        thread id, or None.  Never raises: a failure leaves the event in the
+        inbox with its Pick up button, which is the recoverable end state.
         """
         trusted = self._trusted_senders.get(event.source, frozenset())
         if event.sender_id is None or event.sender_id not in trusted:
-            return False
+            return None
         ctx_name = parse_context_directive(event.text, self._get_context_names())
         if ctx_name is None:
-            return False
+            return None
         try:
             # The atomic claim is the race gate against a simultaneous manual tap.
             if not await claim_inbound_event(self._db, event_id):
-                return False
+                return None
             row = await get_inbound_event(self._db, event_id)
             if row is None:
-                return False
+                return None
             outcome = await spawn_pickup_topic(
                 self._bot, self._db, row, ctx_name
             )
             if outcome.thread_id is None or outcome.bind_failed:
-                return False
+                return None
             await self._rewrite_pickup_button(
                 message_id, outcome.thread_id, ctx_name
             )
-            return True
+            return outcome.thread_id
         except Exception:
             logger.exception(
                 "Auto-pickup failed for event #%s; leaving it in the inbox",
                 event_id,
             )
-            return False
+            return None
 
     async def _rewrite_pickup_button(
         self, message_id: int, thread_id: int, ctx_name: str

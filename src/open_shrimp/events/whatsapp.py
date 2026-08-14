@@ -1,24 +1,33 @@
 """WhatsApp adapter: message rows pushed from the Android companion.
 
 The host holds no WhatsApp data and never talks to WhatsApp.  The companion
-app reads ``msgstore.db`` on the phone behind root, keeps only the chats
-selected there, and POSTs batches to the upload endpoint; this adapter is the
-passive receiving end.  ``start`` only records ``emit`` — nothing polls and
-nothing connects, and the endpoint finds the adapter through
-``EventManager.get_adapter_of_type`` rather than a registry of its own.
+app reads ``msgstore.db`` on the phone behind root and POSTs to the upload
+endpoints; this adapter is the passive receiving end.  ``start`` only records
+``emit`` — nothing polls and nothing connects, and the endpoints find the
+adapter through ``EventManager.get_adapter_of_type`` rather than a registry of
+its own.
 
-Restart-durable dedup lives on the phone, which advances its ``message._id``
-watermark only after the host accepts a batch (the sink's own dedup is an
-in-memory LRU that a restart wipes).  So every row this module refuses must
-still be reported as accepted, or the phone re-sends it forever; ``ingest``
-returns the highest id it is done with, not the highest it emitted.
+Two paths arrive here and they answer different questions.  ``ingest`` is the
+feed: rows from the chats selected in the companion UI, one event each, inert
+in the inbox until someone picks them up.  ``handover`` is one chat the user
+pointed at, rendered as a single transcript and taken straight to a working
+topic.  Neither knows about the other — a handover moves no watermark and
+retires no id, so a chat that is both watched and handed over keeps
+delivering through the feed unchanged.
+
+Restart-durable dedup for the feed lives on the phone, which advances its
+``message._id`` watermark only after the host accepts a batch (the sink's own
+dedup is an in-memory LRU that a restart wipes).  So every row ``ingest``
+refuses must still be reported as accepted, or the phone re-sends it forever;
+it returns the highest id it is done with, not the highest it emitted.
 """
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from open_shrimp.config import EventSourceConfig
-from open_shrimp.events.base import EmitFn
+from open_shrimp.events.base import DeliveryOutcome, EmitFn
 from open_shrimp.events.types import Event
 
 logger = logging.getLogger(__name__)
@@ -65,17 +74,21 @@ def _message_type(row: dict) -> int | None:
         return None
 
 
+def _jid_server(jid: str | None) -> str | None:
+    """The server half of a JID: ``g.us``, ``s.whatsapp.net``, ``lid``."""
+    if jid is None or "@" not in jid:
+        return None
+    return jid.rsplit("@", 1)[-1]
+
+
 def chat_server(row: dict) -> str | None:
-    """The JID server of the row's chat: ``g.us``, ``s.whatsapp.net``, ``lid``.
+    """The JID server of the row's chat.
 
     Derived from ``chat_jid`` rather than carried as its own field, so the two
     cannot disagree — a row claiming a direct server for a group JID would
     otherwise hand a group id back as a trusted sender.
     """
-    chat_jid = _text(row.get("chat_jid"))
-    if chat_jid is None or "@" not in chat_jid:
-        return None
-    return chat_jid.rsplit("@", 1)[-1]
+    return _jid_server(_text(row.get("chat_jid")))
 
 
 def _placeholder(mtype: int | None, row: dict) -> str:
@@ -174,6 +187,185 @@ def build_event(source_name: str, row: dict) -> Event:
     )
 
 
+# ── Handover: one chat, rendered whole ────────────────────────────────────
+#
+# The phone sends rows and nothing else.  The placeholder table, the type
+# allowlist and the text cap all live above, and duplicating them on the
+# phone would let the two drift; so the transcript is drawn here and the
+# companion stays a transport.
+
+_STAMP_FORMAT = "%Y-%m-%d %H:%M"
+_DATE_CHARS = len("2026-08-14")
+
+
+def is_group_chat(chat: dict) -> bool:
+    return _jid_server(_text(chat.get("jid"))) == "g.us"
+
+
+def chat_label(chat: dict) -> str:
+    """The chat's display string, group-qualified.  Display only, untrusted.
+
+    Names come from the phone, which merges ``wa.db`` contact rows into the
+    picker — so a one-to-one chat reads as a person rather than as the bare
+    JID a feed event falls back to.  They gate nothing.
+    """
+    jid = _text(chat.get("jid"))
+    name = _text(chat.get("subject")) or _text(chat.get("name")) or jid or "unknown"
+    return f"group {name}" if is_group_chat(chat) else name
+
+
+def _stamp(value: object) -> str | None:
+    """A row's timestamp as local wall-clock text, or None if it has none."""
+    try:
+        millis = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if millis <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(millis / 1000).strftime(_STAMP_FORMAT)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _author(row: dict, chat: dict) -> str:
+    """Who a transcript line is attributed to.
+
+    Outbound rows read ``me``: a transcript with one side stripped out cannot
+    be read, which is why the handover query keeps them.  A one-to-one row
+    carries no per-row sender — the counterparty is the chat — so it falls
+    back to the chat's own label, while a group row that somehow lacks one is
+    left unattributed rather than credited to the group.
+    """
+    if row.get("from_me"):
+        return "me"
+    who = _text(row.get("sender_name")) or _text(row.get("sender_jid"))
+    if who:
+        return who
+    return "unknown" if is_group_chat(chat) else chat_label(chat)
+
+
+def _drawn_rows(chat: dict, rows: list[dict]) -> list[tuple[str | None, str]]:
+    """``(timestamp, line)`` for every row the host knows how to draw.
+
+    Rows of a type outside ``ACCEPTED_TYPES`` are dropped for the same reason
+    the feed drops them — the allowlist fails closed on the dozen rare types
+    that were never identified — and a row whose body renders empty carries
+    nothing to read.
+    """
+    drawn: list[tuple[str | None, str]] = []
+    for row in rows:
+        if _message_type(row) not in ACCEPTED_TYPES:
+            continue
+        body = message_text(row)
+        if body is None:
+            continue
+        stamp = _stamp(row.get("timestamp"))
+        author = _author(row, chat)
+        drawn.append(
+            (stamp, f"[{stamp}] {author}: {body}" if stamp else f"{author}: {body}")
+        )
+    return drawn
+
+
+def _plural(count: int) -> str:
+    return f"{count} message" if count == 1 else f"{count} messages"
+
+
+def _header_line(
+    chat: dict, drawn: list[tuple[str | None, str]], truncated: bool
+) -> str:
+    """The transcript's first line: what this is, how much of it, and how bounded.
+
+    Truncation is reported rather than counted.  An exact "N older messages
+    omitted" needs a COUNT(*) over the whole chat, which costs seconds on a
+    real store; the boundary tells the agent the one thing it needs — that
+    this is a window and not the chat.
+
+    Being the first line of ``Event.text`` also gives the spawned topic a
+    usable name, which the oldest message's opening words would not.
+    """
+    jid = _text(chat.get("jid")) or "unknown"
+    stamps = [stamp for stamp, _ in drawn if stamp]
+    line = f"WhatsApp chat with {chat_label(chat)} ({jid}) — {_plural(len(drawn))}"
+    if stamps:
+        line += f", {stamps[0]} to {stamps[-1]}"
+    line += "."
+    if truncated:
+        line += (
+            f" Older messages exist; nothing before {stamps[0]} is included."
+            if stamps
+            else " Older messages exist and are not included."
+        )
+    return line
+
+
+def render_transcript(chat: dict, rows: list[dict], truncated: bool) -> str:
+    """*rows* as a readable conversation, oldest first, under a header line.
+
+    This is what the agent reads through ``read_inbound_event``; *rows* must
+    already be in oldest-first order.
+    """
+    drawn = _drawn_rows(chat, rows)
+    return "\n".join(
+        [_header_line(chat, drawn, truncated), "", *(line for _, line in drawn)]
+    )
+
+
+def render_summary(chat: dict, rows: list[dict], truncated: bool) -> str:
+    """The one-line inbox card standing in for the transcript.
+
+    Without it the sink would chunk a hundred-thousand-character transcript
+    into a couple of dozen Telegram messages in the inbox topic.
+    """
+    drawn = _drawn_rows(chat, rows)
+    stamps = [stamp for stamp, _ in drawn if stamp]
+    line = f"Handed over — {_plural(len(drawn))}"
+    if stamps:
+        first, last = stamps[0][:_DATE_CHARS], stamps[-1][:_DATE_CHARS]
+        line += f", {first}" + (f" → {last}" if last != first else "")
+    if truncated:
+        line += ", older messages not included"
+    return line + "."
+
+
+def build_handover(source_name: str, payload: dict) -> Event:
+    """One chat as one event: the unit the user pointed at is the chat.
+
+    ``dedup_key`` is None on purpose.  Replay is already impossible a layer
+    down — every signed request carries a nonce the host rejects on reuse —
+    and a content-derived key would additionally block handing the same chat
+    over twice, which is an ordinary thing to want.
+
+    ``sender_id`` is None on purpose too, and it is load-bearing.  Trust here
+    comes from the device signature rather than from anything in the payload,
+    and leaving the field empty is also what makes it impossible for a
+    ``/context:`` string inside the transcript to route the event: the sink
+    only reads a directive after matching ``sender_id`` against the source's
+    trusted senders, and there is nothing here to match.  A handover reaches
+    a context the same way every other event does — a person taps Pick up and
+    chooses one.
+
+    The caller must have validated that every row carries an integer ``id``.
+    """
+    chat = payload.get("chat") or {}
+    rows = sorted(payload.get("messages") or [], key=lambda row: int(row["id"]))
+    truncated = bool(payload.get("truncated"))
+    return Event(
+        source=source_name,
+        sender=chat_label(chat),
+        text=render_transcript(chat, rows, truncated),
+        summary=render_summary(chat, rows, truncated),
+        raw={
+            "chat": chat,
+            "messages": [_bounded_row(row) for row in rows],
+            "truncated": truncated,
+        },
+        dedup_key=None,
+        sender_id=None,
+    )
+
+
 def should_ingest(row: dict) -> bool:
     """True if the row is a genuine inbound message we know how to render."""
     if _message_type(row) not in ACCEPTED_TYPES:
@@ -227,3 +419,20 @@ class WhatsAppAdapter:
                     return cursor
             cursor = row_id
         return cursor
+
+    async def handover(self, payload: dict[str, Any]) -> DeliveryOutcome:
+        """Deliver one chat as a single event; report where it landed.
+
+        The signature on the request is authority to *deliver* the chat, not
+        to act on it: the event lands in the inbox as an inert card like any
+        other, and a person picks it up into a context of their choosing.
+        Nothing in *payload* can change that, because there is nothing in the
+        payload the sink consults when deciding.
+
+        Nothing here touches a cursor either.  A handover reads from the head
+        of a chat and retires no id, so the feed is unaffected by it.
+        """
+        emit = self._emit
+        if emit is None:
+            raise RuntimeError("WhatsApp adapter is not started")
+        return await emit(build_handover(self.name, payload))

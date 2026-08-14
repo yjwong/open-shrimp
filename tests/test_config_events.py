@@ -156,6 +156,23 @@ def test_second_whatsapp_source_rejected():
         _validate_raw(_base_raw(events))
 
 
+def test_whatsapp_source_rejects_trusted_senders():
+    """Nothing on WhatsApp is addressed to the bot, so a /context: directive
+    in one is never a command — there is no sender to trust it from."""
+    events = {
+        "chat_id": 1,
+        "sources": [
+            {
+                "name": "whatsapp",
+                "type": "whatsapp",
+                "trusted_senders": ["6591234567@s.whatsapp.net"],
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="does not accept 'trusted_senders'"):
+        _validate_raw(_base_raw(events))
+
+
 def test_multiline_source_name_rejected():
     events = {
         "chat_id": 1,

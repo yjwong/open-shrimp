@@ -727,6 +727,20 @@ def _validate_events(raw: dict) -> None:
                     f"name), got {whatsapp_name!r} and {name!r}"
                 )
             whatsapp_name = name
+            # A /context: directive is honored because the message was
+            # addressed to the bot.  Nothing on WhatsApp is: the feed carries
+            # conversations between other people, where the bot is an observer
+            # rather than a recipient, so no string in it is ever a command.
+            # A handover takes its context from this source's own config for
+            # the same reason.
+            if source.get("trusted_senders"):
+                raise ValueError(
+                    f"events source '{name}': type 'whatsapp' does not accept "
+                    f"'trusted_senders' — its messages are addressed to a "
+                    f"person and not to the bot, so a /context: directive in "
+                    f"one is never a command. Set 'context' to choose where "
+                    f"handovers land."
+                )
 
 
 def _parse_sandbox_config(raw: dict) -> SandboxConfig:

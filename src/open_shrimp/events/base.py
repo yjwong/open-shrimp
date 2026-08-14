@@ -1,11 +1,29 @@
 """Adapter protocol for inbound event sources."""
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from open_shrimp.events.types import Event
 
-EmitFn = Callable[[Event], Awaitable[None]]
+
+@dataclass
+class DeliveryOutcome:
+    """Where an emitted event landed.
+
+    Every field is optional because delivery is best-effort: the sink never
+    raises, and an event that failed outright reports Nones rather than an
+    exception.  Adapters that only push events ignore this; it exists for the
+    ones whose caller is a request that must answer with a destination.
+    """
+
+    event_id: int | None  # persisted inbound_events row
+    thread_id: int | None  # the source's inbox topic
+    pickup_thread_id: int | None  # the spawned working topic, if any
+    deep_link: str | None  # tg:// link to pickup_thread_id
+
+
+EmitFn = Callable[[Event], Awaitable[DeliveryOutcome]]
 
 
 class EventSourceAdapter(Protocol):
@@ -54,6 +72,24 @@ class SupportsIngest(Protocol):
     """
 
     async def ingest(self, rows: list[dict]) -> int | None: ...
+
+
+@runtime_checkable
+class SupportsHandover(Protocol):
+    """Optional adapter capability: accept a first-party request to hand a
+    conversation to the agent immediately.
+
+    Distinct from :class:`SupportsIngest`: ingest is a feed the source drains
+    against a watermark, and the host decides what to do with each row.  A
+    handover is a single authenticated request that the conversation be worked
+    on now, so it carries no cursor and its delivery outcome is the answer.
+
+    The authentication is the caller's, not the payload's: an adapter marks
+    the resulting event ``auto_pickup`` because of how the request arrived,
+    and nothing inside *payload* may influence that.
+    """
+
+    async def handover(self, payload: dict) -> DeliveryOutcome: ...
 
 
 @runtime_checkable
