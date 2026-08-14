@@ -29,6 +29,94 @@ class WhatsAppQueryTest {
     }
 
     @Test
+    fun `a handover carries both sides of the conversation`() {
+        // The one filter the feed has that a handover must not: a transcript
+        // with the user's own words removed cannot be read.
+        val sql = WhatsAppQuery.recentMessages()
+        assertTrue(!sql.contains("from_me = 0"))
+        assertTrue(sql.contains("m.from_me"))
+    }
+
+    @Test
+    fun `a handover draws only what the host can render`() {
+        assertTrue(
+            WhatsAppQuery.recentMessages()
+                .contains("m.message_type IN (${WhatsAppQuery.ACCEPTED_TYPES})"),
+        )
+    }
+
+    @Test
+    fun `a handover names exactly one chat, bound rather than spliced`() {
+        // A query that could name several chats is a query that could name all
+        // of them, and the JID it came from is text off the database.
+        val sql = WhatsAppQuery.recentMessages()
+        assertTrue(sql.contains("m.chat_row_id = ?"))
+        assertTrue(!sql.contains("chat_row_id IN"))
+    }
+
+    @Test
+    fun `a handover reads the tail rather than walking the chat`() {
+        val sql = WhatsAppQuery.recentMessages()
+        assertTrue(sql.contains("ORDER BY m._id DESC"))
+        assertTrue(sql.contains("LIMIT ?"))
+    }
+
+    @Test
+    fun `a handover does not consult the feed's cursor`() {
+        // It reads from the head of the chat and retires nothing, so a chat
+        // that is both watched and sent keeps delivering unchanged.
+        assertTrue(!WhatsAppQuery.recentMessages().contains("m._id >"))
+    }
+
+    @Test
+    fun `a chat is looked up by bound JID, without the picker's hidden filter`() {
+        // hidden decides what may be offered, not what may be chosen.
+        assertTrue(WhatsAppQuery.CHAT_BY_JID.contains("cj.raw_string = ?"))
+        assertTrue(!WhatsAppQuery.CHAT_BY_JID.contains("hidden"))
+    }
+
+    @Test
+    fun `a handover within both bounds carries everything it read`() {
+        val window = WhatsAppQuery.handoverWindow(listOf(10, 10, 10), limit = 5, budget = 100)
+        assertEquals(3, window.kept)
+        assertTrue(!window.truncated)
+    }
+
+    @Test
+    fun `the row past the limit is what says older messages exist`() {
+        // The caller scans one row more than it may send; that row is dropped
+        // and reported, rather than counted by walking the whole chat.
+        val window = WhatsAppQuery.handoverWindow(listOf(10, 10, 10, 10), limit = 3, budget = 100)
+        assertEquals(3, window.kept)
+        assertTrue(window.truncated)
+    }
+
+    @Test
+    fun `the budget drops the oldest, because the read is newest first`() {
+        // Costs are newest first, so keeping a prefix keeps the newest — the
+        // 40 at the end is the oldest message and is the one left behind.
+        val window = WhatsAppQuery.handoverWindow(listOf(30, 30, 40), limit = 10, budget = 70)
+        assertEquals(2, window.kept)
+        assertTrue(window.truncated)
+    }
+
+    @Test
+    fun `the newest message is carried whatever it costs`() {
+        // Otherwise a chat whose last message overruns the budget would hand
+        // over nothing and describe itself as entirely older messages.
+        val window = WhatsAppQuery.handoverWindow(listOf(5_000), limit = 10, budget = 100)
+        assertEquals(1, window.kept)
+        assertTrue(!window.truncated)
+    }
+
+    @Test
+    fun `a chat with nothing to send is not reported as truncated`() {
+        val window = WhatsAppQuery.handoverWindow(emptyList(), limit = 10, budget = 100)
+        assertEquals(0, window.kept)
+        assertTrue(!window.truncated)
+    }
+
+    @Test
     fun `the chat listing offers only chats WhatsApp itself lists`() {
         val sql = WhatsAppQuery.chats(recentFrom = 0)
         assertTrue(sql.contains("COALESCE(c.hidden, 0) = 0"))

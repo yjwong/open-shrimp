@@ -7,6 +7,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -33,6 +34,18 @@ data class PortForwardClaim(
     val phoneUrl: String,
     val label: String,
     val hostPort: Int,
+)
+
+/**
+ * Where a handed-over chat landed.
+ *
+ * [deepLink] opens the inbox topic the card was posted to, which is where the
+ * Pick up button is and so where the person who sent it wants to go next.
+ */
+data class HandoverResult(
+    val eventId: Long?,
+    val threadId: Long?,
+    val deepLink: String?,
 )
 
 /** Thin coroutine wrapper over the OpenShrimp HTTP endpoints used by the companion app. */
@@ -222,6 +235,48 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
         (JSONObject(text).opt("cursor") as? Number)?.toLong()
     }
 
+    /**
+     * Push one whole chat, and say where its card landed.
+     *
+     * A separate route from [uploadWhatsAppMessages] because the two answer
+     * different questions. That one is a cursor contract — a drainable batch,
+     * answered with the watermark the phone may retire. This one is atomic,
+     * retires nothing, and is answered with the topic to go and look in; the
+     * card waits there behind the ordinary Pick up button, so nothing runs
+     * until someone taps it.
+     */
+    suspend fun sendWhatsAppHandover(
+        baseUrl: String,
+        deviceId: String,
+        handover: WhatsAppHandover,
+    ): HandoverResult = withContext(Dispatchers.IO) {
+        val rows = JSONArray()
+        for (message in handover.messages) rows.put(message.toHandoverJson())
+        val chat = JSONObject()
+            .put("jid", handover.jid)
+            .put("name", handover.name)
+            .put("subject", handover.subject)
+        val body = JSONObject()
+            .put("chat", chat)
+            .put("truncated", handover.truncated)
+            .put("messages", rows)
+            .toString()
+        val text = signedPost(
+            "$baseUrl/api/whatsapp/handovers",
+            deviceId,
+            "WhatsApp handover failed",
+            body,
+        )
+        val json = JSONObject(text)
+        HandoverResult(
+            eventId = (json.opt("event_id") as? Number)?.toLong(),
+            threadId = (json.opt("thread_id") as? Number)?.toLong(),
+            // opt, not optString: optString renders an explicit JSON null as
+            // the four characters "null", which would pass for a link.
+            deepLink = (json.opt("deep_link") as? String)?.takeIf { it.isNotEmpty() },
+        )
+    }
+
     /** Remove a previously uploaded meeting's transcript and notes from the host. */
     suspend fun deleteUploadedMeeting(
         baseUrl: String,
@@ -268,10 +323,19 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
         return http.newCall(request).execute().use { it.isSuccessful }
     }
 
+    /**
+     * Run *request*, or fail with what the host said went wrong.
+     *
+     * The host's own sentence is preferred over the status line because these
+     * reach the user: a refusal is a thing it wrote to be read, and the body
+     * and code are what is left when it wrote nothing.
+     */
     private fun executeForBody(request: Request, errPrefix: String): String {
         http.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) error("$errPrefix: HTTP ${response.code} $text")
+            if (!response.isSuccessful) {
+                error("$errPrefix: ${hostError(text) ?: "HTTP ${response.code} $text"}")
+            }
             return text
         }
     }
@@ -279,14 +343,21 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
     companion object {
         private val JSON = "application/json".toMediaType()
 
+        /** The host's own words for a refusal, or null if it did not give any. */
+        private fun hostError(body: String): String? =
+            try {
+                JSONObject(body).optString("error").takeIf { it.isNotEmpty() }
+            } catch (e: JSONException) {
+                null
+            }
+
         /**
          * One row, under the host's wire names.
          *
          * A null field is left out rather than sent as null — the host reads
          * every one of these with a default and an absent key is the same
-         * answer. `from_me` is the exception: it is always present and always
-         * false, because the host gates on it and cannot tell an absent key
-         * from a denial.
+         * answer. `from_me` is the exception: it is always present, because
+         * the host gates on it and cannot tell an absent key from a denial.
          */
         private fun WhatsAppMessage.toJson(): JSONObject = JSONObject()
             .put("id", id)
@@ -297,6 +368,25 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
             .put("text", text)
             .put("chat_jid", chatJid)
             .put("chat_subject", chatSubject)
+            .put("sender_jid", senderJid)
+            .put("sender_name", senderName)
+            .put("mime_type", mimeType)
+            .put("caption", caption)
+            .put("file_path", filePath)
+
+        /**
+         * One transcript row.
+         *
+         * The same row as [toJson] without the chat fields: a handover names
+         * its chat once, in the payload, so nothing here can disagree with it.
+         */
+        private fun WhatsAppMessage.toHandoverJson(): JSONObject = JSONObject()
+            .put("id", id)
+            .put("key_id", keyId)
+            .put("from_me", fromMe)
+            .put("timestamp", timestamp)
+            .put("message_type", messageType)
+            .put("text", text)
             .put("sender_jid", senderJid)
             .put("sender_name", senderName)
             .put("mime_type", mimeType)

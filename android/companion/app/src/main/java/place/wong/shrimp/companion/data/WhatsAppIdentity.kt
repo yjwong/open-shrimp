@@ -37,8 +37,14 @@ object WhatsAppIdentity {
      * the server it was keyed by before resolution — a one-to-one chat can
      * itself be keyed by a LID, so the resolved JID is what to attribute to
      * but the raw server is what says whether attribution is allowed.
+     *
+     * An outbound row is nobody's: the implied party is the user, whom the
+     * phone holds no JID for, and the sentinel would otherwise attribute the
+     * user's own words to the person they were sent to. The flag is what says
+     * who wrote it, and it travels beside this.
      */
     fun sender(
+        fromMe: Boolean,
         senderRowId: Long,
         senderServer: String?,
         senderJid: String?,
@@ -46,6 +52,7 @@ object WhatsAppIdentity {
         chatServer: String?,
         chatJid: String?,
     ): String? {
+        if (fromMe) return null
         if (senderRowId == IMPLIED_SENDER) {
             // The sentinel means "the implied party", which only names someone
             // in a one-to-one chat. An inbound group message always carries a

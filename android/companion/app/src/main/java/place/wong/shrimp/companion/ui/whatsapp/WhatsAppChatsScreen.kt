@@ -1,5 +1,8 @@
 package place.wong.shrimp.companion.ui.whatsapp
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -8,11 +11,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -21,13 +27,19 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,23 +47,33 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.text.DateFormat
 import java.util.Date
+import place.wong.shrimp.companion.data.LogStore
 import place.wong.shrimp.companion.data.WhatsAppChat
 import place.wong.shrimp.companion.data.WhatsAppChats
+import place.wong.shrimp.companion.data.WhatsAppQuery
 
 /**
- * Chooses which WhatsApp conversations the host may be told about.
+ * Chooses which WhatsApp conversations the host may be told about, and sends
+ * one outright.
  *
- * This is the allowlist itself, not a view of one: nothing is read from a chat
- * that is not ticked here, and the reader enforces that in SQL before a row
- * leaves the phone. So the screen's job is to make the list recognisable —
- * thousands of conversations, ordered by when they last moved, searchable by
- * name or number — and to make what is ticked impossible to mistake.
+ * The tick box is the allowlist itself, not a view of one: nothing is read
+ * from a chat that is not ticked here, and the reader enforces that in SQL
+ * before a row leaves the phone. So the screen's job is to make the list
+ * recognisable — thousands of conversations, ordered by when they last moved,
+ * searchable by name or number — and to make what is ticked impossible to
+ * mistake.
+ *
+ * The send button beside it means something else and the screen has to say so
+ * out loud: it is one chat, once, whether or not it is ticked, and it leaves
+ * the ticks alone. It asks first, because a tick can be unticked and a
+ * transcript that has left the phone cannot be recalled.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,6 +83,26 @@ fun WhatsAppChatsScreen(
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val selected by vm.selected.collectAsStateWithLifecycle()
+    val sending by vm.sending.collectAsStateWithLifecycle()
+
+    val context = LocalContext.current
+    val snackbars = remember { SnackbarHostState() }
+    var confirming by rememberSaveable { mutableStateOf<WhatsAppChat?>(null) }
+
+    // One snackbar per send, queued: collecting a channel is what keeps two
+    // sends that ended the same way from reading as one.
+    LaunchedEffect(Unit) {
+        vm.outcomes.collect { outcome ->
+            val result = snackbars.showSnackbar(
+                message = outcome.message,
+                actionLabel = outcome.deepLink?.let { "Open" },
+                duration = SnackbarDuration.Long,
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                outcome.deepLink?.let { open(context, it) }
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -78,6 +120,7 @@ fun WhatsAppChatsScreen(
                 },
             )
         },
+        snackbarHost = { SnackbarHost(snackbars) },
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
             when (val current = state) {
@@ -86,10 +129,36 @@ fun WhatsAppChatsScreen(
                 is ChatsState.Ready -> Picker(
                     listed = current.listed,
                     selected = selected,
+                    sending = sending,
+                    canSend = vm.paired,
                     onToggle = vm::toggle,
+                    onSend = { confirming = it },
                 )
             }
         }
+    }
+
+    confirming?.let { chat ->
+        ConfirmSend(
+            chat = chat,
+            onDismiss = { confirming = null },
+            onConfirm = {
+                confirming = null
+                vm.send(chat)
+            },
+        )
+    }
+}
+
+/** Follow a deep link into Telegram, saying so rather than crashing if it will not open. */
+private fun open(context: android.content.Context, deepLink: String) {
+    try {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(deepLink))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    } catch (e: ActivityNotFoundException) {
+        LogStore.add("Nothing on this phone can open the Telegram link")
     }
 }
 
@@ -120,11 +189,45 @@ private fun Failed(message: String, onRetry: () -> Unit) = Centered {
     OutlinedButton(onClick = onRetry) { Text("Try again") }
 }
 
+/**
+ * Asks before a chat leaves the phone.
+ *
+ * The tick box has an undo and this does not, so the one thing the sheet has
+ * to be clear about is what is about to be disclosed: this chat, that many
+ * messages, the user's own words among them.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConfirmSend(chat: WhatsAppChat, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text("Send this chat?", style = MaterialTheme.typography.titleMedium)
+            Text(chat.label, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "The last ${WhatsAppQuery.HANDOVER_MESSAGES} messages — including your own — " +
+                    "will be sent to the host. Photos and files are named, not uploaded. " +
+                    "This does not start reading the chat.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onConfirm) { Text("Send") }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ColumnScope.Picker(
     listed: WhatsAppChats,
     selected: Set<String>,
+    sending: String?,
+    canSend: Boolean,
     onToggle: (String) -> Unit,
+    onSend: (WhatsAppChat) -> Unit,
 ) {
     val chats = listed.chats
     var search by rememberSaveable { mutableStateOf("") }
@@ -170,6 +273,17 @@ private fun ColumnScope.Picker(
             summary(selected.size, visible.size, listed.omitted),
             style = MaterialTheme.typography.bodySmall,
         )
+        // The screen does two things and they are easy to confuse, so it says
+        // which is which above the list rather than leaving the icon to.
+        Text(
+            if (canSend) {
+                "Tick a chat to read it continuously. Send ➤ sends one chat to Telegram now."
+            } else {
+                "Tick a chat to read it continuously. " +
+                    "${WhatsAppChatsViewModel.NOT_PAIRED}, so nothing can be sent."
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 
     HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
@@ -184,14 +298,27 @@ private fun ColumnScope.Picker(
             ChatRow(
                 chat = chat,
                 checked = chat.jid in selected,
+                // Only one send runs at a time, so every other row's button is
+                // off while one is in flight — the server side is deliberately
+                // not idempotent and a second tap would make a second card.
+                sending = sending == chat.jid,
+                canSend = canSend && sending == null,
                 onToggle = { onToggle(chat.jid) },
+                onSend = { onSend(chat) },
             )
         }
     }
 }
 
 @Composable
-private fun ChatRow(chat: WhatsAppChat, checked: Boolean, onToggle: () -> Unit) {
+private fun ChatRow(
+    chat: WhatsAppChat,
+    checked: Boolean,
+    sending: Boolean,
+    canSend: Boolean,
+    onToggle: () -> Unit,
+    onSend: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -200,7 +327,7 @@ private fun ChatRow(chat: WhatsAppChat, checked: Boolean, onToggle: () -> Unit) 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Checkbox(checked = checked, onCheckedChange = { onToggle() })
-        Column(modifier = Modifier.padding(start = 8.dp)) {
+        Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
             Text(
                 chat.label,
                 style = MaterialTheme.typography.bodyLarge,
@@ -213,6 +340,15 @@ private fun ChatRow(chat: WhatsAppChat, checked: Boolean, onToggle: () -> Unit) 
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        // The spinner sits in the button rather than beside it, so a row that
+        // is sending does not shift under the finger that started it.
+        IconButton(onClick = onSend, enabled = canSend && !sending) {
+            if (sending) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp))
+            } else {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send to agent")
+            }
         }
     }
 }

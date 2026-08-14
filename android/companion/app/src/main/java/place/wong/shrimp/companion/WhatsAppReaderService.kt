@@ -20,6 +20,7 @@ import place.wong.shrimp.companion.data.WhatsAppChat
 import place.wong.shrimp.companion.data.WhatsAppChats
 import place.wong.shrimp.companion.data.FileDelta
 import place.wong.shrimp.companion.data.WhatsAppContacts
+import place.wong.shrimp.companion.data.WhatsAppHandover
 import place.wong.shrimp.companion.data.WhatsAppIdentity
 import place.wong.shrimp.companion.data.WhatsAppMessage
 import place.wong.shrimp.companion.data.WhatsAppQuery
@@ -53,8 +54,9 @@ import java.io.RandomAccessFile
  * of which carries no message.
  *
  * A second, far smaller database holds the contact names, and is copied under
- * the same rules — but only when the chat listing asks for it, so that the
- * message path stays as cheap as it has to be.
+ * the same rules — but only for the calls a person is waiting on, the chat
+ * listing and a handover, so that the message path stays as cheap as it has to
+ * be.
  *
  * Progress is reported through [Log] rather than the `LogStore` the rest of
  * the app writes to: this runs in its own root process, where that object is a
@@ -253,7 +255,9 @@ class WhatsAppReaderService : RootService() {
                     val columns = Columns(c)
                     var budget = MAX_BATCH_CHARS
                     while (c.moveToNext()) {
-                        val row = columns.read(c)
+                        // No names: they live in a database this path does not
+                        // pay to copy, and the host falls back to the JID.
+                        val row = columns.read(c, emptyMap())
                         rows.add(row)
                         budget -= row.parcelChars()
                         if (budget <= 0) {
@@ -272,6 +276,75 @@ class WhatsAppReaderService : RootService() {
             Log.i(TAG, "Read ${rows.size} messages after $cursor from ${chatRowIds.size} chats, cursor now $next")
             return WhatsAppBatch(rows, next)
         }
+
+        @Synchronized
+        override fun handover(jid: String?, limit: Int): WhatsAppHandover {
+            val db = requireDatabase()
+            val wanted = jid.orEmpty()
+            require(wanted.isNotEmpty()) { "A handover names one chat; none was given" }
+            // The names are what makes a transcript readable rather than a
+            // column of numbers, and this is the one call that can afford
+            // them: it happens because a person tapped, not because the log
+            // moved.
+            refreshContacts()
+            val names = contactNames()
+            val chat = query { chatRow(db, wanted, names) }
+                ?: throw IllegalStateException("The message store does not carry that chat")
+            val capped = limit.coerceIn(1, WhatsAppQuery.HANDOVER_MESSAGES)
+            // One row past the limit, which is how older messages are found to
+            // exist without counting them.
+            val scanned = ArrayList<WhatsAppMessage>(capped + 1)
+            query {
+                val args = arrayOf(chat.rowId.toString(), (capped + 1).toString())
+                db.rawQuery(WhatsAppQuery.recentMessages(), args).use { c ->
+                    val columns = Columns(c)
+                    while (c.moveToNext()) scanned.add(columns.read(c, names))
+                }
+            }
+            val window = WhatsAppQuery.handoverWindow(
+                costs = scanned.map { it.parcelChars() },
+                limit = capped,
+                budget = MAX_HANDOVER_CHARS,
+            )
+            // Read newest first so the rows dropped are the oldest; turned the
+            // right way round here, because a transcript is read forwards.
+            val messages = scanned.take(window.kept).asReversed()
+            Log.i(TAG, "Handing over ${messages.size} messages, truncated ${window.truncated}")
+            return WhatsAppHandover(
+                jid = chat.jid,
+                name = chat.name,
+                subject = chat.subject,
+                messages = messages,
+                truncated = window.truncated,
+            )
+        }
+
+        /** The chat a JID names in the open snapshot, or null if it holds none. */
+        private fun chatRow(db: SQLiteDatabase, jid: String, names: Map<String, String>): ChatRow? =
+            db.rawQuery(WhatsAppQuery.CHAT_BY_JID, arrayOf(jid)).use { c ->
+                if (!c.moveToFirst()) return null
+                val raw = c.getString(c.getColumnIndexOrThrow("jid")) ?: return null
+                // A chat keyed by a LID is the same conversation as the number
+                // behind it: that is where its contact row will be, and it is
+                // the identity its own message rows are attributed to. Naming
+                // the chat any other way would have one payload calling one
+                // conversation two things.
+                val resolved = WhatsAppIdentity.resolve(
+                    c.getString(c.getColumnIndexOrThrow("server")),
+                    raw,
+                    c.getString(c.getColumnIndexOrThrow("phone_jid")),
+                ) ?: raw
+                ChatRow(
+                    rowId = c.getLong(c.getColumnIndexOrThrow("id")),
+                    jid = resolved,
+                    name = WhatsAppContacts.chatName(
+                        subject = null,
+                        mappedName = names[resolved],
+                        rawName = names[raw],
+                    ),
+                    subject = c.getString(c.getColumnIndexOrThrow("subject")),
+                )
+            }
 
         /**
          * Give up the snapshot and everything held against it.
@@ -317,11 +390,12 @@ class WhatsAppReaderService : RootService() {
         /**
          * Bring the contact copy up to date, if there is one to be had.
          *
-         * Called from [chats] rather than from [refresh] on purpose. The
-         * message path is woken by every flicker of log activity and has to
-         * stay as cheap as finding out nothing happened; the contact database
-         * moves for its own reasons, none of which are a message arriving, and
-         * only the picker ever reads it.
+         * Called from [chats] and [handover] rather than from [refresh] on
+         * purpose. The message path is woken by every flicker of log activity
+         * and has to stay as cheap as finding out nothing happened; the
+         * contact database moves for its own reasons, none of which are a
+         * message arriving, and only a person waiting on a screen is ever
+         * shown a name.
          *
          * A change in either file is answered by copying the pair again rather
          * than by replaying the log, because there is nothing worth saving:
@@ -705,10 +779,25 @@ class WhatsAppReaderService : RootService() {
     /** Which log it is, and how far it has been written. */
     private data class LogMark(val salt: Long, val size: Long, val modified: Long)
 
-    /** Column indices for the tail query, resolved once per query. */
+    /** The chat a handover reads from, and what labels it. */
+    private data class ChatRow(
+        val rowId: Long,
+        val jid: String,
+        val name: String?,
+        val subject: String?,
+    )
+
+    /**
+     * Column indices for a message query, resolved once per query.
+     *
+     * Shared by the feed and the handover: the two differ in which rows they
+     * select, not in what a row is, and a second reader would be a second
+     * place for the identity rules to drift.
+     */
     private class Columns(c: Cursor) {
         private val idCol = c.getColumnIndexOrThrow("id")
         private val keyIdCol = c.getColumnIndexOrThrow("key_id")
+        private val fromMeCol = c.getColumnIndexOrThrow("from_me")
         private val timestampCol = c.getColumnIndexOrThrow("timestamp")
         private val messageTypeCol = c.getColumnIndexOrThrow("message_type")
         private val textCol = c.getColumnIndexOrThrow("text_data")
@@ -724,31 +813,40 @@ class WhatsAppReaderService : RootService() {
         private val captionCol = c.getColumnIndexOrThrow("media_caption")
         private val filePathCol = c.getColumnIndexOrThrow("file_path")
 
-        fun read(c: Cursor): WhatsAppMessage {
+        /** *names* is empty on the path that does not read the contact database. */
+        fun read(c: Cursor, names: Map<String, String>): WhatsAppMessage {
             val chatServer = c.getString(chatServerCol)
             val chatJid = WhatsAppIdentity.resolve(
                 chatServer,
                 c.getString(chatJidCol),
                 c.getString(chatPhoneJidCol),
             )
+            val fromMe = c.getInt(fromMeCol) != 0
+            val sender = WhatsAppIdentity.sender(
+                fromMe = fromMe,
+                senderRowId = c.getLong(senderRowCol),
+                senderServer = c.getString(senderServerCol),
+                senderJid = c.getString(senderJidCol),
+                senderPhoneJid = c.getString(senderPhoneJidCol),
+                chatServer = chatServer,
+                chatJid = chatJid,
+            )
             return WhatsAppMessage(
                 id = c.getLong(idCol),
                 keyId = c.getString(keyIdCol),
-                fromMe = false,
+                fromMe = fromMe,
                 timestamp = c.getLong(timestampCol),
                 messageType = c.getInt(messageTypeCol),
                 text = c.getString(textCol)?.take(MAX_TEXT_CHARS),
                 chatJid = chatJid,
                 chatSubject = c.getString(chatSubjectCol),
-                senderJid = WhatsAppIdentity.sender(
-                    senderRowId = c.getLong(senderRowCol),
-                    senderServer = c.getString(senderServerCol),
-                    senderJid = c.getString(senderJidCol),
-                    senderPhoneJid = c.getString(senderPhoneJidCol),
-                    chatServer = chatServer,
-                    chatJid = chatJid,
-                ),
-                senderName = null,
+                senderJid = sender,
+                // Named by the identity the sender resolved to, not by the
+                // columns it came from. A one-to-one chat is made entirely of
+                // rows whose sender column is the sentinel, and looking those
+                // up would find nothing and leave every line of the transcript
+                // reading as a bare JID.
+                senderName = sender?.let(names::get),
                 mimeType = c.getString(mimeTypeCol),
                 caption = c.getString(captionCol)?.take(MAX_TEXT_CHARS),
                 filePath = c.getString(filePathCol),
@@ -832,6 +930,16 @@ class WhatsAppReaderService : RootService() {
          * cost two bytes each, so this leaves room for concurrent calls.
          */
         private const val MAX_BATCH_CHARS = 200_000
+
+        /**
+         * Ceiling on the text one handover carries, in the same currency.
+         *
+         * Half a batch's, and an order of magnitude under both the transaction
+         * buffer and the host's own byte cap, because the whole chat travels
+         * as one request that has to arrive rather than as a stream that can
+         * be resumed.
+         */
+        private const val MAX_HANDOVER_CHARS = 100_000
 
         /** Per row, what the parcel costs beyond the strings counted against the budget. */
         private const val ROW_OVERHEAD_CHARS = 64

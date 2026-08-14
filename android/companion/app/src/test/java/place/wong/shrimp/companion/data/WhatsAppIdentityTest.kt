@@ -31,6 +31,7 @@ class WhatsAppIdentityTest {
         assertEquals(
             ALICE_PHONE,
             WhatsAppIdentity.sender(
+                fromMe = false,
                 senderRowId = WhatsAppIdentity.IMPLIED_SENDER,
                 senderServer = null,
                 senderJid = null,
@@ -47,6 +48,7 @@ class WhatsAppIdentityTest {
         assertEquals(
             ALICE_PHONE,
             WhatsAppIdentity.sender(
+                fromMe = false,
                 senderRowId = WhatsAppIdentity.IMPLIED_SENDER,
                 senderServer = null,
                 senderJid = null,
@@ -63,6 +65,7 @@ class WhatsAppIdentityTest {
         // trusted sender.
         assertNull(
             WhatsAppIdentity.sender(
+                fromMe = false,
                 senderRowId = WhatsAppIdentity.IMPLIED_SENDER,
                 senderServer = null,
                 senderJid = null,
@@ -78,6 +81,41 @@ class WhatsAppIdentityTest {
         assertEquals(
             ALICE_PHONE,
             WhatsAppIdentity.sender(
+                fromMe = false,
+                senderRowId = 42L,
+                senderServer = "lid",
+                senderJid = ALICE_LID,
+                senderPhoneJid = ALICE_PHONE,
+                chatServer = "g.us",
+                chatJid = GROUP,
+            ),
+        )
+    }
+
+    @Test
+    fun anOutboundRowIsNobodysButTheUsers() {
+        // The sentinel means "the implied party", which on an outbound row is
+        // the user — so reading it as the chat would file the user's own words
+        // under the person they were sent to. Only the handover carries these;
+        // the feed drops them before they are read.
+        assertNull(
+            WhatsAppIdentity.sender(
+                fromMe = true,
+                senderRowId = WhatsAppIdentity.IMPLIED_SENDER,
+                senderServer = null,
+                senderJid = null,
+                senderPhoneJid = null,
+                chatServer = "s.whatsapp.net",
+                chatJid = ALICE_PHONE,
+            ),
+        )
+    }
+
+    @Test
+    fun anOutboundRowInAGroupIsNobodysEither() {
+        assertNull(
+            WhatsAppIdentity.sender(
+                fromMe = true,
                 senderRowId = 42L,
                 senderServer = "lid",
                 senderJid = ALICE_LID,

@@ -4,13 +4,18 @@ import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
 /**
- * One inbound WhatsApp message, as the host's ingest endpoint expects it.
+ * One WhatsApp message, as the host's endpoints expect it.
  *
  * The field names are the host's wire names in camelCase — [keyId] is
  * `key_id`, [chatSubject] is `chat_subject`, and so on. There is deliberately
  * no chat server field: the host derives the server from [chatJid], because
  * two fields that can disagree would let a row claim a direct server for a
  * group JID and get a group id accepted as a trusted sender.
+ *
+ * Both paths that read the store produce this. The feed narrows harder — it
+ * carries inbound rows only, and knows no display names — so several fields
+ * below are documented as what each path can put in them rather than as one
+ * fixed value.
  */
 @Parcelize
 data class WhatsAppMessage(
@@ -18,9 +23,13 @@ data class WhatsAppMessage(
     val id: Long,
     val keyId: String?,
     /**
-     * Always false. Outbound messages are the user's own words and never leave
-     * the phone, but the host gates on this field and an absent key is
-     * indistinguishable from a forged false one.
+     * `message.from_me`, as the column has it. The feed's query drops outbound
+     * rows, so on that path this is only ever false; a handover keeps them,
+     * because a transcript with the user's own side removed cannot be read and
+     * is useless for the obvious questions about it.
+     *
+     * Always sent, never left out: the host gates on this field and an absent
+     * key is indistinguishable from a denial.
      */
     val fromMe: Boolean,
     val timestamp: Long,
@@ -37,9 +46,14 @@ data class WhatsAppMessage(
      */
     val senderJid: String?,
     /**
-     * Null. Display names live in a second database that is copied only when
-     * the chat picker asks for it, so the message path has none; the host
-     * falls back to the JID.
+     * Who to call the sender on screen, or null where no name was read — the
+     * host then falls back to the JID. Display only, untrusted; it gates
+     * nothing.
+     *
+     * Names live in a second database, copied only when something asks for it.
+     * A handover asks, because a transcript of numbers is unreadable; the feed
+     * does not, because it is woken by every flicker of log activity and has
+     * to stay as cheap as finding out nothing happened.
      */
     val senderName: String?,
     val mimeType: String?,

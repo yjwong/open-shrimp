@@ -3,6 +3,7 @@ package place.wong.shrimp.companion.data;
 import place.wong.shrimp.companion.data.IWhatsAppWatcher;
 import place.wong.shrimp.companion.data.WhatsAppBatch;
 import place.wong.shrimp.companion.data.WhatsAppChats;
+import place.wong.shrimp.companion.data.WhatsAppHandover;
 
 /**
  * The uid-0 side of the WhatsApp message reader. Implemented by
@@ -76,4 +77,20 @@ interface IWhatsAppReader {
      * back silence, not the user's whole history.
      */
     WhatsAppBatch messagesAfter(long cursor, in long[] chatRowIds, int limit);
+
+    /**
+     * The tail of one chat, oldest first, for a handover the user asked for by
+     * name. Unlike messagesAfter this carries outbound rows too: a transcript
+     * missing one side cannot be read.
+     *
+     * Selection is by JID, not row id, for the same reason a saved selection
+     * is: row ids are renumbered by a backup restore. The chat need not be one
+     * that is being read continuously — a handover is consent for one chat
+     * once, and it neither consults the reading selection nor joins it.
+     *
+     * At most limit messages, and fewer when the transaction budget binds
+     * first; either way what is dropped is the oldest, and the returned
+     * truncated flag says older messages were left behind.
+     */
+    WhatsAppHandover handover(String jid, int limit);
 }
