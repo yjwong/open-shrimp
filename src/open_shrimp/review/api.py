@@ -76,6 +76,7 @@ def _hunk_to_dict(hunk: Hunk) -> dict[str, Any]:
         "staged": hunk.staged,
         "is_binary": hunk.is_binary,
         "is_empty": hunk.is_empty,
+        "is_lossy": hunk.is_lossy,
     }
 
 
@@ -307,6 +308,22 @@ async def stage_endpoint(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "Hunk not found. The diff may have changed — refresh to get current hunks."},
             status_code=409,
+        )
+
+    if hunk.is_lossy:
+        # The hunk's bytes did not survive the decode, so the patch rebuilt
+        # from it is not the file.  An untracked file applies against
+        # /dev/null and would succeed silently, writing mojibake into the
+        # index while the working tree keeps the original bytes.
+        return JSONResponse(
+            {
+                "error": (
+                    "This hunk contains bytes that are not valid UTF-8 and "
+                    "cannot be staged without corrupting the file. Stage it "
+                    "from a terminal instead."
+                )
+            },
+            status_code=422,
         )
 
     # Resolve the working directory.

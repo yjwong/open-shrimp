@@ -262,6 +262,31 @@ async def test_stage_hunk_not_found(transport) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stage_hunk_refuses_lossy_bytes(transport) -> None:
+    """A hunk whose bytes did not survive the decode must never reach git.
+
+    An untracked file's patch applies against /dev/null, so git would accept
+    it and write the replacement characters into the index while the working
+    tree keeps the original bytes.  The refusal has to happen here.
+    """
+    hunk = _make_hunk()
+    hunk.is_lossy = True
+    _hunk_cache[(CHAT_ID, "default", 0)] = [hunk]
+
+    with patch("open_shrimp.review.api.stage_hunk", new_callable=AsyncMock) as mock_stage:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/review/stage",
+                json={"hunk_id": "abc123", "chat_id": CHAT_ID},
+                headers=_auth_header(),
+            )
+
+    assert resp.status_code == 422
+    assert "UTF-8" in resp.json()["error"]
+    mock_stage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stage_hunk_stale(transport) -> None:
     """Staging a stale hunk returns 409 and invalidates cache."""
     hunk = _make_hunk()

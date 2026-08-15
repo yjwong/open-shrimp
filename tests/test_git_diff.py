@@ -1,7 +1,7 @@
 """Tests for git diff parsing and hunk extraction."""
 
 import os
-import resource
+import sys
 import textwrap
 
 import pytest
@@ -387,17 +387,103 @@ async def test_get_hunks_untracked_files(git_repo: str) -> None:
 
 @pytest.mark.asyncio
 async def test_get_hunks_untracked_non_utf8(git_repo: str) -> None:
-    """A latin-1 byte in an untracked file must not fail the whole request."""
+    """A latin-1 byte in an untracked file must not fail the whole request,
+    and must not reach a stageable hunk either — the bytes a patch rebuilt
+    from it would carry are U+FFFD, not the file's."""
     with open(os.path.join(git_repo, "cp1252.log"), "wb") as f:
         f.write(b"start \x97 end\n")
 
     result = await get_hunks(git_repo, include_untracked=True)
-    assert [h for h in result.hunks if h.file_path == "cp1252.log"]
+    hunks = [h for h in result.hunks if h.file_path == "cp1252.log"]
+    assert len(hunks) == 1
+    assert hunks[0].is_binary is True
+    assert hunks[0].lines == []
 
 
 @pytest.mark.asyncio
+async def test_get_hunks_marks_a_bad_byte_past_the_sample(git_repo: str) -> None:
+    """The 8KB sample is a heuristic; a bad byte beyond it still has to be
+    caught, or its hunk stays stageable."""
+    with open(os.path.join(git_repo, "late.log"), "wb") as f:
+        f.write(b"clean line\n" * 2000)
+        f.write(b"late \x97 byte\n")
+
+    result = await get_hunks(git_repo, include_untracked=True, limit=1000)
+    hunks = [h for h in result.hunks if h.file_path == "late.log"]
+    assert hunks, "the file passed the sample check and should have been diffed"
+    assert any(h.is_lossy for h in hunks)
+    # Only the hunk that actually carries the damage is disqualified.
+    for hunk in hunks:
+        carries = any("�" in line.content for line in hunk.lines)
+        assert hunk.is_lossy is carries
+
+
+@pytest.mark.asyncio
+async def test_a_multibyte_char_across_the_sample_boundary_is_still_text(
+    git_repo: str,
+) -> None:
+    """The sample cuts at a fixed offset, so it can land mid-character. That
+    is a truncated sequence, not an invalid one, and a UTF-8 file must not be
+    demoted to binary for it."""
+    # 8191 ASCII bytes then a 3-byte character: the sample ends one byte in.
+    body = ("a" * 8191) + "€" + "  tail\n"
+    with open(os.path.join(git_repo, "boundary.txt"), "w", encoding="utf-8") as f:
+        f.write(body)
+
+    result = await get_hunks(git_repo, include_untracked=True, limit=1000)
+    hunks = [h for h in result.hunks if h.file_path == "boundary.txt"]
+    assert hunks
+    assert not any(h.is_binary for h in hunks)
+    assert not any(h.is_lossy for h in hunks)
+
+
+def test_lossy_output_only_marks_the_hunks_that_carry_it() -> None:
+    """The flag says replacement happened in this output; the character says
+    where.  A clean hunk from the same diff stays stageable."""
+    diff = textwrap.dedent("""\
+        diff --git a/clean.txt b/clean.txt
+        --- a/clean.txt
+        +++ b/clean.txt
+        @@ -1,1 +1,1 @@
+        -old
+        +new
+        diff --git a/dirty.txt b/dirty.txt
+        --- a/dirty.txt
+        +++ b/dirty.txt
+        @@ -1,1 +1,1 @@
+        -old
+        +new � here
+        """)
+
+    hunks = parse_diff(diff, staged=False, lossy=True)
+
+    by_path = {h.file_path: h for h in hunks}
+    assert by_path["clean.txt"].is_lossy is False
+    assert by_path["dirty.txt"].is_lossy is True
+
+
+def test_a_clean_decode_never_marks_a_hunk() -> None:
+    """A genuine U+FFFD in a UTF-8 source file is just a character."""
+    diff = textwrap.dedent("""\
+        diff --git a/doc.md b/doc.md
+        --- a/doc.md
+        +++ b/doc.md
+        @@ -1,1 +1,1 @@
+        -old
+        +the replacement character is �
+        """)
+
+    assert parse_diff(diff, staged=False, lossy=False)[0].is_lossy is False
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="resource.setrlimit is POSIX-only"
+)
+@pytest.mark.asyncio
 async def test_get_hunks_untracked_many_files(git_repo: str) -> None:
     """Hundreds of untracked files must stay within the process fd limit."""
+    import resource
+
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
     try:
@@ -410,6 +496,32 @@ async def test_get_hunks_untracked_many_files(git_repo: str) -> None:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
     assert len([h for h in result.hunks if h.file_path.startswith("f")]) == 400
+
+
+def test_untracked_diff_survives_a_fresh_event_loop(git_repo: str) -> None:
+    """The process is not one loop for life — the menu-bar app builds a new
+    one per Start.  An asyncio primitive latches the loop it is first
+    contended on, so the fan-out's gate must not outlive a single call.
+    """
+    import asyncio
+
+    for i in range(40):
+        with open(os.path.join(git_repo, f"g{i}.txt"), "w") as f:
+            f.write(f"content {i}\n")
+
+    def run() -> HunkResult:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                get_hunks(git_repo, include_untracked=True, limit=1000)
+            )
+        finally:
+            loop.close()
+
+    first, second = run(), run()
+
+    assert len([h for h in first.hunks if h.file_path.startswith("g")]) == 40
+    assert len([h for h in second.hunks if h.file_path.startswith("g")]) == 40
 
 
 @pytest.mark.asyncio

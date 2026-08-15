@@ -1,6 +1,7 @@
 """Git diff parsing and hunk extraction for the review app."""
 
 import asyncio
+import codecs
 import hashlib
 import logging
 import re
@@ -72,6 +73,11 @@ class Hunk:
     (the superproject for ``repo_path == ""``, or relative to the
     submodule's worktree otherwise).  Patch reconstruction uses this
     in-repo path; the display path is ``repo_path + "/" + file_path``.
+
+    ``is_lossy`` marks a hunk whose lines carry U+FFFD standing in for bytes
+    git emitted that were not valid UTF-8.  It is displayable but not
+    stageable: a patch rebuilt from it would write the replacement characters
+    into the index while the working tree keeps the original bytes.
     """
 
     id: str
@@ -85,6 +91,7 @@ class Hunk:
     is_binary: bool
     is_empty: bool = False
     repo_path: str = ""
+    is_lossy: bool = False
 
 
 @dataclass
@@ -136,9 +143,14 @@ _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$"
 # Regex for binary file detection.
 _BINARY_RE = re.compile(r"^Binary files .* and .* differ$")
 _LARGE_FILE_RE = re.compile(r"^Large file \(.+\) skipped$")
+# What a byte that failed to decode became.  Its presence in a hunk drawn from
+# lossily-decoded output is what localises the damage to that hunk.
+_REPLACEMENT = "�"
 
 
-def parse_diff(diff_text: str, staged: bool, repo_path: str = "") -> list[Hunk]:
+def parse_diff(
+    diff_text: str, staged: bool, repo_path: str = "", lossy: bool = False
+) -> list[Hunk]:
     """Parse unified diff output into structured Hunk objects.
 
     Args:
@@ -147,6 +159,10 @@ def parse_diff(diff_text: str, staged: bool, repo_path: str = "") -> list[Hunk]:
         repo_path: Path of the repo that produced this diff, relative
             to the superproject.  Empty for the superproject; non-empty
             for submodules.
+        lossy: Whether *diff_text* came from bytes that failed a strict
+            UTF-8 decode.  Marks the hunks that actually carry a U+FFFD as
+            unstageable — the flag says replacement happened somewhere in
+            this output, and the character says where.
 
     Returns:
         List of parsed Hunk objects.
@@ -321,16 +337,20 @@ def parse_diff(diff_text: str, staged: bool, repo_path: str = "") -> list[Hunk]:
                     staged=staged,
                     is_binary=False,
                     repo_path=repo_path,
+                    is_lossy=lossy
+                    and any(_REPLACEMENT in line.content for line in hunk_lines),
                 ))
 
     return hunks
 
 
-async def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
+async def _run_git(cwd: str, *args: str) -> tuple[str, str, int, bool]:
     """Run a git command as an async subprocess.
 
     Returns:
-        Tuple of (stdout, stderr, returncode).
+        Tuple of (stdout, stderr, returncode, lossy), where ``lossy`` says
+        stdout was not valid UTF-8 and carries U+FFFD in place of bytes that
+        could not be decoded.
     """
     proc = await asyncio.create_subprocess_exec(
         "git", *args,
@@ -341,33 +361,56 @@ async def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
     stdout, stderr = await proc.communicate()
     # Diff output carries file contents verbatim, so it is only UTF-8 by
     # convention — a single latin-1 byte in a working-tree file must not take
-    # down the whole review.
+    # down the whole review.  What it must do is disqualify the affected hunks
+    # from being staged: replacement characters are not the file's bytes, and
+    # applying them writes a corrupted blob into the index.
+    lossy = False
+    try:
+        stdout.decode()
+    except UnicodeDecodeError:
+        lossy = True
     return (
         stdout.decode(errors="replace"),
         stderr.decode(errors="replace"),
         proc.returncode,
+        lossy,
     )
 
 
 async def _get_untracked_files(cwd: str) -> list[str]:
     """Get list of untracked files in the working directory."""
-    stdout, _, rc = await _run_git(cwd, "ls-files", "--others", "--exclude-standard")
+    stdout, _, rc, _ = await _run_git(
+        cwd, "ls-files", "--others", "--exclude-standard"
+    )
     if rc != 0:
         return []
     return [f for f in stdout.strip().split("\n") if f]
 
 
-def _is_binary_file(path: Path, sample_size: int = 8192) -> bool:
-    """Check if a file is binary by looking for null bytes in the first chunk.
+def _is_unstageable_as_text(path: Path, sample_size: int = 8192) -> bool:
+    """Whether *path* cannot survive a round trip through a text diff.
 
-    Uses the same heuristic as git: a file is binary if it contains a
-    null byte in the first ``sample_size`` bytes.
+    Two ways to fail.  A null byte in the first ``sample_size`` bytes is
+    git's own binary heuristic.  Bytes that are not valid UTF-8 are the other:
+    they reach a hunk as U+FFFD, and a patch rebuilt from that hunk stages
+    those replacement characters rather than the file's bytes.  Either way the
+    file gets the synthetic binary header, which is not stageable.
+
+    A truncated multi-byte sequence at the sample boundary is not a failure —
+    the incremental decoder holds it rather than rejecting it.
     """
     try:
         with open(path, "rb") as f:
-            return b"\x00" in f.read(sample_size)
+            sample = f.read(sample_size)
     except OSError:
         return False
+    if b"\x00" in sample:
+        return True
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(sample)
+    except UnicodeDecodeError:
+        return True
+    return False
 
 
 _MAX_UNTRACKED_DIFF_SIZE = 1_000_000  # 1 MB
@@ -375,25 +418,28 @@ _MAX_UNTRACKED_DIFF_SIZE = 1_000_000  # 1 MB
 # Each `git diff --no-index` child holds a handful of descriptors (two pipes
 # plus a pidfd), so an unbounded fan-out over the untracked-file list exhausts
 # the process fd limit on any tree with a few hundred untracked files.
-_UNTRACKED_DIFF_CONCURRENCY = asyncio.Semaphore(16)
+_UNTRACKED_DIFF_CONCURRENCY = 16
 
 
-async def _diff_untracked_files(cwd: str, files: list[str]) -> str:
+async def _diff_untracked_files(cwd: str, files: list[str]) -> tuple[str, bool]:
     """Generate unified diff output for untracked files without touching the index.
 
-    Binary files are detected cheaply (first 8KB null-byte check) and get
-    a synthetic diff header.  Large text files (>1 MB) are skipped with a
-    synthetic header to avoid reading gigabytes of data.  Remaining text
-    files are diffed via ``git diff --no-index`` as usual.
+    Files that cannot survive a text round trip are detected cheaply from an
+    8KB sample and get a synthetic binary header.  Large text files (>1 MB)
+    are skipped with a synthetic header to avoid reading gigabytes of data.
+    Remaining text files are diffed via ``git diff --no-index`` as usual.
+
+    Returns the combined diff and whether any of it decoded lossily — the
+    sample is a heuristic, so a bad byte past it still has to be caught here.
     """
     if not files:
-        return ""
+        return "", False
 
     text_files: list[str] = []
     skipped_diffs: list[str] = []
     for file_path in files:
         full_path = Path(cwd) / file_path
-        if _is_binary_file(full_path):
+        if _is_unstageable_as_text(full_path):
             skipped_diffs.append(
                 f"diff --git a/{file_path} b/{file_path}\n"
                 f"new file mode 100644\n"
@@ -409,22 +455,27 @@ async def _diff_untracked_files(cwd: str, files: list[str]) -> str:
         else:
             text_files.append(file_path)
 
+    # Created per call rather than at import: an asyncio primitive latches the
+    # running loop the first time it is contended, and this module outlives any
+    # one loop.  The bound that matters is per fan-out anyway.
+    gate = asyncio.Semaphore(_UNTRACKED_DIFF_CONCURRENCY)
+
     # Diff text files concurrently via git.
-    async def _diff_one(file_path: str) -> str:
-        async with _UNTRACKED_DIFF_CONCURRENCY:
-            stdout, _, rc = await _run_git(
+    async def _diff_one(file_path: str) -> tuple[str, bool]:
+        async with gate:
+            stdout, _, rc, lossy = await _run_git(
                 cwd, "diff", "--no-index", "--no-color", "-U3", "--",
                 "/dev/null", file_path,
             )
         # --no-index exits 1 when there are differences (not an error).
         if rc not in (0, 1):
             logger.warning("git diff --no-index failed for %s (rc=%d)", file_path, rc)
-            return ""
-        return stdout
+            return "", False
+        return stdout, lossy
 
     text_diffs = await asyncio.gather(*[_diff_one(f) for f in text_files])
-    all_diffs = skipped_diffs + [d for d in text_diffs if d]
-    return "\n".join(all_diffs)
+    all_diffs = skipped_diffs + [d for d, _ in text_diffs if d]
+    return "\n".join(all_diffs), any(lossy for _, lossy in text_diffs)
 
 
 async def _get_submodule_paths(cwd: str) -> list[str]:
@@ -434,7 +485,7 @@ async def _get_submodule_paths(cwd: str) -> list[str]:
     discovered.  Returns an empty list when there are no submodules or
     when the project doesn't use them at all (no ``.gitmodules``).
     """
-    stdout, _, rc = await _run_git(
+    stdout, _, rc, _ = await _run_git(
         cwd, "submodule", "foreach", "--recursive", "--quiet",
         "echo $displaypath",
     )
@@ -465,7 +516,7 @@ async def _get_hunks_for_repo(
         _run_git(cwd, "diff", "--cached", "--no-color", "-U3", *extra_args)
     )
 
-    untracked_task: asyncio.Task[str] | None = None
+    untracked_task: asyncio.Task[tuple[str, bool]] | None = None
     if include_untracked:
         untracked = await _get_untracked_files(cwd)
         if untracked:
@@ -473,12 +524,12 @@ async def _get_hunks_for_repo(
                 _diff_untracked_files(cwd, untracked)
             )
 
-    (unstaged_out, unstaged_err, unstaged_rc) = await unstaged_task
-    (staged_out, staged_err, staged_rc) = await staged_task
+    (unstaged_out, unstaged_err, unstaged_rc, unstaged_lossy) = await unstaged_task
+    (staged_out, staged_err, staged_rc, staged_lossy) = await staged_task
 
-    untracked_diff = ""
+    untracked_diff, untracked_lossy = "", False
     if untracked_task is not None:
-        untracked_diff = await untracked_task
+        untracked_diff, untracked_lossy = await untracked_task
 
     if unstaged_rc != 0:
         logger.warning("git diff failed in %s: %s", cwd, unstaged_err.strip())
@@ -487,10 +538,16 @@ async def _get_hunks_for_repo(
             "git diff --cached failed in %s: %s", cwd, staged_err.strip()
         )
 
-    unstaged = parse_diff(unstaged_out, staged=False, repo_path=repo_path)
-    staged = parse_diff(staged_out, staged=True, repo_path=repo_path)
+    unstaged = parse_diff(
+        unstaged_out, staged=False, repo_path=repo_path, lossy=unstaged_lossy
+    )
+    staged = parse_diff(
+        staged_out, staged=True, repo_path=repo_path, lossy=staged_lossy
+    )
     untracked_hunks = (
-        parse_diff(untracked_diff, staged=False, repo_path=repo_path)
+        parse_diff(
+            untracked_diff, staged=False, repo_path=repo_path, lossy=untracked_lossy
+        )
         if untracked_diff else []
     )
     return staged + unstaged + untracked_hunks
@@ -525,7 +582,7 @@ async def get_hunks(
     # Verify we're inside a git repository before running diff commands.
     # Without this check, git falls back to --no-index mode which doesn't
     # support --cached and produces confusing errors.
-    _, _, rc = await _run_git(cwd, "rev-parse", "--git-dir")
+    _, _, rc, _ = await _run_git(cwd, "rev-parse", "--git-dir")
     if rc != 0:
         raise ValueError(
             f"Directory is not inside a git repository: {cwd}"
