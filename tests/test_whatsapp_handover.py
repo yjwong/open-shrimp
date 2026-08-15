@@ -34,7 +34,7 @@ from open_shrimp.config import (
 )
 from open_shrimp.db import init_db
 from open_shrimp.events import manager as manager_module
-from open_shrimp.events.base import DeliveryOutcome, SupportsHandover
+from open_shrimp.events.base import Delivery, DeliveryOutcome, SupportsHandover
 from open_shrimp.events.sink import EventSink
 from open_shrimp.events.whatsapp import (
     MAX_TEXT_CHARS,
@@ -268,7 +268,11 @@ def test_adapter_advertises_the_handover_capability():
 @pytest.mark.asyncio
 async def test_handover_returns_the_delivery_outcome():
     outcome = DeliveryOutcome(
-        event_id=412, thread_id=77, pickup_thread_id=8891, deep_link="tg://x"
+        status=Delivery.DELIVERED,
+        event_id=412,
+        thread_id=77,
+        pickup_thread_id=8891,
+        deep_link="tg://x",
     )
     emitted = []
 
@@ -305,7 +309,7 @@ async def test_handover_does_not_touch_the_ingest_path():
 
     async def emit(event):
         ingested.append(event)
-        return DeliveryOutcome(1, 2, 3, "tg://x")
+        return DeliveryOutcome(Delivery.DELIVERED, 1, 2, 3, "tg://x")
 
     await adapter.start(emit)
     try:
@@ -644,6 +648,7 @@ def endpoint(tmp_path, monkeypatch):
     client, db, private_key, device_id = _paired_client(tmp_path)
     adapter = _StubAdapter(
         DeliveryOutcome(
+            status=Delivery.DELIVERED,
             event_id=412,
             thread_id=8891,
             pickup_thread_id=None,
@@ -766,9 +771,13 @@ def test_a_handed_over_chat_answers_with_its_topic(endpoint):
 
 def test_an_undelivered_chat_answers_502_rather_than_a_dead_link(endpoint):
     """Delivery is best-effort and never raises, so a failure arrives as an
-    empty outcome — the phone should say so rather than offer a link."""
+    outcome — the phone should say so rather than offer a link."""
     endpoint.adapter.outcome = DeliveryOutcome(
-        event_id=None, thread_id=None, pickup_thread_id=None, deep_link=None
+        status=Delivery.FAILED,
+        event_id=None,
+        thread_id=None,
+        pickup_thread_id=None,
+        deep_link=None,
     )
 
     response = endpoint.post(_body())

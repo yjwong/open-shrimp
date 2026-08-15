@@ -2,21 +2,38 @@
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
 from open_shrimp.events.types import Event
+
+
+class Delivery(Enum):
+    """What became of an emitted event.
+
+    DUPLICATE and FAILED both leave every destination field None, but they are
+    not interchangeable: a duplicate is already in a topic and is finished
+    with, while a failure never reached one.  A caller holding a source-side
+    watermark may retire the first and must not retire the second.
+    """
+
+    DELIVERED = auto()
+    DUPLICATE = auto()
+    FAILED = auto()
 
 
 @dataclass
 class DeliveryOutcome:
     """Where an emitted event landed.
 
-    Every field is optional because delivery is best-effort: the sink never
-    raises, and an event that failed outright reports Nones rather than an
-    exception.  Adapters that only push events ignore this; it exists for the
-    ones whose caller is a request that must answer with a destination.
+    Every destination field is optional because delivery is best-effort: the
+    sink never raises, and an event that was dropped reports Nones rather than
+    an exception.  ``status`` is what distinguishes the reasons — read it,
+    not the Nones.  Adapters that only push events ignore this; it exists for
+    the ones whose caller is a request that must answer with a destination.
     """
 
+    status: Delivery
     event_id: int | None  # persisted inbound_events row
     thread_id: int | None  # the source's inbox topic
     pickup_thread_id: int | None  # the spawned working topic, if any
@@ -69,6 +86,11 @@ class SupportsIngest(Protocol):
     highest source-side watermark the pusher may retire — which is not the
     same as the highest row emitted, since a row the adapter declines is still
     finished with — or None when the batch advanced nothing.
+
+    Never return an id whose row did not reach a topic. The pusher's watermark
+    is the only restart-durable dedup a passive source has, so a row retired
+    without being delivered is lost: there is no back-fill and it is never
+    offered again.
     """
 
     async def ingest(self, rows: list[dict]) -> int | None: ...

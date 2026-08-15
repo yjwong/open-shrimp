@@ -17,9 +17,11 @@ delivering through the feed unchanged.
 
 Restart-durable dedup for the feed lives on the phone, which advances its
 ``message._id`` watermark only after the host accepts a batch (the sink's own
-dedup is an in-memory LRU that a restart wipes).  So every row ``ingest``
-refuses must still be reported as accepted, or the phone re-sends it forever;
-it returns the highest id it is done with, not the highest it emitted.
+dedup is an in-memory LRU that a restart wipes).  That watermark is one-way,
+so ``ingest`` returns the highest id it is *done with* — which is neither the
+highest it emitted nor the highest it saw.  A row the allowlist declines is
+done with and must be acknowledged or the phone re-sends it forever; a row
+that failed to reach a topic is not, and acknowledging it loses the message.
 """
 
 import logging
@@ -27,7 +29,7 @@ from datetime import datetime
 from typing import Any
 
 from open_shrimp.config import EventSourceConfig
-from open_shrimp.events.base import DeliveryOutcome, EmitFn
+from open_shrimp.events.base import Delivery, DeliveryOutcome, EmitFn
 from open_shrimp.events.types import Event
 
 logger = logging.getLogger(__name__)
@@ -396,10 +398,17 @@ class WhatsAppAdapter:
         Every row must carry an integer ``id``; the upload endpoint enforces
         that before calling.
 
-        Rows the allowlist rejects still advance the watermark — refusing to
-        acknowledge one would stall the phone on it permanently.  The guard
-        around ``emit`` is defensive only: :meth:`EventSink.emit` handles its
-        own failures and does not raise, so a batch drains in full in practice.
+        The returned id is the phone's licence to forget, so it may only cover
+        rows that are genuinely finished with.  Three cases, and they are not
+        the same:
+
+        * a row the allowlist rejects never reaches ``emit`` and is done —
+          withholding it would stall the phone on that row permanently;
+        * a duplicate is already in a topic and is likewise done, which is
+          what lets a re-sent batch drain instead of deadlocking;
+        * a row that failed to deliver reached no topic, has no discoverable
+          event id and will never be offered again, so the batch stops at the
+          last id before it and the phone re-sends from there.
         """
         emit = self._emit
         if emit is None:
@@ -409,10 +418,17 @@ class WhatsAppAdapter:
             row_id = int(row["id"])
             if should_ingest(row):
                 try:
-                    await emit(build_event(self.name, row))
+                    outcome = await emit(build_event(self.name, row))
                 except Exception:
                     logger.exception(
                         "events[%s]: failed to emit message %d; batch stops here",
+                        self.name,
+                        row_id,
+                    )
+                    return cursor
+                if outcome.status is Delivery.FAILED:
+                    logger.warning(
+                        "events[%s]: message %d was not delivered; batch stops here",
                         self.name,
                         row_id,
                     )

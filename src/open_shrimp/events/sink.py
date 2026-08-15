@@ -24,7 +24,7 @@ from open_shrimp.db import (
     prune_inbound_events,
     set_inbound_event_delivery,
 )
-from open_shrimp.events.base import DeliveryOutcome
+from open_shrimp.events.base import Delivery, DeliveryOutcome
 from open_shrimp.events.pickup import (
     parse_context_directive,
     picked_up_markup,
@@ -208,7 +208,9 @@ class EventSink:
         The returned :class:`DeliveryOutcome` says where the event landed, for
         the callers whose own caller is a request waiting on a destination.
         An event that was dropped — duplicate, or a delivery failure — reports
-        Nones rather than raising.
+        Nones rather than raising, and its ``status`` says which of the two it
+        was: a caller holding a watermark may retire a duplicate and must not
+        retire a failure.
         """
         try:
             if self._is_duplicate(event):
@@ -217,7 +219,7 @@ class EventSink:
                     event.dedup_key,
                     event.source,
                 )
-                return DeliveryOutcome(None, None, None, None)
+                return DeliveryOutcome(Delivery.DUPLICATE, None, None, None, None)
             chunks = _render(event)
             thread_id = await self._resolve_topic(event.source)
             event_id = await self._persist(event, thread_id)
@@ -273,6 +275,7 @@ class EventSink:
             # if one was spawned, otherwise the inbox card itself.
             landed = pickup_thread_id if pickup_thread_id is not None else thread_id
             return DeliveryOutcome(
+                status=Delivery.DELIVERED,
                 event_id=event_id,
                 thread_id=thread_id,
                 pickup_thread_id=pickup_thread_id,
@@ -284,7 +287,7 @@ class EventSink:
             logger.exception(
                 "Failed to deliver event from source %r; dropping", event.source
             )
-            return DeliveryOutcome(None, None, None, None)
+            return DeliveryOutcome(Delivery.FAILED, None, None, None, None)
 
     async def _maybe_auto_pickup(
         self, event: Event, event_id: int, message_id: int

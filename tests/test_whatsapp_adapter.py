@@ -3,7 +3,7 @@
 import pytest
 
 from open_shrimp.config import EventSourceConfig
-from open_shrimp.events.base import SupportsIngest
+from open_shrimp.events.base import Delivery, DeliveryOutcome, SupportsIngest
 from open_shrimp.events.whatsapp import (
     MAX_TEXT_CHARS,
     WhatsAppAdapter,
@@ -34,6 +34,18 @@ def make_row(**overrides: object) -> dict:
 
 def make_source(name: str = "whatsapp") -> EventSourceConfig:
     return EventSourceConfig(name=name, type="whatsapp")
+
+
+def outcome(status: Delivery = Delivery.DELIVERED) -> DeliveryOutcome:
+    """What the sink hands back; only ``status`` is read by the adapter."""
+    landed = status is Delivery.DELIVERED
+    return DeliveryOutcome(
+        status=status,
+        event_id=7 if landed else None,
+        thread_id=42 if landed else None,
+        pickup_thread_id=None,
+        deep_link=None,
+    )
 
 
 # --- sender identity -------------------------------------------------------
@@ -193,7 +205,7 @@ async def test_stop_makes_the_adapter_inert():
     adapter = WhatsAppAdapter(make_source())
 
     async def emit(event):
-        pass
+        return outcome()
 
     await adapter.start(emit)
     await adapter.stop()
@@ -207,6 +219,7 @@ async def test_ingest_emits_in_id_order_and_returns_the_watermark():
 
     async def emit(event):
         seen.append(event)
+        return outcome()
 
     adapter = WhatsAppAdapter(make_source())
     await adapter.start(emit)
@@ -232,6 +245,7 @@ async def test_filtered_rows_still_advance_the_cursor():
 
     async def emit(event):
         seen.append(event)
+        return outcome()
 
     adapter = WhatsAppAdapter(make_source())
     await adapter.start(emit)
@@ -258,6 +272,7 @@ async def test_a_failed_emit_stops_the_batch_before_the_bad_row():
         if event.text == "boom":
             raise RuntimeError("sink is down")
         seen.append(event)
+        return outcome()
 
     adapter = WhatsAppAdapter(make_source())
     await adapter.start(emit)
@@ -274,6 +289,88 @@ async def test_a_failed_emit_stops_the_batch_before_the_bad_row():
 
     assert [e.text for e in seen] == ["fine"]
     assert cursor == 3001
+
+
+@pytest.mark.asyncio
+async def test_an_undelivered_row_stops_the_batch_at_the_row_before_it():
+    """The sink reports failure rather than raising, so the status is the
+    only signal that a row never reached a topic.  Retiring it would lose the
+    message outright: there is no back-fill and the phone never re-offers it."""
+    seen = []
+
+    async def emit(event):
+        if event.text == "dropped":
+            return outcome(Delivery.FAILED)
+        seen.append(event)
+        return outcome()
+
+    adapter = WhatsAppAdapter(make_source())
+    await adapter.start(emit)
+    try:
+        cursor = await adapter.ingest(
+            [
+                make_row(id=4001, key_id="A", text="first"),
+                make_row(id=4002, key_id="B", text="second"),
+                make_row(id=4003, key_id="C", text="dropped"),
+                make_row(id=4004, key_id="D", text="fourth"),
+                make_row(id=4005, key_id="E", text="fifth"),
+            ]
+        )
+    finally:
+        await adapter.stop()
+
+    assert [e.text for e in seen] == ["first", "second"]
+    assert cursor == 4002
+
+
+@pytest.mark.asyncio
+async def test_a_re_sent_batch_of_duplicates_drains_in_full():
+    """A duplicate is already in a topic and is finished with.  Stopping on it
+    would deadlock the feed, because every row of a retry is one."""
+    seen = []
+
+    async def emit(event):
+        seen.append(event)
+        return outcome(Delivery.DUPLICATE)
+
+    adapter = WhatsAppAdapter(make_source())
+    await adapter.start(emit)
+    try:
+        cursor = await adapter.ingest(
+            [
+                make_row(id=4003, key_id="C", text="dropped"),
+                make_row(id=4004, key_id="D", text="fourth"),
+                make_row(id=4005, key_id="E", text="fifth"),
+            ]
+        )
+    finally:
+        await adapter.stop()
+
+    assert len(seen) == 3
+    assert cursor == 4005
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_row_advances_even_when_a_later_row_fails():
+    """The two rules compose: the allowlist rejection is retired because it is
+    done with, and the undelivered row after it is not."""
+
+    async def emit(event):
+        return outcome(Delivery.FAILED)
+
+    adapter = WhatsAppAdapter(make_source())
+    await adapter.start(emit)
+    try:
+        cursor = await adapter.ingest(
+            [
+                make_row(id=5001, key_id="A", message_type=7),
+                make_row(id=5002, key_id="B", text="dropped"),
+            ]
+        )
+    finally:
+        await adapter.stop()
+
+    assert cursor == 5001
 
 
 @pytest.mark.asyncio

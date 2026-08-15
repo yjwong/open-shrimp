@@ -27,7 +27,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from open_shrimp.android_companion import authenticate_android_request
-from open_shrimp.events.base import SupportsHandover, SupportsIngest
+from open_shrimp.events.base import Delivery, SupportsHandover, SupportsIngest
 from open_shrimp.events.manager import get_active_adapter_of_type
 from open_shrimp.review.auth import AuthError, read_json_body
 
@@ -140,9 +140,10 @@ async def upload_whatsapp_handover_endpoint(request: Request) -> JSONResponse:
         outcome.event_id,
         outcome.thread_id,
     )
-    if outcome.thread_id is None:
+    if outcome.status is not Delivery.DELIVERED:
         # Delivery is best-effort and never raises, so a failure arrives as an
-        # empty outcome.  Say so rather than hand back a link to nothing.
+        # outcome rather than an exception.  Say so rather than hand back a
+        # link to nothing.
         return JSONResponse(
             {
                 "error": "the chat could not be delivered to a topic",
