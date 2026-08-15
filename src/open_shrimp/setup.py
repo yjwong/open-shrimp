@@ -203,20 +203,31 @@ def _prompt_context() -> tuple[str, dict[str, Any]]:
     else:
         model = _prompt("Custom model name")
 
-    # Resolve the directory so we store an absolute path.
-    resolved_dir = str(Path(directory).expanduser().resolve())
+    return name, build_context_dict(directory, description, model)
 
-    context_dict: dict[str, Any] = {
-        "directory": resolved_dir,
+
+def build_context_dict(
+    directory: str,
+    description: str,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Assemble one context entry.
+
+    Shared by every front end that can create a first config — this terminal
+    wizard, the macOS wizard, and ``openshrimp config write`` — so the shape
+    cannot drift between them.
+    """
+    context: dict[str, Any] = {
+        "directory": str(Path(directory).expanduser().resolve()),
         "description": description,
         "allowed_tools": ["LSP", "AskUserQuestion"],
     }
     if model is not None:
-        context_dict["model"] = model
-    return name, context_dict
+        context["model"] = model
+    return context
 
 
-def _build_config_dict(
+def build_config_dict(
     token: str,
     user_id: int,
     context_name: str,
@@ -257,7 +268,7 @@ def run_setup_wizard(config_path: Path) -> None:
     user_id = _prompt_user_id()
     context_name, context = _prompt_context()
 
-    config_dict = _build_config_dict(token, user_id, context_name, context)
+    config_dict = build_config_dict(token, user_id, context_name, context)
 
     from open_shrimp.config import write_config
 

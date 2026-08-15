@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
+from collections.abc import Awaitable
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from open_shrimp.bot import run_bot
 from open_shrimp.config import DEFAULT_CONFIG_PATH, load_config
 from open_shrimp.db import init_db
-from open_shrimp.paths import init_paths
+from open_shrimp.paths import init_paths, log_dir
 from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
 
 logger = logging.getLogger("open_shrimp")
@@ -126,41 +130,84 @@ def _install_signal_handlers(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OpenShrimp - Telegram bot for remote Claude access")
-    parser.add_argument(
-        "--config",
-        default=str(DEFAULT_CONFIG_PATH),
-        help=f"Path to config file (default: {DEFAULT_CONFIG_PATH})",
-    )
+    _add_config_arg(parser, default=str(DEFAULT_CONFIG_PATH))
+
+    # Every subcommand accepts --config on either side of the subcommand name.
+    # The shared parent suppresses its default so an unset subcommand value
+    # cannot overwrite one given before the subcommand name.
+    common = argparse.ArgumentParser(add_help=False)
+    _add_config_arg(common, default=argparse.SUPPRESS)
 
     subparsers = parser.add_subparsers(dest="subcommand")
 
-    sub_install = subparsers.add_parser(
+    subparsers.add_parser(
         "install",
+        parents=[common],
         help="Install OpenShrimp as a system service (systemd/launchd)",
-    )
-    sub_install.add_argument(
-        "--config",
-        dest="config",
-        default=str(DEFAULT_CONFIG_PATH),
-        help=f"Path to config file (default: {DEFAULT_CONFIG_PATH})",
     )
 
     subparsers.add_parser(
         "uninstall",
+        parents=[common],
         help="Remove the OpenShrimp system service",
     )
 
     subparsers.add_parser(
         "doctor",
+        parents=[common],
         help="Check optional component availability",
     )
 
     subparsers.add_parser(
         "update",
+        parents=[common],
         help="Check for and apply updates",
     )
 
+    sub_models = subparsers.add_parser(
+        "models",
+        parents=[common],
+        help="List the models a context may be pinned to",
+    )
+    sub_models.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON (for a setup UI)",
+    )
+
+    sub_config = subparsers.add_parser(
+        "config",
+        parents=[common],
+        help="Inspect or write the config file",
+    )
+    config_subs = sub_config.add_subparsers(dest="config_command")
+    sub_config_write = config_subs.add_parser(
+        "write",
+        parents=[common],
+        help="Write a fresh config from a JSON description on stdin",
+    )
+    sub_config_write.add_argument(
+        "--json",
+        metavar="PATH",
+        default="-",
+        help="File to read the JSON description from ('-' for stdin, the default)",
+    )
+    sub_config_write.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing config file",
+    )
+
     return parser.parse_args()
+
+
+def _add_config_arg(parser: argparse.ArgumentParser, *, default: object) -> None:
+    parser.add_argument(
+        "--config",
+        dest="config",
+        default=default,
+        help=f"Path to config file (default: {DEFAULT_CONFIG_PATH})",
+    )
 
 
 def _create_http_server(
@@ -212,6 +259,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     logger.info("Contexts: %s", ", ".join(config.contexts.keys()))
 
     init_paths(config.instance_name)
+    _attach_file_logging()
 
     db = await init_db()
 
@@ -269,6 +317,28 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         )
         mcp_proxy = None
 
+    # Degrade like the MCP proxy above: losing the channel costs the UI its
+    # controls, not the user their bot.
+    from open_shrimp.control import ControlServer, CoreStatus, build_methods
+
+    core_status = CoreStatus(
+        state="starting",
+        config_path=config_path,
+        instance_name=config.instance_name,
+        contexts=list(config.contexts),
+    )
+    control = ControlServer(
+        build_methods(core_status), instance_name=config.instance_name
+    )
+    try:
+        await control.start()
+    except Exception:
+        logger.exception(
+            "Control channel failed to start — a supervising UI will not be "
+            "able to read status or stop this process gracefully.",
+        )
+        control = None
+
     from open_shrimp.security_key.sessions import SecurityKeySessionRegistry
     from open_shrimp.port_relay.sessions import PortRelaySessionRegistry
 
@@ -284,6 +354,12 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         port_relay_registry=port_relay_registry,
     )
 
+    def _bot_ready(username: str) -> None:
+        core_status.state = "running"
+        core_status.bot_username = username or None
+        if control is not None:
+            control.broadcast("state", {"state": "running", "bot_username": username})
+
     bot_task = asyncio.create_task(
         run_bot(
             config, db,
@@ -292,35 +368,259 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
             mcp_proxy=mcp_proxy,
             security_key_registry=security_key_registry,
             port_relay_registry=port_relay_registry,
+            on_ready=_bot_ready,
         )
     )
+    def _bot_finished(task: asyncio.Task) -> None:
+        # A bot that dies on its own — a rejected token, say — must unwind the
+        # process the way a signal would.  Nothing else sets the stop event, so
+        # without this the core sits alive indefinitely: HTTP still serving,
+        # sandbox guests still up, and no exit code for whoever started it.
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        core_status.state = "error"
+        core_status.error = f"{type(exc).__name__}: {exc}"
+        if control is not None:
+            control.broadcast("state", {"state": "error", "error": core_status.error})
+        stop_event.set()
+
+    bot_task.add_done_callback(_bot_finished)
+
     http_task = asyncio.create_task(http_server.serve())
 
     await stop_event.wait()
     logger.info("Shutting down...")
 
+    # Tell any supervising UI before the process goes away, so a stop it did
+    # not initiate — /restart from Telegram, or an auto-update — reads as a
+    # restart rather than a crash.  The re-exec changes the pid, so the UI
+    # must reconnect to the endpoint rather than track the child.
+    core_status.state = "stopping"
+    if control is not None:
+        control.broadcast(
+            "stopping", {"restarting": _restart_requested}
+        )
+
     # Signal uvicorn to exit gracefully (avoids CancelledError in lifespan).
     http_server.should_exit = True
 
     bot_task.cancel()
+    # A task that died on its own rather than being cancelled — a rejected
+    # token, say — must not skip the rest of teardown.  The proxy, the tunnel,
+    # the sandbox guests and the control endpoint all still need releasing, so
+    # hold the failure and re-raise once cleanup has run.
+    task_failure: BaseException | None = None
     for task in (bot_task, http_task):
         try:
             await task
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            logger.exception("Task failed before shutdown")
+            if task_failure is None:
+                task_failure = exc
+
+    # Each step is isolated: a failure tearing one down must not skip the
+    # rest, and must not replace the failure that actually killed the bot —
+    # an operator debugging a rejected token should not be shown a tunnel
+    # error instead.
+    async def _release(what: str, coro: "Awaitable[Any]") -> None:
+        try:
+            await coro
+        except Exception:
+            logger.exception("Failed to stop %s during shutdown", what)
+
+    if control is not None:
+        await _release("the control channel", control.shutdown())
 
     # Stop the MCP proxy and its stdio server processes.
     if mcp_proxy is not None:
-        await mcp_proxy.shutdown()
+        await _release("the MCP proxy", mcp_proxy.shutdown())
 
     # Stop the tunnel if we started one.
     if tunnel_proc is not None:
         from open_shrimp.tunnel import stop_tunnel
 
-        await stop_tunnel(tunnel_proc)
+        await _release("the tunnel", stop_tunnel(tunnel_proc))
 
-    await db.close()
+    await _release("the database", db.close())
     logger.info("Shutdown complete")
+
+    # Surfaced only now, so the CLI still exits non-zero on a boot failure.
+    if task_failure is not None:
+        raise task_failure
+
+
+def _attach_file_logging() -> None:
+    """Log to a rotating file on Windows.
+
+    Elsewhere the process log already has a home — the journal under systemd,
+    the app's own handler under the macOS menu bar app — but a Windows core
+    launched by a tray app or a logon task writes to a console nobody sees.
+    Owning the file here rather than in the supervisor means the log survives
+    however the core was started.
+    """
+    if sys.platform != "win32":
+        return
+
+    root = logging.getLogger()
+    if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        return
+
+    try:
+        directory = log_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            directory / "openshrimp.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.exception("Could not open the log file — logging to stderr only")
+        return
+
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    root.addHandler(handler)
+    logger.info("Logging to %s", directory)
+
+
+def _run_models(*, json_output: bool, config_path: str) -> int:
+    """List the models a context may be pinned to.
+
+    Exists so a setup UI outside Python can populate its model picker without
+    hardcoding the catalog or importing the package.
+
+    Resolved through the configured backend rather than a fixed catalog:
+    OpenCode wants provider-qualified ids, so offering Claude aliases there
+    would let a setup UI write a config the backend rejects on every turn.
+    Falls back to the default backend's catalog when there is no config yet,
+    which is the first-run case.
+    """
+    from open_shrimp.backend import get_backend
+    from open_shrimp.config import load_config
+
+    try:
+        backend = get_backend(load_config(config_path))
+    except Exception:
+        from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
+    else:
+        MODEL_CHOICES = tuple(backend.model_catalog())
+
+    if json_output:
+        json.dump(
+            {
+                "models": [
+                    {
+                        "alias": choice.alias,
+                        "model_id": choice.model_id,
+                        "description": choice.description,
+                    }
+                    for choice in MODEL_CHOICES
+                ]
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    else:
+        for choice in MODEL_CHOICES:
+            print(f"{choice.alias:<8} {choice.model_id:<20} {choice.description}")
+    return 0
+
+
+def _run_config_write(args: argparse.Namespace) -> int:
+    """Write a fresh config from a JSON description.
+
+    The first-run path for any front end that cannot call into Python — the
+    terminal wizard is unreachable there because it needs a tty, and the
+    config HTTP API needs a bot that is already running.  Keeping the schema
+    on this side is what stops a second implementation from drifting.
+
+    Reads ``{token, user_id, context_name, directory, description, model?}``
+    and reports the outcome as JSON so a caller can parse a failure rather
+    than scrape it.
+    """
+    from open_shrimp.config import _validate_raw, write_config
+    from open_shrimp.setup import build_config_dict, build_context_dict
+
+    def _fail(message: str) -> int:
+        json.dump({"ok": False, "error": message}, sys.stdout)
+        sys.stdout.write("\n")
+        return 1
+
+    try:
+        raw = sys.stdin.read() if args.json == "-" else Path(args.json).read_text("utf-8")
+    except OSError as exc:
+        return _fail(f"could not read the JSON description: {exc}")
+    except UnicodeDecodeError:
+        # Windows PowerShell 5.1's Out-File writes UTF-16 by default, so this
+        # is a realistic way for a GUI to hand us a file we cannot read.  It
+        # must still come back as parsable JSON, not a traceback.
+        return _fail("the JSON description must be UTF-8")
+
+    try:
+        spec = json.loads(raw)
+    except ValueError as exc:
+        return _fail(f"invalid JSON: {exc}")
+    if not isinstance(spec, dict):
+        return _fail("the JSON description must be an object")
+
+    missing = [
+        key
+        for key in ("token", "user_id", "context_name", "directory")
+        if not spec.get(key)
+    ]
+    if missing:
+        return _fail(f"missing required field(s): {', '.join(missing)}")
+
+    try:
+        user_id = int(spec["user_id"])
+    except (TypeError, ValueError):
+        return _fail("user_id must be a number")
+
+    # The terminal wizard checks this before writing; without it here a setup
+    # UI reports success, the bot boots fine, and every agent turn then fails
+    # on a working directory that does not exist — far from the UI that could
+    # still have corrected it.
+    directory = Path(str(spec["directory"])).expanduser()
+    if not directory.is_dir():
+        return _fail(f"directory does not exist: {directory}")
+
+    config_path = Path(args.config)
+    if config_path.exists() and not args.force:
+        return _fail(f"{config_path} already exists — pass --force to overwrite")
+
+    config_dict = build_config_dict(
+        str(spec["token"]),
+        user_id,
+        str(spec["context_name"]),
+        build_context_dict(
+            str(spec["directory"]),
+            str(spec.get("description") or "Default context"),
+            spec.get("model") or None,
+        ),
+    )
+
+    # write_config does not validate, so a bad description would otherwise be
+    # written out and only rejected at the next boot.
+    try:
+        _validate_raw(config_dict)
+    except ValueError as exc:
+        return _fail(str(exc))
+
+    try:
+        write_config(config_path, config_dict)
+    except OSError as exc:
+        return _fail(f"could not write {config_path}: {exc}")
+
+    json.dump({"ok": True, "config_path": str(config_path)}, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
 
 
 async def _async_main(config_path: str) -> None:
@@ -366,6 +666,15 @@ def main() -> None:
 
         sys.exit(asyncio.run(run_update_cli()))
 
+    if args.subcommand == "models":
+        sys.exit(_run_models(json_output=args.json, config_path=args.config))
+
+    if args.subcommand == "config":
+        if args.config_command == "write":
+            sys.exit(_run_config_write(args))
+        print("usage: openshrimp config write [--json PATH] [--force]", file=sys.stderr)
+        sys.exit(2)
+
     # Offer guided setup when config is missing and running interactively.
     config_path = Path(args.config)
     if not config_path.exists():
@@ -386,10 +695,18 @@ def main() -> None:
             )
             sys.exit(1)
 
+    failed = False
     try:
         asyncio.run(_async_main(args.config))
     except KeyboardInterrupt:
         pass
+    except Exception:
+        # A failure must not swallow a pending restart.  /restart and the
+        # auto-updater both request one before the core unwinds, so letting
+        # this propagate would leave the bot down until someone started it
+        # by hand — while still reporting the failure and the exit code.
+        logger.exception("Bot exited with an error")
+        failed = True
 
     if _restart_requested:
         logger.info("Re-executing process for restart...")
@@ -408,6 +725,9 @@ def main() -> None:
                 _reexec([uv, "run", "openshrimp"] + sys.argv[1:])
             else:
                 _reexec([sys.executable] + sys.argv)
+
+    if failed:
+        sys.exit(1)
 
 
 def _reexec(argv: list[str]) -> None:

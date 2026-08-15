@@ -14,20 +14,24 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from platformdirs import user_data_path
+from platformdirs import user_data_path, user_log_path
 
 _instance_name: str | None = None
 _data_dir: Path | None = None
 _build_log_dir: Path | None = None
+_log_dir: Path | None = None
 
 
 def init_paths(instance_name: str | None = None) -> None:
     """Initialise the global instance name.  Must be called once at startup."""
-    global _instance_name, _data_dir, _build_log_dir
+    global _instance_name, _data_dir, _build_log_dir, _log_dir
     _instance_name = instance_name
 
     base = user_data_path("openshrimp")
     _data_dir = base / "instances" / instance_name if instance_name else base
+
+    log_base = user_log_path("openshrimp")
+    _log_dir = log_base / "instances" / instance_name if instance_name else log_base
 
     tmp = Path(tempfile.gettempdir())
     _build_log_dir = (
@@ -48,6 +52,17 @@ def data_dir() -> Path:
 def db_path() -> Path:
     """Path to the SQLite database."""
     return data_dir() / "sessions.db"
+
+
+def log_dir() -> Path:
+    """Directory for the rotating process log, scoped by instance name.
+
+    Instance-scoped so two cores never rotate the same file underneath each
+    other.
+    """
+    if _log_dir is None:
+        raise RuntimeError("paths.init_paths() has not been called yet")
+    return _log_dir
 
 
 def build_log_dir() -> Path:

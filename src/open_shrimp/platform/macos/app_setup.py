@@ -8,7 +8,6 @@ selection.  Replaces the previous chain of ``rumps.Window`` alerts.
 from __future__ import annotations
 
 import logging
-import random
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -178,24 +177,14 @@ def _build_config_dict(
     model: str | None,
 ) -> dict[str, Any]:
     """Assemble the config dictionary for YAML serialisation."""
-    context: dict[str, Any] = {
-        "directory": directory,
-        "description": description,
-        "allowed_tools": ["LSP", "AskUserQuestion"],
-    }
-    if model is not None:
-        context["model"] = model
+    from open_shrimp.setup import build_config_dict, build_context_dict
 
-    return {
-        "telegram": {"token": token},
-        "allowed_users": [user_id],
-        "contexts": {context_name: context},
-        "default_context": context_name,
-        "review": {
-            "port": random.randint(49152, 65535),
-            "tunnel": "cloudflared",
-        },
-    }
+    return build_config_dict(
+        token,
+        user_id,
+        context_name,
+        build_context_dict(directory, description, model),
+    )
 
 
 # ── Custom Window ──

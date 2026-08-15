@@ -56,6 +56,12 @@ External sources deliver into per-source forum topics with **zero LLM processing
 
 **Untrusted-content rule (load-bearing, applies everywhere):** agent prompts never carry untrusted content — not even provider-delivered event text. Prompts reference events by id; the agent fetches content itself via the `read_inbound_event` MCP tool, which returns it wrapped in an `<inbound-event untrusted="true">` envelope as a tool result.
 
+### Control channel (`control/`)
+
+Lets a UI process outside Python supervise the core: `status`, `shutdown`, `restart`, plus pushed `state`/`stopping` events. Newline-delimited JSON over a Windows named pipe or a Unix domain socket, chosen by platform behind one `ControlServer`; the address is derived from the instance name alone (`endpoint_address`) so no discovery file is needed. Authorisation is the OS's — pipe DACL, or a `0600` socket in a `0700` directory — never a token, and the channel must never be mounted on the main Starlette app, which is published through a tunnel. It exists because `request_shutdown()` is in-process only and `os.kill(pid, SIGTERM)` on Windows is an unconditional `TerminateProcess` that skips shutdown and strands the sandbox guest; `SIGBREAK` is bound to the debug dump, not to stopping. Two cores sharing an instance name must refuse to start rather than both serve — asyncio's pipes allow unlimited instances of a name, so the collision is otherwise silent on Windows. Process control only: it carries no conversation or event content.
+
+Front ends that must work while the core is *stopped* use the CLI instead — `openshrimp config write --json -` and `openshrimp models --json`. The config schema lives only in Python; a GUI collects values and pipes JSON in.
+
 ## Config
 
 Runtime config: `~/.config/openshrimp/config.yaml` (schema documented inline in `config.example.yaml`). `ANTHROPIC_API_KEY` comes from the environment, not config. Session/container state under `~/.config/openshrimp/`.

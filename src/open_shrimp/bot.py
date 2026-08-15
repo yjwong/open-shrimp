@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, Update
 from telegram.ext import (
@@ -341,8 +341,13 @@ async def run_bot(
     mcp_proxy: "Any | None" = None,
     security_key_registry: "Any | None" = None,
     port_relay_registry: "Any | None" = None,
+    on_ready: "Callable[[str], None] | None" = None,
 ) -> None:
-    """Start the bot with long polling."""
+    """Start the bot with long polling.
+
+    *on_ready* is invoked with the bot's username once polling is live, so a
+    supervisor can distinguish "still starting" from "answering messages".
+    """
     # Resolve the agent backend once at startup and install it as the process
     # default; warm every per-context override so construction errors surface
     # here and command registration unions their capabilities.
@@ -450,6 +455,12 @@ async def run_bot(
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     logger.info("Bot is running")
+
+    if on_ready is not None:
+        try:
+            on_ready(app.bot_data.get("bot_username", ""))
+        except Exception:
+            logger.exception("on_ready callback failed")
 
     # If we were restarted via /restart or auto-update, send a confirmation.
     import os as _os
