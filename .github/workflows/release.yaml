@@ -66,8 +66,8 @@ jobs:
           # separate tagging workflow that would need a PAT to hand off.
           git push origin "$tag"
 
-  build-sdist:
-    name: Build sdists
+  build-dists:
+    name: Build sdists and wheels
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -104,28 +104,29 @@ jobs:
         working-directory: web/pdf-app
         run: npm ci && npm run build
 
-      - name: Build open-shrimp sdist
-        run: uv build --sdist
+      # Both: PyApp embeds the wheel, and the release publishes the sdist.
+      - name: Build open-shrimp distributions
+        run: uv build
 
-      - name: Build moonshine-stt sdist
+      - name: Build moonshine-stt distributions
         working-directory: moonshine-stt
-        run: uv build --sdist
+        run: uv build
 
-      - name: Upload open-shrimp sdist
+      - name: Upload open-shrimp distributions
         uses: actions/upload-artifact@v7
         with:
-          name: sdist-openshrimp
-          path: dist/*.tar.gz
+          name: dist-openshrimp
+          path: dist/*
 
-      - name: Upload moonshine-stt sdist
+      - name: Upload moonshine-stt distributions
         uses: actions/upload-artifact@v7
         with:
-          name: sdist-moonshine-stt
-          path: moonshine-stt/dist/*.tar.gz
+          name: dist-moonshine-stt
+          path: moonshine-stt/dist/*
 
   build-binary:
     name: Build ${{ matrix.artifact }}
-    needs: build-sdist
+    needs: build-dists
     runs-on: ${{ matrix.os }}
     # Every step below is a POSIX shell script (realpath, $GITHUB_OUTPUT
     # appends, `if [ ... ]`); pwsh is the Windows runner's default, so pin
@@ -140,21 +141,21 @@ jobs:
           # open-shrimp
           - os: ubuntu-latest
             artifact: openshrimp-linux-x86_64
-            sdist_artifact: sdist-openshrimp
+            dist_artifact: dist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
             features: "libvirt"
           - os: ubuntu-24.04-arm
             artifact: openshrimp-linux-aarch64
-            sdist_artifact: sdist-openshrimp
+            dist_artifact: dist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
             features: "libvirt"
           - os: macos-latest
             artifact: openshrimp-macos-aarch64
-            sdist_artifact: sdist-openshrimp
+            dist_artifact: dist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
           - os: macos-latest
             artifact: openshrimp-macos-x86_64
-            sdist_artifact: sdist-openshrimp
+            dist_artifact: dist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
             rust_target: x86_64-apple-darwin
           # The `hcs` extra is what makes the Windows build worth shipping:
@@ -164,39 +165,39 @@ jobs:
           # so it appears on no other entry.
           - os: windows-latest
             artifact: openshrimp-windows-x86_64.exe
-            sdist_artifact: sdist-openshrimp
+            dist_artifact: dist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
             features: "hcs"
           # moonshine-stt
           - os: ubuntu-latest
             artifact: moonshine-stt-linux-x86_64
-            sdist_artifact: sdist-moonshine-stt
+            dist_artifact: dist-moonshine-stt
             exec_code: "from moonshine_stt.main import main; main()"
           - os: ubuntu-24.04-arm
             artifact: moonshine-stt-linux-aarch64
-            sdist_artifact: sdist-moonshine-stt
+            dist_artifact: dist-moonshine-stt
             exec_code: "from moonshine_stt.main import main; main()"
           - os: macos-latest
             artifact: moonshine-stt-macos-aarch64
-            sdist_artifact: sdist-moonshine-stt
+            dist_artifact: dist-moonshine-stt
             exec_code: "from moonshine_stt.main import main; main()"
           - os: macos-latest
             artifact: moonshine-stt-macos-x86_64
-            sdist_artifact: sdist-moonshine-stt
+            dist_artifact: dist-moonshine-stt
             exec_code: "from moonshine_stt.main import main; main()"
             rust_target: x86_64-apple-darwin
           - os: windows-latest
             artifact: moonshine-stt-windows-x86_64.exe
-            sdist_artifact: sdist-moonshine-stt
+            dist_artifact: dist-moonshine-stt
             exec_code: "from moonshine_stt.main import main; main()"
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download sdist
+      - name: Download distributions
         uses: actions/download-artifact@v8
         with:
-          name: ${{ matrix.sdist_artifact }}
+          name: ${{ matrix.dist_artifact }}
           path: dist
 
       - name: Install libvirt development headers
@@ -217,10 +218,10 @@ jobs:
           key: ${{ runner.os }}-cargo-pyapp-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-pyapp-
 
-      - name: Get sdist filename
-        id: sdist
+      - name: Get wheel filename
+        id: wheel
         run: |
-          FILE=$(realpath dist/*.tar.gz)
+          FILE=$(realpath dist/*.whl)
           # PyApp is a native program: on Windows it cannot open the
           # `/d/a/...` path git-bash's realpath hands back.
           if [ "$RUNNER_OS" = "Windows" ]; then FILE=$(cygpath -w "$FILE"); fi
@@ -228,7 +229,7 @@ jobs:
 
       - name: Build with PyApp
         env:
-          PYAPP_PROJECT_PATH: ${{ steps.sdist.outputs.filename }}
+          PYAPP_PROJECT_PATH: ${{ steps.wheel.outputs.filename }}
           PYAPP_PROJECT_FEATURES: ${{ matrix.features || '' }}
           PYAPP_PYTHON_VERSION: "3.12"
           PYAPP_EXEC_CODE: ${{ matrix.exec_code }}
@@ -791,7 +792,7 @@ jobs:
 
   build-macos-app:
     name: Build macOS .app
-    needs: [build-sdist, version]
+    needs: [build-dists, version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
