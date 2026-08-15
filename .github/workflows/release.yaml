@@ -4,12 +4,68 @@ on:
   push:
     tags:
       - "v*"
+    # Bumping VERSION on master *is* cutting a release, so the tag is never
+    # typed a second time.  It must not diverge: updater.py compares a
+    # release's tag against the version compiled into the binary, so a
+    # mismatch offers every user an update that never lands.
+    branches:
+      - master
+    paths:
+      - VERSION
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  version:
+    # The single place the release version is decided.
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="$(tr -d '[:space:]' < VERSION)"
+          fi
+          # An MSI version is four numeric fields and the Windows job appends
+          # `.0`, so anything else fails there instead of here — long after
+          # every other artifact has been built.
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::VERSION must be three numeric parts, got '$version'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag
+        if: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.resolve.outputs.tag }}'
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::$tag already exists — bump VERSION to cut a release"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          # A tag pushed with GITHUB_TOKEN does not start another workflow run,
+          # which is exactly why the build happens here rather than in a
+          # separate tagging workflow that would need a PAT to hand off.
+          git push origin "$tag"
+
   build-sdist:
     name: Build sdists
     runs-on: ubuntu-latest
@@ -735,7 +791,7 @@ jobs:
 
   build-macos-app:
     name: Build macOS .app
-    needs: build-sdist
+    needs: [build-sdist, version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -847,7 +903,7 @@ jobs:
             --icon "OpenShrimp.app" 150 200 \
             --app-drop-link 450 200 \
             --no-internet-enable \
-            "dist/OpenShrimp-$(cat VERSION).dmg" \
+            "dist/OpenShrimp-${{ needs.version.outputs.version }}.dmg" \
             "dist/OpenShrimp.app"
 
       - name: Sign, notarize, and staple DMG
@@ -858,7 +914,7 @@ jobs:
           API_ISSUER_ID: ${{ secrets.MACOS_NOTARY_API_ISSUER_ID }}
         run: |
           set -e
-          DMG="dist/OpenShrimp-$(cat VERSION).dmg"
+          DMG="dist/OpenShrimp-${{ needs.version.outputs.version }}.dmg"
           codesign --force --timestamp --sign "$IDENTITY" "$DMG"
           KEY="$RUNNER_TEMP/notary_key.p8"
           echo -n "$API_KEY_B64" | base64 --decode -o "$KEY"
@@ -901,7 +957,7 @@ jobs:
     # one.
     name: Build Windows app
     runs-on: windows-latest
-    needs: build-binary
+    needs: [build-binary, version]
     defaults:
       run:
         shell: pwsh
@@ -928,12 +984,13 @@ jobs:
             -p:Configuration=Release -p:Platform=x64 `
             -p:RuntimeIdentifier=win-x64 `
             -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
+            -p:VersionPrefix=${{ needs.version.outputs.version }} `
             -p:PublishDir=$(Join-Path $PWD 'publish')\
 
       - name: Build the MSI
         run: |
           dotnet tool install --global wix --version 5.*
-          $version = (Get-Content VERSION).Trim()
+          $version = '${{ needs.version.outputs.version }}'
           wix build windows/packaging/OpenShrimp.wxs `
             -arch x64 `
             -d ProductVersion="$version.0" `
@@ -949,8 +1006,11 @@ jobs:
 
   release:
     name: Create GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Both release paths are pushes — a v* tag, or the VERSION bump that
+    # creates one.  A manual dispatch builds everything and publishes nothing.
+    if: github.event_name == 'push'
     needs:
+      - version
       - build-binary
       - build-windows-app
       - build-virtiofsd
@@ -974,6 +1034,10 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          # Named from the resolved version, not from the ref: the run that
+          # bumped VERSION created this tag itself, so it is not what
+          # triggered the run.
+          tag_name: ${{ needs.version.outputs.tag }}
           generate_release_notes: true
           # These patterns must not overlap.  A file matched twice is
           # uploaded twice concurrently, and the second upload deletes the
