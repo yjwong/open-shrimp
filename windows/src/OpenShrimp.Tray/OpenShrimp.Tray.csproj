@@ -56,4 +56,33 @@
     <Content Include="Assets\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!--
+    Every compiled XAML page lives inside the project's .pri, and publish leaves
+    it behind: the target that adds it to the publish set ships in the MSIX
+    tooling's targets, which are not imported here. MrtCore still generates the
+    file into the build output, so it only needs carrying across.
+
+    Without this the app launches — a tray icon and a native Win32 menu need no
+    XAML page — and then throws XamlParseException the first time it opens a
+    window, which is the wizard, on a machine that has no config yet.
+  -->
+  <Target Name="PublishProjectPriFile" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(ProjectPriFullPath)"
+                             RelativePath="$(ProjectPriFileName)"
+                             CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+  <!--
+    The failure this guards against is invisible in a build log and only shows
+    up as a crash on a user's machine, so it is worth failing the build over.
+    An unset ProjectPriFileName is its own failure, and is called out rather
+    than left to resolve into a test of whether the publish directory exists.
+  -->
+  <Target Name="VerifyPublishedPriFile" AfterTargets="Publish">
+    <Error Condition="'$(ProjectPriFileName)' == '' or !Exists('$(PublishDir)$(ProjectPriFileName)')"
+           Text="The project's .pri file is missing from $(PublishDir) — the published app carries no compiled XAML and every window it opens will fail to load." />
+  </Target>
+
 </Project>
