@@ -2,6 +2,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using OpenShrimp.Tray.Core;
 using OpenShrimp.Tray.Setup;
+using Windows.UI.ViewManagement;
 
 namespace OpenShrimp.Tray;
 
@@ -21,12 +22,49 @@ public partial class App : Application
     /// </summary>
     private string? _instanceName;
 
-    public App() => InitializeComponent();
+    /// <summary>
+    /// Held for its lifetime, not just to subscribe: the change event is
+    /// dropped once this is collected, and a local would be. Constructed
+    /// inside the launch path rather than here so that a machine where it is
+    /// unavailable loses the theme, not the tray.
+    /// </summary>
+    private UISettings? _uiSettings;
+
+    public App()
+    {
+        InitializeComponent();
+
+        // A tray app has no console and no window to surface a fault in, so
+        // anything that reaches here would otherwise be lost entirely. All
+        // three are needed: the XAML hook misses background threads, and a
+        // faulted task nobody awaited reaches neither of the other two.
+        UnhandledException += (_, e) => TrayLog.Write("Unhandled exception", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            TrayLog.Write("Unhandled exception", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+            TrayLog.Write("Unobserved task exception", e.Exception);
+    }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _dispatcher = DispatcherQueue.GetForCurrentThread();
         _instanceName = ConfigPeek.ReadInstanceName(CorePaths.ConfigFile);
+        TrayLog.UseDirectory(CorePaths.LogDirectory(_instanceName));
+
+        // Before the icon exists, so the first menu the user opens is already
+        // themed. Re-applied on change because the preference is read when the
+        // menu is built, not when the desktop setting moves.
+        NativeMenuTheme.FollowSystem();
+        try
+        {
+            _uiSettings = new UISettings();
+            _uiSettings.ColorValuesChanged += (_, _) => NativeMenuTheme.FollowSystem();
+        }
+        catch (Exception ex)
+        {
+            // Menu colour is cosmetic; it does not get to prevent a launch.
+            TrayLog.Write("Could not subscribe to theme changes", ex);
+        }
 
         _supervisor = new CoreSupervisor(_instanceName);
         _supervisor.Changed += OnSupervisorChanged;
@@ -57,6 +95,7 @@ public partial class App : Application
         window.Completed += () =>
         {
             _instanceName = ConfigPeek.ReadInstanceName(CorePaths.ConfigFile);
+            TrayLog.UseDirectory(CorePaths.LogDirectory(_instanceName));
             _ = _supervisor!.StartAsync();
         };
         window.Activate();
@@ -64,10 +103,17 @@ public partial class App : Application
 
     private async void QuitAsync()
     {
-        // Stop the core before the tray goes away, or it is left running with
-        // nothing to control it.
-        if (_supervisor is not null) await _supervisor.StopAsync();
-        _tray?.Dispose();
+        try
+        {
+            // Stop the core before the tray goes away, or it is left running
+            // with nothing to control it.
+            if (_supervisor is not null) await _supervisor.StopAsync();
+            _tray?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write("Quit failed to stop the core cleanly", ex);
+        }
         Exit();
     }
 }

@@ -8,6 +8,13 @@ namespace OpenShrimp.Tray;
 /// The notification-area icon and its menu.
 ///
 /// Status, start/stop, open config, open logs, start at login, quit.
+///
+/// The menu is rendered as a native Win32 popup menu built from this flyout as
+/// a template. Two consequences shape everything below: an item is invoked
+/// through Command and never through Click, and the native menu reports a
+/// selection without mutating the item it was built from — so a toggle's
+/// checked state is ours to advance, not something that has already happened
+/// by the time we are called.
 /// </summary>
 internal sealed class TrayIconHost : IDisposable
 {
@@ -32,23 +39,23 @@ internal sealed class TrayIconHost : IDisposable
     {
         _statusItem = new MenuFlyoutItem { Text = "Status: Stopped", IsEnabled = false };
         _startStopItem = new MenuFlyoutItem { Text = "Start" };
-        _startStopItem.Click += (_, _) => ToggleCore();
+        _startStopItem.Command = Command("Start/Stop", ToggleCore);
 
         var openConfig = new MenuFlyoutItem { Text = "Open Config…" };
-        openConfig.Click += (_, _) => OpenConfig();
+        openConfig.Command = Command("Open Config", OpenConfig);
 
         var openLogs = new MenuFlyoutItem { Text = "Open Logs…" };
-        openLogs.Click += (_, _) => CorePaths.Reveal(CorePaths.LogDirectory(_instanceName));
+        openLogs.Command = Command("Open Logs", () => CorePaths.Reveal(CorePaths.LogDirectory(_instanceName)));
 
         _autostartItem = new ToggleMenuFlyoutItem
         {
             Text = "Start at Login",
             IsChecked = Autostart.IsEnabled(_instanceName),
         };
-        _autostartItem.Click += (_, _) => ToggleAutostart();
+        _autostartItem.Command = Command("Start at Login", ToggleAutostart);
 
         var quit = new MenuFlyoutItem { Text = "Quit" };
-        quit.Click += (_, _) => OnQuit?.Invoke();
+        quit.Command = Command("Quit", () => OnQuit?.Invoke());
 
         var menu = new MenuFlyout();
         menu.Items.Add(_statusItem);
@@ -71,6 +78,37 @@ internal sealed class TrayIconHost : IDisposable
         };
         _icon.ForceCreate();
         Refresh();
+    }
+
+    /// <summary>
+    /// Wrap a menu action so that a failure is reported rather than lost. An
+    /// unreported failure here is indistinguishable from a menu item that does
+    /// nothing at all, which is the one outcome the user cannot act on.
+    /// </summary>
+    private RelayCommand Command(string action, Action body) => new(() =>
+    {
+        try
+        {
+            body();
+        }
+        catch (Exception ex)
+        {
+            Report(action, ex);
+        }
+    });
+
+    private void Report(string action, Exception exception)
+    {
+        TrayLog.Write($"{action} failed", exception);
+        try
+        {
+            _icon?.ShowNotification("OpenShrimp", $"{action} failed: {exception.Message}");
+        }
+        catch (Exception)
+        {
+            // The log already has it; a toast we cannot raise is not worth
+            // taking the tray down for.
+        }
     }
 
     public void Refresh()
@@ -104,20 +142,31 @@ internal sealed class TrayIconHost : IDisposable
         return text.Length <= max ? text : text[..max] + "…";
     }
 
+    /// <summary>
+    /// Fire-and-forget from the menu, so it owns its own failures: nothing
+    /// after the first await is inside the wrapper that invoked it.
+    /// </summary>
     private async void ToggleCore()
     {
-        if (_supervisor.State is CoreState.Running or CoreState.Starting or CoreState.Installing)
+        try
         {
-            await _supervisor.StopAsync();
-            return;
-        }
+            if (_supervisor.State is CoreState.Running or CoreState.Starting or CoreState.Installing)
+            {
+                await _supervisor.StopAsync();
+                return;
+            }
 
-        if (!File.Exists(CorePaths.ConfigFile))
-        {
-            OnRunSetup?.Invoke();
-            return;
+            if (!File.Exists(CorePaths.ConfigFile))
+            {
+                OnRunSetup?.Invoke();
+                return;
+            }
+            await _supervisor.StartAsync();
         }
-        await _supervisor.StartAsync();
+        catch (Exception ex)
+        {
+            Report("Start/Stop", ex);
+        }
     }
 
     private void OpenConfig()
@@ -132,15 +181,20 @@ internal sealed class TrayIconHost : IDisposable
 
     private void ToggleAutostart()
     {
-        var enabling = _autostartItem?.IsChecked ?? false;
+        if (_autostartItem is null) return;
+
+        // The native menu leaves the item untouched, so the click means "the
+        // opposite of what is currently shown" and the new state is only
+        // committed once the task has actually been created or deleted.
+        var enabling = !_autostartItem.IsChecked;
         var error = enabling ? Autostart.Enable(_instanceName) : Autostart.Disable(_instanceName);
 
         if (error is not null)
         {
-            // Put the toggle back where it was — the task was not changed.
-            if (_autostartItem is not null) _autostartItem.IsChecked = !enabling;
             _icon?.ShowNotification("OpenShrimp", $"Could not update Start at Login: {error}");
+            return;
         }
+        _autostartItem.IsChecked = enabling;
     }
 
     public void Dispose()
