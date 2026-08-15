@@ -14,13 +14,24 @@ import mistune
 TELEGRAM_MAX_LENGTH = 4096
 
 # Characters that must be escaped in Telegram MarkdownV2 (outside code spans/blocks).
-_ESCAPE_CHARS = r"_*[]()~`>#+-=|{}.!"
+# The backslash is in the set because Telegram treats an unescaped one as an
+# escape character and drops it: a literal backslash must be sent doubled.
+_ESCAPE_CHARS = "\\" + r"_*[]()~`>#+-=|{}.!"
 _ESCAPE_RE = re.compile(r"([" + re.escape(_ESCAPE_CHARS) + r"])")
+
+# Inside pre and code entities Telegram only honours these two escapes; every
+# other character is literal, so escaping more would show the backslashes.
+_CODE_ESCAPE_RE = re.compile(r"([\\`])")
 
 
 def escape(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""
     return _ESCAPE_RE.sub(r"\\\1", text)
+
+
+def escape_code(text: str) -> str:
+    """Escape the characters Telegram honours inside pre and code entities."""
+    return _CODE_ESCAPE_RE.sub(r"\\\1", text)
 
 
 def _plain_text(token: dict[str, Any]) -> str:
@@ -83,7 +94,7 @@ class TelegramRenderer(mistune.BaseRenderer):
 
     def block_code(self, code: str, **attrs: Any) -> str:
         info = attrs.get("info", "")
-        code = code.rstrip("\n")
+        code = escape_code(code.rstrip("\n"))
         if info:
             return f"```{info}\n{code}\n```\n\n"
         return f"```\n{code}\n```\n\n"
@@ -143,7 +154,9 @@ class TelegramRenderer(mistune.BaseRenderer):
             if idx == 0:
                 lines.append("-+-".join("-" * w for w in col_widths))
 
-        table_text = "\n".join(lines)
+        # Escape after padding: the escapes are invisible once Telegram parses
+        # them, so column widths must be measured on the unescaped text.
+        table_text = escape_code("\n".join(lines))
         return f"```\n{table_text}\n```\n\n"
 
     # Stubs so mistune finds the method; actual rendering is in _render_table
@@ -168,7 +181,7 @@ class TelegramRenderer(mistune.BaseRenderer):
         return f"*{text}*"
 
     def codespan(self, code: str) -> str:
-        return f"`{code}`"
+        return f"`{escape_code(code)}`"
 
     def link(self, text: str, **attrs: Any) -> str:
         url = attrs.get("url", "")
@@ -223,6 +236,21 @@ def _is_inside_code_block(text: str, position: int) -> tuple[bool, str]:
     return inside, fence
 
 
+def _back_off_escape(text: str, split_at: int) -> int:
+    """Move a split point off the middle of a MarkdownV2 escape sequence.
+
+    A chunk ending in an odd run of backslashes ends with a backslash whose
+    escaped character landed in the next chunk, which Telegram rejects as an
+    unterminated escape.  Give that backslash back to the next chunk.
+    """
+    run = 0
+    while run < split_at and text[split_at - 1 - run] == "\\":
+        run += 1
+    if run % 2 and split_at > 1:
+        return split_at - 1
+    return split_at
+
+
 def _split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
     """Split a rendered message into chunks of at most max_length characters.
 
@@ -253,6 +281,7 @@ def _split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str
             # Last resort: split at max_length
             split_at = max_length
 
+        split_at = _back_off_escape(remaining, split_at)
         chunk = remaining[:split_at].strip()
         rest = remaining[split_at:].lstrip("\n")
 
