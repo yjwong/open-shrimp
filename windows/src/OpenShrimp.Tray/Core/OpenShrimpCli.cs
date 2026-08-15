@@ -66,6 +66,71 @@ internal static class OpenShrimpCli
         return new CliResult(process.ExitCode, await stdout.ConfigureAwait(false), await stderr.ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// Make the core binary ready to run. Returns null once it is, else the
+    /// reason it is not.
+    ///
+    /// The core ships as a self-installing binary: the first launch unpacks an
+    /// interpreter and installs the project before any of its own code runs,
+    /// which takes minutes on a fresh machine. Forcing that here, unbounded and
+    /// with the output captured, is what keeps it out of the control-channel
+    /// handshake window — a launch killed for missing that window leaves an
+    /// installation directory that exists but holds no project, and the
+    /// launcher skips installing whenever that directory is present, so it
+    /// never heals on its own.
+    /// </summary>
+    public static async Task<string?> EnsureRuntimeAsync(CancellationToken ct = default)
+    {
+        var reason = await ProbeAsync(ct).ConfigureAwait(false);
+        if (reason is null) return null;
+
+        // Rebuilding the installation is the only way out of the half-written
+        // state above, and it is safe on a healthy one — we only get here
+        // because the probe already failed.
+        try
+        {
+            var restore = await RunAsync("self restore", null, ct).ConfigureAwait(false);
+            if (restore.ExitCode != 0) return reason;
+        }
+        catch (Exception)
+        {
+            // Could not be run at all, or the caller stopped waiting. Either
+            // way the probe failure is the more useful of the two to report.
+            // A build with no management command needs no special case: it
+            // rejects the arguments and fails the exit-code check above.
+            return reason;
+        }
+
+        return await ProbeAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Runs the one core command that reads no config and touches no state.</summary>
+    private static async Task<string?> ProbeAsync(CancellationToken ct)
+    {
+        CliResult result;
+        try
+        {
+            result = await RunAsync("--version", null, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+
+        if (result.ExitCode == 0) return null;
+
+        // A Python traceback puts the exception on its last line; the frames
+        // above it say nothing a user can act on.
+        var output = string.IsNullOrWhiteSpace(result.Stderr) ? result.Stdout : result.Stderr;
+        var lastLine = output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .LastOrDefault();
+
+        return string.IsNullOrEmpty(lastLine)
+            ? $"Core exited {result.ExitCode} without starting"
+            : lastLine;
+    }
+
     public static async Task<IReadOnlyList<ModelChoice>> GetModelsAsync(CancellationToken ct = default)
     {
         try

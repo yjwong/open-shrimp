@@ -2,7 +2,7 @@ using System.Diagnostics;
 
 namespace OpenShrimp.Tray.Core;
 
-internal enum CoreState { Stopped, Starting, Running, Stopping, Error, NoConfig }
+internal enum CoreState { Stopped, Installing, Starting, Running, Stopping, Error, NoConfig }
 
 /// <summary>
 /// Owns the core process: starts it, watches it, stops it gracefully.
@@ -25,10 +25,25 @@ internal sealed class CoreSupervisor : IAsyncDisposable
     /// <summary>How long a dropped pipe may stay dropped before it counts as gone.</summary>
     private static readonly TimeSpan ReexecGrace = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// How long the core gets to open its control channel. It opens the channel
+    /// before the rest of its boot, so this bounds process start and config
+    /// load, not the whole startup.
+    /// </summary>
+    private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long the runtime bootstrap may run before the tray reports that it is
+    /// installing. Short enough to explain a wait, long enough that an
+    /// already-installed core never flashes the message.
+    /// </summary>
+    private static readonly TimeSpan InstallAnnounceDelay = TimeSpan.FromSeconds(3);
+
     private readonly string? _instanceName;
     private Process? _process;
     private ControlClient? _client;
     private CancellationTokenSource? _watchdog;
+    private CancellationTokenSource? _bootstrap;
     private bool _stopRequested;
 
     public CoreState State { get; private set; } = CoreState.Stopped;
@@ -48,7 +63,7 @@ internal sealed class CoreSupervisor : IAsyncDisposable
 
     public async Task StartAsync()
     {
-        if (State is CoreState.Running or CoreState.Starting) return;
+        if (State is CoreState.Running or CoreState.Starting or CoreState.Installing) return;
 
         if (!File.Exists(CorePaths.ConfigFile))
         {
@@ -79,6 +94,33 @@ internal sealed class CoreSupervisor : IAsyncDisposable
             return;
         }
 
+        // A core we spawned before and never reached is still unreachable — the
+        // adopt probe above just failed against the endpoint it would hold.
+        // Retiring it here rather than when its handshake timed out is what
+        // lets a merely slow core keep running and be adopted instead.
+        RetireUnreachableProcess();
+
+        // Unpack the runtime before anything starts timing the boot. Killing a
+        // core midway through installing itself leaves it permanently broken,
+        // so this step is deliberately unbounded — a stop stops us waiting on
+        // it, and lets it run to completion unsupervised.
+        _bootstrap = new CancellationTokenSource();
+        var bootstrap = OpenShrimpCli.EnsureRuntimeAsync(_bootstrap.Token);
+        if (await Task.WhenAny(bootstrap, Task.Delay(InstallAnnounceDelay)).ConfigureAwait(false) != bootstrap)
+            Set(CoreState.Installing);
+        var bootstrapError = await bootstrap.ConfigureAwait(false);
+        if (_stopRequested)
+        {
+            Set(CoreState.Stopped);
+            return;
+        }
+        if (bootstrapError is not null)
+        {
+            Set(CoreState.Error, bootstrapError);
+            return;
+        }
+        Set(CoreState.Starting);
+
         try
         {
             _process = Process.Start(new ProcessStartInfo
@@ -98,18 +140,14 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         }
 
         var client = new ControlClient(_instanceName);
-        if (!await client.TryConnectAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false))
+        if (!await client.TryConnectAsync(HandshakeTimeout).ConfigureAwait(false))
         {
             await client.DisposeAsync().ConfigureAwait(false);
-            // Do not leave it running and unreferenced: a later Start would
-            // overwrite the handle and orphan this core, which would still hold
-            // the control endpoint and keep polling Telegram unsupervised.
-            if (_process is { HasExited: false })
-            {
-                try { _process.Kill(entireProcessTree: true); }
-                catch (Exception) { /* already gone */ }
-            }
-            DropStaleProcessHandle();
+            // Leave it running rather than killing it: a core that is only slow
+            // gets adopted on the next Start, and a kill here would cut it off
+            // mid-write. The handle is kept so that Start can retire it first
+            // instead of orphaning a core that still holds the control endpoint
+            // and keeps polling Telegram unsupervised.
             Set(CoreState.Error, "Core did not open its control channel");
             return;
         }
@@ -169,6 +207,26 @@ internal sealed class CoreSupervisor : IAsyncDisposable
     }
 
     /// <summary>
+    /// Kill a core that was spawned but never answered on the control channel,
+    /// before spawning its replacement. Only ever called once the adopt probe
+    /// has failed, which is what establishes that it is unreachable and not
+    /// merely slow.
+    /// </summary>
+    private void RetireUnreachableProcess()
+    {
+        var process = _process;
+        _process = null;
+        if (process is null) return;
+
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch (Exception) { /* already gone */ }
+        process.Dispose();
+    }
+
+    /// <summary>
     /// Release the spawned handle once it no longer refers to the live core.
     /// After this the control endpoint is the only liveness signal, which is
     /// the same footing the adopt path runs on.
@@ -218,6 +276,10 @@ internal sealed class CoreSupervisor : IAsyncDisposable
     {
         _stopRequested = true;
         _watchdog?.Cancel();
+        // Stop waiting on a runtime install; never interrupt one. The command
+        // outlives the wait and finishes on its own, which is what keeps its
+        // installation directory from being left half-written.
+        _bootstrap?.Cancel();
         Set(CoreState.Stopping);
 
         var client = _client;

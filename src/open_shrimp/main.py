@@ -132,6 +132,18 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OpenShrimp - Telegram bot for remote Claude access")
     _add_config_arg(parser, default=str(DEFAULT_CONFIG_PATH))
 
+    # The cheapest command that still proves the interpreter can import the
+    # package: it reads no config, opens no socket, and touches no state.  A
+    # supervisor runs it to force a self-installing binary to unpack itself
+    # before anything starts timing the boot.
+    from open_shrimp.updater import get_current_version
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=get_current_version(),
+    )
+
     # Every subcommand accepts --config on either side of the subcommand name.
     # The shared parent suppresses its default so an unset subcommand value
     # cannot overwrite one given before the subcommand name.
@@ -261,6 +273,45 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     init_paths(config.instance_name)
     _attach_file_logging()
 
+    # Set up graceful shutdown before anything a supervisor might have to
+    # interrupt: ``request_shutdown`` is a no-op while ``_active_stop_event``
+    # is None, so a control-channel shutdown arriving before this point would
+    # be answered and then ignored.
+    if stop_event is None:
+        stop_event = asyncio.Event()
+        _install_signal_handlers(asyncio.get_running_loop(), stop_event)
+    global _active_stop_event
+    _active_stop_event = stop_event
+
+    # Open the control channel first, before any of the boot work below.  A
+    # supervising UI judges liveness by this endpoint and gives up if it does
+    # not appear within its handshake window; opening it last would spend that
+    # window on a cloudflared download or database setup and get the core
+    # killed for being slow rather than wedged.  Nothing here needs the bot to
+    # exist — the status it reports is "starting" until it does.
+    #
+    # Degrade rather than abort: losing the channel costs the UI its controls,
+    # not the user their bot.
+    from open_shrimp.control import ControlServer, CoreStatus, build_methods
+
+    core_status = CoreStatus(
+        state="starting",
+        config_path=config_path,
+        instance_name=config.instance_name,
+        contexts=list(config.contexts),
+    )
+    control = ControlServer(
+        build_methods(core_status), instance_name=config.instance_name
+    )
+    try:
+        await control.start()
+    except Exception:
+        logger.exception(
+            "Control channel failed to start — a supervising UI will not be "
+            "able to read status or stop this process gracefully.",
+        )
+        control = None
+
     db = await init_db()
 
     # Start tunnel if configured (before the bot, so public_url is ready).
@@ -278,13 +329,6 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
                 "The review app will not be accessible externally. "
                 "Set review.public_url manually or fix the tunnel issue."
             )
-
-    # Set up graceful shutdown
-    if stop_event is None:
-        stop_event = asyncio.Event()
-        _install_signal_handlers(asyncio.get_running_loop(), stop_event)
-    global _active_stop_event
-    _active_stop_event = stop_event
 
     sandbox_mgrs = create_sandbox_managers(config)
 
@@ -316,28 +360,6 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
             "UNAVAILABLE this run. Chat still works; restart to retry.",
         )
         mcp_proxy = None
-
-    # Degrade like the MCP proxy above: losing the channel costs the UI its
-    # controls, not the user their bot.
-    from open_shrimp.control import ControlServer, CoreStatus, build_methods
-
-    core_status = CoreStatus(
-        state="starting",
-        config_path=config_path,
-        instance_name=config.instance_name,
-        contexts=list(config.contexts),
-    )
-    control = ControlServer(
-        build_methods(core_status), instance_name=config.instance_name
-    )
-    try:
-        await control.start()
-    except Exception:
-        logger.exception(
-            "Control channel failed to start — a supervising UI will not be "
-            "able to read status or stop this process gracefully.",
-        )
-        control = None
 
     from open_shrimp.security_key.sessions import SecurityKeySessionRegistry
     from open_shrimp.port_relay.sessions import PortRelaySessionRegistry

@@ -77,7 +77,7 @@ internal sealed class TrayIconHost : IDisposable
     {
         if (_statusItem is null || _startStopItem is null) return;
 
-        var running = _supervisor.State is CoreState.Running or CoreState.Starting;
+        var running = _supervisor.State is CoreState.Running or CoreState.Starting or CoreState.Installing;
         _startStopItem.Text = running ? "Stop" : "Start";
         _statusItem.Text = $"Status: {DescribeState()}";
         if (_icon is not null) _icon.ToolTipText = $"OpenShrimp — {DescribeState()}";
@@ -90,6 +90,7 @@ internal sealed class TrayIconHost : IDisposable
         CoreState.Running => _supervisor.LastStatus?.BotUsername is { Length: > 0 } name
             ? $"Running as @{name}"
             : "Running",
+        CoreState.Installing => "Installing runtime…",
         CoreState.Starting => "Starting…",
         CoreState.Stopping => "Stopping…",
         CoreState.NoConfig => "No config",
@@ -105,7 +106,7 @@ internal sealed class TrayIconHost : IDisposable
 
     private async void ToggleCore()
     {
-        if (_supervisor.State is CoreState.Running or CoreState.Starting)
+        if (_supervisor.State is CoreState.Running or CoreState.Starting or CoreState.Installing)
         {
             await _supervisor.StopAsync();
             return;
