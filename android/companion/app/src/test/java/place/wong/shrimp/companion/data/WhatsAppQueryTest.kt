@@ -7,25 +7,43 @@ import org.junit.Test
 class WhatsAppQueryTest {
     @Test
     fun `selected chats are the only ones the query can read`() {
-        val sql = WhatsAppQuery.messagesAfter(longArrayOf(7, 12, 4))
+        val sql = WhatsAppQuery.messagesAfter(mapOf(7L to 0L, 12L to 0L, 4L to 0L))
         assertTrue(sql.contains("m.chat_row_id IN (7,12,4)"))
     }
 
     @Test(expected = IllegalArgumentException::class)
     fun `an empty selection is refused rather than read as every chat`() {
-        WhatsAppQuery.messagesAfter(longArrayOf())
+        WhatsAppQuery.messagesAfter(emptyMap())
     }
 
     @Test(expected = IllegalArgumentException::class)
     fun `a selection past the ceiling is refused`() {
-        WhatsAppQuery.messagesAfter(LongArray(WhatsAppQuery.MAX_CHATS + 1) { it.toLong() })
+        WhatsAppQuery.messagesAfter((0..WhatsAppQuery.MAX_CHATS).associate { it.toLong() to 0L })
     }
 
     @Test
     fun `the query keeps its own filters alongside the selection`() {
-        val sql = WhatsAppQuery.messagesAfter(longArrayOf(1))
+        val sql = WhatsAppQuery.messagesAfter(mapOf(1L to 0L))
         assertTrue(sql.contains("m.from_me = 0"))
         assertTrue(sql.contains("m.message_type IN (0, 1, 2, 3, 4, 5, 9, 13, 20)"))
+    }
+
+    @Test
+    fun `each chat only delivers above its own floor`() {
+        // The cursor is one number across every chat, so it cannot say when a
+        // particular chat joined the selection. Without the per-chat floor, a
+        // chat ticked while the cursor sat still delivers its whole backlog.
+        val sql = WhatsAppQuery.messagesAfter(mapOf(7L to 900L, 12L to 40L))
+        assertTrue(sql.contains("m._id > (CASE m.chat_row_id WHEN 7 THEN 900 WHEN 12 THEN 40 ELSE"))
+    }
+
+    @Test
+    fun `a chat with no floor of its own reads nothing rather than everything`() {
+        // The ELSE is unreachable while the IN list and the CASE arms come
+        // from one map, and it fails closed for the day they do not.
+        val sql = WhatsAppQuery.messagesAfter(mapOf(1L to 0L))
+        assertTrue(sql.contains("ELSE ${Long.MAX_VALUE} END"))
+        assertEquals(Long.MAX_VALUE, WhatsAppQuery.NO_FLOOR)
     }
 
     @Test
@@ -130,7 +148,7 @@ class WhatsAppQueryTest {
             .substringBefore(") AS recent_messages")
         assertTrue(counted.contains("m.from_me = 0"))
         assertTrue(counted.contains("m.message_type IN (${WhatsAppQuery.ACCEPTED_TYPES})"))
-        assertTrue(WhatsAppQuery.messagesAfter(longArrayOf(1)).contains("m.from_me = 0"))
+        assertTrue(WhatsAppQuery.messagesAfter(mapOf(1L to 0L)).contains("m.from_me = 0"))
     }
 
     @Test

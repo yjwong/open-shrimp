@@ -47,5 +47,22 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         if (on) WhatsAppWatcherService.start(app) else WhatsAppWatcherService.stop(app)
     }
 
+    /** Whether the feed has stopped delivering and needs a person to say so. */
+    fun whatsappStalled(): Boolean = prefs.whatsappStalled
+
+    /**
+     * Re-anchor the feed at the store's current end.
+     *
+     * Offered only against a stall, because that is the only state it fixes
+     * and it costs whatever arrived and was never delivered. A restored store
+     * is renumbered below the watermark, and nothing else can move the
+     * watermark back down.
+     */
+    fun restartWhatsAppFromNow() {
+        prefs.restartWhatsAppFromNow()
+        LogStore.add("WhatsApp watcher: reading restarts from the current end of the store")
+        if (prefs.whatsappWatch) WhatsAppWatcherService.start(getApplication())
+    }
+
     fun clearLog() = LogStore.clear()
 }

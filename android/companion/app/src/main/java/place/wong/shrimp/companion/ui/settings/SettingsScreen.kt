@@ -56,9 +56,11 @@ fun SettingsScreen(
     // writes this, and coming back from it is exactly when it has changed.
     var selectedChats by remember { mutableIntStateOf(0) }
     var watching by remember { mutableStateOf(false) }
+    var stalled by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) {
         selectedChats = vm.whatsappChatCount()
         watching = vm.whatsappWatching()
+        stalled = vm.whatsappStalled()
         onPauseOrDispose { }
     }
 
@@ -126,6 +128,24 @@ fun SettingsScreen(
                             vm.setWhatsAppWatching(it)
                         },
                     )
+                }
+                // Shown only against a stall, which is the one state it fixes.
+                // Re-anchoring costs whatever arrived and was never delivered,
+                // so it is not something to leave lying around.
+                if (stalled) {
+                    Text(
+                        "Nothing is being read: the message store is older than the point " +
+                            "reading had reached, which is what restoring a backup does. " +
+                            "Restarting reads new messages from now on; anything that arrived " +
+                            "and was not sent is skipped.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            vm.restartWhatsAppFromNow()
+                            stalled = false
+                        },
+                    ) { Text("Restart reading from now") }
                 }
             }
 

@@ -49,6 +49,24 @@ object WhatsAppQuery {
     const val HANDOVER_MESSAGES = 100
 
     /**
+     * The floor a chat gets when none could be worked out for it.
+     *
+     * No id can exceed it, so the chat delivers nothing at all. Failing that
+     * way round is the point: the alternative reading of "no floor" is zero,
+     * which would send the chat's entire history.
+     */
+    const val NO_FLOOR = Long.MAX_VALUE
+
+    /**
+     * What a JID the store carries no chat for resolves to.
+     *
+     * A selection outlives the row ids it names — a restore renumbers them —
+     * so a JID that resolves to nothing is an ordinary answer rather than an
+     * error, and the caller drops it from the query it builds.
+     */
+    const val UNRESOLVED_CHAT = -1L
+
+    /**
      * How far back a chat counts as recently active, in message ids.
      *
      * Ids are handed out across every chat at once, so a span of them is a
@@ -111,7 +129,7 @@ object WhatsAppQuery {
         require(count in 1..MAX_CHATS) { "A resolution of $count chats is outside 1..$MAX_CHATS" }
         val placeholders = List(count) { "?" }.joinToString(",")
         return """
-            SELECT DISTINCT c._id AS id
+            SELECT c._id AS id, cj.raw_string AS jid
             FROM chat c
             JOIN jid cj ON cj._id = c.jid_row_id
             WHERE cj.raw_string IN ($placeholders)
@@ -132,23 +150,35 @@ object WhatsAppQuery {
     /**
      * Inbound messages after a cursor, from the selected chats, oldest first.
      *
-     * Three filters run in SQL. The chat selection is the one that makes the
+     * Four filters run in SQL. The chat selection is the one that makes the
      * privacy claim true — the host is told rows are "already narrowed to the
      * chats selected in the companion UI", and this clause is where that is
      * enforced, before a row is read out of the snapshot rather than after it
      * has been uploaded. Outbound rows are dropped here too, so the user's own
      * words never leave the phone. The third is [ACCEPTED_TYPES].
      *
+     * The fourth is *floors*: the lowest id each chat may deliver. The cursor
+     * is one number across every chat and says nothing about when any one of
+     * them was ticked, so without this a chat added while the cursor sat still
+     * would deliver everything between the two. A chat with no floor of its
+     * own is refused outright — the ELSE is the largest id there is — because
+     * a selection whose floor could not be worked out must read nothing rather
+     * than everything.
+     *
      * The ids are spliced because they are `long`s, which cannot carry
      * anything but digits, and because a bound list would put the selection
-     * against SQLite's variable ceiling.
+     * against SQLite's variable ceiling. The `IN` is what the index on
+     * `(chat_row_id, _id)` is seeked with; the floor is checked on the rows
+     * that seek returns.
      *
      * Bodies are `message.text_data`. The `message_text` table is link-preview
      * metadata, not message content.
      */
-    fun messagesAfter(chatRowIds: LongArray): String {
-        require(chatRowIds.isNotEmpty()) { "A query needs at least one chat; an empty selection reads nothing" }
-        require(chatRowIds.size <= MAX_CHATS) { "A selection of ${chatRowIds.size} chats is past the ceiling of $MAX_CHATS" }
+    fun messagesAfter(floors: Map<Long, Long>): String {
+        require(floors.isNotEmpty()) { "A query needs at least one chat; an empty selection reads nothing" }
+        require(floors.size <= MAX_CHATS) { "A selection of ${floors.size} chats is past the ceiling of $MAX_CHATS" }
+        val chatRowIds = floors.keys
+        val arms = floors.entries.joinToString(" ") { "WHEN ${it.key} THEN ${it.value}" }
         return """
             SELECT m._id AS id, m.key_id, m.from_me, m.timestamp, m.message_type, m.text_data,
                    c.subject,
@@ -169,6 +199,7 @@ object WhatsAppQuery {
             LEFT JOIN message_media mm ON mm.message_row_id = m._id
             WHERE m._id > ?
               AND m.chat_row_id IN (${chatRowIds.joinToString(",")})
+              AND m._id > (CASE m.chat_row_id $arms ELSE $NO_FLOOR END)
               AND m.from_me = 0
               AND m.message_type IN ($ACCEPTED_TYPES)
             ORDER BY m._id

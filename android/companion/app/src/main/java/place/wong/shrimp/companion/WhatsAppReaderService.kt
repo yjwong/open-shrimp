@@ -175,12 +175,13 @@ class WhatsAppReaderService : RootService() {
         @Synchronized
         override fun resolveChats(jids: Array<String>?): LongArray {
             val db = requireDatabase()
-            val wanted = jids.orEmpty().filter { it.isNotEmpty() }.distinct()
-            if (wanted.isEmpty()) return LongArray(0)
-            require(wanted.size <= WhatsAppQuery.MAX_CHATS) {
-                "A selection of ${wanted.size} chats is past the ceiling of ${WhatsAppQuery.MAX_CHATS}"
+            val asked = jids.orEmpty()
+            if (asked.isEmpty()) return LongArray(0)
+            require(asked.size <= WhatsAppQuery.MAX_CHATS) {
+                "A selection of ${asked.size} chats is past the ceiling of ${WhatsAppQuery.MAX_CHATS}"
             }
-            val ids = ArrayList<Long>(wanted.size)
+            val byJid = HashMap<String, Long>(asked.size)
+            val wanted = asked.filter { it.isNotEmpty() }.distinct()
             query {
                 // Bound values go against SQLite's variable ceiling, which a
                 // selection of every chat on a real phone is within reach of;
@@ -188,12 +189,19 @@ class WhatsAppReaderService : RootService() {
                 // chats someone ticked.
                 for (chunk in wanted.chunked(RESOLVE_CHUNK)) {
                     db.rawQuery(WhatsAppQuery.resolveChats(chunk.size), chunk.toTypedArray()).use { c ->
-                        while (c.moveToNext()) ids.add(c.getLong(0))
+                        val idCol = c.getColumnIndexOrThrow("id")
+                        val jidCol = c.getColumnIndexOrThrow("jid")
+                        while (c.moveToNext()) {
+                            c.getString(jidCol)?.let { byJid[it] = c.getLong(idCol) }
+                        }
                     }
                 }
             }
-            Log.i(TAG, "Resolved ${wanted.size} JIDs to ${ids.size} chat row ids")
-            return ids.toLongArray()
+            // Positional, so the caller can put each row id back to the JID it
+            // holds a floor for. UNRESOLVED_CHAT for one the store has lost.
+            val ids = LongArray(asked.size) { byJid[asked[it]] ?: WhatsAppQuery.UNRESOLVED_CHAT }
+            Log.i(TAG, "Resolved ${asked.size} JIDs to ${byJid.size} chat row ids")
+            return ids
         }
 
         override fun watch(watcher: IWhatsAppWatcher?): Unit = synchronized(watching) {
@@ -236,8 +244,16 @@ class WhatsAppReaderService : RootService() {
         }
 
         @Synchronized
-        override fun messagesAfter(cursor: Long, chatRowIds: LongArray, limit: Int): WhatsAppBatch {
+        override fun messagesAfter(
+            cursor: Long,
+            chatRowIds: LongArray,
+            chatFloors: LongArray,
+            limit: Int,
+        ): WhatsAppBatch {
             val db = requireDatabase()
+            require(chatRowIds.size == chatFloors.size) {
+                "Every chat needs a floor; got ${chatRowIds.size} chats and ${chatFloors.size} floors"
+            }
             if (chatRowIds.isEmpty()) {
                 // Fail closed, and stand still. Reading nothing is the easy
                 // half; the cursor is the half that matters, because moving it
@@ -249,8 +265,12 @@ class WhatsAppReaderService : RootService() {
             val capped = limit.coerceIn(1, MAX_ROWS)
             val rows = ArrayList<WhatsAppMessage>(capped)
             var cutShort = false
+            // Last floor wins for a row id named twice, which cannot happen —
+            // the caller's JIDs are distinct and a chat has one row.
+            val floors = LinkedHashMap<Long, Long>(chatRowIds.size)
+            for (i in chatRowIds.indices) floors[chatRowIds[i]] = chatFloors[i]
             query {
-                val sql = WhatsAppQuery.messagesAfter(chatRowIds)
+                val sql = WhatsAppQuery.messagesAfter(floors)
                 db.rawQuery(sql, arrayOf(cursor.toString(), capped.toString())).use { c ->
                     val columns = Columns(c)
                     var budget = MAX_BATCH_CHARS

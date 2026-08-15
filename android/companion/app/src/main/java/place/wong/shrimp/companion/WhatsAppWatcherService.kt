@@ -69,6 +69,14 @@ class WhatsAppWatcherService : Service() {
      */
     private lateinit var lease: WhatsAppReader.Lease
 
+    /**
+     * Consecutive passes that found the store's end below the watermark.
+     *
+     * Counted rather than reported on sight: a snapshot taken mid-write can
+     * read short, and one pass is not a stall.
+     */
+    private var stalledPasses = 0
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -178,6 +186,26 @@ class WhatsAppWatcherService : Service() {
             LogStore.add("WhatsApp watcher: starting from the current end of the store")
             return copied
         }
+        // A cursor above the store's own end delivers nothing and cannot
+        // recover: the query only ever matches ids above it, and the cursor
+        // only ever moves forward. It happens when the store behind the
+        // watermark was replaced — a restore puts back the backed-up database
+        // file, whose highest id is older — and also when the chat holding the
+        // highest id is cleared, which does heal as new messages push the id
+        // past the cursor again. Nothing here can tell the two apart, and
+        // resetting on the second re-sends history, so the phone says so and
+        // leaves the choice to a person.
+        if (reader.latestMessageId() < cursor) {
+            stalledPasses += 1
+            if (stalledPasses >= STALL_PASSES && !prefs.whatsappStalled) {
+                prefs.whatsappStalled = true
+                publish("Nothing can be read: the message store is older than the watermark")
+            }
+        } else {
+            stalledPasses = 0
+            if (prefs.whatsappStalled) prefs.whatsappStalled = false
+        }
+
         val selected = prefs.whatsappChats
         if (selected.isEmpty()) {
             publish("No chats are selected")
@@ -189,15 +217,17 @@ class WhatsAppWatcherService : Service() {
             publish("Not paired with a server")
             return copied
         }
-        val chatRowIds = reader.resolveChats(selected.toTypedArray())
-        if (chatRowIds.isEmpty()) {
+        val selection = floored(reader, prefs, selected)
+        if (selection.isEmpty()) {
             publish("None of the selected chats are in the message store")
             return copied
         }
+        val chatRowIds = selection.keys.toLongArray()
+        val chatFloors = selection.values.toLongArray()
 
         var sent = 0
         while (running.get()) {
-            val batch = reader.messagesAfter(cursor, chatRowIds, BATCH_ROWS)
+            val batch = reader.messagesAfter(cursor, chatRowIds, chatFloors, BATCH_ROWS)
             if (batch.messages.isEmpty()) {
                 // Nothing to send, but the query has examined every id up to
                 // its cursor and filtered them out. Those never reach the host
@@ -229,6 +259,40 @@ class WhatsAppWatcherService : Service() {
         }
         if (sent > 0) publish("Sent $sent new messages")
         return copied
+    }
+
+    /**
+     * The selected chats as row id to admission floor, dropping the ones the
+     * store no longer carries.
+     *
+     * A chat with no floor of its own is floored at the store's current end
+     * and delivers nothing this pass. That is the same rule the very first
+     * pass follows: what is already in the store is history nobody asked to
+     * have sent anywhere. It is also the only floor a chat ticked while the
+     * reader was unreachable will ever get.
+     */
+    private fun floored(
+        reader: IWhatsAppReader,
+        prefs: Prefs,
+        selected: Set<String>,
+    ): Map<Long, Long> {
+        val jids = selected.toTypedArray()
+        val rowIds = reader.resolveChats(jids)
+        var floors = prefs.whatsappChatFloors
+        val missing = jids.filterNot { it in floors }
+        if (missing.isNotEmpty()) {
+            val latest = reader.latestMessageId()
+            floors = floors + missing.associateWith { latest }
+            prefs.saveWhatsAppChatFloors(floors)
+            LogStore.add("WhatsApp watcher: ${missing.size} newly read chats start from here")
+        }
+        val selection = LinkedHashMap<Long, Long>(jids.size)
+        for (i in jids.indices) {
+            val rowId = rowIds[i]
+            if (rowId == WhatsAppQuery.UNRESOLVED_CHAT) continue
+            selection[rowId] = floors[jids[i]] ?: WhatsAppQuery.NO_FLOOR
+        }
+        return selection
     }
 
     /** Say what happened where the user can see it — a count, never a message. */
@@ -299,6 +363,9 @@ class WhatsAppWatcherService : Service() {
          * message several times over.
          */
         private const val FLOOR_MS = 20_000L
+
+        /** How many passes must agree before a short store counts as a stall. */
+        private const val STALL_PASSES = 3
 
         private const val CHANNEL_ID = "whatsapp_watcher"
 

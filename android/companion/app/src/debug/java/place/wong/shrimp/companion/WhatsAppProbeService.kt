@@ -98,22 +98,25 @@ class WhatsAppProbeService : Service() {
 
         val all = listed.chats.map { it.rowId }.toLongArray()
         val chats = selection ?: all
+        // The probe reads a window the caller named, so every chat is floored
+        // at nothing. The watcher's floors are per-tick and belong to it.
+        val floors = LongArray(chats.size)
         Log.i(TAG, "Selection: ${chats.size} of ${all.size} chats")
 
         // The picker stores JIDs, not row ids, so the trip a real selection
         // takes is jid -> row id, asked of the store. Round-trip it here:
         // resolving every listed chat's JID has to give back exactly the row
-        // ids the listing carried, or a stored selection would silently read a
-        // different set of chats than the one that was ticked.
+        // ids the listing carried, in the order it asked, or a stored selection
+        // would silently read a different set of chats than the one ticked.
         val resolveStarted = System.currentTimeMillis()
         val resolved = reader.resolveChats(listed.chats.map { it.jid }.toTypedArray())
         Log.i(
             TAG,
             "Resolved ${resolved.size} row ids in ${System.currentTimeMillis() - resolveStarted} ms, " +
-                "matching the listing: ${resolved.sorted() == all.sorted()}",
+                "matching the listing in order: ${resolved.toList() == all.toList()}",
         )
         val unknown = reader.resolveChats(arrayOf("no-such-chat@${WhatsAppIdentity.PHONE_SERVER}"))
-        Log.i(TAG, "An unknown JID resolves to ${unknown.size} row ids")
+        Log.i(TAG, "An unknown JID resolves to ${unknown.toList()}")
 
         // A negative cursor asks for a recent window instead of the oldest
         // messages: recent traffic is almost entirely LID-addressed, which is
@@ -124,7 +127,7 @@ class WhatsAppProbeService : Service() {
         val tally = Tally()
         for (batch in 1..batches) {
             val queryStarted = System.currentTimeMillis()
-            val read = reader.messagesAfter(at, chats, limit)
+            val read = reader.messagesAfter(at, chats, floors, limit)
             // The batch carries the cursor: it is past rows the query filtered
             // out as well as the ones it returned, so it is not the last row's
             // id whenever anything was skipped.
@@ -151,11 +154,11 @@ class WhatsAppProbeService : Service() {
         val moved = reader.latestMessageId()
         Log.i(TAG, "Watermark: $latest -> $moved")
         if (moved > latest) {
-            val caught = reader.messagesAfter(latest, chats, limit)
+            val caught = reader.messagesAfter(latest, chats, floors, limit)
             Log.i(TAG, "Picked up ${caught.messages.size} rows the refresh brought in")
         }
 
-        if (watch > 0) watchLog(reader, chats, limit, watch)
+        if (watch > 0) watchLog(reader, chats, floors, limit, watch)
     }
 
     /**
@@ -166,7 +169,13 @@ class WhatsAppProbeService : Service() {
      * refresh, one read. What it proves is the timing and the coalescing, so
      * what it reports is when each wake arrived and how much it carried.
      */
-    private fun watchLog(reader: IWhatsAppReader, chats: LongArray, limit: Int, seconds: Int) {
+    private fun watchLog(
+        reader: IWhatsAppReader,
+        chats: LongArray,
+        floors: LongArray,
+        limit: Int,
+        seconds: Int,
+    ) {
         val woken = java.util.concurrent.LinkedBlockingQueue<Long>()
         val started = System.currentTimeMillis()
         val watcher = object : IWhatsAppWatcher.Stub() {
@@ -184,7 +193,7 @@ class WhatsAppProbeService : Service() {
             wakes++
             val refreshStarted = System.currentTimeMillis()
             val bytes = reader.refresh()
-            val batch = reader.messagesAfter(cursor, chats, limit)
+            val batch = reader.messagesAfter(cursor, chats, floors, limit)
             carried += batch.messages.size
             cursor = batch.cursor
             Log.i(

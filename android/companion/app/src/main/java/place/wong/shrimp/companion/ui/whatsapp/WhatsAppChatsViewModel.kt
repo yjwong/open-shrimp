@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import place.wong.shrimp.companion.data.LogStore
 import place.wong.shrimp.companion.data.Prefs
 import place.wong.shrimp.companion.data.ServerApi
@@ -85,6 +87,9 @@ class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
     private val _outcomes = Channel<SendOutcome>(Channel.BUFFERED)
     val outcomes: Flow<SendOutcome> = _outcomes.receiveAsFlow()
 
+    /** Serialises the stored selection and its floors against rapid taps. */
+    private val writes = Mutex()
+
     /**
      * Whether there is a server to send to.
      *
@@ -115,14 +120,56 @@ class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Tick or untick one chat.
+     *
+     * Ticking is consent to read what arrives next, not to send what is
+     * already there, so a chat joining the selection is floored at the store's
+     * current end. Without that the feed's single cursor decides how far back
+     * a new chat reaches, and a cursor that has not moved for a week would
+     * take a week of that chat with it.
+     *
+     * Unticking drops the floor, so ticking the chat again re-floors it rather
+     * than resuming from where it left off.
+     *
+     * The floor is read off the reader and so cannot be taken on this thread.
+     * The chat is not written into the selection until it has one — the
+     * checkbox answers the tap immediately, but nothing may read the chat
+     * before the floor that bounds it exists.
+     */
     fun toggle(jid: String) {
         val next = _selected.value.toMutableSet()
-        if (!next.remove(jid)) next.add(jid)
-        // Written through on every tap: the selection is what the reader is
-        // allowed to see, and a screen left without saving must not leave that
-        // disagreeing with what the checkboxes showed.
+        val ticking = !next.remove(jid)
+        if (ticking) next.add(jid)
         _selected.value = next
-        prefs.saveWhatsAppChats(next)
+        viewModelScope.launch(Dispatchers.IO) {
+            // Both writes are read-modify-write over one stored map, and taps
+            // arrive faster than a Binder call answers, so they are taken one
+            // at a time. What is written is the checkboxes' current state
+            // rather than the state at the tap that queued this, so whichever
+            // write lands last still lands the truth.
+            writes.withLock {
+                if (ticking) {
+                    try {
+                        val floor = lease.reader().latestMessageId()
+                        prefs.saveWhatsAppChatFloors(prefs.whatsappChatFloors + (jid to floor))
+                    } catch (e: Exception) {
+                        // The watcher floors whatever it finds unfloored, so
+                        // the chat is still bounded — at the moment the watcher
+                        // next runs rather than at this tap.
+                        LogStore.add("Could not read the store's end for a newly ticked chat")
+                    }
+                } else {
+                    prefs.saveWhatsAppChatFloors(prefs.whatsappChatFloors - jid)
+                }
+                // Written through on every tap: the selection is what the
+                // reader is allowed to see, and a screen left without saving
+                // must not leave that disagreeing with what the checkboxes
+                // showed. It goes last, so no chat is readable before the
+                // floor that bounds it exists.
+                prefs.saveWhatsAppChats(_selected.value)
+            }
+        }
     }
 
     /**
@@ -166,7 +213,14 @@ class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearSelection() {
         _selected.value = emptySet()
-        prefs.saveWhatsAppChats(emptySet())
+        viewModelScope.launch(Dispatchers.IO) {
+            writes.withLock {
+                prefs.saveWhatsAppChats(emptySet())
+                // The floors go with the chats they bounded: re-ticking one is
+                // a fresh consent and gets a fresh floor.
+                prefs.saveWhatsAppChatFloors(emptyMap())
+            }
+        }
         LogStore.add("WhatsApp chat selection cleared; no chats will be read")
     }
 

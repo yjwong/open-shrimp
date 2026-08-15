@@ -41,9 +41,13 @@ interface IWhatsAppReader {
 
     /**
      * The chat row ids the given JIDs name in the open snapshot, for
-     * messagesAfter. Duplicates and JIDs the store does not carry contribute
-     * nothing, so a selection that names no surviving chat resolves to nothing
-     * and reads nothing.
+     * messagesAfter. One entry per JID given, in the same order, and -1 where
+     * the store carries no such chat — so a selection that names no surviving
+     * chat resolves to nothing and reads nothing.
+     *
+     * Positional rather than a bare set of ids because the caller holds a
+     * per-chat admission floor keyed by JID, and a row id it could not put a
+     * JID back to is a floor it could not apply.
      *
      * Asked of the store directly rather than worked out from chats(), which
      * costs a fifth of a second and a two-hundred-kilobyte transaction, and
@@ -72,11 +76,17 @@ interface IWhatsAppReader {
      * may come back than the snapshot holds: the batch is also bounded by how
      * much text fits in one Binder transaction.
      *
+     * chatFloors runs parallel to chatRowIds and gives each chat a second,
+     * per-chat floor its rows must also clear. The cursor is one number across
+     * every chat, so it alone cannot say when any one of them was added to the
+     * selection; without the floor a chat ticked while the cursor sat still
+     * would deliver its whole backlog.
+     *
      * An empty selection reads nothing and retires nothing. It is never
      * "every chat" — a caller that has not loaded its selection yet has to get
      * back silence, not the user's whole history.
      */
-    WhatsAppBatch messagesAfter(long cursor, in long[] chatRowIds, int limit);
+    WhatsAppBatch messagesAfter(long cursor, in long[] chatRowIds, in long[] chatFloors, int limit);
 
     /**
      * The tail of one chat, oldest first, for a handover the user asked for by
