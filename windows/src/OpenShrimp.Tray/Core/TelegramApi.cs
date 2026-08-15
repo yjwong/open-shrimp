@@ -6,9 +6,9 @@ namespace OpenShrimp.Tray.Core;
 internal sealed record TokenCheck(bool Ok, string? Username, string? Error);
 
 /// <summary>
-/// Verifies a bot token during setup, the way the macOS wizard does before it
-/// lets you past the first step. Done here rather than through the core: there
-/// is no core yet at that point in the wizard, and getMe is one HTTP call.
+/// Verifies a bot token before the wizard lets you past the first step. Done
+/// here rather than through the core: there is no core yet at that point, and
+/// getMe is a single HTTP call.
 /// </summary>
 internal static class TelegramApi
 {

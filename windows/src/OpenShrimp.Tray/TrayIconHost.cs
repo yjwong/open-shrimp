@@ -7,8 +7,7 @@ namespace OpenShrimp.Tray;
 /// <summary>
 /// The notification-area icon and its menu.
 ///
-/// Mirrors the macOS menu bar item (platform/macos/app.py) item for item:
-/// status, start/stop, open config, open logs, start at login, quit.
+/// Status, start/stop, open config, open logs, start at login, quit.
 /// </summary>
 internal sealed class TrayIconHost : IDisposable
 {

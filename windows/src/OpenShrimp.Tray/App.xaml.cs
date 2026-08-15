@@ -6,8 +6,8 @@ using OpenShrimp.Tray.Setup;
 namespace OpenShrimp.Tray;
 
 /// <summary>
-/// The tray app. Mirrors the macOS menu-bar app: no window on launch, start
-/// the core if a config exists, run the wizard if it does not.
+/// The tray app. No window on launch: start the core when a config already
+/// exists, run the first-run wizard when it does not.
 /// </summary>
 public partial class App : Application
 {

@@ -5,7 +5,7 @@ using System.Text;
 namespace OpenShrimp.Tray.Core;
 
 /// <summary>
-/// Start-at-logon, the Windows counterpart of the macOS LaunchAgent toggle.
+/// Start-at-logon for the tray.
 ///
 /// A logon-triggered scheduled task, registered against the *tray* rather than
 /// the core: the tray owns the core's lifetime, so starting the core directly

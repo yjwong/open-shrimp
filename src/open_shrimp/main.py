@@ -457,9 +457,8 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
 def _attach_file_logging() -> None:
     """Log to a rotating file on Windows.
 
-    Elsewhere the process log already has a home — the journal under systemd,
-    the app's own handler under the macOS menu bar app — but a Windows core
-    launched by a tray app or a logon task writes to a console nobody sees.
+    A core launched by a tray app or a logon task writes to a console nobody
+    can read, and it is the only entry point with no other home for its log.
     Owning the file here rather than in the supervisor means the log survives
     however the core was started.
     """

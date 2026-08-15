@@ -8,10 +8,11 @@ using Windows.Storage.Pickers;
 namespace OpenShrimp.Tray.Setup;
 
 /// <summary>
-/// First-run wizard: bot token, user ID, first context. The Windows
-/// counterpart of platform/macos/app_setup.py, and the reason the core grew a
-/// non-interactive "config write" — the terminal wizard needs a tty, which a
-/// tray app launched from Explorer or a logon task does not have.
+/// First-run wizard: bot token, user ID, first context.
+///
+/// The reason the core grew a non-interactive "config write": the terminal
+/// wizard needs a tty, which a tray app launched from Explorer or a logon task
+/// does not have.
 /// </summary>
 public sealed partial class SetupWindow : Window
 {

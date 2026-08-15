@@ -213,8 +213,7 @@ def build_context_dict(
 ) -> dict[str, Any]:
     """Assemble one context entry.
 
-    Shared by every front end that can create a first config — this terminal
-    wizard, the macOS wizard, and ``openshrimp config write`` — so the shape
+    Shared by every front end that can create a first config, so the shape
     cannot drift between them.
     """
     context: dict[str, Any] = {
