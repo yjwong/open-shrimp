@@ -1,0 +1,9 @@
+# MSBuild / NuGet output
+bin/
+obj/
+publish/
+*.user
+
+# WiX output
+*.msi
+*.wixpdb

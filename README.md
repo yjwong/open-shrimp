@@ -132,6 +132,19 @@ On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` fr
 
 > **Note:** The macOS app is currently unsigned. On first launch, macOS will block it — right-click the app and choose "Open" to bypass Gatekeeper, or go to System Settings → Privacy & Security and click "Open Anyway".
 
+## Windows App
+
+On Windows, OpenShrimp is also available as a notification-area app. Download the `.msi` from [Releases](https://github.com/yjwong/open-shrimp/releases) and run it — no terminal needed.
+
+- Lives in the notification area with no taskbar window
+- First-run setup wizard walks you through configuration with native dialogs
+- Start/stop the bot, open config, view logs — all from the tray menu
+- "Start at Login" toggle, backed by a logon scheduled task
+
+The installer is per-user (into `%LOCALAPPDATA%\Programs\OpenShrimp`) and needs no administrator rights. It bundles everything: the bot, the .NET runtime, and the Windows App SDK.
+
+> **Note:** The Windows app is currently unsigned, so SmartScreen will warn on first run — choose "More info" then "Run anyway".
+
 ## Quick Start
 
 ### Prerequisites

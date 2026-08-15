@@ -62,6 +62,17 @@ On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` fr
 - Start/stop the bot, open config, view logs — all from the menu bar
 - "Start at Login" toggle for automatic launch
 
+## Windows App
+
+On Windows, OpenShrimp is also available as a notification-area app. Download the `.msi` from [Releases](https://github.com/yjwong/open-shrimp/releases) and run it — no terminal needed.
+
+- Lives in the notification area with no taskbar window
+- First-run setup wizard walks you through configuration with native dialogs
+- Start/stop the bot, open config, view logs — all from the tray menu
+- "Start at Login" toggle, backed by a logon scheduled task
+
+The installer is per-user (into `%LOCALAPPDATA%\Programs\OpenShrimp`) and needs no administrator rights. It bundles the bot, the .NET runtime and the Windows App SDK, so there are no prerequisites to install first.
+
 ## Run the setup wizard
 
 On first run, the binary launches an interactive setup wizard:

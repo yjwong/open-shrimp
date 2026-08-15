@@ -21,3 +21,6 @@ contexts/
 
 # PyApp build output
 pyapp-out/
+
+# Host command dispatcher used to drive the Windows dev VM from the sandbox.
+.hostq/

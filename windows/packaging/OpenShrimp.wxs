@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Per-user MSI for the OpenShrimp tray app.
+
+  Per-user, into LocalAppData, deliberately: the core binary self-updates by
+  replacing itself in place, which a machine-wide install under Program Files
+  would silently break for a non-elevated user.  It also means no UAC prompt to
+  install, which is much of the point of shipping an installer at all.
+
+  MSIX was the other candidate and was rejected: it installs to a versioned
+  WindowsApps path that changes on every update, which would break the logon
+  scheduled task the tray registers against a fixed exe path.
+
+  Build with:
+    wix build OpenShrimp.wxs -arch x64 \
+      -d ProductVersion=<x.y.z.0> \
+      -d TrayPublishDir=<publish dir> \
+      -d CoreExe=<path to openshrimp.exe> \
+      -o OpenShrimp-<version>-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="OpenShrimp"
+           Manufacturer="OpenShrimp"
+           Version="$(ProductVersion)"
+           UpgradeCode="6F3A9E42-6B0C-4C3E-9A2E-6B1B2D5C7A31"
+           Scope="perUser"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of OpenShrimp is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- The Id is the stream name Windows Installer extracts to; without a
+         .ico suffix the shell cannot resolve an icon handler and both the
+         shortcut and the Apps & Features entry fall back to a generic icon. -->
+    <Icon Id="AppIcon.ico" SourceFile="$(TrayPublishDir)\Assets\tray.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="OpenShrimp" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ShortcutFolder" Name="OpenShrimp" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="OpenShrimp" Level="1">
+      <ComponentGroupRef Id="TrayFiles" />
+      <ComponentGroupRef Id="CoreFiles" />
+      <ComponentGroupRef Id="Shortcuts" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <!-- The whole self-contained publish output: app, .NET runtime, Windows App SDK. -->
+    <ComponentGroup Id="TrayFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(TrayPublishDir)\**" />
+    </ComponentGroup>
+
+    <!--
+      The PyApp core, installed beside the tray so CorePaths.CoreExecutable
+      finds it without touching PATH.
+    -->
+    <ComponentGroup Id="CoreFiles" Directory="INSTALLFOLDER">
+      <Component>
+        <File Id="CoreExecutable" Source="$(CoreExe)" Name="openshrimp.exe" />
+      </Component>
+    </ComponentGroup>
+
+    <!--
+      No autostart entry here on purpose: the tray owns that toggle so the menu
+      always reflects reality, and an installer-created task would drift from it.
+    -->
+    <ComponentGroup Id="Shortcuts" Directory="ShortcutFolder">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut Id="TrayShortcut"
+                  Name="OpenShrimp"
+                  Description="Telegram bot for remote coding-agent access"
+                  Target="[INSTALLFOLDER]OpenShrimp.Tray.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon.ico" />
+        <RemoveFolder Id="RemoveShortcutFolder" Directory="ShortcutFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\OpenShrimp" Name="installed"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

@@ -889,11 +889,70 @@ jobs:
           name: OpenShrimp-macos-app
           path: dist/OpenShrimp-*.dmg
 
+  build-windows-app:
+    # The WinUI 3 tray app, wrapped with the core into a per-user MSI.
+    #
+    # Built with Visual Studio's MSBuild, not `dotnet publish`.  The Windows
+    # App SDK resolves its PRI/Appx tasks out of
+    # $(MSBuildExtensionsPath)\Microsoft\VisualStudio\v17.0\AppxPackage\, and
+    # the .NET SDK's MSBuild points that at the SDK directory, where those
+    # tasks do not exist — the build then fails in MrtCore.PriGen.targets.
+    # Only the VS toolset resolves it, and the hosted runner already carries
+    # one.
+    name: Build Windows app
+    runs-on: windows-latest
+    needs: build-binary
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Fetch the core binary
+        uses: actions/download-artifact@v8
+        with:
+          name: openshrimp-windows-x86_64.exe
+          path: core
+
+      - name: Publish the tray app
+        run: |
+          msbuild windows/src/OpenShrimp.Tray/OpenShrimp.Tray.csproj `
+            -t:Publish -restore `
+            -p:Configuration=Release -p:Platform=x64 `
+            -p:RuntimeIdentifier=win-x64 `
+            -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
+            -p:PublishDir=$(Join-Path $PWD 'publish')\
+
+      - name: Build the MSI
+        run: |
+          dotnet tool install --global wix --version 5.*
+          $version = (Get-Content VERSION).Trim()
+          wix build windows/packaging/OpenShrimp.wxs `
+            -arch x64 `
+            -d ProductVersion="$version.0" `
+            -d TrayPublishDir="$(Resolve-Path publish)" `
+            -d CoreExe="$(Resolve-Path core/openshrimp-windows-x86_64.exe)" `
+            -o "OpenShrimp-$version-x64.msi"
+
+      - name: Upload the MSI
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenShrimp-windows-msi
+          path: OpenShrimp-*.msi
+
   release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - build-binary
+      - build-windows-app
       - build-virtiofsd
       - build-security-key-helper
       - build-hcs-initrd
@@ -927,4 +986,5 @@ jobs:
             artifacts/moonshine-stt-*
             artifacts/virtiofsd-*
             artifacts/OpenShrimp-*.dmg
+            artifacts/OpenShrimp-*.msi
             artifacts/*.tar.gz
