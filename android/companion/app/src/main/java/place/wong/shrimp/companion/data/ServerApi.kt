@@ -11,6 +11,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeUnit
 
 data class PendingSession(
     val id: String,
@@ -49,7 +50,7 @@ data class HandoverResult(
 )
 
 /** Thin coroutine wrapper over the OpenShrimp HTTP endpoints used by the companion app. */
-class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build()) {
+class ServerApi(private val http: OkHttpClient = defaultClient()) {
 
     suspend fun pair(
         baseUrl: String,
@@ -342,6 +343,27 @@ class ServerApi(private val http: OkHttpClient = OkHttpClient.Builder().build())
 
     companion object {
         private val JSON = "application/json".toMediaType()
+
+        /**
+         * The client every endpoint shares, patient enough for the slowest of
+         * them.
+         *
+         * OkHttp's own default read timeout is ten seconds, which is below
+         * what an upload here costs: the host posts one Telegram card per
+         * accepted row inside the request, and the response bytes are only
+         * written once it has finished. A full batch therefore outlives the
+         * default, and the phone would abandon a request that landed in full —
+         * leaving its watermark where it was and re-sending the same rows.
+         *
+         * Connecting stays short. A host that is not there is a different
+         * answer from a host that is working, and only the second is worth
+         * waiting on.
+         */
+        private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build()
 
         /** The host's own words for a refusal, or null if it did not give any. */
         private fun hostError(body: String): String? =

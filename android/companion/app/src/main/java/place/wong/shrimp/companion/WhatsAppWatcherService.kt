@@ -93,12 +93,48 @@ class WhatsAppWatcherService : Service() {
         startForeground(
             NOTIFICATION_ID,
             notification("Watching for new messages"),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            // specialUse rather than dataSync, which is capped at six
+            // cumulative background hours a day. This service is resident by
+            // design: see the manifest for the whole reason.
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
         // Restarted by the system with the same intent, so a second start is
         // an instruction to keep going rather than to begin again.
         if (running.compareAndSet(false, true)) scope.launch { watch() }
         return START_STICKY
+    }
+
+    /**
+     * The platform has withdrawn this service's foreground time; stop at once.
+     *
+     * A foreground service type that is time-limited gets this call when its
+     * budget runs out, and a service that does not stop within seconds of it
+     * is killed with a fatal exception rather than allowed to finish. So this
+     * does the one thing it can do in the time it has, and says so where the
+     * user will see it: nothing restarts the watcher on its own, and it will
+     * stay stopped until the app is opened.
+     *
+     * The watch preference is deliberately left alone. It is what the user
+     * asked for, the platform's budget is not a change of mind, and it is what
+     * MainActivity reads to put the watcher back.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) = timedOut()
+
+    override fun onTimeout(startId: Int) = timedOut()
+
+    private fun timedOut() {
+        LogStore.add("WhatsApp watcher: the system withdrew its foreground time")
+        (getSystemService(NOTIFICATION_SERVICE) as? NotificationManager)?.notify(
+            PAUSED_NOTIFICATION_ID,
+            Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("OpenShrimp WhatsApp")
+                .setContentText("Paused by the system. Open OpenShrimp to resume watching.")
+                .setSmallIcon(android.R.drawable.stat_notify_error)
+                .setContentIntent(launchIntent())
+                .setAutoCancel(true)
+                .build(),
+        )
+        stopSelf()
     }
 
     /**
@@ -130,6 +166,13 @@ class WhatsAppWatcherService : Service() {
      * floor one message is answered by a run of back-to-back copies; with it,
      * by two or three. A pass that found nothing imposes no floor, because
      * finding nothing is what most wakes do and it costs milliseconds.
+     *
+     * The refresh is taken here rather than inside [drain] so that the floor
+     * is set from the copy that was actually paid for, before anything that
+     * can throw. The expensive half of a pass is the copy, and the half that
+     * fails is the upload; leaving the two in one call let a failed upload
+     * skip the floor and repeat the copy on the very next wake — the state the
+     * floor exists for.
      */
     private suspend fun watch() {
         try {
@@ -144,6 +187,7 @@ class WhatsAppWatcherService : Service() {
         LogStore.add("WhatsApp watcher started")
         var attached: IWhatsAppReader? = null
         var floorUntil = 0L
+        var backoff = 0L
         while (running.get()) {
             try {
                 val reader = attached?.takeIf { it.asBinder().isBinderAlive } ?: lease.reader()
@@ -153,30 +197,39 @@ class WhatsAppWatcherService : Service() {
                     reader.watch(watcher)
                     attached = reader
                 }
-                if (sync(reader) > 0) floorUntil = SystemClock.elapsedRealtime() + FLOOR_MS
+                if (reader.refresh() > 0) floorUntil = SystemClock.elapsedRealtime() + FLOOR_MS
+                drain(reader)
+                backoff = 0L
             } catch (e: Exception) {
                 attached = null
+                // A host that is refusing connections refuses the next pass
+                // too, and each one costs a full read of a half-gigabyte
+                // store. The floor covers a pass that copied something; this
+                // covers the one that did not.
+                backoff = if (backoff == 0L) BACKOFF_MS else minOf(backoff * 2, MAX_BACKOFF_MS)
                 publish(e.message ?: "The message store could not be read")
             }
             withTimeoutOrNull(BEAT_MS) { wake.receive() }
-            // After the wake, so a message arriving inside the floor is
-            // answered when it lifts rather than dropped.
-            val held = floorUntil - SystemClock.elapsedRealtime()
+            // After the wake, so a message arriving inside the held time is
+            // answered when it lifts rather than dropped. The wake is
+            // CONFLATED, so one queued mid-pass returns from receive() at
+            // once — which is why the delay is served here unconditionally
+            // rather than by waiting on the channel for it.
+            val held = maxOf(floorUntil - SystemClock.elapsedRealtime(), backoff)
             if (held > 0) delay(held)
         }
     }
 
     /**
-     * One pass: bring the snapshot up to date, then drain what is new.
-     * Returns the bytes the snapshot had to be brought forward by.
+     * One pass over what is new, against a snapshot the caller has already
+     * brought up to date.
      *
-     * Most passes stop at the refresh — the log is written for reasons that
-     * are not messages arriving, and finding out nothing changed costs
-     * milliseconds.
+     * Most wakes end before the first query — the log is written for reasons
+     * that are not messages arriving, and the refresh above has already found
+     * that out for nothing.
      */
-    private suspend fun sync(reader: IWhatsAppReader): Long {
+    private suspend fun drain(reader: IWhatsAppReader) {
         val prefs = Prefs(this)
-        val copied = reader.refresh()
         var cursor = prefs.whatsappCursor
         if (cursor == Prefs.NO_CURSOR) {
             // The first pass delivers nothing. Everything already in the store
@@ -184,17 +237,16 @@ class WhatsAppWatcherService : Service() {
             cursor = reader.latestMessageId()
             prefs.saveWhatsAppCursor(cursor)
             LogStore.add("WhatsApp watcher: starting from the current end of the store")
-            return copied
+            return
         }
         // A cursor above the store's own end delivers nothing and cannot
         // recover: the query only ever matches ids above it, and the cursor
         // only ever moves forward. It happens when the store behind the
-        // watermark was replaced — a restore puts back the backed-up database
-        // file, whose highest id is older — and also when the chat holding the
-        // highest id is cleared, which does heal as new messages push the id
-        // past the cursor again. Nothing here can tell the two apart, and
-        // resetting on the second re-sends history, so the phone says so and
-        // leaves the choice to a person.
+        // watermark was replaced — a restore rebuilds it — and also when the
+        // chat holding the highest id is cleared, which does heal as new
+        // messages push the id past the cursor again. Nothing here can tell
+        // the two apart, and resetting on the second re-sends history, so the
+        // phone says so and leaves the choice to a person.
         if (reader.latestMessageId() < cursor) {
             stalledPasses += 1
             if (stalledPasses >= STALL_PASSES && !prefs.whatsappStalled) {
@@ -209,18 +261,18 @@ class WhatsAppWatcherService : Service() {
         val selected = prefs.whatsappChats
         if (selected.isEmpty()) {
             publish("No chats are selected")
-            return copied
+            return
         }
         val baseUrl = prefs.baseUrl
         val deviceId = prefs.deviceId
         if (baseUrl.isEmpty() || deviceId == null) {
             publish("Not paired with a server")
-            return copied
+            return
         }
         val selection = floored(reader, prefs, selected)
         if (selection.isEmpty()) {
             publish("None of the selected chats are in the message store")
-            return copied
+            return
         }
         val chatRowIds = selection.keys.toLongArray()
         val chatFloors = selection.values.toLongArray()
@@ -248,7 +300,7 @@ class WhatsAppWatcherService : Service() {
                 // The host accepted nothing. Standing still is what makes the
                 // batch arrive late rather than not at all.
                 publish("$sent sent; the server accepted none of the next ${batch.messages.size}")
-                return copied
+                return
             }
             prefs.saveWhatsAppCursor(next)
             cursor = next
@@ -258,7 +310,6 @@ class WhatsAppWatcherService : Service() {
             if (acknowledged != null && acknowledged < lastUploaded) break
         }
         if (sent > 0) publish("Sent $sent new messages")
-        return copied
     }
 
     /**
@@ -302,21 +353,21 @@ class WhatsAppWatcherService : Service() {
             ?.notify(NOTIFICATION_ID, notification(message))
     }
 
-    private fun notification(text: String): Notification {
-        val launch = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        return Notification.Builder(this, CHANNEL_ID)
+    private fun launchIntent(): PendingIntent = PendingIntent.getActivity(
+        this,
+        0,
+        Intent(this, MainActivity::class.java),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    private fun notification(text: String): Notification =
+        Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("OpenShrimp WhatsApp")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentIntent(launch)
+            .setContentIntent(launchIntent())
             .setOngoing(true)
             .build()
-    }
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
@@ -364,6 +415,20 @@ class WhatsAppWatcherService : Service() {
          */
         private const val FLOOR_MS = 20_000L
 
+        /**
+         * How long a pass that threw waits before another is made, doubling
+         * up to [MAX_BACKOFF_MS].
+         *
+         * The failure this exists for is the upload, and a host that is
+         * refusing connections goes on refusing them for as long as it takes
+         * someone to notice. Each attempt costs a full read of the store, so
+         * an outage is answered by a handful of passes rather than by one per
+         * wake — while staying short enough that a host restarting is picked
+         * up in seconds rather than at the next beat.
+         */
+        private const val BACKOFF_MS = 30_000L
+        private const val MAX_BACKOFF_MS = 10 * 60 * 1000L
+
         /** How many passes must agree before a short store counts as a stall. */
         private const val STALL_PASSES = 3
 
@@ -372,5 +437,14 @@ class WhatsAppWatcherService : Service() {
         // 44-47 are the forwarding, port-forward, meeting recording and
         // diarization services; 48 is the debug probe.
         private const val NOTIFICATION_ID = 49
+
+        /**
+         * The pause notice, on its own id.
+         *
+         * Stopping the service takes its ongoing notification with it, so a
+         * notice posted under that id would vanish along with the thing it is
+         * reporting.
+         */
+        private const val PAUSED_NOTIFICATION_ID = 50
     }
 }

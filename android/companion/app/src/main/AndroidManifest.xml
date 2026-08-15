@@ -7,6 +7,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -64,10 +65,21 @@
           for seconds at a time, and the system kills a cached process that
           does rather than waiting for it.
         -->
+        <!--
+          specialUse, not dataSync: dataSync is capped at six cumulative
+          background hours per day across every dataSync service in the app,
+          and this one is meant to be resident. Exceeding the cap stops it
+          silently until the app is next opened, and it would spend the same
+          budget the forwarding and port-forward services need.
+        -->
         <service
             android:name=".WhatsAppWatcherService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Reads new WhatsApp messages from the selected chats and forwards them to the paired OpenShrimp host" />
+        </service>
 
         <service
             android:name=".ShrimpFirebaseMessagingService"
