@@ -59,9 +59,13 @@ def _print_windows_instructions(config_path: str) -> None:
     print("Run the bot manually:")
     print(f"  {cmd}")
     print()
+    # schtasks takes the whole command line as one /TR argument. cmd.exe gives
+    # single quotes no meaning, so the value is wrapped in double quotes and the
+    # quotes already inside it are backslash-escaped for the CRT argv parser.
+    task_run = cmd.replace('"', '\\"')
     print("Or register a Scheduled Task that starts it at logon:")
     print(
-        f'  schtasks /Create /TN OpenShrimp /SC ONLOGON /TR \'{cmd}\''
+        f'  schtasks /Create /TN OpenShrimp /SC ONLOGON /TR "{task_run}"'
     )
     print("Remove it later with:")
     print("  schtasks /Delete /TN OpenShrimp /F")
