@@ -52,6 +52,35 @@
       <ComponentGroupRef Id="CoreFiles" />
       <ComponentGroupRef Id="Shortcuts" />
     </Feature>
+
+    <!--
+      Unpack the core's runtime here rather than leaving every bit of it to the
+      first launch.  The core is a self-installing binary: it carries an
+      interpreter and a wheel, and the first command run against it spends
+      minutes unpacking them and fetching dependencies.  The version probe
+      below is the cheapest command that does that work, and a no-op once it
+      is done.
+
+      Return="ignore" is load-bearing.  The unpack needs the network, so a
+      machine that is offline at install time must still get an installed
+      product — the tray runs the same probe before it starts the core, so the
+      only cost of failing here is that the first launch is slow again.
+
+      Impersonate="yes" because the runtime lands in the invoking user's
+      LocalAppData; a non-impersonated action would unpack it into the wrong
+      profile and the user would pay for it twice.
+    -->
+    <CustomAction Id="WarmRuntime"
+                  FileRef="CoreExecutable"
+                  ExeCommand="--version"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- After InstallFiles: the exe it runs does not exist before that. -->
+      <Custom Action="WarmRuntime" After="InstallFiles" Condition="NOT Installed" />
+    </InstallExecuteSequence>
   </Package>
 
   <Fragment>
