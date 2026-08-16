@@ -44,6 +44,12 @@ OPTIONS: dict = {
     },
     "packages": [
         "open_shrimp",
+        # Copied as directories rather than zipped: the SDK locates its
+        # bundled CLI relative to __file__, which no zip entry satisfies.
+        "claude_agent_sdk",
+        "cryptography",
+        "cffi",
+        "pycparser",
         "telegram",
         "httpx",
         "httpcore",
@@ -60,6 +66,9 @@ OPTIONS: dict = {
         "ruamel.yaml",
     ],
     "includes": [
+        # Imported from cryptography's Rust extension, where py2app's
+        # import scanner cannot see it.
+        "_cffi_backend",
         "rumps",
         "open_shrimp.platform.macos.app",
         "open_shrimp.platform.macos.app_setup",
