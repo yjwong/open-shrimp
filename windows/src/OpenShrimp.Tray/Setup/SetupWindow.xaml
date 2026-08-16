@@ -8,74 +8,98 @@
     mc:Ignorable="d"
     Title="Set up OpenShrimp">
 
-    <Grid Padding="32" RowSpacing="16">
+    <!-- No Background: an opaque brush anywhere above the content hides Mica. -->
+    <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- Header -->
-        <StackPanel Grid.Row="0" Spacing="4">
-            <TextBlock x:Name="StepTitle" Style="{StaticResource TitleTextBlockStyle}" />
-            <TextBlock x:Name="StepSubtitle"
-                       Style="{StaticResource BodyTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       TextWrapping="Wrap" />
-        </StackPanel>
-
-        <!-- Steps -->
-        <Grid Grid.Row="1">
-
-            <!-- Step 0: bot token -->
-            <StackPanel x:Name="StepToken" Spacing="10" Visibility="Visible">
-                <PasswordBox x:Name="TokenBox"
-                             Header="Telegram bot token"
-                             PlaceholderText="123456:ABC-DEF…"
-                             PasswordRevealMode="Peek" />
-                <HyperlinkButton Content="Open @BotFather in Telegram →" Click="OpenBotFather" />
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                    <ProgressRing x:Name="TokenSpinner" IsActive="False" Width="16" Height="16" />
-                    <TextBlock x:Name="TokenMessage" TextWrapping="Wrap" />
-                </StackPanel>
-            </StackPanel>
-
-            <!-- Step 1: user id -->
-            <StackPanel x:Name="StepUserId" Spacing="10" Visibility="Collapsed">
-                <TextBox x:Name="UserIdBox"
-                         Header="Your Telegram user ID"
-                         PlaceholderText="123456789" />
-                <HyperlinkButton Content="Open @userinfobot in Telegram →" Click="OpenUserInfoBot" />
-                <TextBlock x:Name="UserIdMessage" TextWrapping="Wrap" />
-            </StackPanel>
-
-            <!-- Step 2: first context -->
-            <StackPanel x:Name="StepContext" Spacing="10" Visibility="Collapsed">
-                <TextBox x:Name="ContextNameBox" Header="Context name" Text="default" />
-                <StackPanel Spacing="4">
-                    <TextBlock Text="Working directory" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <TextBlock x:Name="DirectoryLabel"
-                                   Text="No folder chosen"
-                                   VerticalAlignment="Center"
-                                   TextTrimming="CharacterEllipsis"
-                                   Width="280" />
-                        <Button Content="Choose…" Click="ChooseFolder" />
-                    </StackPanel>
-                </StackPanel>
-                <ComboBox x:Name="ModelBox" Header="Model" Width="320" />
-                <TextBlock x:Name="ContextMessage" TextWrapping="Wrap" />
-            </StackPanel>
+        <!-- Padding is set in code-behind from the caption-button inset. -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="32" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Image Grid.Column="0" Width="16" Height="16"
+                   Source="ms-appx:///Assets/tray.ico"
+                   VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1"
+                       Text="Set up OpenShrimp"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       TextTrimming="CharacterEllipsis"
+                       VerticalAlignment="Center" />
         </Grid>
 
-        <!-- Footer: progress dots + navigation -->
-        <Grid Grid.Row="2">
-            <StackPanel x:Name="Dots" Orientation="Horizontal" Spacing="6"
-                        HorizontalAlignment="Left" VerticalAlignment="Center" />
-            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                <Button x:Name="BackButton" Content="Back" Click="GoBack" />
-                <Button x:Name="NextButton" Content="Next" Style="{StaticResource AccentButtonStyle}" Click="GoNext" />
+        <Grid Grid.Row="1" Padding="32,12,32,24" RowSpacing="16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Header -->
+            <StackPanel Grid.Row="0" Spacing="4">
+                <TextBlock x:Name="StepTitle" Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock x:Name="StepSubtitle"
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap" />
             </StackPanel>
+
+            <!-- Steps -->
+            <Grid Grid.Row="1">
+
+                <!-- Step 0: bot token -->
+                <StackPanel x:Name="StepToken" Spacing="10" Visibility="Visible">
+                    <PasswordBox x:Name="TokenBox"
+                                 Header="Telegram bot token"
+                                 PlaceholderText="123456:ABC-DEF…"
+                                 PasswordRevealMode="Peek" />
+                    <HyperlinkButton Content="Open @BotFather in Telegram →" Click="OpenBotFather" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <ProgressRing x:Name="TokenSpinner" IsActive="False" Width="16" Height="16" />
+                        <TextBlock x:Name="TokenMessage" TextWrapping="Wrap" />
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- Step 1: user id -->
+                <StackPanel x:Name="StepUserId" Spacing="10" Visibility="Collapsed">
+                    <TextBox x:Name="UserIdBox"
+                             Header="Your Telegram user ID"
+                             PlaceholderText="123456789" />
+                    <HyperlinkButton Content="Open @userinfobot in Telegram →" Click="OpenUserInfoBot" />
+                    <TextBlock x:Name="UserIdMessage" TextWrapping="Wrap" />
+                </StackPanel>
+
+                <!-- Step 2: first context -->
+                <StackPanel x:Name="StepContext" Spacing="10" Visibility="Collapsed">
+                    <TextBox x:Name="ContextNameBox" Header="Context name" Text="default" />
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Working directory" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock x:Name="DirectoryLabel"
+                                       Text="No folder chosen"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"
+                                       Width="280" />
+                            <Button Content="Choose…" Click="ChooseFolder" />
+                        </StackPanel>
+                    </StackPanel>
+                    <ComboBox x:Name="ModelBox" Header="Model" Width="320" />
+                    <TextBlock x:Name="ContextMessage" TextWrapping="Wrap" />
+                </StackPanel>
+            </Grid>
+
+            <!-- Footer: progress dots + navigation -->
+            <Grid Grid.Row="2">
+                <StackPanel x:Name="Dots" Orientation="Horizontal" Spacing="6"
+                            HorizontalAlignment="Left" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="BackButton" Content="Back" Click="GoBack" />
+                    <Button x:Name="NextButton" Content="Next" Style="{StaticResource AccentButtonStyle}" Click="GoNext" />
+                </StackPanel>
+            </Grid>
         </Grid>
     </Grid>
 </Window>

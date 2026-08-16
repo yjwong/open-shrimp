@@ -1,8 +1,12 @@
+using System.Runtime.InteropServices;
+using Microsoft.UI.Composition.SystemBackdrops;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using OpenShrimp.Tray.Core;
+using Windows.Graphics;
 using Windows.Storage.Pickers;
 
 namespace OpenShrimp.Tray.Setup;
@@ -29,10 +33,71 @@ public sealed partial class SetupWindow : Window
     public SetupWindow()
     {
         InitializeComponent();
+        ApplySystemAppearance();
         BuildDots();
         _ = LoadModelsAsync();
         ShowStep(0);
     }
+
+    // -- Appearance ---------------------------------------------------------
+
+    /// <summary>
+    /// Make the window look like a first-party one: Mica behind the content and
+    /// the title bar drawn as part of it.
+    ///
+    /// The default title bar is painted by the system frame, which does not
+    /// follow the app's theme here, so on a dark desktop the window wears a
+    /// white caption. Extending the content into it removes that surface
+    /// altogether and lets the backdrop run to the top edge, which is also what
+    /// the caption buttons need in order to sit on Mica rather than on a strip
+    /// of solid colour.
+    /// </summary>
+    private void ApplySystemAppearance()
+    {
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
+
+        // Mica is composited by the system behind a transparent client area, so
+        // where it is unavailable the window would draw as a black hole rather
+        // than degrade. The solid page brush is the fallback.
+        if (MicaController.IsSupported())
+            SystemBackdrop = new MicaBackdrop();
+        else
+            RootGrid.Background = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"];
+
+        // The caption buttons are still drawn by the system on top of the
+        // extended content. Their foreground follows the app theme on its own,
+        // but an opaque background behind them would cut a strip of flat colour
+        // out of the Mica; only the resting states are cleared, so hover and
+        // press keep the highlight the rest of the system uses.
+        AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+        AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        var scale = GetDpiForWindow(hwnd) / 96.0;
+
+        // The caption buttons keep their own region of the title bar; the inset
+        // is reported in physical pixels and varies with the button set, so it
+        // is read rather than assumed.
+        AppTitleBar.Padding = new Thickness(16, 0, AppWindow.TitleBar.RightInset / scale, 0);
+
+        // A wizard opening at the default window size, in the corner the system
+        // happens to pick, is the other half of not looking native.
+        AppWindow.Resize(new SizeInt32((int)(560 * scale), (int)(540 * scale)));
+        var work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+        AppWindow.Move(new PointInt32(
+            work.X + (work.Width - AppWindow.Size.Width) / 2,
+            work.Y + (work.Height - AppWindow.Size.Height) / 2));
+
+        // Qualified: Microsoft.UI.Xaml.Shapes, imported for the step dots, also
+        // exports a Path.
+        var icon = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "tray.ico");
+        if (File.Exists(icon)) AppWindow.SetIcon(icon);
+    }
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
 
     // -- Navigation ---------------------------------------------------------
 
@@ -40,12 +105,7 @@ public sealed partial class SetupWindow : Window
     {
         for (var i = 0; i < StepCount; i++)
         {
-            Dots.Children.Add(new Ellipse
-            {
-                Width = 8,
-                Height = 8,
-                Fill = new SolidColorBrush(Microsoft.UI.Colors.Gray),
-            });
+            Dots.Children.Add(new Ellipse { Width = 8, Height = 8 });
         }
     }
 
@@ -69,8 +129,8 @@ public sealed partial class SetupWindow : Window
 
         for (var i = 0; i < Dots.Children.Count; i++)
         {
-            ((Ellipse)Dots.Children[i]).Fill = new SolidColorBrush(
-                i == step ? Microsoft.UI.Colors.SteelBlue : Microsoft.UI.Colors.Gray);
+            ((Ellipse)Dots.Children[i]).Fill = ThemeBrush(
+                i == step ? "AccentFillColorDefaultBrush" : "ControlStrongFillColorDefaultBrush");
         }
     }
 
@@ -170,9 +230,16 @@ public sealed partial class SetupWindow : Window
     private static void SetMessage(TextBlock target, string text, bool error)
     {
         target.Text = text;
-        target.Foreground = new SolidColorBrush(
-            error ? Microsoft.UI.Colors.IndianRed : Microsoft.UI.Colors.SeaGreen);
+        target.Foreground = ThemeBrush(
+            error ? "SystemFillColorCriticalBrush" : "SystemFillColorSuccessBrush");
     }
+
+    /// <summary>
+    /// Named colours picked by hand read as foreign against the system theme
+    /// and stay put when it flips; the theme dictionaries carry a variant of
+    /// each for light and dark.
+    /// </summary>
+    private static Brush ThemeBrush(string key) => (Brush)Application.Current.Resources[key];
 
     // -- Step 2 helpers -----------------------------------------------------
 
