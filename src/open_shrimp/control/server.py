@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 MethodHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 
+# ``sun_path`` in ``struct sockaddr_un`` is a fixed-size field — 104 bytes on
+# macOS and the BSDs, 108 on Linux — and one of those bytes is the terminating
+# NUL.  A longer address fails at ``bind`` as a bare ``EINVAL``, which says
+# nothing about the length being the problem.
+SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107
+
 
 def _endpoint_name(instance_name: str | None) -> str:
     return f"openshrimp-{instance_name}" if instance_name else "openshrimp"
@@ -97,6 +103,7 @@ class ControlServer:
 
     async def _start_unix(self) -> None:
         path = Path(self._address)
+        _check_sun_path(self._address)
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
 
@@ -235,6 +242,30 @@ _IN_USE = (
     "another OpenShrimp core is already serving the control channel at "
     "{address} — give this one a distinct instance_name"
 )
+
+_TOO_LONG = (
+    "control socket path is {actual} bytes, over the {limit}-byte kernel "
+    "limit: {address} — shorten instance_name by at least {excess}"
+)
+
+
+def _check_sun_path(address: str) -> None:
+    """Reject an address the kernel cannot hold, before it becomes an EINVAL.
+
+    Only the instance name is under anyone's control — the rest is the user's
+    home and the platform's runtime directory — so the message names it.
+    """
+    actual = len(os.fsencode(address))
+    if actual <= SUN_PATH_MAX:
+        return
+    raise RuntimeError(
+        _TOO_LONG.format(
+            actual=actual,
+            limit=SUN_PATH_MAX,
+            address=address,
+            excess=actual - SUN_PATH_MAX,
+        )
+    )
 
 
 def _pipe_is_live(address: str) -> bool:

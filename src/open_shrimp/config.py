@@ -1149,6 +1149,11 @@ def write_config(config_path: Path, config_dict: dict[str, Any]) -> None:
         OSError: If the file cannot be written.
     """
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    # The file holds the bot token, so narrow it to the owner before any
+    # content lands in it rather than after — a chmod that follows the write
+    # leaves the token world-readable for the width of that window.
+    config_path.touch(exist_ok=True)
+    config_path.chmod(0o600)
     config_path.write_text(
         yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
         encoding="utf-8",

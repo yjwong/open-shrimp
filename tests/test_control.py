@@ -18,6 +18,7 @@ import pytest_asyncio
 
 from open_shrimp.control import ControlServer, CoreStatus, build_methods, endpoint_address
 from open_shrimp.control import protocol
+from open_shrimp.control import server as server_module
 
 
 # -- Framing -----------------------------------------------------------------
@@ -52,6 +53,27 @@ def test_endpoint_address_is_instance_scoped():
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX socket layout")
 def test_endpoint_address_is_a_socket_path_on_posix():
     assert endpoint_address().endswith("openshrimp.sock")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sun_path is a POSIX limit")
+@pytest.mark.asyncio
+async def test_over_long_instance_name_is_refused_readably(status):
+    """An address the kernel cannot hold must not surface as a bare EINVAL.
+
+    The margin is tightest on macOS, where sun_path is 104 bytes and the
+    address is /Users/<user>/Library/Caches/TemporaryItems/openshrimp/
+    openshrimp-<instance>.sock.
+    """
+    # The instance name also introduces a separator, so a name this long puts
+    # the address exactly one byte over.
+    instance = "x" * (server_module.SUN_PATH_MAX - len(endpoint_address("")))
+    assert len(endpoint_address(instance)) == server_module.SUN_PATH_MAX + 1
+
+    srv = ControlServer(build_methods(status), instance_name=instance)
+    with pytest.raises(RuntimeError, match="instance_name"):
+        await srv.start()
+    # Rejected before anything was created, so there is no stale node to clear.
+    assert not Path(endpoint_address(instance)).exists()
 
 
 # -- Live server -------------------------------------------------------------

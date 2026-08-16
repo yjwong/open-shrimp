@@ -112,6 +112,28 @@ def test_written_config_loads(tmp_path, monkeypatch, capsys):
     assert config.contexts["default"].directory == str(tmp_path)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+def test_written_config_is_owner_only(tmp_path, monkeypatch, capsys):
+    """It carries the bot token, which is the whole of the bot's authority."""
+    code, out = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path))
+
+    assert code == 0
+    assert Path(out["config_path"]).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+def test_overwrite_narrows_a_loose_config(tmp_path, monkeypatch, capsys):
+    """A file that predates the tightening must not keep its old mode."""
+    existing = tmp_path / "config.yaml"
+    existing.write_text("telegram:\n  token: replace-me\n")
+    existing.chmod(0o644)
+
+    code, _ = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path), force=True)
+
+    assert code == 0
+    assert existing.stat().st_mode & 0o777 == 0o600
+
+
 def test_model_is_optional(tmp_path, monkeypatch, capsys):
     code, out = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path))
     assert code == 0
