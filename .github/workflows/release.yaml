@@ -875,9 +875,14 @@ jobs:
           # Sign every Mach-O file inside the bundle. Extension-based matching
           # isn't enough for py2app (the embedded Python interpreter has no
           # suffix), so probe each file with `file`.
+          #
+          # Entitlements bind to each binary's own signature and are not
+          # inherited from the enclosing bundle, so every nested executable
+          # carries them too -- the agent CLI is exec'd as its own process.
           find "$APP" -type f | while read -r f; do
             if file -b "$f" | grep -qE 'Mach-O|dynamically linked shared library'; then
               codesign --force --timestamp --options runtime \
+                --entitlements entitlements.plist \
                 --sign "$IDENTITY" "$f"
             fi
           done
@@ -887,6 +892,7 @@ jobs:
             awk -F/ '{ print NF, $0 }' | sort -k1 -rn | cut -d' ' -f2- | \
             while read -r b; do
               codesign --force --timestamp --options runtime \
+                --entitlements entitlements.plist \
                 --sign "$IDENTITY" "$b"
             done
           # Finally sign the outer bundle with entitlements.
