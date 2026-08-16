@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>OpenShrimp</string>
+	<key>CFBundleDisplayName</key>
+	<string>OpenShrimp</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.openshrimp.app</string>
+	<key>CFBundleExecutable</key>
+	<string>OpenShrimp</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleIconFile</key>
+	<string>icon</string>
+	<!-- No Dock icon and no menu bar of its own: the status item is the whole
+	     interface, and an app with no windows that took the Dock would offer a
+	     tile that opens nothing. -->
+	<key>LSUIElement</key>
+	<true/>
+	<!-- SMAppService, which is how the login item is registered, exists from
+	     13.0; below it there is no supported mechanism left to fall back to. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

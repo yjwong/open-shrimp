@@ -59,6 +59,19 @@ actor CoreSupervisor {
     private(set) var statusDetail: String?
     private(set) var lastStatus: CoreStatus?
 
+    /// Everything a caller outside the actor renders, read in a single hop.
+    /// Three separate reads can interleave with a watchdog poll and produce a
+    /// line that pairs a state from one moment with a detail from another.
+    struct Snapshot: Sendable {
+        let state: CoreState
+        let detail: String?
+        let botUsername: String?
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(state: state, detail: statusDetail, botUsername: lastStatus?.botUsername)
+    }
+
     private var onChange: (@Sendable (CoreState, String?) -> Void)?
 
     init(instanceName: String?) {
@@ -167,7 +180,7 @@ actor CoreSupervisor {
         self.process = process
 
         let client = ControlClient(instanceName: instanceName)
-        guard await client.connect(timeout: Self.handshakeTimeout) else {
+        guard await client.awaitConnection(within: Self.handshakeTimeout) else {
             await client.dispose()
             // Leave it running rather than killing it: a core that is only slow
             // gets adopted on the next start, and a kill here would cut it off
@@ -225,7 +238,7 @@ actor CoreSupervisor {
             return
         }
 
-        if await client.reconnect(within: Self.reexecGrace) {
+        if await client.awaitConnection(within: Self.reexecGrace) {
             reconcileProcessHandle()
             if stopRequested { return }
             await refreshStatus()

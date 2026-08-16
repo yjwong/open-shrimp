@@ -477,14 +477,19 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
 
 
 def _attach_file_logging() -> None:
-    """Log to a rotating file on Windows.
+    """Log to a rotating file where nothing else captures stderr.
 
-    A core launched by a tray app or a logon task writes to a console nobody
-    can read, and it is the only entry point with no other home for its log.
-    Owning the file here rather than in the supervisor means the log survives
-    however the core was started.
+    A core launched by a menu-bar or tray front end, or by a logon task, writes
+    to a console nobody can read; the front end deliberately leaves its output
+    streams alone, so without this the log has no home at all.  Owning the file
+    here rather than in the supervisor means it survives however the core was
+    started.
+
+    Not on Linux, where the core is run from a terminal or from a service
+    manager that already captures stderr, and a second copy on disk would be
+    duplication nobody asked for.
     """
-    if sys.platform != "win32":
+    if sys.platform not in ("win32", "darwin"):
         return
 
     root = logging.getLogger()

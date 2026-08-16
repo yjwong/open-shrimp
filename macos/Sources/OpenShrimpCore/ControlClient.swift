@@ -112,11 +112,21 @@ actor ControlClient {
         return true
     }
 
-    /// Reconnect across a core re-exec.  `/restart` and auto-update replace the
-    /// process, so the pid changes and the socket drops; the endpoint path is
-    /// stable, which is why liveness is judged by the endpoint and not by
-    /// tracking a child process.
-    func reconnect(within: TimeInterval) async -> Bool {
+    /// Keep trying until the endpoint answers or the budget runs out.
+    ///
+    /// Retried rather than waited on, because there is nothing to wait on: a
+    /// Unix socket that has not been bound yet is refused the instant it is
+    /// addressed, so `connect(timeout:)` returns false immediately and its
+    /// timeout never applies.  A Windows named pipe blocks until the pipe
+    /// appears, which is why the same budget passed to one connect call is
+    /// enough there and expires here the moment the core is spawned.
+    ///
+    /// Both callers need exactly this: a core that has been started but has not
+    /// reached its control channel yet, and one that dropped the socket to
+    /// re-exec.  `/restart` and auto-update replace the process, so the pid
+    /// changes and the socket drops; the endpoint path is stable, which is why
+    /// liveness is judged by the endpoint and not by tracking a child process.
+    func awaitConnection(within: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(within)
         while Date() < deadline {
             // Bail the moment someone disposes us, or a reconnect that wins the

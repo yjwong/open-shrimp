@@ -52,6 +52,34 @@ enum CorePaths {
         appDirectory(xdg: "XDG_RUNTIME_DIR", appleDefault: "Library/Caches/TemporaryItems")
     }
 
+    /// `user_log_path("openshrimp")`, scoped by instance the way `paths.py`
+    /// scopes it, so two cores never rotate one file underneath each other.
+    ///
+    /// Built without the XDG override the directories above honour, and not
+    /// because it was forgotten: `platformdirs` layers its XDG mixin over the
+    /// data, config and runtime directories but not over the log directory on
+    /// macOS, so the core's log path is unconditional.  Reading a variable here
+    /// would name a directory the core never writes to.
+    ///
+    /// Lowercase for the same reason — it is what `user_log_path` yields, and
+    /// on a case-sensitive volume a capitalised name is a second, empty
+    /// directory rather than the same one.
+    static func logDirectory(instanceName: String?) -> URL {
+        let base = home
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent(appName, isDirectory: true)
+        guard let instanceName, !instanceName.isEmpty else { return base }
+        return base
+            .appendingPathComponent("instances", isDirectory: true)
+            .appendingPathComponent(instanceName, isDirectory: true)
+    }
+
+    /// The core's rotating log, which is the file "Open Logs" should reveal.
+    static func logFile(instanceName: String?) -> URL {
+        logDirectory(instanceName: instanceName).appendingPathComponent("openshrimp.log")
+    }
+
     /// The control endpoint, mirroring `endpoint_address()`.
     static func controlSocket(instanceName: String?) -> String {
         let name = instanceName.map { "openshrimp-\($0)" } ?? "openshrimp"
