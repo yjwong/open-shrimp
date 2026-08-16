@@ -97,7 +97,33 @@ enum OpenShrimpCLI {
     /// window leaves an installation directory that exists but holds no
     /// project, and the launcher skips installing whenever that directory is
     /// present, so it never heals on its own.
+    ///
+    /// Serialised across callers, because there is more than one: the supervisor
+    /// warms the runtime as it starts, and the wizard warms it to read the model
+    /// catalog.  Two bootstraps against the same installation directory are what
+    /// leave it in the half-written state above.
     static func ensureRuntime() async -> String? {
+        await bootstrapGate.join { await bootstrap() }
+    }
+
+    private static let bootstrapGate = BootstrapGate()
+
+    /// Lets concurrent callers join the run already in flight.  A call made
+    /// after one finishes starts its own, because what it checks may since have
+    /// changed.
+    private actor BootstrapGate {
+        private var running: Task<String?, Never>?
+
+        func join(_ body: @Sendable @escaping () async -> String?) async -> String? {
+            if let running { return await running.value }
+            let task = Task { await body() }
+            running = task
+            defer { running = nil }
+            return await task.value
+        }
+    }
+
+    private static func bootstrap() async -> String? {
         guard let reason = await probe() else { return nil }
 
         // Rebuilding the installation is the only way out of the half-written

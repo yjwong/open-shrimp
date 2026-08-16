@@ -1,11 +1,14 @@
 import Foundation
 
-/// A command-line driver for the control client and the supervisor.
+/// A command-line driver for the control client, the supervisor, and the checks
+/// the setup wizard makes before it writes anything.
 ///
 /// The supervisor's behaviour is all timing and process lifetime, so it is
 /// exercised against a real core rather than asserted against a mock: the
 /// failures worth catching here are a re-exec that reads as a crash, and a
-/// crash that reads as a re-exec.
+/// crash that reads as a re-exec.  A menu and a window can be driven by hand but
+/// not by a script, so what the app reaches only through them is reachable here
+/// on its own.
 
 let start = Date()
 
@@ -70,7 +73,7 @@ func showStatus() async {
 
 /// Supervise until interrupted, reporting every transition as it happens.
 func watch(seconds: TimeInterval) async {
-    let supervisor = CoreSupervisor(instanceName: instanceName())
+    let supervisor = CoreSupervisor(instanceOverride: instanceOverride)
     await supervisor.setOnChange { state, detail in
         stamp("state -> \(state.rawValue)\(detail.map { " (\($0))" } ?? "")")
     }
@@ -100,7 +103,7 @@ func watch(seconds: TimeInterval) async {
 
 /// Adopt and then stop, which is the path that must not strand a VM.
 func stopCore() async {
-    let supervisor = CoreSupervisor(instanceName: instanceName())
+    let supervisor = CoreSupervisor(instanceOverride: instanceOverride)
     await supervisor.setOnChange { state, detail in
         stamp("state -> \(state.rawValue)\(detail.map { " (\($0))" } ?? "")")
     }
@@ -129,6 +132,39 @@ func requestRestart() async {
     await client.dispose()
 }
 
+/// Run the wizard's token check from a terminal.  Its three outcomes — a shape
+/// the API is never asked about, a token Telegram refuses, and a Telegram that
+/// cannot be reached at all — are otherwise reachable only by typing into the
+/// one window the app has.
+func checkToken(_ token: String) async {
+    guard TelegramAPI.looksLikeToken(token) else {
+        stamp("malformed: \(TelegramAPI.malformedToken)")
+        exit(1)
+    }
+    let check = await TelegramAPI.verify(token: token)
+    guard let username = check.username else {
+        stamp("rejected: \(check.error ?? "no reason given")")
+        exit(1)
+    }
+    stamp("Found @\(username)")
+}
+
+/// The catalog the wizard's model picker is filled from, and the runtime warm-up
+/// that precedes it.
+func showModels() async {
+    if let reason = await OpenShrimpCLI.ensureRuntime() {
+        stamp("core runtime is not ready: \(reason)")
+    }
+    let choices = await OpenShrimpCLI.models()
+    guard !choices.isEmpty else {
+        stamp("no catalog; the picker offers CLI default alone")
+        return
+    }
+    for choice in choices {
+        print("\(choice.alias) — \(choice.description)  [\(choice.modelID)]")
+    }
+}
+
 // -- Entry -------------------------------------------------------------------
 
 switch arguments.first {
@@ -143,7 +179,12 @@ case "restart":
     await requestRestart()
 case "stop":
     await stopCore()
+case "token":
+    await checkToken(arguments.count > 1 ? arguments[1] : "")
+case "models":
+    await showModels()
 default:
-    print("usage: openshrimp-probe {paths|status|watch [seconds]|restart|stop} [--instance NAME]")
+    print("usage: openshrimp-probe {paths|status|watch [seconds]|restart|stop|token TOKEN|models}"
+        + " [--instance NAME]")
     exit(64)
 }

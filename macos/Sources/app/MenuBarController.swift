@@ -11,7 +11,6 @@ import AppKit
 @MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
     private let supervisor: CoreSupervisor
-    private let instanceName: String?
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let statusEntry = NSMenuItem(title: "Status: Stopped", action: nil, keyEquivalent: "")
@@ -23,11 +22,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var botUsername: String?
 
     var onQuit: (() -> Void)?
+    var onRunSetup: (() -> Void)?
 
-    init(supervisor: CoreSupervisor, instanceName: String?) {
+    init(supervisor: CoreSupervisor) {
         self.supervisor = supervisor
-        self.instanceName = instanceName
         super.init()
+    }
+
+    /// Scopes the log directory, and is only readable once a config exists —
+    /// which on a first run happens after this object does.  Read at click time
+    /// for the same reason the login item's state is: the answer lives in a file
+    /// the app does not own, and a copy taken at launch goes stale the moment
+    /// that file is written or edited.
+    private var instanceName: String? {
+        ConfigPeek.readInstanceName(at: CorePaths.configFile.path)
     }
 
     func show() {
@@ -182,10 +190,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
             let config = CorePaths.configFile
             guard FileManager.default.fileExists(atPath: config.path) else {
-                // Without a config there is nothing to start, and a Start that
-                // silently does nothing is the failure this reporting exists
-                // to prevent.  Name the file so the answer is actionable.
-                Notifier.post("No config file. Expected at \(config.path)")
+                // Without a config there is nothing to start, and the wizard is
+                // the only thing that leads anywhere from here.
+                self.onRunSetup?()
                 return
             }
             await supervisor.start()

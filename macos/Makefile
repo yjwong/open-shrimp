@@ -31,7 +31,8 @@ SOURCES       := $(CORE_SOURCES) $(PROBE_SOURCES)
 # Swift 5 language mode: the sources are written to be concurrency-safe, but
 # the toolchain that has to build them is whatever the machine has.
 FLAGS := -swift-version 5 -O -sdk $(SDK) -framework Foundation -framework Network
-APP_FLAGS := $(FLAGS) -framework AppKit -framework UserNotifications -framework ServiceManagement
+APP_FLAGS := $(FLAGS) -framework AppKit -framework SwiftUI -framework UserNotifications \
+	-framework ServiceManagement
 
 APP     := $(BUILD)/OpenShrimp.app
 APP_BIN := $(APP)/Contents/MacOS/OpenShrimp

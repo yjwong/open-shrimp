@@ -48,7 +48,16 @@ actor CoreSupervisor {
     /// equivalent, where the only kill available is unconditional.
     private static let sigtermGrace: TimeInterval = 10
 
-    private let instanceName: String?
+    /// An endpoint name fixed by the caller, scoping a run to an endpoint of its
+    /// own rather than the one the config names.
+    private let instanceOverride: String?
+
+    /// What the control endpoint derives from.  Re-read from the config as each
+    /// start begins rather than fixed at construction: on a first run this
+    /// object exists before config.yaml does, and the setup wizard writes the
+    /// file in between.
+    private var instanceName: String?
+
     private var process: Process?
     private var client: ControlClient?
     private var watchdog: Task<Void, Never>?
@@ -74,8 +83,9 @@ actor CoreSupervisor {
 
     private var onChange: (@Sendable (CoreState, String?) -> Void)?
 
-    init(instanceName: String?) {
-        self.instanceName = instanceName
+    init(instanceOverride: String? = nil) {
+        self.instanceOverride = instanceOverride
+        self.instanceName = instanceOverride
     }
 
     func setOnChange(_ handler: (@Sendable (CoreState, String?) -> Void)?) {
@@ -101,6 +111,11 @@ actor CoreSupervisor {
             set(.noConfig)
             return
         }
+
+        // Beside the check that establishes the file exists, because that is the
+        // moment the name becomes readable at all.
+        instanceName = instanceOverride
+            ?? ConfigPeek.readInstanceName(at: CorePaths.configFile.path)
 
         stopRequested = false
         set(.starting)

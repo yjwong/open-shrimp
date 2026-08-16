@@ -11,11 +11,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var supervisor: CoreSupervisor?
     private var menu: MenuBarController?
+    private var wizard: SetupWizard?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         instanceName = ConfigPeek.readInstanceName(at: CorePaths.configFile.path)
         AppLog.use(directory: CorePaths.logDirectory(instanceName: instanceName))
         AppLog.write("OpenShrimp \(Self.version) launched")
+        MainMenu.install()
         Notifier.requestAuthorization()
 
         // Before anything tries to run the core: what gets spawned is the copy
@@ -25,9 +27,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Notifier.post(reason)
         }
 
-        let supervisor = CoreSupervisor(instanceName: instanceName)
-        let menu = MenuBarController(supervisor: supervisor, instanceName: instanceName)
+        let supervisor = CoreSupervisor()
+        let menu = MenuBarController(supervisor: supervisor)
         menu.onQuit = { NSApp.terminate(nil) }
+        menu.onRunSetup = { [weak self] in self?.runSetup() }
         menu.show()
         self.supervisor = supervisor
         self.menu = menu
@@ -39,9 +42,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             // Start unconditionally: a missing config is the supervisor's own
             // answer, and reaching it here is what puts "No config" on the menu
-            // instead of leaving it reading "Stopped".
+            // instead of leaving it reading "Stopped" — including while the
+            // wizard below is open, and after it is dismissed unfinished.
             await supervisor.start()
+
+            if !FileManager.default.fileExists(atPath: CorePaths.configFile.path) {
+                runSetup()
+            }
         }
+    }
+
+    // -- Setup ----------------------------------------------------------------
+
+    /// The wizard, reached both from a launch with no config and from the menu's
+    /// Start while there is still none.
+    private func runSetup() {
+        // One at a time: a second window would collect a second set of answers
+        // and write config.yaml from whichever finished last.
+        if let wizard {
+            wizard.show()
+            return
+        }
+
+        let wizard = SetupWizard(
+            onComplete: { [weak self] in self?.setupCompleted() },
+            onCancel: { [weak self] in self?.setupDismissed() }
+        )
+        self.wizard = wizard
+        wizard.show()
+    }
+
+    private func setupCompleted() {
+        wizard = nil
+
+        // Re-read rather than assumed: the name scopes the log directory, and
+        // until the wizard wrote config.yaml there was no file to read it from.
+        // The supervisor and the menu derive it themselves, at start and at
+        // click, so this is the only copy that has to be moved.
+        instanceName = ConfigPeek.readInstanceName(at: CorePaths.configFile.path)
+        AppLog.use(directory: CorePaths.logDirectory(instanceName: instanceName))
+        AppLog.write("setup complete; starting the core")
+
+        Task { [supervisor] in await supervisor?.start() }
+    }
+
+    private func setupDismissed() {
+        wizard = nil
+        AppLog.write("setup dismissed; no config was written")
     }
 
     /// Stop the core before the app goes away, or it is left running with

@@ -341,8 +341,12 @@ class SetupWizardController(NSObject):
 
         content = w.contentView()
 
-        # Build step views
-        step_frame = (_CONTENT_INSET, 72, _CONTENT_WIDTH, 248)
+        # Build step views.  Tall enough that the lowest row any step lays out
+        # — the context step's error label, below the custom-model row — still
+        # lands inside the view.  A subview placed at a negative y is clipped,
+        # and a validation error nobody can see is a Next button that silently
+        # refuses to advance.
+        step_frame = (_CONTENT_INSET, 72, _CONTENT_WIDTH, 280)
         self._step_views = [
             self._build_step_token(step_frame),
             self._build_step_userid(step_frame),
