@@ -337,8 +337,8 @@ def _prompt_operator(token: str, identity: enrollment.BotIdentity) -> _Enrolled:
         try:
             poller.start()
             print()
-            print(f"  Open Telegram, search for {handle} — the bot you just")
-            print("  created — and press START.")
+            print(f"  Open Telegram, search for {handle} (the bot you just")
+            print("  created) and press START.")
             if identity.username:
                 print(
                     "  Already have Telegram on this machine? "
@@ -399,7 +399,7 @@ def _await_code(
             # The code is spent either way, so a decline reopens the window for
             # a different person rather than for a retype of the same digits.
             window.take(candidate)
-            print("  Nothing was written. Have the right account message the bot.")
+            print("  Nothing was written. Message the bot again to get a new code.")
             continue
 
         # Re-checked after the confirmation, not only before it: a prompt left

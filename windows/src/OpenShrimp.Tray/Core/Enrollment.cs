@@ -164,8 +164,16 @@ internal sealed class EnrollmentWindow
 
         if (Property(sender, "is_bot").ValueKind == JsonValueKind.True) return null;
 
-        if (_spokenTo.Contains(userId)) return null;
-        if (_spokenTo.Count >= MaxCandidates)
+        // Somebody already holding a live code gets nothing for messaging twice;
+        // a second code would only be a second thing to mistype.
+        if (_pending.Any(c => c.UserId == userId)) return null;
+
+        // But somebody the operator *declined* may ask again. What the cap
+        // bounds is how many distinct strangers the bot ever speaks to, and
+        // re-issuing to one already in that set widens it by nobody — while
+        // refusing them makes "Not me" a dead end for an operator who mis-tapped.
+        var returning = _spokenTo.Contains(userId);
+        if (!returning && _spokenTo.Count >= MaxCandidates)
         {
             Flooded = true;
             return null;

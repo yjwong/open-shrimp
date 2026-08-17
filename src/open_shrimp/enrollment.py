@@ -256,10 +256,18 @@ class EnrollmentWindow:
             if not isinstance(user_id, int) or sender.get("is_bot"):
                 return None
 
-            if user_id in self._spoken_to:
+            # Somebody already holding a live code gets nothing for messaging
+            # twice; a second code would only be a second thing to mistype.
+            if any(c.user_id == user_id for c in self._pending):
                 return None
 
-            if len(self._spoken_to) >= MAX_CANDIDATES:
+            # But somebody the operator *declined* may ask again.  What the cap
+            # bounds is how many distinct strangers the bot ever speaks to, and
+            # re-issuing to one already in that set widens it by nobody — while
+            # refusing them makes "No, try again" a dead end for the operator
+            # who mis-tapped it.
+            returning = user_id in self._spoken_to
+            if not returning and len(self._spoken_to) >= MAX_CANDIDATES:
                 self.flooded = True
                 return None
 

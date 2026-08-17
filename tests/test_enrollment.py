@@ -144,19 +144,52 @@ class TestFlood:
         assert window.flooded
         assert len(window.candidates) == enrollment.MAX_CANDIDATES
 
-    def test_the_cap_counts_codes_issued_not_codes_outstanding(self) -> None:
-        """Otherwise a declined stranger asks again, forever."""
+    def test_the_cap_counts_people_not_codes(self) -> None:
+        """Three distinct strangers is the bound worth holding.  Re-issuing to
+        one already inside it widens the bot's audience by nobody."""
         window = EnrollmentWindow()
         first = window.offer(_message(1, update_id=1))
         assert first
-        window.submit(first.code)  # operator declines; the slot frees up
+        window.submit(first.code)  # operator declines; the code is spent
 
         for i in range(2, enrollment.MAX_CANDIDATES + 1):
             assert window.offer(_message(i, update_id=i)) is not None
 
-        assert window.offer(_message(1, update_id=10)) is None
         assert window.offer(_message(99, update_id=99)) is None
         assert window.flooded
+
+    def test_a_declined_person_may_ask_again(self) -> None:
+        """"Not me" must not be a dead end for an operator who mis-tapped it:
+        the decline tells them to message again, so messaging again has to work.
+        """
+        window = EnrollmentWindow()
+        ada = window.offer(_message(7, update_id=1))
+        assert ada
+        window.submit(ada.code)  # operator declines
+
+        again = window.offer(_message(7, update_id=2))
+        assert again is not None
+        assert again.code != ada.code
+        assert window.submit(again.code) == again
+
+    def test_asking_again_does_not_buy_a_slot(self) -> None:
+        window = EnrollmentWindow()
+        for i in range(1, enrollment.MAX_CANDIDATES + 1):
+            assert window.offer(_message(i, update_id=i)) is not None
+        first = window.candidates[0]
+        window.submit(first.code)  # declined
+
+        assert window.offer(_message(first.user_id, update_id=10)) is not None
+        assert window.offer(_message(99, update_id=99)) is None
+        assert window.flooded
+
+    def test_a_repeat_while_holding_a_code_is_ignored(self) -> None:
+        """A second code is only a second thing to mistype."""
+        window = EnrollmentWindow()
+        ada = window.offer(_message(7, update_id=1))
+        assert ada
+        assert window.offer(_message(7, update_id=2)) is None
+        assert window.candidates == [ada]
 
     def test_a_deep_link_candidate_counts_against_the_cap_too(self) -> None:
         window = EnrollmentWindow(nonce="s3cret")

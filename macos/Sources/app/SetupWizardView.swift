@@ -145,7 +145,7 @@ struct SetupWizardView: View {
     /// when the wizard is here and Telegram is only on a phone.
     private var codeStep: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Open Telegram, search for \(botHandle) — the bot you just created — "
+            Text("Open Telegram, search for \(botHandle) (the bot you just created) "
                  + "and press START. It will reply with a setup code; type it below.")
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)

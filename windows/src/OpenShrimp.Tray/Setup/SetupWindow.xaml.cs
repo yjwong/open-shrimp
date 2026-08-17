@@ -326,7 +326,7 @@ public sealed partial class SetupWindow : Window
         _window = new EnrollmentWindow();
         var handle = _verifiedUsername is null ? "your bot" : $"@{_verifiedUsername}";
         EnrollInstruction.Text =
-            $"Open Telegram, search for {handle} — the bot you just created — "
+            $"Open Telegram, search for {handle} (the bot you just created) "
             + "and press START. It will reply with a setup code; type it below.";
         DeepLinkButton.Visibility = _verifiedUsername is null ? Visibility.Collapsed : Visibility.Visible;
         SetMessage(EnrollMessage, "", error: false);

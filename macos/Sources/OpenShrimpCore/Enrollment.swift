@@ -122,8 +122,16 @@ final class EnrollmentWindow {
               sender["is_bot"] as? Bool != true
         else { return nil }
 
-        guard !spokenTo.contains(userID) else { return nil }
-        guard spokenTo.count < Self.maxCandidates else {
+        // Somebody already holding a live code gets nothing for messaging twice;
+        // a second code would only be a second thing to mistype.
+        guard !pending.contains(where: { $0.userID == userID }) else { return nil }
+
+        // But somebody the operator *declined* may ask again.  What the cap
+        // bounds is how many distinct strangers the bot ever speaks to, and
+        // re-issuing to one already in that set widens it by nobody — while
+        // refusing them makes "Not me" a dead end for an operator who mis-tapped.
+        let returning = spokenTo.contains(userID)
+        guard returning || spokenTo.count < Self.maxCandidates else {
             flooded = true
             return nil
         }
