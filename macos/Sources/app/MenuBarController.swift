@@ -19,8 +19,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusEntry = NSMenuItem(title: "Status: Stopped", action: nil, keyEquivalent: "")
     private let startStopEntry = NSMenuItem(title: "Start", action: nil, keyEquivalent: "")
     private let autostartEntry = NSMenuItem(title: "Start at Login", action: nil, keyEquivalent: "")
+    /// Named for what it does rather than for what is wrong, because it sits
+    /// directly above a toggle: a title that states a fact reads there as a
+    /// second setting to tick, not as a fault to fix.  What is wrong is the
+    /// dialog's to say, at the length it takes.
     private let conflictEntry = NSMenuItem(
-        title: "Headless Service Also Starts at Login…",
+        title: "Resolve Login Conflict…",
         action: nil,
         keyEquivalent: ""
     )
@@ -59,6 +63,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         autostartEntry.action = #selector(toggleAutostart)
         conflictEntry.target = self
         conflictEntry.action = #selector(showLoginConflict)
+        // The one item in the menu that reports a fault rather than offering a
+        // choice, and the only thing that distinguishes it at a glance.
+        conflictEntry.image = NSImage(
+            systemSymbolName: "exclamationmark.triangle.fill",
+            accessibilityDescription: "Conflict"
+        )
 
         let menu = NSMenu()
         menu.delegate = self
@@ -289,22 +299,25 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // open behind whatever is in front.
         NSApp.activate(ignoringOtherApps: true)
 
+        // Said in the words of someone who never installed the second copy on
+        // purpose.  What is technically true here — a launchd agent, a bot
+        // token, one getUpdates consumer — explains nothing to the person being
+        // asked to choose, and the log keeps all of it anyway.
         let alert = NSAlert()
-        alert.messageText = "A headless OpenShrimp service is also configured to start at login."
+        alert.messageText = "OpenShrimp is set to start twice."
         alert.informativeText = """
-            Running both will make them fight over the Telegram connection: only one \
-            process may receive updates for a bot token, and launchd restarts the one \
-            that loses, indefinitely.
+            Two copies will start when you log in: this app, and a separate background \
+            copy that was installed on its own.
 
-            Removing the service leaves this app in charge of the core, and stops the \
-            copy the service has already started. Keep it if this Mac is meant to run \
-            OpenShrimp headlessly — then leave Start at Login switched off here.
+            They cannot both connect to Telegram. One of them will be knocked offline \
+            and restarted over and over, and your bot may stop answering.
 
-            The service is \(LaunchAgents.headlessAgent.path). Running "openshrimp \
-            uninstall" in a terminal removes it too.
+            Removing the background copy leaves this app to run OpenShrimp by itself. \
+            If the background copy is the one you meant to keep, leave it and switch \
+            Start at Login off here instead.
             """
-        alert.addButton(withTitle: "Remove Service")
-        alert.addButton(withTitle: "Keep It")
+        alert.addButton(withTitle: "Remove Background Copy")
+        alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         Task { [weak self] in
@@ -320,25 +333,29 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         do {
             stillRunning = try await LaunchAgents.removeHeadlessAgent()
         } catch {
-            Notifier.post("Remove the headless service failed: \(error.localizedDescription)")
+            Notifier.post("Could not remove the background copy: \(error.localizedDescription)")
             return
         }
         refresh()
 
         if let stillRunning {
+            // Why it is still running is a diagnosis, and goes where diagnoses
+            // go.  What the user is told is the part they can act on.
+            AppLog.write("the headless agent's job outlived the bootout: \(stillRunning)")
             Notifier.post(
-                "The headless OpenShrimp service will not return at login, but the core "
-                    + "it started has not stopped: \(stillRunning)"
+                "The background copy will not start again when you log in, but the one "
+                    + "already running has not stopped yet. Restart your Mac if your bot "
+                    + "keeps dropping out."
             )
         } else {
-            // Unloading the agent stops the core it was running, which may be
+            // Unloading the agent stops the copy it was running, which may be
             // the very one this app adopted at launch.  Said rather than
             // repaired: the supervisor calls a lost core an unexpected stop a
             // grace period later, and a restart issued here would either race
             // that or bounce a healthy core that was never the service's.
             Notifier.post(
-                "The headless OpenShrimp service has been removed. If the core it was "
-                    + "running has stopped, use Start to run one under this app."
+                "The background copy has been removed. If OpenShrimp has stopped, "
+                    + "choose Start from the menu."
             )
         }
 

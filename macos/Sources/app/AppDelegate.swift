@@ -69,8 +69,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func reportLoginConflict() {
         guard LaunchAgents.headlessAgentInstalled, Autostart.isEnabled else { return }
         Notifier.post(
-            "A headless OpenShrimp service also starts at login. Both will fight over "
-                + "the Telegram connection — open the menu bar item to resolve it."
+            "OpenShrimp is set to start twice when you log in, which can stop your bot "
+                + "answering. Open the OpenShrimp menu to fix it."
         )
     }
 

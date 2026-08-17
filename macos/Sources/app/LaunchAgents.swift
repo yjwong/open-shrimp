@@ -36,7 +36,7 @@ enum LaunchAgents {
         directory.appendingPathComponent("\(appLabel).plist")
     }
 
-    static var headlessAgent: URL {
+    private static var headlessAgent: URL {
         directory.appendingPathComponent("\(headlessLabel).plist")
     }
 
