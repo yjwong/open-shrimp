@@ -1,0 +1,37 @@
+---
+/*
+Points app download links at the actual asset in the newest release.
+
+The .dmg and .msi carry the version in their filename, so there is no stable
+`releases/latest/download/<name>` URL for them the way there is for the
+unversioned CLI binaries. Links are authored pointing at the releases page and
+upgraded here once the newest release is known, so a failed or blocked request
+still leaves a link that works.
+
+Mark a link with `data-release-asset="<filename suffix>"`, and any element with
+`data-release-version` gets the tag name as its text.
+*/
+---
+
+<script>
+	const links = document.querySelectorAll<HTMLAnchorElement>('a[data-release-asset]');
+	const versions = document.querySelectorAll<HTMLElement>('[data-release-version]');
+
+	if (links.length || versions.length) {
+		fetch('https://api.github.com/repos/yjwong/open-shrimp/releases/latest')
+			.then((response) => (response.ok ? response.json() : Promise.reject(response.status)))
+			.then((release) => {
+				for (const link of links) {
+					const suffix = link.dataset.releaseAsset;
+					const asset = release.assets.find((a: { name: string }) => a.name.endsWith(suffix!));
+					if (asset) link.href = asset.browser_download_url;
+				}
+				for (const version of versions) {
+					version.textContent = release.tag_name;
+				}
+			})
+			.catch(() => {
+				/* Links keep pointing at the releases page. */
+			});
+	}
+</script>

@@ -3,12 +3,14 @@ title: OpenShrimp
 description: Your personal Claude, on Telegram.
 template: splash
 hero:
-  tagline: A self-hosted Telegram bot for remote coding-agent access. Run the Claude Agent SDK or OpenCode, with full tool approval, sandboxed execution, and multi-project contexts — all from your chat.
+  tagline: Chat with Claude from Telegram while it works on real projects on your own computer. It runs on your machine, asks before it changes anything, and goes wherever your phone does.
   actions:
-    - text: Get Started
+    - text: Download
       link: /getting-started/installation/
-      icon: right-arrow
+      icon: download
       variant: primary
+      attrs:
+        data-download-cta: 'true'
     - text: View on GitHub
       link: https://github.com/yjwong/open-shrimp
       icon: external
@@ -16,29 +18,48 @@ hero:
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
+import PlatformDownload from '../../components/PlatformDownload.astro';
+
+<PlatformDownload />
+
+## What you'll need
+
+<CardGrid>
+	<Card title="A computer that stays on" icon="laptop">
+		Your Mac, PC, or a home server. This is where your projects live and where the work actually happens — OpenShrimp is not a hosted service.
+	</Card>
+	<Card title="A Telegram account" icon="comment">
+		Telegram is the entire interface. There's no separate app to install on your phone.
+	</Card>
+	<Card title="A Claude account" icon="star">
+		A Claude Pro or Max subscription, or an Anthropic API key. You sign in once, from the bot.
+	</Card>
+</CardGrid>
+
+Setting up is a download, a short detour through Telegram to create your bot, and a sign-in. [Start here](/getting-started/installation/).
 
 ## Features
 
 <CardGrid stagger>
-	<Card title="Pluggable backends" icon="puzzle">
-		Drive your sessions with the [Claude Agent SDK or OpenCode](/guides/backends/) — OpenAI, Anthropic, and Google models — set globally or per context.
+	<Card title="It asks before it changes anything" icon="approve-check-circle">
+		Every file edit and every command comes to you as a button in the chat: allow once, allow for this session, or deny. Reading files inside your project is automatic; nothing outside it happens without you. See [tool approval](/guides/tool-approval/).
 	</Card>
-	<Card title="Multi-project contexts" icon="open-book">
-		Switch between projects with `/context`. Each context has its own working directory, model, allowed tools, and session history.
+	<Card title="One bot, all your projects" icon="open-book">
+		Switch between projects with `/context`. Each one remembers its own folder, model, permissions, and conversation history.
 	</Card>
-	<Card title="Tool approval" icon="approve-check-circle">
-		Every tool call goes through path-scoped approval. Read-only tools auto-approve within your project; mutating tools always ask first. You stay in control.
+	<Card title="Run it in a sandbox" icon="seti:docker">
+		Put the agent in a Docker container or a virtual machine, where it can't reach the rest of your computer. Inside the box, you can safely let it do anything. See [sandboxing](/guides/docker-sandbox/).
 	</Card>
-	<Card title="Sandboxed execution" icon="seti:docker">
-		Run the agent in a Docker container, a Libvirt VM, or a macOS sandbox. Filesystem isolation means you can safely auto-approve everything.
+	<Card title="Your choice of model" icon="puzzle">
+		Claude out of the box, or point it at OpenAI, Anthropic, and Google models through [OpenCode](/guides/backends/) — for everything, or just for one project.
 	</Card>
-	<Card title="Computer use" icon="laptop">
-		Enable a headless desktop inside the sandbox. Claude can take screenshots, click, type, and browse the web — viewable live via VNC.
+	<Card title="It can use a browser" icon="laptop">
+		Give the sandbox a screen and Claude can click, type, and browse the web to finish a task. You can watch it happen live from your phone. See [computer use](/guides/computer-use/).
 	</Card>
-	<Card title="Scheduled tasks" icon="seti:clock">
-		Set up cron-like recurring prompts in natural language. Claude runs them automatically and reports back to your chat.
+	<Card title="Work while you're asleep" icon="seti:clock">
+		Ask for something to happen every morning, or every Monday, in plain language. Claude runs it on schedule and reports back in the chat. See [scheduled tasks](/guides/scheduled-tasks/).
 	</Card>
-	<Card title="Mini Apps" icon="puzzle">
-		Review diffs, view terminal output, watch VNC, and preview markdown — all through Telegram Mini Apps built into the bot.
+	<Card title="Review changes properly" icon="rocket">
+		Diffs, terminal output, a live screen, and rendered markdown all open right inside Telegram, so you're not reading code in a chat bubble. See [Mini Apps](/guides/mini-apps/).
 	</Card>
 </CardGrid>

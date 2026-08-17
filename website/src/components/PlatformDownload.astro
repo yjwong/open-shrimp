@@ -1,0 +1,35 @@
+---
+/*
+Names the visitor's platform on the hero download button and points it at that
+platform's section of the installation page.
+
+Progressive enhancement: the button is rendered as a plain "Download" link to
+the installation page, so it stays correct when the script does not run or the
+platform is unrecognised.
+*/
+---
+
+<script>
+	const cta = document.querySelector<HTMLAnchorElement>('a[data-download-cta]');
+
+	if (cta) {
+		const ua = navigator.userAgent;
+		const platform = /Mac|iPhone|iPad/.test(ua)
+			? { name: 'macOS', anchor: 'macos' }
+			: /Win/.test(ua)
+				? { name: 'Windows', anchor: 'windows' }
+				: /Linux|Android|CrOS/.test(ua)
+					? { name: 'Linux', anchor: 'linux' }
+					: null;
+
+		if (platform) {
+			// The button renders the label as a text node followed by the icon SVG;
+			// replacing the whole content would drop the icon.
+			const label = cta.firstChild;
+			if (label && label.nodeType === Node.TEXT_NODE) {
+				label.nodeValue = `Download for ${platform.name}`;
+			}
+			cta.href = `/getting-started/installation/#${platform.anchor}`;
+		}
+	}
+</script>

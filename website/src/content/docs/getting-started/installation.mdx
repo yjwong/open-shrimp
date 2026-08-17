@@ -1,0 +1,200 @@
+---
+title: Installation
+description: Download OpenShrimp and get it running on your computer.
+sidebar:
+  order: 1
+---
+
+import { Steps } from '@astrojs/starlight/components';
+import ReleaseDownloads from '../../../components/ReleaseDownloads.astro';
+
+<ReleaseDownloads />
+
+OpenShrimp runs on your own computer — the one your projects are on, and the one
+that needs to stay awake for the bot to answer. Pick your platform below.
+
+On macOS and Windows there's an app with a setup wizard and no terminal
+involved. On every platform there's also a single self-contained binary: no
+Python, no package manager, nothing to install alongside it.
+
+## macOS
+
+Download the disk image, drag OpenShrimp to Applications, and open it.
+
+<Steps>
+
+1. <a href="https://github.com/yjwong/open-shrimp/releases/latest" data-release-asset=".dmg">**Download OpenShrimp for macOS**</a> (`.dmg`)
+
+2. Open the downloaded file and drag **OpenShrimp** into your Applications folder.
+
+3. Launch it from Applications. The setup wizard opens on first run.
+
+</Steps>
+
+OpenShrimp lives in the menu bar (the shrimp icon) rather than the Dock. From
+there you can start and stop the bot, open your config, and read the logs. Turn
+on **Start at Login** and it comes back with your Mac — it registers a proper
+login item, so it shows up under Login Items in System Settings. The bot runs as
+its own process, so `/restart` from Telegram works and the menu keeps reporting
+what it's actually doing. It updates itself in place when a new release is out.
+
+### Command line
+
+If you'd rather run the bot from a terminal, download the binary instead of the
+app. Apple Silicon:
+
+```bash
+curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-macos-aarch64 -o openshrimp
+chmod +x openshrimp
+```
+
+Intel:
+
+```bash
+curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-macos-x86_64 -o openshrimp
+chmod +x openshrimp
+```
+
+## Windows
+
+Download the installer and run it. It installs just for you, into
+`%LOCALAPPDATA%\Programs\OpenShrimp`, so it never asks for an administrator
+password. The bot, the .NET runtime and the Windows App SDK are all bundled —
+there's nothing to install first.
+
+<Steps>
+
+1. <a href="https://github.com/yjwong/open-shrimp/releases/latest" data-release-asset=".msi">**Download OpenShrimp for Windows**</a> (`.msi`)
+
+2. Run the downloaded installer. See the note below about the warning Windows shows.
+
+3. Launch OpenShrimp from the Start menu. The setup wizard opens on first run.
+
+</Steps>
+
+:::caution[Windows will warn you about this download]
+The installer isn't signed with a code-signing certificate, so Windows hasn't
+learned to recognise it. You'll see this twice:
+
+- Your browser may say the file "isn't commonly downloaded". Choose **Keep**.
+- When you run it, Microsoft Defender SmartScreen shows **"Windows protected
+  your PC"**. Click **More info**, then **Run anyway**.
+
+Both are expected, and the same warnings apply to the command-line `.exe`. If
+you'd rather not click through them, [build from
+source](/reference/building-from-source/) instead.
+:::
+
+OpenShrimp lives in the notification area with no taskbar window. Start and stop
+the bot, open your config, and read the logs from the tray menu. There's a
+**Start at Login** toggle, backed by a logon scheduled task.
+
+The Windows build also includes the [HCS sandbox](/guides/hcs-sandbox/), which
+runs a project inside a Linux guest on the Host Compute Service. It's optional —
+the bot works without it — and the guest image downloads on first boot if you
+turn it on.
+
+### Command line
+
+```powershell
+curl.exe -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-windows-x86_64.exe -o openshrimp.exe
+```
+
+## Linux
+
+There's no desktop app on Linux — download the binary and run it. x86_64:
+
+```bash
+curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-linux-x86_64 -o openshrimp
+chmod +x openshrimp
+```
+
+ARM64:
+
+```bash
+curl -fsSL https://github.com/yjwong/open-shrimp/releases/latest/download/openshrimp-linux-aarch64 -o openshrimp
+chmod +x openshrimp
+```
+
+Both binaries need glibc 2.39 or newer — Ubuntu 24.04+, Debian 13+, Fedora 40+.
+On an older distribution, [build from source](/reference/building-from-source/)
+instead.
+
+To keep the bot running in the background and start it with the machine, see
+[running under systemd](/deployment/systemd/).
+
+---
+
+Every binary, installer and source archive is also on the
+[GitHub Releases](https://github.com/yjwong/open-shrimp/releases) page. The
+newest release is <span data-release-version>the one at the top</span>.
+
+## Create your Telegram bot first
+
+The setup wizard asks for a bot token straight away, so get one before you run
+it. It takes about two minutes in Telegram itself:
+
+<Steps>
+
+1. Message [@BotFather](https://t.me/BotFather), send `/newbot`, and pick a name. It replies with your **bot token**.
+
+2. Message [@userinfobot](https://t.me/userinfobot) to get your **Telegram user ID**, so the bot knows to answer only you.
+
+</Steps>
+
+[Telegram Setup](/getting-started/telegram-setup/) walks through both, and covers
+the two BotFather settings worth turning on while you're there.
+
+## Run the setup wizard
+
+Launch the app, or run the binary from a terminal:
+
+```bash
+./openshrimp
+```
+
+The wizard asks for three things:
+
+<Steps>
+
+1. Your Telegram bot token, from [@BotFather](https://t.me/BotFather).
+
+2. Your Telegram user ID, from [@userinfobot](https://t.me/userinfobot).
+
+3. Your first project — a folder on this computer, a description, and a model.
+
+</Steps>
+
+It writes the config to `~/.config/openshrimp/config.yaml` on Linux, or
+`~/Library/Application Support/openshrimp/config.yaml` on macOS. You can also
+write it by hand — see [Configuration](/getting-started/configuration/). On
+later runs it skips the wizard and starts immediately.
+
+## Sign in to Claude
+
+Open your bot in Telegram and send `/start`. You should get a welcome message
+confirming you're connected, along with the project you're currently in.
+
+Now sign in to Claude. Send `/login` in a private chat with the bot: this opens a
+Mini App that runs the same sign-in flow as the Claude Code CLI, and you paste
+the resulting token back to finish. Use `/login` again whenever you need to
+re-authenticate.
+
+If you'd rather use an API key, set `ANTHROPIC_API_KEY` in the environment before
+starting the bot and you can skip `/login` entirely. It's read from the
+environment, never from the config file.
+
+There's nothing else to install — the Claude Code CLI ships inside OpenShrimp.
+If you'd rather drive sessions with a different model, the
+[OpenCode backend](/guides/backends/) reaches OpenAI, Anthropic and Google
+models; it's the one case where you install a second binary and sign in to it
+separately.
+
+## Next steps
+
+Your bot is running and signed in. Head to
+[First Conversation](/getting-started/first-conversation/) to try it out, or
+[Configuration](/getting-started/configuration/) to add more projects.
+
+Building from source — for older Linux distributions, or to work on OpenShrimp
+itself — is covered in [Building from Source](/reference/building-from-source/).
