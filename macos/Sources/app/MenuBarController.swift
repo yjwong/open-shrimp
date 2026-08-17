@@ -24,7 +24,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// second setting to tick, not as a fault to fix.  What is wrong is the
     /// dialog's to say, at the length it takes.
     private let conflictEntry = NSMenuItem(
-        title: "Resolve Login Conflict…",
+        title: "Fix Startup Problem…",
         action: nil,
         keyEquivalent: ""
     )
