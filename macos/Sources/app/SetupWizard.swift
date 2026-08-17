@@ -107,6 +107,11 @@ final class SetupWizard: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        // Ends any open enrollment window with the wizard.  A poll left running
+        // behind a screen nobody is looking at is exactly the case the window's
+        // expiry exists for; this closes it at the moment it stops being watched.
+        model.cancel()
+
         // The reference goes now — the close notification retains the window for
         // the rest of the teardown — but the outcome is reported a turn later,
         // because that callback drops the last reference to this object while

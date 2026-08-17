@@ -63,13 +63,55 @@
                     </StackPanel>
                 </StackPanel>
 
-                <!-- Step 1: user id -->
-                <StackPanel x:Name="StepUserId" Spacing="10" Visibility="Collapsed">
-                    <TextBox x:Name="UserIdBox"
-                             Header="Your Telegram user ID"
-                             PlaceholderText="123456789" />
-                    <HyperlinkButton Content="Open @userinfobot in Telegram →" Click="OpenUserInfoBot" />
-                    <TextBlock x:Name="UserIdMessage" TextWrapping="Wrap" />
+                <!--
+                    Step 1: enrollment.  The code travels phone to desktop,
+                    which is the only direction that works when the wizard is
+                    here and Telegram is only on a phone.
+                -->
+                <StackPanel x:Name="StepEnroll" Spacing="10" Visibility="Collapsed">
+
+                    <StackPanel x:Name="EnrollWaiting" Spacing="10">
+                        <TextBlock x:Name="EnrollInstruction" TextWrapping="Wrap"
+                                   Text="Open Telegram, search for your bot, and press START." />
+                        <HyperlinkButton x:Name="DeepLinkButton"
+                                         Content="Already have Telegram on this PC? Open it here →"
+                                         Visibility="Collapsed"
+                                         Click="OpenDeepLink" />
+                        <TextBox x:Name="SetupCodeBox"
+                                 Header="Setup code"
+                                 PlaceholderText="000 000"
+                                 Width="160"
+                                 HorizontalAlignment="Left"
+                                 KeyDown="SetupCodeKeyDown" />
+                        <HyperlinkButton Content="Paste a user ID instead" Click="ChooseManualEntry" />
+                    </StackPanel>
+
+                    <!-- Names the consequence, not only the person. -->
+                    <StackPanel x:Name="EnrollConfirming" Spacing="10" Visibility="Collapsed">
+                        <TextBlock x:Name="CandidateLabel" TextWrapping="Wrap"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="Adding them lets them read and change files on this computer." />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="ConfirmButton" Content="Yes, that's me"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    Click="ConfirmCandidate" />
+                            <Button x:Name="DeclineButton" Content="No — try again" Click="DeclineCandidate" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <StackPanel x:Name="EnrollManual" Spacing="10" Visibility="Collapsed">
+                        <TextBox x:Name="UserIdBox"
+                                 Header="Your Telegram user ID"
+                                 PlaceholderText="123456789" />
+                        <HyperlinkButton Content="Open @userinfobot in Telegram →" Click="OpenUserInfoBot" />
+                        <!-- A network blip must not be a one-way door into
+                             typing a number from memory. -->
+                        <HyperlinkButton Content="Use a setup code instead" Click="RestartEnrollment" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="EnrollMessage" TextWrapping="Wrap" />
                 </StackPanel>
 
                 <!-- Step 2: first context -->

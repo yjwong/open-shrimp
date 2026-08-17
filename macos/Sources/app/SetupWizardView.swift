@@ -37,7 +37,9 @@ struct SetupWizardView: View {
     private var title: String {
         switch model.step {
         case 0: return "Connect your bot"
-        case 1: return "Who may use it?"
+        case 1:
+            if case .confirming = model.stage { return "Is this you?" }
+            return "Who may use it?"
         default: return "Your first context"
         }
     }
@@ -45,7 +47,17 @@ struct SetupWizardView: View {
     private var subtitle: String {
         switch model.step {
         case 0: return "Create a bot with @BotFather and paste its token here."
-        case 1: return "Only your Telegram user ID will be allowed to talk to the bot."
+        case 1:
+            switch model.stage {
+            case .confirming:
+                return "Only this person will be allowed to talk to the bot."
+            case .manual:
+                return "A wrong number here produces a bot that ignores you, with no error anywhere."
+            case .closed:
+                return "The window closed. Start a new one to try again."
+            case .waiting:
+                return "Message the bot from Telegram, and it will send you a code."
+            }
         default: return "A working directory the agent will operate in."
         }
     }
@@ -97,7 +109,7 @@ struct SetupWizardView: View {
                 Task { await model.advance() }
             }
             .keyboardShortcut(.defaultAction)
-            .disabled(model.busy)
+            .disabled(model.primaryDisabled)
         }
     }
 
@@ -106,7 +118,7 @@ struct SetupWizardView: View {
     @ViewBuilder private var content: some View {
         switch model.step {
         case 0: tokenStep
-        case 1: userIDStep
+        case 1: enrollStep
         default: contextStep
         }
     }
@@ -119,13 +131,86 @@ struct SetupWizardView: View {
         }
     }
 
-    private var userIDStep: some View {
+    @ViewBuilder private var enrollStep: some View {
+        switch model.stage {
+        case .confirming(let candidate): confirmation(candidate)
+        case .manual: manualIDStep
+        case .closed: EmptyView()
+        case .waiting: codeStep
+        }
+    }
+
+    /// The code travels phone → desktop, which is the only direction that works
+    /// when the wizard is here and Telegram is only on a phone.
+    private var codeStep: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Open Telegram, search for \(botHandle) — the bot you just created — and press START.")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let link = model.botLink, let url = URL(string: link) {
+                Button("Already have Telegram on this Mac? Open it here") {
+                    NSWorkspace.shared.open(url)
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
+
+            HStack(spacing: 8) {
+                Text("Setup code").frame(width: 96, alignment: .leading)
+                TextField("000 000", text: $model.setupCode)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 120)
+            }
+
+            Button("Paste a user ID instead") { model.chooseManualEntry() }
+                .buttonStyle(.link)
+                .font(.caption)
+        }
+    }
+
+    private var manualIDStep: some View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("e.g. 123456789", text: $model.userID)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 180)
             telegramLink("Open @userinfobot in Telegram", domain: "userinfobot")
+            // A network blip should not be a one-way door into typing a number
+            // from memory.
+            Button("Use a setup code instead") {
+                Task { await model.restartEnrollment() }
+            }
+            .buttonStyle(.link)
+            .font(.caption)
         }
+    }
+
+    /// Names the consequence, not only the person.  This is what holds when a
+    /// code is read off a shoulder-surfed screen or a screen share.
+    private func confirmation(_ candidate: EnrollmentCandidate) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("\(candidate.label) messaged your bot.")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Adding them lets them read and change files on this computer.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                Button("Yes, that's me") {
+                    Task { await model.confirmCandidate() }
+                }
+                .disabled(model.busy)
+
+                Button("No — try again") { model.declineCandidate() }
+                    .disabled(model.busy)
+            }
+        }
+    }
+
+    private var botHandle: String {
+        model.verifiedUsername.map { "@\($0)" } ?? "your bot"
     }
 
     private var contextStep: some View {

@@ -194,7 +194,8 @@ async def _handle_question_callback(
         return False
 
     if not _is_authorized(query.from_user and query.from_user.id, config):
-        await query.answer("Unauthorized.")
+        # Silent: a toast is the bot speaking to a non-allowlisted user.
+        await query.answer()
         return True
 
     # Parse callback data

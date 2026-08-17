@@ -80,7 +80,15 @@ def _is_private_chat(update: Update) -> bool:
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command: welcome message for first-time users."""
+    """Handle /start command: welcome message for first-time users.
+
+    A deep-link start payload is read by nobody here, and must stay that way.
+    Enrollment lives in the setup wizard, which owns the poll while the core is
+    stopped; a payload interpreted by the running bot would be an
+    unauthenticated enrollment endpoint on a public username, permanently open.
+    ``allowed_users`` is the only auth boundary in front of a bot that runs
+    shell commands, so nothing reachable by a stranger may ever add to it.
+    """
     config: Config = context.bot_data["config"]
     db: aiosqlite.Connection = context.bot_data["db"]
     message = update.effective_message

@@ -27,6 +27,23 @@ struct WizardMessage: Equatable {
     let text: String
 }
 
+/// Where the enrollment step is.
+///
+/// Enrollment is an authentication step, so it has more states than a text
+/// field: the operator has to be told who is about to be granted access before
+/// anything is written, and a window that has closed must not look like one
+/// still waiting for a code.
+enum EnrollStage: Equatable {
+    /// Waiting for a message, and for the code it earns to be typed back.
+    case waiting
+    /// Naming the person, and the consequence, before writing anything.
+    case confirming(EnrollmentCandidate)
+    /// Expired, or spent on wrong codes.  Every code it issued is dead.
+    case closed
+    /// The escape hatch for an operator who is not holding the phone.
+    case manual
+}
+
 /// The wizard's state and every rule it enforces before the core is asked to
 /// write anything.
 ///
@@ -47,9 +64,16 @@ final class SetupWizardModel: ObservableObject {
 
     @Published var token = ""
     @Published var userID = ""
+    @Published var setupCode = ""
     @Published var contextName = "default"
     @Published var customModel = ""
     @Published private(set) var directory: String?
+
+    @Published private(set) var stage: EnrollStage = .waiting
+    /// The deep-link accelerator, shown beside the search instruction.  One
+    /// click where Telegram Desktop is on this machine; the code path is what
+    /// carries everyone else, so nothing depends on this working.
+    @Published private(set) var botLink: String?
 
     @Published private(set) var options: [ModelOption] = [.cliDefault, .custom]
     @Published private(set) var catalogLoaded = false
@@ -66,7 +90,18 @@ final class SetupWizardModel: ObservableObject {
     /// succeeded.  A flag lets an edited token skip verification while it is the
     /// edited value that gets written.
     private var verifiedToken: String?
-    private var verifiedUsername: String?
+
+    /// The bot that token belongs to.  Published because the enrollment step
+    /// names what to search for.
+    @Published private(set) var verifiedUsername: String?
+
+    /// The open enrollment window and the poll feeding it.  Held so that
+    /// leaving the step, or closing the wizard, ends both — a wizard abandoned
+    /// on a desk must not still be enrollable.
+    private var window: EnrollmentWindow?
+    private var pollTask: Task<Void, Never>?
+    private var offset: Int64 = 0
+    private var enrolledUserID: Int64?
 
     /// The catalog fetch, which is also the first thing that runs the core at
     /// all.  Held so the config write can wait for it out rather than launch the
@@ -84,7 +119,16 @@ final class SetupWizardModel: ObservableObject {
     var primaryTitle: String {
         if isLastStep { return "Finish" }
         if step == 0 && verifiedToken != trimmed(token) { return "Verify" }
+        if step == 1 && stage == .closed { return "Start again" }
         return "Next"
+    }
+
+    /// The confirmation carries its own two buttons, and naming the consequence
+    /// only works if the plain "Next" cannot bypass it.
+    var primaryDisabled: Bool {
+        if busy { return true }
+        if step == 1, case .confirming = stage { return true }
+        return false
     }
 
     // -- Setup ----------------------------------------------------------------
@@ -122,8 +166,16 @@ final class SetupWizardModel: ObservableObject {
 
     func back() {
         guard step > 0, !busy else { return }
+        // Leaving the step ends the window with it: an open poll behind a
+        // screen nobody is looking at is exactly the overnight case.
+        if step == 1 { stopPolling() }
         message = nil
         step -= 1
+    }
+
+    /// Called when the wizard window goes away, however it goes away.
+    func cancel() {
+        stopPolling()
     }
 
     func advance() async {
@@ -134,7 +186,7 @@ final class SetupWizardModel: ObservableObject {
 
         switch step {
         case 0: await leaveTokenStep()
-        case 1: leaveUserIDStep()
+        case 1: await leaveEnrollmentStep()
         default: await finish()
         }
     }
@@ -145,6 +197,7 @@ final class SetupWizardModel: ObservableObject {
         if verifiedToken == token {
             message = nil
             step = 1
+            await startEnrollment()
             return
         }
 
@@ -171,16 +224,235 @@ final class SetupWizardModel: ObservableObject {
         message = WizardMessage(tone: .success, text: "Found @\(username)")
     }
 
-    private func leaveUserIDStep() {
-        guard let id = Int64(trimmed(userID)), id > 0 else {
+    // -- Enrollment -----------------------------------------------------------
+
+    /// Open a window and start polling for the operator's message.
+    ///
+    /// The backlog is drained first, so nothing queued before this moment is a
+    /// candidate — and nothing queued before this moment receives a code.
+    private func startEnrollment() async {
+        guard let token = verifiedToken else { return }
+
+        stopPolling()
+        setupCode = ""
+        stage = .waiting
+        message = WizardMessage(tone: .progress, text: "Getting ready…")
+
+        switch await TelegramAPI.drainBacklog(token: token) {
+        case .failure(let failure):
+            message = WizardMessage(tone: .failure, text: failure.message)
+            stage = .manual
+            return
+        case .success(let next):
+            offset = next
+        }
+
+        let window = EnrollmentWindow()
+        self.window = window
+        botLink = verifiedUsername.map { window.deepLink(username: $0) }
+        message = nil
+        pollTask = Task { [weak self] in
+            await self?.poll(token: token, window: window)
+        }
+    }
+
+    private func poll(token: String, window: EnrollmentWindow) async {
+        while !Task.isCancelled && !window.closed {
+            // Never park past the deadline, and never spin: a poll shorter than
+            // a second would busy-loop through the last of the window.
+            let wait = max(1, min(TelegramAPI.pollSeconds, window.secondsLeft))
+            let outcome = await TelegramAPI.poll(token: token, offset: offset, seconds: wait)
+            if Task.isCancelled { return }
+
+            switch outcome {
+            case .failure(let failure):
+                // A refused token or a conflicting poller does not resolve by
+                // waiting; anything else must not spend the operator's five
+                // minutes, so it is reported and retried.
+                switch failure {
+                case .rejected, .conflict:
+                    message = WizardMessage(tone: .failure, text: failure.message)
+                    stage = .manual
+                    return
+                default:
+                    message = WizardMessage(tone: .failure, text: failure.message)
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+            case .success(let batch):
+                offset = batch.next
+                for update in batch.updates {
+                    await consider(update, token: token, window: window)
+                }
+            }
+        }
+
+        if window.expired, stage == .waiting {
+            stage = .closed
             message = WizardMessage(
                 tone: .failure,
-                text: "Must be a positive number — @userinfobot will tell you yours."
+                text: "The setup window closed. Every code it issued is now dead."
+            )
+        }
+    }
+
+    private func consider(
+        _ update: [String: Any],
+        token: String,
+        window: EnrollmentWindow
+    ) async {
+        let wasFlooded = window.flooded
+        guard let candidate = window.offer(update) else {
+            if window.flooded && !wasFlooded {
+                message = WizardMessage(
+                    tone: .failure,
+                    text: """
+                        Several people have messaged this bot. That's unusual \
+                        during setup — check the name before you continue.
+                        """
+                )
+            }
+            return
+        }
+
+        if let code = candidate.code {
+            _ = await TelegramAPI.send(
+                token: token,
+                chatID: candidate.chatID,
+                text: EnrollmentWindow.codeMessage(code),
+                threadID: candidate.threadID
             )
             return
         }
+
+        // The deep link already proves this came from the wizard's own screen,
+        // so there is nothing left for a code to prove.
+        if stage == .waiting { stage = .confirming(candidate) }
+    }
+
+    private func leaveEnrollmentStep() async {
+        switch stage {
+        case .confirming:
+            // Answered by the confirmation's own buttons, never by "Next".
+            return
+
+        case .closed:
+            await startEnrollment()
+
+        case .manual:
+            guard let id = Int64(trimmed(userID)), id > 0 else {
+                message = WizardMessage(
+                    tone: .failure,
+                    text: "Must be a positive number."
+                )
+                return
+            }
+            enrolledUserID = id
+            stopPolling()
+            // Confirmed here too: this path also consumed updates, and leaving
+            // them unconfirmed replays them into the core on its first poll.
+            if let token = verifiedToken {
+                await TelegramAPI.confirmOffset(token: token, offset: offset)
+            }
+            message = nil
+            step = 2
+
+        case .waiting:
+            guard let window else {
+                // Backed into a step whose window has already been spent.
+                await startEnrollment()
+                return
+            }
+
+            if let linked = window.authenticatedCandidate {
+                stage = .confirming(linked)
+                return
+            }
+
+            let entered = trimmed(setupCode)
+            guard !entered.isEmpty else {
+                message = WizardMessage(
+                    tone: .failure,
+                    text: "Type the code the bot sent you."
+                )
+                return
+            }
+
+            if let candidate = window.submit(entered) {
+                setupCode = ""
+                message = nil
+                stage = .confirming(candidate)
+            } else if window.closed {
+                stage = .closed
+                message = WizardMessage(
+                    tone: .failure,
+                    text: "Too many wrong codes. Every code that window issued is now dead."
+                )
+            } else {
+                let left = EnrollmentWindow.maxWrongCodes - window.wrongAttempts
+                message = WizardMessage(
+                    tone: .failure,
+                    text: "That code doesn't match. \(left) attempt(s) left."
+                )
+            }
+        }
+    }
+
+    /// Write the candidate in, and hand the poll back to the core cleanly.
+    func confirmCandidate() async {
+        guard case .confirming(let candidate) = stage, let token = verifiedToken else { return }
+
+        window?.take(candidate)
+        enrolledUserID = candidate.userID
+        message = WizardMessage(tone: .progress, text: "Finishing up…")
+        stopPolling()
+
+        _ = await TelegramAPI.send(
+            token: token,
+            chatID: candidate.chatID,
+            text: EnrollmentWindow.allSetMessage,
+            threadID: candidate.threadID
+        )
+        await TelegramAPI.confirmOffset(token: token, offset: offset)
+
         message = nil
+        stage = .waiting
         step = 2
+    }
+
+    /// Decline reopens the window for a fresh message, not a retype: the code
+    /// is spent either way.
+    func declineCandidate() {
+        guard case .confirming(let candidate) = stage else { return }
+        window?.take(candidate)
+        setupCode = ""
+        stage = .waiting
+        message = WizardMessage(
+            tone: .failure,
+            text: "Nothing was written. Message the bot again to get a new code."
+        )
+    }
+
+    /// Go back to the code flow — from manual entry, or from a window that
+    /// closed while nobody was looking.
+    func restartEnrollment() async {
+        await startEnrollment()
+    }
+
+    /// The escape hatch, for an operator authorising an ID for a phone they are
+    /// not holding.  Rarely needed now that the code path works over ssh.
+    func chooseManualEntry() {
+        stopPolling()
+        setupCode = ""
+        stage = .manual
+        message = nil
+    }
+
+    private func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
+        window?.close()
+        window = nil
+        botLink = nil
     }
 
     // -- Finish ---------------------------------------------------------------
@@ -218,7 +490,7 @@ final class SetupWizardModel: ObservableObject {
             model = custom
         }
 
-        guard let token = verifiedToken, let userID = Int64(trimmed(self.userID)) else {
+        guard let token = verifiedToken, let userID = enrolledUserID else {
             message = WizardMessage(tone: .failure, text: "Go back and complete the earlier steps.")
             return
         }

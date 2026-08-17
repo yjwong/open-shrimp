@@ -18,6 +18,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -68,6 +69,7 @@ from open_shrimp.handlers.commands import (
 )
 from open_shrimp.handlers.messages import message_handler, web_app_data_handler
 from open_shrimp.handlers.questions import _handle_question_callback
+from open_shrimp.handlers.turned_away import note_unauthorized
 from open_shrimp.handlers.utils import _is_authorized
 
 logger = logging.getLogger(__name__)
@@ -94,7 +96,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if not _is_authorized(query.from_user and query.from_user.id, config):
-        await query.answer("Unauthorized.")
+        # Answered, so their client stops spinning, but with nothing said. A
+        # toast is the bot speaking to a non-allowlisted user, which happens in
+        # exactly one place and this is not it.
+        await query.answer()
         return
 
     # Inbound-event pick-up (button + context picker)
@@ -287,6 +292,12 @@ def build_application(
     app.bot_data["config"] = config
     app.bot_data["db"] = db
     app.bot_data["config_path"] = None  # set by run_bot if available
+
+    # Ahead of everything else, and stopping nothing: each handler still drops
+    # an unauthorized update itself.  This only makes the drop visible — a log
+    # line for the post-mortem, and an aggregated note to the people who are
+    # allowed.  The sender is never answered.
+    app.add_handler(TypeHandler(Update, note_unauthorized, block=False), group=-1)
 
     # Command handlers
     app.add_handler(CommandHandler("start", start_handler))
@@ -495,6 +506,16 @@ async def run_bot(
                 logger.warning(
                     "Failed to send update confirmation to %d", uid, exc_info=True
                 )
+
+    # The enrollment handshake spends Telegram's one-shot START press, so the
+    # bot's explanation of itself has to arrive unprompted, and only once the
+    # core is actually alive.
+    from open_shrimp.first_boot import send_orientation
+
+    try:
+        await send_orientation(app.bot, db, config)
+    except Exception:
+        logger.warning("Failed to send the first-boot orientation", exc_info=True)
 
     # Instantiate one SandboxManager per backend used in the config.
     _sandbox_managers = sandbox_managers or create_sandbox_managers(config)

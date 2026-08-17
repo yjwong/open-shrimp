@@ -1,6 +1,6 @@
 ---
 title: Telegram Setup
-description: Create a Telegram bot and find your user ID.
+description: Create a Telegram bot and let the setup wizard enroll you.
 sidebar:
   order: 2
 ---
@@ -34,15 +34,40 @@ Why this matters: without threads, every message lands in the same Claude sessio
 
 The same model extends to **forum groups** (a group with Topics enabled): each topic is a separate thread, and the bot responds to every message inside a topic without needing an @mention. Use a forum group if you want to share a workspace with other allowed users; otherwise a private chat with Threaded Mode is the simplest setup.
 
-## Find your Telegram user ID
+## Who the bot answers
 
-OpenShrimp only responds to users in the `allowed_users` list. To find your user ID:
+OpenShrimp only responds to users in the `allowed_users` list. That list is the
+only thing standing between a stranger and a bot that runs shell commands and
+edits files on your computer, so the setup wizard fills it in by proving who
+you are rather than by asking you to type a number.
 
-1. Open Telegram and search for [@userinfobot](https://t.me/userinfobot)
-2. Send any message
-3. It replies with your numeric user ID (e.g. `123456789`)
+The wizard shows you your bot's `@name` and asks you to message it. It replies
+with a six-digit **setup code**; you type that back into the wizard, which then
+names the account it's about to grant access to and asks you to confirm. Only
+that account is written in.
 
-Add this number to your config file's `allowed_users` list.
+Three things follow from doing it this way:
+
+- A message the bot received **before** the wizard opened — Telegram queues them
+  for up to a day — can never enroll anyone, and never gets a code.
+- Group messages and messages from other bots are ignored outright.
+- If several people message the bot during setup, the wizard says so and stops
+  handing out codes rather than quietly picking one.
+
+If Telegram Desktop is on the same computer as the wizard, it also shows a link
+that skips the code entirely.
+
+### Adding somebody later
+
+The handshake enrolls one operator. To allow a second account, add its numeric
+user ID to `allowed_users` in the config by hand — [@userinfobot](https://t.me/userinfobot)
+will tell them theirs.
+
+The bot deliberately says **nothing** to anyone who isn't on the list: replying
+would confirm to anyone scanning bot usernames that a real machine sits behind
+this one. It logs every turned-away sender instead, and sends you an
+at-most-hourly note that it happened, so a wrong `allowed_users` still tells
+you something — just not them.
 
 ## Next steps
 

@@ -149,6 +149,62 @@ func checkToken(_ token: String) async {
     stamp("Found @\(username)")
 }
 
+/// Run the wizard's enrollment handshake from a terminal.
+///
+/// The window, the codes and the filters are the same objects the wizard's step
+/// drives; only the drawing differs.  Reachable from a terminal because the
+/// alternative is typing into the one window the app has, on a Mac that may
+/// only be reachable over ssh.
+@MainActor
+func enroll(_ token: String) async {
+    let check = await TelegramAPI.verify(token: token)
+    guard let username = check.username else {
+        stamp("rejected: \(check.error ?? "no reason given")")
+        exit(1)
+    }
+
+    var offset: Int64
+    switch await TelegramAPI.drainBacklog(token: token) {
+    case .failure(let failure):
+        stamp(failure.message)
+        exit(1)
+    case .success(let next):
+        offset = next
+        stamp("backlog drained; window starts at update \(next)")
+    }
+
+    let window = EnrollmentWindow()
+    stamp("search for @\(username) and press START, or open "
+        + window.deepLink(username: username))
+
+    while !window.closed {
+        let outcome = await TelegramAPI.poll(token: token, offset: offset, seconds: 5)
+        guard case .success(let batch) = outcome else {
+            if case .failure(let failure) = outcome { stamp(failure.message) }
+            exit(1)
+        }
+        offset = batch.next
+        for update in batch.updates {
+            guard let candidate = window.offer(update) else {
+                if window.flooded { stamp("flood: more than three candidates") }
+                continue
+            }
+            guard let code = candidate.code else {
+                stamp("deep link opened by \(candidate.label) — already authenticated")
+                exit(0)
+            }
+            _ = await TelegramAPI.send(
+                token: token,
+                chatID: candidate.chatID,
+                text: EnrollmentWindow.codeMessage(code),
+                threadID: candidate.threadID
+            )
+            stamp("sent a code to \(candidate.label)")
+        }
+    }
+    stamp("the window closed")
+}
+
 /// The catalog the wizard's model picker is filled from, and the runtime warm-up
 /// that precedes it.
 func showModels() async {
@@ -181,10 +237,12 @@ case "stop":
     await stopCore()
 case "token":
     await checkToken(arguments.count > 1 ? arguments[1] : "")
+case "enroll":
+    await enroll(arguments.count > 1 ? arguments[1] : "")
 case "models":
     await showModels()
 default:
-    print("usage: openshrimp-probe {paths|status|watch [seconds]|restart|stop|token TOKEN|models}"
-        + " [--instance NAME]")
+    print("usage: openshrimp-probe {paths|status|watch [seconds]|restart|stop|token TOKEN"
+        + "|enroll TOKEN|models} [--instance NAME]")
     exit(64)
 }

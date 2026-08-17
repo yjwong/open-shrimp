@@ -138,11 +138,12 @@ it. It takes about two minutes in Telegram itself:
 
 1. Message [@BotFather](https://t.me/BotFather), send `/newbot`, and pick a name. It replies with your **bot token**.
 
-2. Message [@userinfobot](https://t.me/userinfobot) to get your **Telegram user ID**, so the bot knows to answer only you.
-
 </Steps>
 
-[Telegram Setup](/getting-started/telegram-setup/) walks through both, and covers
+That's the only thing you need in advance. The wizard works out who you are by
+having you message the bot.
+
+[Telegram Setup](/getting-started/telegram-setup/) walks through it, and covers
 the two BotFather settings worth turning on while you're there.
 
 ## Run the setup wizard
@@ -157,13 +158,23 @@ The wizard asks for three things:
 
 <Steps>
 
-1. Your Telegram bot token, from [@BotFather](https://t.me/BotFather).
+1. Your Telegram bot token, from [@BotFather](https://t.me/BotFather). The
+   wizard checks it with Telegram before it goes on.
 
-2. Your Telegram user ID, from [@userinfobot](https://t.me/userinfobot).
+2. Proof that you're you. Search Telegram for the bot you just created and
+   press START; it replies with a six-digit **setup code**. Type that into the
+   wizard, and confirm the name it shows you. That's what gets written into
+   `allowed_users` — nobody else's message can take your place, and a message
+   the bot received before you started the wizard never counts.
 
 3. Your first project — a folder on this computer, a description, and a model.
 
 </Steps>
+
+If Telegram Desktop is on the same machine, the wizard also shows a link that
+does step 2 in one click. And if you'd rather type an ID — you're setting the
+bot up for a phone you're not holding, say — there's a "paste a user ID
+instead" escape hatch.
 
 It writes the config to `~/.config/openshrimp/config.yaml` on Linux, or
 `~/Library/Application Support/openshrimp/config.yaml` on macOS. You can also

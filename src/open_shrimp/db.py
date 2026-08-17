@@ -229,6 +229,39 @@ CREATE TABLE IF NOT EXISTS security_key_audit_events (
 )
 """
 
+_CREATE_ONCE_CLAIMS_TABLE = """
+CREATE TABLE IF NOT EXISTS once_claims (
+    kind TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    claimed_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, subject)
+)
+"""
+
+
+async def claim_once(db: aiosqlite.Connection, kind: str, subject: str) -> bool:
+    """Claim "``kind`` has happened for ``subject``", True only the first time.
+
+    The insert is the test, so two callers racing on the same database cannot
+    both decide they are the first one.  ``kind`` and ``subject`` are separate
+    columns because what a claim is about is then a query rather than a prefix
+    match on a concatenated key.
+    """
+    cursor = await db.execute(
+        "INSERT OR IGNORE INTO once_claims (kind, subject, claimed_at) VALUES (?, ?, ?)",
+        (kind, subject, int(time.time())),
+    )
+    await db.commit()
+    return cursor.rowcount == 1
+
+
+async def release_once(db: aiosqlite.Connection, kind: str, subject: str) -> None:
+    """Give a claim back, so it may be claimed again."""
+    await db.execute(
+        "DELETE FROM once_claims WHERE kind = ? AND subject = ?", (kind, subject)
+    )
+    await db.commit()
+
 
 async def _migrate_schema(db: aiosqlite.Connection) -> None:
     """Migrate old schema (no message_thread_id) to new schema.
@@ -389,6 +422,7 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_EVENT_TOPICS_TABLE)
     await db.execute(_CREATE_INBOUND_EVENTS_TABLE)
     await db.execute(_CREATE_MEETING_JOBS_TABLE)
+    await db.execute(_CREATE_ONCE_CLAIMS_TABLE)
     await db.commit()
     await _migrate_schema(db)
     await _migrate_scheduled_tasks_events(db)

@@ -1,44 +1,342 @@
-"""Tests for the setup wizard."""
+"""Tests for the setup wizard.
+
+The wizard writes the first entry in ``allowed_users``, which is the only auth
+boundary in the product, so most of what is asserted here is about *who* ends
+up in it rather than about the YAML that comes out.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
+from open_shrimp import setup as setup_mod
 from open_shrimp.setup import _path_completer, _validate_directory, run_setup_wizard
+from tests.telegram_stub import FakeTelegram, wait_for
+
+OPERATOR = 424242
+
+# What a ``codes`` entry may be: the text to type, or something handed the
+# wizard that decides on the spot — which is how a test waits for the bot to
+# send before reading the code back off it.
+Answer = str | Callable[["_Wizard"], str]
 
 
-def _make_inputs(*responses: str):
-    """Create a side_effect iterator for mocking input()."""
-    it = iter(responses)
-    return lambda prompt="": next(it)
+def _code_for(user_id: int, *, after: int = 1) -> Callable[[_Wizard], str]:
+    """Type the code the bot actually sent ``user_id``.
+
+    ``after`` is how many sends to wait for first, which is how a test names
+    the second code without racing the poll that delivers it.
+    """
+
+    def _answer(wizard: _Wizard) -> str:
+        wait_for(lambda: len(wizard.fake.sent) >= after)
+        return wizard.fake.code_sent_to(user_id)
+
+    return _answer
+
+
+def _typed(text: str, *, after: int = 1) -> Callable[[_Wizard], str]:
+    """Type something of the test's choosing, once the bot has sent."""
+
+    def _answer(wizard: _Wizard) -> str:
+        wait_for(lambda: len(wizard.fake.sent) >= after)
+        return text
+
+    return _answer
+
+
+class _Wizard:
+    """Drives ``run_setup_wizard`` against a fake Telegram.
+
+    ``answers`` are consumed in order for every prompt except two: the token,
+    which comes from ``tokens``, and the code, which comes from ``codes``.
+    ``codes`` defaults to answering every prompt with the code the operator
+    actually received — the handshake is exercised, not stubbed.
+    """
+
+    def __init__(
+        self,
+        fake: FakeTelegram,
+        *answers: str,
+        operator: int = OPERATOR,
+        tokens: tuple[str, ...] = ("111:AAA-bbb",),
+        codes: tuple[Answer, ...] = (),
+        clients: tuple[Callable[[], object], ...] = (),
+    ):
+        self.fake = fake
+        self.operator = operator
+        self.code_prompts = 0
+        self._answers = iter(answers)
+        self._tokens = list(tokens)
+        self._codes = list(codes)
+        self._clients = list(clients)
+
+    def __call__(self, prompt: str = "") -> str:
+        if prompt.startswith("Telegram bot token") and self._tokens:
+            return self._tokens.pop(0)
+        if prompt.startswith("Setup code"):
+            self.code_prompts += 1
+            answer = self._codes.pop(0) if self._codes else _code_for(self.operator)
+            return answer(self) if callable(answer) else answer
+        return next(self._answers)
+
+    def _client(self):
+        return (self._clients.pop(0) if self._clients else self.fake.client)()
+
+    def run(self, config_path: Path) -> None:
+        with patch("builtins.input", side_effect=self):
+            with patch.object(setup_mod, "_open_client", self._client):
+                run_setup_wizard(config_path)
+
+
+def _fake_with_operator(**kwargs) -> FakeTelegram:
+    """A bot whose only in-window message comes from the operator."""
+    fake = FakeTelegram(**kwargs)
+    fake.deliver_on_poll(1, user_id=OPERATOR, username="ada_l")
+    return fake
+
+
+class TestEnrollment:
+    """The handshake, end to end through the wizard."""
+
+    def test_the_code_enrolls_the_person_who_received_it(self, tmp_path: Path) -> None:
+        fake = _fake_with_operator()
+        wizard = _Wizard(fake, "y", "myproject", "/tmp", "My project", "4")
+        wizard.run(tmp_path / "config.yaml")
+
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["allowed_users"] == [OPERATOR]
+        assert raw["telegram"]["token"] == "111:AAA-bbb"
+
+    def test_the_backlog_never_receives_a_setup_code(self, tmp_path: Path) -> None:
+        """Telegram queues updates for a day; the backlog is not a candidate."""
+        fake = _fake_with_operator()
+        fake.queue_message(user_id=666, username="stranger")
+
+        wizard = _Wizard(fake, "y", "default", "/tmp", "test", "1")
+        wizard.run(tmp_path / "config.yaml")
+
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["allowed_users"] == [OPERATOR]
+        assert {chat for chat, _ in fake.sent} == {OPERATOR}
+
+    def test_a_wrong_code_does_not_enroll_and_does_not_end_the_window(
+        self, tmp_path: Path
+    ) -> None:
+        fake = _fake_with_operator()
+
+        wizard = _Wizard(
+            fake,
+            "y",
+            "default",
+            "/tmp",
+            "test",
+            "1",
+            codes=(_typed("000000"), _code_for(OPERATOR)),
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["allowed_users"] == [OPERATOR]
+        assert wizard.code_prompts == 2
+
+    def test_declining_the_confirmation_leaves_the_allowlist_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """A decline reopens the window; the spent code cannot be retyped."""
+        fake = FakeTelegram()
+        fake.deliver_on_poll(1, user_id=OPERATOR, username="ada_l")
+        fake.deliver_on_poll(3, user_id=OPERATOR + 1, username="bob")
+
+        wizard = _Wizard(
+            fake,
+            "n",
+            "y",
+            "default",
+            "/tmp",
+            "test",
+            "1",
+            codes=(_code_for(OPERATOR), _code_for(OPERATOR + 1, after=2)),
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["allowed_users"] == [OPERATOR + 1]
+
+    def test_the_deep_link_nonce_skips_the_code_entry(self, tmp_path: Path) -> None:
+        fake = FakeTelegram()
+        real_window = setup_mod.enrollment.EnrollmentWindow
+
+        def _capture(*args, **kwargs):
+            """Have the operator open the link the wizard just generated."""
+            window = real_window(*args, **kwargs)
+            fake.deliver_on_poll(
+                1,
+                user_id=OPERATOR,
+                username="ada_l",
+                text=f"/start {window.nonce}",
+            )
+            return window
+
+        def _press_enter(wizard: _Wizard) -> str:
+            """Pressing Enter is all the deep-link path asks for."""
+            wait_for(lambda: wizard.fake.polls >= 2)
+            return ""
+
+        wizard = _Wizard(fake, "y", "default", "/tmp", "test", "1", codes=(_press_enter,))
+        with patch.object(setup_mod.enrollment, "EnrollmentWindow", _capture):
+            wizard.run(tmp_path / "config.yaml")
+
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["allowed_users"] == [OPERATOR]
+        # No code was ever issued on this path.
+        assert not any("Setup code" in text for _, text in fake.sent)
+
+    def test_the_wizard_hands_back_a_drained_queue(self, tmp_path: Path) -> None:
+        """The core's first poll must replay nothing the wizard consumed."""
+        fake = _fake_with_operator()
+        wizard = _Wizard(fake, "y", "default", "/tmp", "test", "1")
+        wizard.run(tmp_path / "config.yaml")
+
+        assert fake.pending == []
+
+    def test_the_last_word_is_a_promise_not_an_explanation(
+        self, tmp_path: Path
+    ) -> None:
+        """Orientation belongs on first boot, when the bot can act on it."""
+        fake = _fake_with_operator()
+        wizard = _Wizard(fake, "y", "default", "/tmp", "test", "1")
+        wizard.run(tmp_path / "config.yaml")
+
+        final = fake.sent[-1][1]
+        assert "You're all set" in final
+        assert "/context" not in final
+
+    def test_every_word_lands_in_the_thread_it_was_asked_from(
+        self, tmp_path: Path
+    ) -> None:
+        """Both the code and the sign-off, or the operator is left looking at a
+        conversation the bot never spoke into."""
+        fake = FakeTelegram()
+        fake.deliver_on_poll(1, user_id=OPERATOR, username="ada_l", thread_id=931)
+
+        wizard = _Wizard(fake, "y", "default", "/tmp", "test", "1")
+        wizard.run(tmp_path / "config.yaml")
+
+        assert fake.threads == [931, 931]
+
+    def test_an_expired_window_offers_a_fresh_one(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A wizard left open on a desk overnight must not still be enrollable
+        in the morning — but it must still be usable."""
+        fake = FakeTelegram()
+        clock = [0.0]
+        real_window = setup_mod.enrollment.EnrollmentWindow
+        windows: list[object] = []
+
+        def _capture(*args, **kwargs):
+            kwargs["clock"] = lambda: clock[0]
+            window = real_window(*args, **kwargs)
+            windows.append(window)
+            if len(windows) == 2:
+                # The second window is the one that gets a candidate.
+                fake.deliver_on_poll(fake.polls + 1, user_id=OPERATOR, username="ada_l")
+            return window
+
+        def _leave_it_overnight(_: _Wizard) -> str:
+            clock[0] += setup_mod.enrollment.WINDOW_SECONDS + 1
+            return ""
+
+        wizard = _Wizard(
+            fake, "y", "y", "default", "/tmp", "test", "1", codes=(_leave_it_overnight,)
+        )
+        with patch.object(setup_mod.enrollment, "EnrollmentWindow", _capture):
+            wizard.run(tmp_path / "config.yaml")
+
+        out = capsys.readouterr().out
+        assert "The setup window closed" in out
+        assert len(windows) == 2
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["allowed_users"] == [OPERATOR]
+
+    def test_a_flood_is_surfaced_not_swallowed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        fake = FakeTelegram()
+        for i in range(1, 5):
+            fake.deliver_on_poll(i, user_id=100 + i, username=f"u{i}")
+        fake.deliver_on_poll(5, user_id=OPERATOR, username="ada_l")
+
+        wizard = _Wizard(
+            fake, "y", "default", "/tmp", "test", "1", codes=(_code_for(101, after=3),)
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        out = capsys.readouterr().out
+        assert "Several people have messaged this bot" in out
+        # The fifth sender never got a code, cap or no cap.
+        assert OPERATOR not in [chat for chat, text in fake.sent if "Setup code" in text]
+
+    def test_a_running_core_says_so_instead_of_raising(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        fake = FakeTelegram()
+        fake.conflict = True
+
+        wizard = _Wizard(fake, "n", str(OPERATOR), "default", "/tmp", "test", "1")
+        wizard.run(tmp_path / "config.yaml")
+
+        assert "Another OpenShrimp is already connected" in capsys.readouterr().out
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["allowed_users"] == [OPERATOR]
+
+    def test_manual_entry_stays_available(self, tmp_path: Path) -> None:
+        fake = _fake_with_operator()
+
+        wizard = _Wizard(fake, "5150", "default", "/tmp", "test", "1", codes=("id",))
+        wizard.run(tmp_path / "config.yaml")
+
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["allowed_users"] == [5150]
+
+    def test_a_token_telegram_rejects_is_reprompted(self, tmp_path: Path) -> None:
+        fake = _fake_with_operator()
+        rejected = FakeTelegram()
+        rejected.bad_token = True
+
+        _Wizard(
+            fake,
+            "y",
+            "default",
+            "/tmp",
+            "test",
+            "1",
+            tokens=("111:AAA-bbb", "222:CCC-ddd"),
+            clients=(rejected.client, fake.client),
+        ).run(tmp_path / "config.yaml")
+
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert raw["telegram"]["token"] == "222:CCC-ddd"
+        assert raw["allowed_users"] == [OPERATOR]
 
 
 class TestRunSetupWizard:
-    """End-to-end tests for run_setup_wizard."""
+    """The rest of the wizard, unchanged by the handshake."""
 
     def test_creates_valid_config(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        inputs = _make_inputs(
-            "111:AAA-bbb",  # token
-            "42",  # user ID
-            "myproject",  # context name
-            "/tmp",  # directory (always exists)
-            "My project",  # description
-            "4",  # model choice (1=CLI default, 2=fable, 3=opus, 4=sonnet)
+        wizard = _Wizard(
+            _fake_with_operator(), "y", "myproject", "/tmp", "My project", "4"
         )
+        wizard.run(config_path)
 
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
-
-        assert config_path.exists()
         raw = yaml.safe_load(config_path.read_text())
-
-        assert raw["telegram"]["token"] == "111:AAA-bbb"
-        assert raw["allowed_users"] == [42]
         assert "myproject" in raw["contexts"]
         assert raw["default_context"] == "myproject"
 
@@ -52,17 +350,7 @@ class TestRunSetupWizard:
 
     def test_uses_defaults(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        inputs = _make_inputs(
-            "111:AAA-bbb",  # token
-            "42",  # user ID
-            "",  # context name (default)
-            "/tmp",  # directory
-            "",  # description (default)
-            "",  # model choice (default: 1)
-        )
-
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
+        _Wizard(_fake_with_operator(), "y", "", "/tmp", "", "").run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
         assert raw["default_context"] == "default"
@@ -71,18 +359,15 @@ class TestRunSetupWizard:
 
     def test_custom_model(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        inputs = _make_inputs(
-            "111:AAA-bbb",  # token
-            "42",  # user ID
-            "default",  # context name
-            "/tmp",  # directory
-            "test",  # description
-            "6",  # model choice (custom — one past the 5 listed models)
-            "claude-custom-model",  # custom model name
-        )
-
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            "default",
+            "/tmp",
+            "test",
+            "6",
+            "claude-custom-model",
+        ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
         assert raw["contexts"]["default"]["model"] == "claude-custom-model"
@@ -109,116 +394,63 @@ class TestRunSetupWizard:
 
     def test_invalid_token_reprompts(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        inputs = _make_inputs(
-            "bad-token",  # invalid (no colon)
-            "111:AAA-bbb",  # valid
-            "42",  # user ID
-            "default",  # context name
-            "/tmp",  # directory
-            "test",  # description
-            "1",  # model
-        )
-
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            "default",
+            "/tmp",
+            "test",
+            "1",
+            tokens=("bad-token", "111:AAA-bbb"),
+        ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
         assert raw["telegram"]["token"] == "111:AAA-bbb"
 
-    def test_invalid_user_id_reprompts(self, tmp_path: Path) -> None:
-        config_path = tmp_path / "config.yaml"
-        inputs = _make_inputs(
-            "111:AAA-bbb",  # token
-            "not-a-number",  # invalid
-            "-5",  # invalid (negative)
-            "42",  # valid
-            "default",  # context name
-            "/tmp",  # directory
-            "test",  # description
-            "1",  # model
-        )
-
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
-
-        raw = yaml.safe_load(config_path.read_text())
-        assert raw["allowed_users"] == [42]
-
     def test_invalid_directory_reprompts(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
-        inputs = _make_inputs(
-            "111:AAA-bbb",  # token
-            "42",  # user ID
-            "default",  # context name
-            "/nonexistent/path/that/does/not/exist",  # invalid
-            "/tmp",  # valid
-            "test",  # description
-            "1",  # model
-        )
-
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            "default",
+            "/nonexistent/path/that/does/not/exist",
+            "/tmp",
+            "test",
+            "1",
+        ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
         assert raw["contexts"]["default"]["directory"] == "/tmp"
 
     def test_creates_parent_directories(self, tmp_path: Path) -> None:
         config_path = tmp_path / "deep" / "nested" / "config.yaml"
-        inputs = _make_inputs(
-            "111:AAA-bbb",
-            "42",
-            "default",
-            "/tmp",
-            "test",
-            "1",
+        _Wizard(_fake_with_operator(), "y", "default", "/tmp", "test", "1").run(
+            config_path
         )
-
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
-
         assert config_path.exists()
 
     def test_tilde_directory_accepted(self, tmp_path: Path) -> None:
-        """Tilde paths like ~/projects should be accepted and resolved."""
         config_path = tmp_path / "config.yaml"
-        inputs = _make_inputs(
-            "111:AAA-bbb",  # token
-            "42",  # user ID
-            "default",  # context name
-            "~",  # directory (home dir, always exists)
-            "test",  # description
-            "1",  # model
+        _Wizard(_fake_with_operator(), "y", "default", "~", "test", "1").run(
+            config_path
         )
-
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
         resolved = raw["contexts"]["default"]["directory"]
-        # Should be resolved to an absolute path, not contain ~
         assert "~" not in resolved
         assert Path(resolved).is_absolute()
 
     def test_config_roundtrips_through_load(self, tmp_path: Path) -> None:
-        """The wizard-generated config should pass load_config validation."""
         from open_shrimp.config import load_config
 
         config_path = tmp_path / "config.yaml"
-        inputs = _make_inputs(
-            "111:AAA-bbb",
-            "42",
-            "default",
-            "/tmp",
-            "test",
-            "1",
+        _Wizard(_fake_with_operator(), "y", "default", "/tmp", "test", "1").run(
+            config_path
         )
-
-        with patch("builtins.input", side_effect=inputs):
-            run_setup_wizard(config_path)
 
         config = load_config(str(config_path))
         assert config.telegram.token == "111:AAA-bbb"
-        assert config.allowed_users == [42]
+        assert config.allowed_users == [OPERATOR]
         assert config.default_context == "default"
 
 
@@ -237,15 +469,11 @@ class TestPathCompleter:
 
     def test_returns_none_past_end(self, tmp_path: Path) -> None:
         (tmp_path / "only_one").mkdir()
-        # State 0 should return a match, state 1 should return None
         assert _path_completer(str(tmp_path) + "/only_one", 0) is not None
         assert _path_completer(str(tmp_path) + "/only_one", 1) is None
 
     def test_tilde_completion(self) -> None:
-        """Tilde paths should be expanded for matching but kept in output."""
-        # Use ~/. to match dotfiles, since some environments only have dotfiles
         result = _path_completer("~/.", 0)
-        # Home dir always has some dotfiles, so first completion should work
         assert result is not None
 
 
