@@ -147,8 +147,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // again every time rather than advanced on each toggle.
         autostartEntry.state = Autostart.isEnabled ? .on : .off
 
-        headlessAgentInstalled = LaunchAgents.headlessAgentInstalled
-        conflictEntry.isHidden = !headlessAgentInstalled
+        // Announced when it changes, and only then.  The menu is the sole place
+        // this is shown and it exists only while it is open, so a conflict that
+        // appeared — or was resolved — while nobody had it open would otherwise
+        // leave no trace anywhere.
+        let conflicted = LaunchAgents.headlessAgentInstalled
+        if conflicted != headlessAgentInstalled {
+            AppLog.write(
+                conflicted
+                    ? "a headless service is configured to start at login too"
+                    : "the headless service is no longer configured to start at login"
+            )
+        }
+        headlessAgentInstalled = conflicted
+        conflictEntry.isHidden = !conflicted
 
         let supervisor = self.supervisor
         Task { [weak self] in
