@@ -20,9 +20,11 @@
 	<string>@VERSION@</string>
 	<key>CFBundleIconFile</key>
 	<string>icon</string>
-	<!-- No Dock icon and no menu bar of its own: the status item is the whole
-	     interface, and an app with no windows that took the Dock would offer a
-	     tile that opens nothing. -->
+	<!-- How the app launches and what it goes back to: no Dock icon and no menu
+	     bar of its own, because the status item is the whole interface and an
+	     app with no windows that took the Dock would offer a tile that opens
+	     nothing.  The setup wizard promotes the app to a regular one for as long
+	     as its window is up, so that window can be found again. -->
 	<key>LSUIElement</key>
 	<true/>
 	<!-- SMAppService, which is how the login item is registered, exists from

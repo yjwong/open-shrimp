@@ -56,8 +56,17 @@ final class SetupWizard: NSObject, NSWindowDelegate {
     }
 
     /// An accessory app is never the active one, so its window would otherwise
-    /// open behind whatever is in front and never take the keyboard.
+    /// open behind whatever is in front and never take the keyboard.  It also
+    /// has no Dock tile and no ⌘-Tab entry, so a user who switched to Telegram —
+    /// which is the app this one is about, and the one the wizard asks them to
+    /// go and use — would have no way back to the window but the status menu.
+    /// So the app is a regular one for as long as the window is up.
+    ///
+    /// The promotion goes before the activation, not after: activating is what
+    /// hands the app the front and the menu bar, and it has to see the policy it
+    /// is being activated under.
     private func focus(_ window: NSWindow) {
+        _ = NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
@@ -109,6 +118,15 @@ final class SetupWizard: NSObject, NSWindowDelegate {
     private func report() {
         let completed = wroteConfig
         DispatchQueue.main.async { [self] in
+            // Back to an accessory now the window is gone, or the app is left
+            // holding a Dock tile that opens nothing and a menu bar over a
+            // desktop with no window of its own in it.
+            //
+            // A turn after the close rather than during it: demoting while
+            // AppKit is still tearing the window down takes the front away
+            // before anything else has been given it, and leaves no app active
+            // at all.
+            _ = NSApp.setActivationPolicy(.accessory)
             completed ? onComplete() : onCancel()
         }
     }

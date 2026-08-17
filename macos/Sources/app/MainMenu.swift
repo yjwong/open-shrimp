@@ -2,11 +2,13 @@ import AppKit
 
 /// The application's main menu.
 ///
-/// An accessory app draws no menu bar, so none of this is ever seen — but
-/// `NSApplication` still offers a key equivalent to the main menu before the key
-/// window gets it, and an app that installs no main menu at all therefore has no
-/// ⌘V.  The first thing the setup wizard asks for is a bot token, which is
-/// always pasted, so the Edit menu is what makes that step usable.
+/// Drawn for as long as the setup wizard's window is open, which is the only
+/// time the app is a regular one rather than an accessory.  The rest of the
+/// time it is unseen — but `NSApplication` still offers a key equivalent to the
+/// main menu before the key window gets it, and an app that installs no main
+/// menu at all therefore has no ⌘V.  The first thing the setup wizard asks for
+/// is a bot token, which is always pasted, so the Edit menu is what makes that
+/// step usable.
 enum MainMenu {
     static func install() {
         let main = NSMenu()
@@ -39,7 +41,20 @@ enum MainMenu {
         )
         main.addItem(submenu: edit, titled: "Edit")
 
+        // ⌘W, because a titled window that cannot be closed from the keyboard
+        // reads as stuck.  `windowsMenu` is what has AppKit list the open
+        // windows below it, which is the second way back to a window that has
+        // gone behind something — the Dock tile being the first.
+        let windows = NSMenu(title: "Window")
+        windows.addItem(
+            withTitle: "Close",
+            action: #selector(NSWindow.performClose(_:)),
+            keyEquivalent: "w"
+        )
+        main.addItem(submenu: windows, titled: "Window")
+
         NSApp.mainMenu = main
+        NSApp.windowsMenu = windows
     }
 }
 
