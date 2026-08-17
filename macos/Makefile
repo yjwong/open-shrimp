@@ -18,9 +18,7 @@ SDK       ?= $(shell xcrun --show-sdk-path)
 DEPLOY    ?= 13.0
 BUILD     ?= build
 
-# Pointed at where the icons live rather than copied, so there is only ever one
-# pair of PNGs to keep in step.
-ICONS   ?= ../src/open_shrimp/platform/macos/resources
+ICONS   ?= App/Resources
 VERSION ?= $(shell cat ../VERSION)
 
 CORE_SOURCES  := $(wildcard Sources/OpenShrimpCore/*.swift)

@@ -58,9 +58,11 @@ All binaries and source archives are also available on the [GitHub Releases](htt
 On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` from [Releases](https://github.com/yjwong/open-shrimp/releases), drag to Applications, and launch — no terminal needed.
 
 - Lives in the menu bar (shrimp icon) with no Dock icon
-- First-run setup wizard walks you through configuration with native macOS dialogs
+- First-run setup wizard walks you through your bot token, user ID and first project folder
 - Start/stop the bot, open config, view logs — all from the menu bar
-- "Start at Login" toggle for automatic launch
+- "Start at Login" registers a system login item, so it appears under Login Items in System Settings
+- The bot runs as its own process, so `/restart` from Telegram works and the menu keeps reporting what it is actually doing
+- The bot updates itself in place when a new release is out
 
 ## Windows App
 
