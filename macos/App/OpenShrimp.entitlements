@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Deliberately empty, and deliberately not the core's entitlements.plist.
+
+     The app claims no hardened-runtime exception because it needs none: it
+     embeds no interpreter, loads no code but Apple's own frameworks, and is
+     not sandboxed, so its network access and the directories the user picks
+     need nothing declared.  The core it spawns is a separate process signed
+     separately, and the three exceptions CPython needs are on that binary's
+     own signature, where they apply.
+
+     An empty claim stated in a file of its own is what keeps the two apart.
+     Reusing entitlements.plist here would hand a Swift app the right to map
+     unsigned executable memory and to load unvalidated libraries, for no
+     reason beyond the file already existing. -->
+<plist version="1.0">
+<dict/>
+</plist>

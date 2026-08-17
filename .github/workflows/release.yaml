@@ -791,63 +791,57 @@ jobs:
           path: lima-src/_artifacts/lima-${{ steps.pin.outputs.version }}-Darwin-${{ matrix.uname_m }}.tar.gz
 
   build-macos-app:
+    # The Swift menu bar app, carrying both core binaries as seeds.
+    #
+    # The runner needs nothing but the Command Line Tools.  There is no Xcode
+    # project: an .app is a directory with an Info.plist in it, so the
+    # Makefile builds one out of two swiftc invocations, a lipo and a copy,
+    # and the menu bar icon is loaded from loose PNGs precisely so that
+    # nothing here needs actool.
     name: Build macOS .app
-    needs: [build-dists, version]
+    needs: [build-binary, version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Build the universal .app
+        # The resolved version rather than the VERSION file the Makefile
+        # would read for itself: a tag push takes its version from the tag,
+        # and CFBundleVersion is what the app stamps beside the seeded core
+        # to decide whether to seed again.
+        run: make -C macos app-universal VERSION=${{ needs.version.outputs.version }}
+
+      - name: Fetch the arm64 core binary
+        uses: actions/download-artifact@v8
         with:
-          python-version: "3.12"
+          name: openshrimp-macos-aarch64
+          path: seeds
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Fetch the x86_64 core binary
+        uses: actions/download-artifact@v8
         with:
-          node-version: 22
+          name: openshrimp-macos-x86_64
+          path: seeds
 
-      - name: Build review app frontend
-        working-directory: web/review-app
-        run: npm ci && npm run build
-
-      - name: Build terminal app frontend
-        working-directory: web/terminal-app
-        run: npm ci && npm run build
-
-      - name: Build markdown preview app frontend
-        working-directory: web/markdown-app
-        run: npm ci && npm run build
-
-      - name: Build VNC app frontend
-        working-directory: web/vnc-app
-        run: npm ci && npm run build
-
-      - name: Build config app frontend
-        working-directory: web/config-app
-        run: npm ci && npm run build
-
-      - name: Build PDF app frontend
-        working-directory: web/pdf-app
-        run: npm ci && npm run build
-
-      - name: Install dependencies
+      - name: Seed the core binaries into the bundle
+        # Both arches ship and the app copies out the one matching the host,
+        # under the names CorePaths.seedExecutable looks for.  They are the
+        # same signed, notarized binaries published as release assets, not a
+        # second build of the same Python.
+        #
+        # Before the signing step, always: a resource added after the seal is
+        # a resource the seal does not cover, and the bundle then arrives with
+        # a broken signature.
         run: |
-          uv pip install --system py2app setuptools
-          uv pip install --system '.[macos]'
-
-      - name: Build .app bundle
-        run: |
-          # ruamel is a PEP 420 namespace package (no __init__.py), which
-          # py2app's imp.find_module cannot resolve.  Add a stub so py2app
-          # can locate the package.
-          touch "$(python -c 'import ruamel; print(ruamel.__path__[0])')/__init__.py"
-          mv pyproject.toml pyproject.toml.bak
-          python setup_app.py py2app
-          mv pyproject.toml.bak pyproject.toml
+          set -euo pipefail
+          RES="macos/build/OpenShrimp.app/Contents/Resources"
+          mv seeds/openshrimp-macos-aarch64 "$RES/openshrimp-arm64"
+          mv seeds/openshrimp-macos-x86_64 "$RES/openshrimp-x86_64"
+          # An artifact download does not preserve the executable bit.  The
+          # copy-out sets its own mode on the destination, so restoring it
+          # here is what keeps the seed a binary that can be run where it
+          # sits, rather than one that only works after being fixed up.
+          chmod +x "$RES/openshrimp-arm64" "$RES/openshrimp-x86_64"
 
       - name: Import signing certificate
         env:
@@ -871,35 +865,27 @@ jobs:
           IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
           set -e
-          APP="dist/OpenShrimp.app"
-          # Sign every Mach-O file inside the bundle. Extension-based matching
-          # isn't enough for py2app (the embedded Python interpreter has no
-          # suffix), so probe each file with `file`.
+          APP="macos/build/OpenShrimp.app"
+          # One signature over the whole bundle.  It holds a single executable
+          # and two seeds that arrive already signed and notarized, so sealing
+          # the enclosure records their hashes and leaves their own signatures
+          # untouched; there is no nested bundle and nothing to walk.  This
+          # replaces the ad-hoc signature the Makefile applies, which exists so
+          # that a local build has a stable identity for the login item to
+          # attribute itself to.
           #
-          # Entitlements bind to each binary's own signature and are not
-          # inherited from the enclosing bundle, so every nested executable
-          # carries them too -- the agent CLI is exec'd as its own process.
-          find "$APP" -type f | while read -r f; do
-            if file -b "$f" | grep -qE 'Mach-O|dynamically linked shared library'; then
-              codesign --force --timestamp --options runtime \
-                --entitlements entitlements.plist \
-                --sign "$IDENTITY" "$f"
-            fi
-          done
-          # Sign embedded bundles (frameworks, nested .app) deepest-first so
-          # each enclosing CodeResources seal covers already-signed contents.
-          find "$APP/Contents" -type d \( -name "*.framework" -o -name "*.app" \) | \
-            awk -F/ '{ print NF, $0 }' | sort -k1 -rn | cut -d' ' -f2- | \
-            while read -r b; do
-              codesign --force --timestamp --options runtime \
-                --entitlements entitlements.plist \
-                --sign "$IDENTITY" "$b"
-            done
-          # Finally sign the outer bundle with entitlements.
+          # The app's own entitlements, not the core's: it embeds no
+          # interpreter, and the exceptions CPython needs belong on the
+          # signature of the binary that embeds it.
           codesign --force --timestamp --options runtime \
-            --entitlements entitlements.plist \
+            --entitlements macos/App/OpenShrimp.entitlements \
             --sign "$IDENTITY" "$APP"
           codesign --verify --strict --deep --verbose=2 "$APP"
+          # Both arches on the executable, and both seeds still carrying the
+          # signatures they were notarized under.
+          lipo -info "$APP/Contents/MacOS/OpenShrimp"
+          codesign -dv "$APP/Contents/Resources/openshrimp-arm64"
+          codesign -dv "$APP/Contents/Resources/openshrimp-x86_64"
 
       - name: Create DMG
         run: |
@@ -910,8 +896,8 @@ jobs:
             --icon "OpenShrimp.app" 150 200 \
             --app-drop-link 450 200 \
             --no-internet-enable \
-            "dist/OpenShrimp-${{ needs.version.outputs.version }}.dmg" \
-            "dist/OpenShrimp.app"
+            "macos/build/OpenShrimp-${{ needs.version.outputs.version }}.dmg" \
+            "macos/build/OpenShrimp.app"
 
       - name: Sign, notarize, and staple DMG
         env:
@@ -921,7 +907,7 @@ jobs:
           API_ISSUER_ID: ${{ secrets.MACOS_NOTARY_API_ISSUER_ID }}
         run: |
           set -e
-          DMG="dist/OpenShrimp-${{ needs.version.outputs.version }}.dmg"
+          DMG="macos/build/OpenShrimp-${{ needs.version.outputs.version }}.dmg"
           codesign --force --timestamp --sign "$IDENTITY" "$DMG"
           KEY="$RUNNER_TEMP/notary_key.p8"
           echo -n "$API_KEY_B64" | base64 --decode -o "$KEY"
@@ -950,7 +936,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: OpenShrimp-macos-app
-          path: dist/OpenShrimp-*.dmg
+          path: macos/build/OpenShrimp-*.dmg
 
   build-windows-app:
     # The WinUI 3 tray app, wrapped with the core into a per-user MSI.
