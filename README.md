@@ -130,8 +130,6 @@ On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` fr
 - Start/stop the bot, open config, view logs — all from the menu bar
 - "Start at Login" toggle for automatic launch
 
-> **Note:** The macOS app is currently unsigned. On first launch, macOS will block it — right-click the app and choose "Open" to bypass Gatekeeper, or go to System Settings → Privacy & Security and click "Open Anyway".
-
 ## Windows App
 
 On Windows, OpenShrimp is also available as a notification-area app. Download the `.msi` from [Releases](https://github.com/yjwong/open-shrimp/releases) and run it — no terminal needed.
