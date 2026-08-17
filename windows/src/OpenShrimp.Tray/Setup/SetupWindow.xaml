@@ -97,7 +97,7 @@
                             <Button x:Name="ConfirmButton" Content="Yes, that's me"
                                     Style="{StaticResource AccentButtonStyle}"
                                     Click="ConfirmCandidate" />
-                            <Button x:Name="DeclineButton" Content="No — try again" Click="DeclineCandidate" />
+                            <Button x:Name="DeclineButton" Content="Not me" Click="DeclineCandidate" />
                         </StackPanel>
                     </StackPanel>
 

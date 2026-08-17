@@ -56,7 +56,8 @@ struct SetupWizardView: View {
             case .closed:
                 return "The window closed. Start a new one to try again."
             case .waiting:
-                return "Message the bot from Telegram, and it will send you a code."
+                // Says why the step exists; the body says how to get through it.
+                return "Only the account you enroll here will be allowed to talk to the bot."
             }
         default: return "A working directory the agent will operate in."
         }
@@ -144,7 +145,8 @@ struct SetupWizardView: View {
     /// when the wizard is here and Telegram is only on a phone.
     private var codeStep: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Open Telegram, search for \(botHandle) — the bot you just created — and press START.")
+            Text("Open Telegram, search for \(botHandle) — the bot you just created — "
+                 + "and press START. It will reply with a setup code; type it below.")
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -203,7 +205,7 @@ struct SetupWizardView: View {
                 }
                 .disabled(model.busy)
 
-                Button("No — try again") { model.declineCandidate() }
+                Button("Not me") { model.declineCandidate() }
                     .disabled(model.busy)
             }
         }

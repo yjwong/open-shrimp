@@ -193,13 +193,37 @@ func enroll(_ token: String) async {
                 stamp("deep link opened by \(candidate.label) — already authenticated")
                 exit(0)
             }
-            _ = await TelegramAPI.send(
+            stamp("candidate \(candidate.label), thread \(candidate.threadID.map(String.init) ?? "(none)")")
+            if let failure = await TelegramAPI.send(
                 token: token,
                 chatID: candidate.chatID,
                 text: EnrollmentWindow.codeMessage(code),
                 threadID: candidate.threadID
+            ) {
+                stamp("send failed: \(failure.message)")
+                exit(1)
+            }
+            stamp("code sent")
+
+            // Redeemed here rather than from a keyboard: `submit` and its
+            // fixed-time compare are the half of the flow the window hides.
+            let grouped = EnrollmentWindow.groupedCode(code)
+            stamp(window.submit("000000") == nil
+                ? "wrong code rejected: OK" : "WRONG CODE ACCEPTED")
+            stamp(window.submit(grouped)?.userID == candidate.userID
+                ? "code redeemed (\(grouped)): OK" : "REDEEM FAILED")
+            stamp(window.submit(grouped) == nil
+                ? "replay rejected: OK" : "REPLAY ACCEPTED")
+
+            _ = await TelegramAPI.send(
+                token: token,
+                chatID: candidate.chatID,
+                text: EnrollmentWindow.allSetMessage,
+                threadID: candidate.threadID
             )
-            stamp("sent a code to \(candidate.label)")
+            await TelegramAPI.confirmOffset(token: token, offset: offset)
+            stamp("DONE")
+            exit(0)
         }
     }
     stamp("the window closed")

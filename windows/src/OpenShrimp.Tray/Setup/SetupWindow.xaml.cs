@@ -201,7 +201,10 @@ public sealed partial class SetupWindow : Window
         EnrollStage.Closed =>
             ("Who may use it?", "The window closed. Start a new one to try again."),
         _ =>
-            ("Who may use it?", "Message the bot from Telegram, and it will send you a code."),
+            // Says why the step exists; the body below says how to get through
+            // it.  A subtitle that repeats the instruction it sits above is
+            // two sentences of the same sentence.
+            ("Who may use it?", "Only the account you enroll here will be allowed to talk to the bot."),
     };
 
     /// <summary>Redraw the enrollment step for the stage it is now in.</summary>
