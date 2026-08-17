@@ -3,7 +3,10 @@ import AppKit
 /// The status item and its menu.
 ///
 /// Status, start/stop, open config, open logs, start at login, quit — the same
-/// six the Windows tray offers, so the two front ends stay one design.
+/// six the Windows tray offers, so the two front ends stay one design.  A
+/// seventh shows only while a headless service is configured to start at login
+/// too: nothing on Windows registers that second autostart by itself, so the
+/// tray has nothing to say about it.
 ///
 /// An `NSStatusItem` rather than a `MenuBarExtra`: the latter hands out no
 /// status item to give a template image to, and behaves awkwardly for an app
@@ -16,10 +19,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusEntry = NSMenuItem(title: "Status: Stopped", action: nil, keyEquivalent: "")
     private let startStopEntry = NSMenuItem(title: "Start", action: nil, keyEquivalent: "")
     private let autostartEntry = NSMenuItem(title: "Start at Login", action: nil, keyEquivalent: "")
+    private let conflictEntry = NSMenuItem(
+        title: "Headless Service Also Starts at Login…",
+        action: nil,
+        keyEquivalent: ""
+    )
 
     private var state: CoreState = .stopped
     private var detail: String?
     private var botUsername: String?
+
+    /// Whether a headless core is configured to start at login too.  Re-read on
+    /// every menu open rather than answered once at launch: `openshrimp install`
+    /// can write that agent while this app is running, and a menu that opens
+    /// afterwards must not still offer an autostart that would fight it.
+    private var headlessAgentInstalled = false
 
     var onQuit: (() -> Void)?
     var onRunSetup: (() -> Void)?
@@ -43,6 +57,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         startStopEntry.action = #selector(toggleCore)
         autostartEntry.target = self
         autostartEntry.action = #selector(toggleAutostart)
+        conflictEntry.target = self
+        conflictEntry.action = #selector(showLoginConflict)
 
         let menu = NSMenu()
         menu.delegate = self
@@ -58,6 +74,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(entry("Open Config…", #selector(openConfig)))
         menu.addItem(entry("Open Logs…", #selector(openLogs)))
         menu.addItem(.separator())
+        // Directly above the item it governs and inside the same separators, so
+        // hiding it leaves no gap to explain.
+        menu.addItem(conflictEntry)
         menu.addItem(autostartEntry)
         menu.addItem(.separator())
         menu.addItem(entry("Quit", #selector(quit), key: "q"))
@@ -117,6 +136,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // The login item's state lives in the system, not here, so it is read
         // again every time rather than advanced on each toggle.
         autostartEntry.state = Autostart.isEnabled ? .on : .off
+
+        headlessAgentInstalled = LaunchAgents.headlessAgentInstalled
+        conflictEntry.isHidden = !headlessAgentInstalled
 
         let supervisor = self.supervisor
         Task { [weak self] in
@@ -232,12 +254,102 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func toggleAutostart() {
+        // The click means the opposite of what the system currently reports.
+        let enabling = !Autostart.isEnabled
+
+        // Two cores at the next login is what enabling this over a headless
+        // agent buys, so it is not done.  Explained rather than refused: an
+        // enable that simply does not happen is indistinguishable from a menu
+        // item that does nothing.  Disabling is never blocked — it resolves the
+        // conflict rather than creating it.
+        if enabling && headlessAgentInstalled {
+            resolveLoginConflict(thenEnableAutostart: true)
+            return
+        }
+
+        // The tick moves only once the change has actually been made.
         attempt("Start at Login") {
-            // The click means the opposite of what the system currently reports,
-            // and the tick is moved only once the change has actually been made.
-            let enabling = !Autostart.isEnabled
             try Autostart.setEnabled(enabling)
             autostartEntry.state = enabling ? .on : .off
+        }
+    }
+
+    @objc private func showLoginConflict() {
+        resolveLoginConflict(thenEnableAutostart: false)
+    }
+
+    /// State the conflict and offer the one action that ends it.
+    ///
+    /// Removing the headless agent is offered, never taken: it was installed
+    /// deliberately by `openshrimp install` and may be the point of the machine,
+    /// in which case the resolution the user wants is the opposite one — leave
+    /// it alone and leave this app's autostart off.
+    private func resolveLoginConflict(thenEnableAutostart: Bool) {
+        // An accessory app is never the active one, so its alert would otherwise
+        // open behind whatever is in front.
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "A headless OpenShrimp service is also configured to start at login."
+        alert.informativeText = """
+            Running both will make them fight over the Telegram connection: only one \
+            process may receive updates for a bot token, and launchd restarts the one \
+            that loses, indefinitely.
+
+            Removing the service leaves this app in charge of the core, and stops the \
+            copy the service has already started. Keep it if this Mac is meant to run \
+            OpenShrimp headlessly — then leave Start at Login switched off here.
+
+            The service is \(LaunchAgents.headlessAgent.path). Running "openshrimp \
+            uninstall" in a terminal removes it too.
+            """
+        alert.addButton(withTitle: "Remove Service")
+        alert.addButton(withTitle: "Keep It")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        Task { [weak self] in
+            await self?.removeHeadlessService(thenEnableAutostart: thenEnableAutostart)
+        }
+    }
+
+    /// Left to run on its own after the first suspension — the removal waits on
+    /// launchd rather than on the user — and so responsible for its own
+    /// reporting, like every other action that outlives the click.
+    private func removeHeadlessService(thenEnableAutostart: Bool) async {
+        let stillRunning: String?
+        do {
+            stillRunning = try await LaunchAgents.removeHeadlessAgent()
+        } catch {
+            Notifier.post("Remove the headless service failed: \(error.localizedDescription)")
+            return
+        }
+        refresh()
+
+        if let stillRunning {
+            Notifier.post(
+                "The headless OpenShrimp service will not return at login, but the core "
+                    + "it started has not stopped: \(stillRunning)"
+            )
+        } else {
+            // Unloading the agent stops the core it was running, which may be
+            // the very one this app adopted at launch.  Said rather than
+            // repaired: the supervisor calls a lost core an unexpected stop a
+            // grace period later, and a restart issued here would either race
+            // that or bounce a healthy core that was never the service's.
+            Notifier.post(
+                "The headless OpenShrimp service has been removed. If the core it was "
+                    + "running has stopped, use Start to run one under this app."
+            )
+        }
+
+        // The click that reached here meant "start at login"; the dialog was in
+        // the way of that, not a change of subject.  The login half of the
+        // conflict is settled by now either way.
+        if thenEnableAutostart {
+            attempt("Start at Login") {
+                try Autostart.setEnabled(true)
+                autostartEntry.state = .on
+            }
         }
     }
 

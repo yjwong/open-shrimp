@@ -20,6 +20,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainMenu.install()
         Notifier.requestAuthorization()
 
+        // The login item supersedes the launch agent the front end used to write
+        // for itself, and one bundle must not be started by both.
+        LaunchAgents.adoptAppAgent()
+        reportLoginConflict()
+
         // Before anything tries to run the core: what gets spawned is the copy
         // outside the bundle, because self-update replaces the binary in place
         // and a rewritten bundle resource would break this app's signature.
@@ -50,6 +55,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 runSetup()
             }
         }
+    }
+
+    /// Say once, out loud, that both this app and a headless service are set to
+    /// start at login.  The menu carries the same conflict and the action that
+    /// ends it, but a menu exists only while it is open — and this is the state
+    /// that puts two cores on one bot token at the next login, which is not
+    /// something to leave until somebody happens to look.
+    ///
+    /// Only when both are enabled: a headless agent beside a switched-off login
+    /// item is a machine set up to run headlessly, and saying so on every launch
+    /// would be noise over a working arrangement.
+    private func reportLoginConflict() {
+        guard LaunchAgents.headlessAgentInstalled, Autostart.isEnabled else { return }
+        Notifier.post(
+            "A headless OpenShrimp service also starts at login. Both will fight over "
+                + "the Telegram connection — open the menu bar item to resolve it."
+        )
     }
 
     // -- Setup ----------------------------------------------------------------
