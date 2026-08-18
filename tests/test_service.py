@@ -275,6 +275,111 @@ class TestIsServiceInstalled:
         with patch("open_shrimp.service._capture", return_value=query):
             assert is_service_installed(None) is True
 
+    @patch("open_shrimp.service._detect_platform", return_value="macos")
+    def test_an_agent_registered_without_being_loaded_is_installed(
+        self,
+        _plat: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # The answer is about the next login, not this instant: an agent
+        # registered by a wizard that must not start a second core is not
+        # loaded, and telling its operator to go and register it again would
+        # be telling them to do what they just did.
+        plist = tmp_path / "com.openshrimp.bot.plist"
+        plist.write_text("<plist/>")
+
+        with (
+            patch("open_shrimp.service._LAUNCHD_PLIST_PATH", plist),
+            patch(
+                "open_shrimp.service._capture",
+                return_value='disabled services = {\n\t"com.apple.other" => true\n}\n',
+            ),
+        ):
+            assert is_service_installed(None) is True
+
+    @patch("open_shrimp.service._detect_platform", return_value="macos")
+    def test_a_missing_plist_is_not_installed(
+        self,
+        _plat: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        with patch(
+            "open_shrimp.service._LAUNCHD_PLIST_PATH", tmp_path / "absent.plist"
+        ):
+            assert is_service_installed(None) is False
+
+    # The verdict is spelled differently across OS versions; both spellings
+    # mean the agent stays down.
+    @pytest.mark.parametrize("verdict", ["true", "disabled"])
+    @patch("open_shrimp.service._detect_platform", return_value="macos")
+    def test_a_disabled_agent_is_not_installed(
+        self,
+        _plat: MagicMock,
+        verdict: str,
+        tmp_path: Path,
+    ) -> None:
+        plist = tmp_path / "com.openshrimp.bot.plist"
+        plist.write_text("<plist/>")
+        listing = f'disabled services = {{\n\t"com.openshrimp.bot" => {verdict}\n}}\n'
+
+        with (
+            patch("open_shrimp.service._LAUNCHD_PLIST_PATH", plist),
+            patch("open_shrimp.service._capture", return_value=listing),
+        ):
+            assert is_service_installed(None) is False
+
+    @pytest.mark.parametrize("verdict", ["false", "enabled"])
+    @patch("open_shrimp.service._detect_platform", return_value="macos")
+    def test_an_enabled_agent_is_installed(
+        self,
+        _plat: MagicMock,
+        verdict: str,
+        tmp_path: Path,
+    ) -> None:
+        plist = tmp_path / "com.openshrimp.bot.plist"
+        plist.write_text("<plist/>")
+        listing = f'disabled services = {{\n\t"com.openshrimp.bot" => {verdict}\n}}\n'
+
+        with (
+            patch("open_shrimp.service._LAUNCHD_PLIST_PATH", plist),
+            patch("open_shrimp.service._capture", return_value=listing),
+        ):
+            assert is_service_installed(None) is True
+
+    @patch("open_shrimp.service._detect_platform", return_value="macos")
+    def test_a_longer_label_is_not_mistaken_for_ours(
+        self,
+        _plat: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # The label is matched whole: a disabled com.openshrimp.bot.helper
+        # says nothing about com.openshrimp.bot.
+        plist = tmp_path / "com.openshrimp.bot.plist"
+        plist.write_text("<plist/>")
+        listing = 'disabled services = {\n\t"com.openshrimp.bot.helper" => true\n}\n'
+
+        with (
+            patch("open_shrimp.service._LAUNCHD_PLIST_PATH", plist),
+            patch("open_shrimp.service._capture", return_value=listing),
+        ):
+            assert is_service_installed(None) is True
+
+    @patch("open_shrimp.service._capture", return_value=None)
+    @patch("open_shrimp.service._detect_platform", return_value="macos")
+    def test_an_unanswerable_query_leaves_the_plist_as_the_evidence(
+        self,
+        _plat: MagicMock,
+        _cap: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # A disable is the exception; the plist is the rule.  A launchd that
+        # would not answer must not delete the evidence that was in hand.
+        plist = tmp_path / "com.openshrimp.bot.plist"
+        plist.write_text("<plist/>")
+
+        with patch("open_shrimp.service._LAUNCHD_PLIST_PATH", plist):
+            assert is_service_installed(None) is True
+
 
 class TestInstallService:
     @patch("open_shrimp.service._run")

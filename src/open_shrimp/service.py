@@ -364,15 +364,46 @@ def _task_name(instance_name: str | None) -> str:
     return f"OpenShrimp-{safe}"
 
 
+def _launchd_disabled(label: str) -> bool:
+    """Whether launchd has been told never to load *label*.
+
+    The disable is recorded against the label rather than against the plist
+    and outlives it, so it is the one thing that stops a plist sitting in
+    ``LaunchAgents`` from being loaded at the next login.  Which is why it is
+    asked about here and being loaded *now* is not: an agent registered
+    without being started is not loaded and still comes back.
+
+    The verdict is spelled ``true`` or ``disabled`` depending on the OS
+    version.  Anything else — an unrecognised spelling, a launchd that would
+    not answer — leaves the plist as the evidence in hand, because a question
+    nobody could ask must not delete one that was.
+    """
+    listing = _capture(["launchctl", "print-disabled", f"gui/{os.getuid()}"])
+    if listing is None:
+        return False
+    for line in listing.splitlines():
+        name, _, verdict = line.partition("=>")
+        if name.strip().strip('"') != label:
+            continue
+        return verdict.strip().rstrip(";").lower() in ("true", "disabled")
+    return False
+
+
 def is_service_installed(instance_name: str | None = None) -> bool:
     """Whether the bot is registered to come back without a terminal.
 
     The question is not whether a file was written but whether closing the
     window keeps the bot alive, so each platform is asked the version of that
     question it can answer: systemd whether the unit is *enabled*, launchd
-    whether the label is actually loaded, and Windows whether the task will
-    run rather than merely exist.  A plist on disk that launchd refused, a
-    disabled logon task and a disabled unit all start nothing.
+    whether the label is not *disabled*, and Windows whether the task will
+    run rather than merely exist.  A disabled unit, a disabled label and a
+    disabled logon task all start nothing.
+
+    Asked of the next login rather than of this instant.  Two of the three
+    answers can only be about the next login; launchd is the one that could
+    be asked either way, and an agent whose plist is in ``LaunchAgents`` and
+    whose label is not disabled is loaded at the next login whether or not it
+    is loaded now.
     """
     try:
         platform = _detect_platform()
@@ -394,10 +425,7 @@ def is_service_installed(instance_name: str | None = None) -> bool:
             _capture(["systemctl", "--user", "is-enabled", "open-shrimp.service"])
             is not None
         )
-    return (
-        _capture(["launchctl", "print", f"gui/{os.getuid()}/{_LAUNCHD_LABEL}"])
-        is not None
-    )
+    return not _launchd_disabled(_LAUNCHD_LABEL)
 
 
 def _refuse(reason: str, remedy: str) -> NoReturn:
