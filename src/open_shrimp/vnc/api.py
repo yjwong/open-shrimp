@@ -40,6 +40,7 @@ from open_shrimp.sandbox.base import (
     VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
     VNC_QUIRK_RFB_DROPS_SET_ENCODINGS,
 )
+from open_shrimp.web_url import phone_websocket_base
 from open_shrimp.vnc.apple_dh import AppleDhAuthError, authenticate as apple_dh_authenticate
 from open_shrimp.vnc.rfb_filter import (
     RfbClientFilter,
@@ -584,17 +585,7 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
         idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
     )
 
-    public_base = (
-        config.review.public_url.rstrip("/")
-        if config.review.public_url
-        else f"https://{config.review.host}:{config.review.port}"
-    )
-    if public_base.startswith("https://"):
-        phone_base = "wss://" + public_base[len("https://") :]
-    elif public_base.startswith("http://"):
-        phone_base = "ws://" + public_base[len("http://") :]
-    else:
-        phone_base = public_base
+    phone_base = phone_websocket_base(config)
     relay_base = (
         f"ws://{sandbox.host_address}:{config.review.port}"
         if sandbox is not None

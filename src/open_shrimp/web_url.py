@@ -61,6 +61,23 @@ def is_public_base(config: Config) -> bool:
         )
 
 
+def mini_app_base(config: Config) -> str | None:
+    """The base a Mini App URL may be built from, or ``None`` when there is none.
+
+    Invariant: every URL that ends up behind a ``WebAppInfo`` — or behind the
+    group-chat ``url`` button that stands in for one — derives from here.  A
+    caller that reaches past this into :func:`public_base` can hand Telegram a
+    loopback address, which renders as an ordinary button that does nothing
+    when tapped, and a dead button is worse than no button: it is
+    indistinguishable from a broken product.
+
+    ``None`` therefore means "no Mini App", which is what the button-building
+    helpers in :mod:`open_shrimp.mini_app` already treat it as — so a caller
+    who forgets the distinction omits a button rather than breaking one.
+    """
+    return public_base(config) if is_public_base(config) else None
+
+
 def phone_websocket_base(config: Config) -> str:
     base = public_base(config)
     if base.startswith("https://"):

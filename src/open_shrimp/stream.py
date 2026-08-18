@@ -42,7 +42,7 @@ from telegram.error import BadRequest
 from open_shrimp.agent import AgentEvent
 from open_shrimp.db import ChatScope
 from open_shrimp.markdown import gfm_to_telegram
-from open_shrimp.web_app_button import make_web_app_button
+from open_shrimp.mini_app import make_web_app_button
 
 logger = logging.getLogger(__name__)
 

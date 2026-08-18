@@ -33,7 +33,7 @@ from open_shrimp.backend.types import ResultMessage, SystemMessage
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from open_shrimp.web_app_button import make_web_app_button
+from open_shrimp.mini_app import make_web_app_button
 
 from open_shrimp.agent import AgentEvent
 from open_shrimp.config import ContextConfig, is_sandboxed

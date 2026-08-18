@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from telegram import Bot, InlineKeyboardMarkup
 
-from open_shrimp.web_app_button import make_web_app_button
+from open_shrimp.mini_app import make_web_app_button
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

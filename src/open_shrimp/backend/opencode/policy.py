@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
-from open_shrimp.web_app_button import make_web_app_button
+from open_shrimp.mini_app import make_web_app_button
 
 if TYPE_CHECKING:
     from open_shrimp.db import ChatScope

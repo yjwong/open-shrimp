@@ -28,7 +28,8 @@ from open_shrimp.host_shell import (
     kill_host_shell_tree,
     spawn_host_shell,
 )
-from open_shrimp.web_app_button import make_web_app_button
+from open_shrimp.mini_app import make_web_app_button
+from open_shrimp.web_url import mini_app_base
 
 logger = logging.getLogger(__name__)
 
@@ -361,12 +362,8 @@ def create_openshrimp_tools(
 
         def _preview_button(label: str, app: str) -> InlineKeyboardMarkup | None:
             """Build a Mini App button opening *app* (e.g. "preview", "pdf")
-            on *path*, or None when no Mini App base URL is configured."""
-            base_url = None
-            if config.review.public_url:
-                base_url = config.review.public_url.rstrip("/")
-            elif config.review.host and config.review.port:
-                base_url = f"https://{config.review.host}:{config.review.port}"
+            on *path*, or None when Telegram could not open a Mini App."""
+            base_url = mini_app_base(config)
             if not base_url:
                 return None
 
@@ -1054,14 +1051,10 @@ def create_openshrimp_tools(
 
     def _vnc_button(label: str) -> InlineKeyboardMarkup | None:
         """Build a Mini App button opening the /vnc viewer for this context,
-        or ``None`` when no public base URL is configured."""
+        or ``None`` when Telegram could not open a Mini App."""
         if not (context_name and config is not None):
             return None
-        base_url = None
-        if config.review.public_url:
-            base_url = config.review.public_url.rstrip("/")
-        elif config.review.host and config.review.port:
-            base_url = f"https://{config.review.host}:{config.review.port}"
+        base_url = mini_app_base(config)
         if not base_url:
             return None
         return InlineKeyboardMarkup([[

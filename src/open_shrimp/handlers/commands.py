@@ -13,7 +13,8 @@ from typing import Any
 import aiosqlite
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 
-from open_shrimp.web_app_button import make_web_app_button
+from open_shrimp.mini_app import reply_mini_app
+from open_shrimp.web_url import phone_websocket_base, public_base
 from telegram.ext import ContextTypes
 
 from open_shrimp.client_manager import (
@@ -1324,35 +1325,17 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context_name, ctx = await _get_context(scope, config, db)
 
-    # Build the Mini App URL.
-    # Use the configured public URL if available, otherwise build from
-    # host:port.  For production behind a reverse proxy the user should
-    # set review.public_url in config.
-    if config.review.public_url:
-        base_url = config.review.public_url.rstrip("/")
-    else:
-        base_url = f"https://{config.review.host}:{config.review.port}"
-
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    _is_private = chat_type == "private"
-    _user_id = update.effective_user.id
 
     escaped_context = _escape_mdv2(context_name)
     dirs = [ctx.directory] + (ctx.additional_directories or [])
     thread_param = f"&thread_id={scope.thread_id}" if scope.thread_id is not None else ""
 
     if len(dirs) == 1:
-        app_url = f"{base_url}/app/?chat_id={scope.chat_id}{thread_param}"
-        keyboard = InlineKeyboardMarkup([
-            [make_web_app_button(
-                text="\U0001f4dd Open Review",
-                url=app_url,
-                chat_id=scope.chat_id,
-                user_id=_user_id,
-                bot_token=config.telegram.token,
-                is_private_chat=_is_private,
-            )]
-        ])
+        rows = [[(
+            "\U0001f4dd Open Review",
+            f"/app/?chat_id={scope.chat_id}{thread_param}",
+        )]]
         escaped_dir = _escape_mdv2(ctx.directory)
         text = (
             f"Review changes in *{escaped_context}*\n"
@@ -1360,25 +1343,28 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     else:
         # Multiple directories: one button per directory.
-        rows = []
-        for i, d in enumerate(dirs):
-            app_url = f"{base_url}/app/?chat_id={scope.chat_id}&dir={i}{thread_param}"
-            basename = d.rstrip("/").rsplit("/", 1)[-1]
-            rows.append([make_web_app_button(
-                text=f"\U0001f4c1 {basename}",
-                url=app_url,
-                chat_id=scope.chat_id,
-                user_id=_user_id,
-                bot_token=config.telegram.token,
-                is_private_chat=_is_private,
-            )])
-        keyboard = InlineKeyboardMarkup(rows)
+        rows = [
+            [(
+                f"\U0001f4c1 {d.rstrip('/').rsplit('/', 1)[-1]}",
+                f"/app/?chat_id={scope.chat_id}&dir={i}{thread_param}",
+            )]
+            for i, d in enumerate(dirs)
+        ]
         text = f"Review changes in *{escaped_context}*"
 
-    await update.message.reply_text(
-        text,
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
+    await reply_mini_app(
+        update.message,
+        text=text,
+        rows=rows,
+        config=config,
+        user_id=update.effective_user.id,
+        is_private_chat=chat_type == "private",
+        opens="the page that shows what I've changed",
+        still_works=(
+            "Chatting with me here still works, and so does everything I do "
+            "to your files — you just can't see the changes side by side. Ask "
+            "me what I changed and I'll describe it in the chat."
+        ),
     )
 
 
@@ -1425,32 +1411,25 @@ async def _open_vnc_viewer(
         )
         return
 
-    # Build the Mini App URL.
-    if config.review.public_url:
-        base_url = config.review.public_url.rstrip("/")
-    else:
-        base_url = f"https://{config.review.host}:{config.review.port}"
-
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    vnc_url = f"{base_url}/vnc/?context={context_name}"
     label = "View phone" if phone else "View desktop"
-    keyboard = InlineKeyboardMarkup([
-        [make_web_app_button(
-            text=label,
-            url=vnc_url,
-            chat_id=scope.chat_id,
-            user_id=update.effective_user.id,
-            bot_token=config.telegram.token,
-            is_private_chat=chat_type == "private",
-        )]
-    ])
+    screen = "phone screen" if phone else "desktop"
 
     escaped_context = _escape_mdv2(context_name)
     title = "Phone" if phone else "Desktop"
-    await update.message.reply_text(
-        f"{title} for *{escaped_context}*",
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
+    await reply_mini_app(
+        update.message,
+        text=f"{title} for *{escaped_context}*",
+        rows=[[(label, f"/vnc/?context={context_name}")]],
+        config=config,
+        user_id=update.effective_user.id,
+        is_private_chat=chat_type == "private",
+        opens=f"the live view of the {screen}",
+        still_works=(
+            f"I can still use the {screen} myself, and I can take a "
+            "screenshot and send it to you here whenever you ask — you just "
+            "can't watch or click on it live."
+        ),
     )
 
 
@@ -1465,14 +1444,6 @@ async def phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ── /security_key ──
-
-
-def _websocket_base(url: str) -> str:
-    if url.startswith("https://"):
-        return "wss://" + url[len("https://") :]
-    if url.startswith("http://"):
-        return "ws://" + url[len("http://") :]
-    return url
 
 
 def _get_sandbox_for_security_key(
@@ -1565,11 +1536,7 @@ async def security_key_handler(
         idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
     )
 
-    if config.review.public_url:
-        public_base = config.review.public_url.rstrip("/")
-    else:
-        public_base = f"https://{config.review.host}:{config.review.port}"
-    phone_base = _websocket_base(public_base)
+    phone_base = phone_websocket_base(config)
     phone_url = (
         f"{phone_base}/api/security-key/sessions/{session.id}/phone"
         f"?token={session.phone_token}"
@@ -1578,7 +1545,7 @@ async def security_key_handler(
     if sandbox is not None:
         relay_base = f"ws://{sandbox.host_address}:{config.review.port}"
     else:
-        relay_base = _websocket_base(public_base)
+        relay_base = phone_base
     helper_cmd = (
         "sudo openshrimp-security-key-vm-helper "
         f"--relay-url {relay_base} "
@@ -1658,19 +1625,15 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if action in {"code", "new"}:
         pairing = await create_pairing_code(db)
         server_id = await get_or_create_server_id(db)
-        public_base = (
-            config.review.public_url.rstrip("/")
-            if config.review.public_url
-            else f"https://{config.review.host}:{config.review.port}"
-        )
-        pairing_url = f"openshrimp://pair?base_url={public_base}&code={pairing['code']}"
+        base = public_base(config)
+        pairing_url = f"openshrimp://pair?base_url={base}&code={pairing['code']}"
         text = "\n".join(
             [
                 r"Android companion pairing code created\.",
                 "",
                 f"Code: `{_escape_mdv2(pairing['code'])}`",
                 f"Server: `{_escape_mdv2(server_id)}`",
-                f"Base URL: `{_escape_mdv2(public_base)}`",
+                f"Base URL: `{_escape_mdv2(base)}`",
                 f"Deep link: `{_escape_mdv2(pairing_url)}`",
                 "",
                 r"The code expires in `10 minutes` and can be used once\.",
@@ -1764,29 +1727,25 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if backend is not None:
         body = backend.copy().login_mini_app_body or body
 
-    # Build the Mini App URL.
-    if config.review.public_url:
-        base_url = config.review.public_url.rstrip("/")
-    else:
-        base_url = f"https://{config.review.host}:{config.review.port}"
-
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    login_url = f"{base_url}/terminal/?mode=login"
-    keyboard = InlineKeyboardMarkup([
-        [make_web_app_button(
-            text="Open login",
-            url=login_url,
-            chat_id=scope.chat_id,
-            user_id=update.effective_user.id,
-            bot_token=config.telegram.token,
-            is_private_chat=chat_type == "private",
-        )]
-    ])
 
-    await update.message.reply_text(
-        _escape_mdv2(body),
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
+    # The sign-in page is the only way to authenticate from Telegram, so its
+    # explanation names that consequence rather than leaving the user to
+    # discover it as a failed turn later.
+    await reply_mini_app(
+        update.message,
+        text=_escape_mdv2(body),
+        rows=[[("Open login", "/terminal/?mode=login")]],
+        config=config,
+        user_id=update.effective_user.id,
+        is_private_chat=chat_type == "private",
+        opens="the sign-in page",
+        still_works=(
+            "This is the only way to sign in from Telegram, so until it's "
+            "fixed I can't answer anything that needs an account — if I've "
+            "been telling you authentication failed, this is why. Everything "
+            "else about the bot is fine."
+        ),
     )
 
 
@@ -2276,29 +2235,20 @@ async def config_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
         return
 
-    # Build the Mini App URL.
-    if config.review.public_url:
-        base_url = config.review.public_url.rstrip("/")
-    else:
-        base_url = f"https://{config.review.host}:{config.review.port}"
-
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    _is_private = chat_type == "private"
-    _user_id = update.effective_user.id
-    scope = chat_scope_from_message(message)
 
-    app_url = f"{base_url}/config/"
-    keyboard = InlineKeyboardMarkup([
-        [make_web_app_button(
-            text="\u2699\ufe0f Edit Configuration",
-            url=app_url,
-            chat_id=scope.chat_id,
-            user_id=_user_id,
-            bot_token=config.telegram.token,
-            is_private_chat=_is_private,
-        )]
-    ])
-    await message.reply_text(
-        "OpenShrimp configuration",
-        reply_markup=keyboard,
+    await reply_mini_app(
+        message,
+        text="OpenShrimp configuration",
+        rows=[[("\u2699\ufe0f Edit Configuration", "/config/")]],
+        config=config,
+        user_id=update.effective_user.id,
+        is_private_chat=chat_type == "private",
+        parse_mode=None,
+        opens="the settings page",
+        still_works=(
+            "Chatting with me here still works, and every setting is also "
+            "kept in a file called config.yaml on the machine I run on, so "
+            "whoever set me up can change things there in the meantime."
+        ),
     )

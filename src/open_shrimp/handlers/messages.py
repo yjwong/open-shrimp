@@ -39,6 +39,7 @@ from open_shrimp.handlers.approval import (
 )
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
 from open_shrimp.markdown import escape as _escape_md
+from open_shrimp.web_url import mini_app_base
 from open_shrimp.handlers.questions import (
     _complete_other_input,
     _handle_ask_user_questions,
@@ -886,10 +887,9 @@ async def _start_agent_task(
         all_attachment_paths: list[Path] = list(attachment_paths)
 
         try:
-            if config.review.public_url:
-                _base_url: str | None = config.review.public_url.rstrip("/")
-            else:
-                _base_url = f"https://{config.review.host}:{config.review.port}"
+            # None when Telegram could not open a Mini App, which every
+            # button-builder downstream already reads as "render no button".
+            _base_url: str | None = mini_app_base(config)
 
             async def request_approval(
                 tool_name: str,
@@ -1138,12 +1138,9 @@ async def _start_agent_task(
             while True:
                 try:
                     events = receive_events(session)
-                    # Build terminal base URL for background task
-                    # "View output" buttons.
-                    if config.review.public_url:
-                        terminal_url: str | None = config.review.public_url.rstrip("/")
-                    else:
-                        terminal_url = f"https://{config.review.host}:{config.review.port}"
+                    # Base for background-task "View output" buttons — None
+                    # when there is no Mini App to open, so no button is drawn.
+                    terminal_url: str | None = mini_app_base(config)
 
                     from open_shrimp.client_manager import resolve_backend
 
