@@ -32,9 +32,10 @@ Download the disk image, drag OpenShrimp to Applications, and open it.
 </Steps>
 
 OpenShrimp lives in the menu bar (the shrimp icon) rather than the Dock. From
-there you can start and stop the bot, open your config, and read the logs. Turn
-on **Start at Login** and it comes back with your Mac — it registers a proper
-login item, so it shows up under Login Items in System Settings. The bot runs as
+there you can start and stop the bot, open your config, and read the logs. The
+last step of setup offers to keep it running after you sign in, and the menu's
+**Start at Login** changes that later — either way it registers a proper login
+item, so it shows up under Login Items in System Settings. The bot runs as
 its own process, so `/restart` from Telegram works and the menu keeps reporting
 what it's actually doing. It updates itself in place when a new release is out.
 
@@ -86,8 +87,9 @@ source](/reference/building-from-source/) instead.
 :::
 
 OpenShrimp lives in the notification area with no taskbar window. Start and stop
-the bot, open your config, and read the logs from the tray menu. There's a
-**Start at Login** toggle, backed by a logon scheduled task.
+the bot, open your config, and read the logs from the tray menu. The last step of
+setup offers to keep it running after you sign in, and there's a **Start at
+Login** toggle to change that later, backed by a logon scheduled task.
 
 The Windows build also includes the [HCS sandbox](/guides/hcs-sandbox/), which
 runs a project inside a Linux guest on the Host Compute Service. It's optional —

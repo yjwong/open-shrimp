@@ -126,7 +126,7 @@ OpenCode contexts use a separate `openshrimp-opencode:latest` image — see [Age
 On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` from [Releases](https://github.com/yjwong/open-shrimp/releases), drag to Applications, and launch — no terminal needed.
 
 - Lives in the menu bar (shrimp icon) with no Dock icon
-- First-run setup wizard walks you through your bot token, user ID and first project folder
+- First-run setup wizard walks you through your bot token, user ID, first project folder, and whether to keep OpenShrimp running after you sign in
 - Start/stop the bot, open config, view logs — all from the menu bar
 - "Start at Login" registers a system login item, so it appears under Login Items in System Settings
 - The bot runs as its own process, so `/restart` from Telegram works and the menu keeps reporting what it is actually doing
@@ -137,7 +137,7 @@ On macOS, OpenShrimp is also available as a menu bar app. Download the `.dmg` fr
 On Windows, OpenShrimp is also available as a notification-area app. Download the `.msi` from [Releases](https://github.com/yjwong/open-shrimp/releases) and run it — no terminal needed.
 
 - Lives in the notification area with no taskbar window
-- First-run setup wizard walks you through configuration with native dialogs
+- First-run setup wizard walks you through configuration with native dialogs, and offers to keep OpenShrimp running after you sign in
 - Start/stop the bot, open config, view logs — all from the tray menu
 - "Start at Login" toggle, backed by a logon scheduled task
 
