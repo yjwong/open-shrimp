@@ -48,7 +48,9 @@ from open_shrimp.hooks import (
     HostBashApprovalCallback,
     QuestionCallback,
 )
-from open_shrimp.sandbox import Sandbox, SandboxManager, SandboxStartupError
+from open_shrimp.sandbox import Sandbox, SandboxManager
+from open_shrimp.sandbox.base import SandboxStartupError
+from open_shrimp.sandbox.launch import start_sandboxed_agent
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     AgentRuntime,
@@ -585,35 +587,14 @@ async def get_or_create_session(
             else:
                 log_file = None
 
-            _sandbox = sandbox  # capture for closure
-            _mgr = sandbox_manager  # capture for closure
-
-            _backend_name = sandbox_backend(context)
-
-            def _ensure_and_start_agent() -> "AgentHandle":
-                # Everything the lifecycle raises leaves here as one type
-                # naming the context and the backend, so the handler can ask
-                # that backend's prerequisite checks what is wrong with the
-                # machine instead of rendering a traceback nobody can act on.
-                try:
-                    try:
-                        _sandbox.ensure_environment(log_file=log_file)
-                        _sandbox.ensure_running(log_file=log_file)
-                        # Keep the build log registered through provisioning so
-                        # long steps (e.g. the one-time Waydroid image download)
-                        # stream to the terminal Mini App.
-                        _sandbox.provision_workspace(log_file=log_file)
-                    finally:
-                        if log_file is not None:
-                            assert _mgr is not None
-                            _mgr.unregister_build(context_name)
-                    return _sandbox.start_agent(_runtime)
-                except Exception as e:
-                    raise SandboxStartupError(
-                        context_name, _backend_name, e
-                    ) from e
-
-            handle = await asyncio.to_thread(_ensure_and_start_agent)
+            handle = await start_sandboxed_agent(
+                sandbox,
+                _runtime,
+                context_name=context_name,
+                backend=sandbox_backend(context),
+                manager=sandbox_manager,
+                log_file=log_file,
+            )
             # WrappedCLI → cli_path; ServedEndpoint → endpoint.
             cli_path = handle.cli_path
             wrapper_cleanup_paths = handle.cleanup_paths
@@ -987,6 +968,11 @@ async def reconnect_session(
             push_sender=push_sender,
             backend=backend,
         )
+    except SandboxStartupError:
+        # Not a reconnect that failed — a machine that lost a prerequisite
+        # mid-session.  Flattening it to ``None`` would cost the caller the
+        # one answer that says what to do about it.
+        raise
     except Exception:
         logger.exception(
             "Failed to reconnect session for scope %s", scope

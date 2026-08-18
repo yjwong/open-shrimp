@@ -225,29 +225,21 @@ def _sandbox(config: Config) -> Verdict:
     where doctor would run nothing, because the config names a backend this
     platform does not have, there is no verdict to give rather than a pass.
     """
-    from open_shrimp.doctor import checks_for_backend
+    from open_shrimp.doctor import prerequisites
     from open_shrimp.sandbox.manager import referenced_backends
 
     backends = referenced_backends(config)
     if not backends:
         return None
 
-    problems: list[str] = []
-    unanswered: list[str] = []
-    ran = 0
-    for backend in sorted(backends):
-        for check_label, check in checks_for_backend(backend):
-            ran += 1
-            try:
-                ok, detail = check(config)
-            except Exception:
-                logger.warning(
-                    "The %s readiness check failed to run", check_label, exc_info=True
-                )
-                unanswered.append(check_label)
-                continue
-            if not ok:
-                problems.append(f"{check_label}: {detail}")
+    outcomes = [
+        outcome
+        for backend in sorted(backends)
+        for outcome in prerequisites(backend, config)
+    ]
+    problems = [f"{o.label}: {o.detail}" for o in outcomes if o.ok is False]
+    unanswered = [o.label for o in outcomes if o.ok is None]
+    ran = len(outcomes)
 
     if problems:
         return State.PROBLEM, "; ".join(problems)

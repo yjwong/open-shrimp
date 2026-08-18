@@ -15,6 +15,7 @@ import asyncio
 import platform
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -34,7 +35,7 @@ from open_shrimp.handlers.messages import _start_agent_task
 from open_shrimp.handlers.state import _running_tasks
 from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, split_message
 from open_shrimp.sandbox.base import SandboxStartupError
-from open_shrimp.sandbox_diagnosis import diagnose, failure_reply, forget_diagnoses
+from open_shrimp.sandbox_diagnosis import diagnose, failure_reply
 
 CHAT_ID = 100
 SCOPE = ChatScope(chat_id=CHAT_ID, thread_id=None)
@@ -54,9 +55,9 @@ LONG_REMEDY = (
 @pytest.fixture(autouse=True)
 def _fresh_cache():
     """Each test diagnoses from scratch; the TTL cache is process-wide."""
-    forget_diagnoses()
+    sandbox_diagnosis._cache.clear()
     yield
-    forget_diagnoses()
+    sandbox_diagnosis._cache.clear()
 
 
 def _config(backend: str = "docker") -> Config:
@@ -406,46 +407,12 @@ def db(tmp_path):
 class _Context:
     """The slice of ``ContextTypes.DEFAULT_TYPE`` the dispatch path touches."""
 
-    def __init__(self) -> None:
+    def __init__(self, sandbox: "_RefusingSandbox") -> None:
         self.bot = AsyncMock()
         self.bot.send_message.return_value = SimpleNamespace(message_id=7)
-        self.bot_data: dict[str, Any] = {}
-
-
-async def _drive(monkeypatch, context: _Context, config: Config) -> None:
-    """Run one turn whose sandbox refuses to start, through the real handler."""
-
-    async def _refuse(**kwargs):
-        raise SandboxStartupError("work", "docker", RuntimeError("boom"))
-
-    monkeypatch.setattr(
-        "open_shrimp.handlers.messages.get_or_create_session", _refuse
-    )
-    await _start_agent_task(
-        prompt="what changed today?",
-        attachments=[],
-        scope=SCOPE,
-        config=config,
-        db=context.db,
-        context=context,
-        user_id=1,
-    )
-    task = _running_tasks.get(SCOPE)
-    if task is not None:
-        await task
-
-
-def _sent(context: _Context) -> list[str]:
-    return [
-        call.kwargs.get("text", "")
-        for call in context.bot.send_message.await_args_list
-    ]
-
-
-def _failure_message(context: _Context) -> str:
-    matching = [text for text in _sent(context) if "sandbox" in text]
-    assert matching, f"nothing said about the sandbox: {_sent(context)}"
-    return "\n".join(matching)
+        self.bot_data: dict[str, Any] = {
+            "sandbox_managers": {"docker": _StubManager(sandbox)}
+        }
 
 
 class _RefusingSandbox:
@@ -455,7 +422,7 @@ class _RefusingSandbox:
     being reached would mean the failure was not raised where it is claimed.
     """
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str = "Failed to start container") -> None:
         self._message = message
         self.context_name = "work"
         self.attempted = False
@@ -475,65 +442,63 @@ class _StubManager:
     def __init__(self, sandbox: _RefusingSandbox) -> None:
         self._sandbox = sandbox
 
-    def agent_home_dir(self, context_name: str):
-        import pathlib
+    def agent_home_dir(self, context_name: str) -> Path:
+        return Path("/tmp") / context_name
 
-        return pathlib.Path("/tmp") / context_name
-
-    def create_sandbox(self, context_name, ctx, runtime=None):
+    def create_sandbox(self, context_name, ctx, runtime=None) -> _RefusingSandbox:
         return self._sandbox
+
+
+async def _drive(db, message: str = "Failed to start container") -> _Context:
+    """One turn against a sandbox that refuses, through the real handler.
+
+    Nothing between the lifecycle call and the reply is stubbed: the refusal
+    is raised by ``ensure_environment`` and travels the same path a real
+    Docker failure would.
+    """
+    sandbox = _RefusingSandbox(message)
+    context = _Context(sandbox)
+    await set_active_context(db, SCOPE, "work")
+    await _start_agent_task(
+        prompt="what changed today?",
+        attachments=[],
+        scope=SCOPE,
+        config=_config(),
+        db=db,
+        context=context,
+        user_id=1,
+    )
+    task = _running_tasks.get(SCOPE)
+    if task is not None:
+        await task
+    assert sandbox.attempted, "the lifecycle call was never reached"
+    return context
+
+
+def _sent(context: _Context) -> list[str]:
+    return [
+        call.kwargs.get("text", "")
+        for call in context.bot.send_message.await_args_list
+    ]
+
+
+def _failure_message(context: _Context) -> str:
+    matching = [text for text in _sent(context) if "sandbox" in text]
+    assert matching, f"nothing said about the sandbox: {_sent(context)}"
+    return "\n".join(matching)
 
 
 class TestTheWholeChain:
     """From the lifecycle call that raises to the words the user reads."""
 
     @pytest.mark.asyncio
-    async def test_a_sandbox_that_will_not_start_reports_the_remedy(
-        self, monkeypatch, db
-    ):
-        _checks(
-            monkeypatch,
-            ("Docker", lambda config: (False, "add yourself to the docker group")),
-        )
-        sandbox = _RefusingSandbox("Failed to start container")
-        context = _Context()
-        context.bot_data["sandbox_managers"] = {"docker": _StubManager(sandbox)}
-        await set_active_context(db, SCOPE, "work")
-
-        await _start_agent_task(
-            prompt="what changed today?",
-            attachments=[],
-            scope=SCOPE,
-            config=_config(),
-            db=db,
-            context=context,
-            user_id=1,
-        )
-        task = _running_tasks.get(SCOPE)
-        if task is not None:
-            await task
-
-        assert sandbox.attempted, "the lifecycle call was never reached"
-        said = _failure_message(context)
-        assert "add yourself to the docker group" in said
-        assert "An error occurred while processing your request" not in "".join(
-            _sent(context)
-        )
-
-
-class TestTheRealErrorPath:
-    @pytest.mark.asyncio
     async def test_a_missing_prerequisite_reaches_the_user(self, monkeypatch, db):
         _checks(
             monkeypatch,
             ("Docker", lambda config: (False, "add yourself to the docker group")),
         )
-        config = _config()
-        context = _Context()
-        context.db = db
-        await set_active_context(db, SCOPE, "work")
 
-        await _drive(monkeypatch, context, config)
+        context = await _drive(db)
 
         said = _failure_message(context)
         assert "add yourself to the docker group" in said
@@ -544,26 +509,18 @@ class TestTheRealErrorPath:
     @pytest.mark.asyncio
     async def test_a_runtime_failure_reaches_the_user(self, monkeypatch, db):
         _checks(monkeypatch, ("Docker", lambda config: (True, "daemon running")))
-        config = _config()
-        context = _Context()
-        context.db = db
-        await set_active_context(db, SCOPE, "work")
 
-        await _drive(monkeypatch, context, config)
+        context = await _drive(db, "VM SSH not reachable after 120s")
 
-        assert "boom" in _failure_message(context)
+        assert "VM SSH not reachable after 120s" in _failure_message(context)
 
     @pytest.mark.asyncio
     async def test_the_remedy_is_sent_plain(self, monkeypatch, db):
         """MarkdownV2 would reject these remedies outright, and a message
         Telegram refuses is worse than the sentence it replaced."""
         _checks(monkeypatch, ("HCS RDP helper", lambda config: (False, LONG_REMEDY)))
-        config = _config()
-        context = _Context()
-        context.db = db
-        await set_active_context(db, SCOPE, "work")
 
-        await _drive(monkeypatch, context, config)
+        context = await _drive(db)
 
         remedy_calls = [
             call
@@ -576,3 +533,49 @@ class TestTheRealErrorPath:
         assert LONG_REMEDY in "".join(
             call.kwargs["text"] for call in remedy_calls
         )
+
+    @pytest.mark.asyncio
+    async def test_a_remedy_past_the_length_limit_is_split_not_clipped(
+        self, monkeypatch, db
+    ):
+        """W6: the remedy is the payload, so the limit costs a second message
+        rather than the end of the sentence."""
+        long_report = "\n".join(f"{i}: {LONG_REMEDY}" for i in range(20))
+        _checks(monkeypatch, ("HCS RDP helper", lambda config: (False, long_report)))
+
+        context = await _drive(db)
+
+        parts = [text for text in _sent(context) if "mingw64" in text]
+        assert len(parts) > 1, "a reply over the limit must arrive in pieces"
+        assert all(len(part) <= TELEGRAM_MAX_LENGTH for part in parts)
+        assert "".join(parts).count(LONG_REMEDY) == 20
+
+
+class TestTheReconnectPath:
+    """A sandbox that dies mid-session is the likeliest real failure there is,
+    and its reconnect must not flatten the diagnosis into "reconnect failed"
+    — the caller's fallback text blames a process that terminated, when what
+    happened is that the machine lost a prerequisite."""
+
+    @pytest.mark.asyncio
+    async def test_a_startup_failure_survives_the_reconnect(self, monkeypatch):
+        from open_shrimp import client_manager
+
+        async def _refuse(**kwargs):
+            raise SandboxStartupError("work", "docker", RuntimeError("boom"))
+
+        monkeypatch.setattr(client_manager, "get_or_create_session", _refuse)
+        monkeypatch.setitem(
+            client_manager._active_sessions,
+            SCOPE,
+            client_manager.AgentSession(
+                client=SimpleNamespace(), session_id="s-1", context_name="work"
+            ),
+        )
+
+        with pytest.raises(SandboxStartupError):
+            await client_manager.reconnect_session(
+                scope=SCOPE,
+                context_name="work",
+                context=_config().contexts["work"],
+            )

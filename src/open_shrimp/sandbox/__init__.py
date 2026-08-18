@@ -1,6 +1,7 @@
 """Sandbox package -- isolated execution environments for the Claude CLI."""
 
 from open_shrimp.sandbox.base import Sandbox, SandboxStartupError
+from open_shrimp.sandbox.launch import start_sandboxed_agent
 from open_shrimp.sandbox.manager import (
     DockerSandboxManager,
     HcsSandboxManager,
@@ -23,4 +24,5 @@ __all__ = [
     "create_sandbox_manager",
     "create_sandbox_managers",
     "referenced_backends",
+    "start_sandboxed_agent",
 ]

@@ -23,7 +23,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from open_shrimp.config import Config, ContextConfig
+from open_shrimp.config import Config, ContextConfig, is_sandboxed, sandbox_backend
 from open_shrimp.paths import build_log_dir as _build_log_dir, data_dir as _data_dir
 from open_shrimp.sandbox.base import Sandbox
 
@@ -1380,14 +1380,17 @@ class HcsSandboxManager:
 
 
 def referenced_backends(config: Config) -> set[str]:
-    """Return the backend names referenced by sandboxed contexts in *config*."""
-    backends: set[str] = set()
-    for ctx in config.contexts.values():
-        if ctx.sandbox is not None and ctx.sandbox.enabled:
-            backends.add(ctx.sandbox.backend)
-        elif ctx.container is not None and ctx.container.enabled:
-            backends.add("docker")
-    return backends
+    """Return the backend names referenced by sandboxed contexts in *config*.
+
+    The plural of :func:`~open_shrimp.config.sandbox_backend`, and built from
+    it: which managers get built and which prerequisites get checked must not
+    be able to disagree about what backend a context is on.
+    """
+    return {
+        sandbox_backend(ctx)
+        for ctx in config.contexts.values()
+        if is_sandboxed(ctx)
+    }
 
 
 _MANAGER_FACTORIES: dict[str, type[SandboxManager]] = {

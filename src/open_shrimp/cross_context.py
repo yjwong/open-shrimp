@@ -34,6 +34,7 @@ from telegram import Bot, InlineKeyboardMarkup
 
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.sandbox.base import SandboxStartupError
+from open_shrimp.sandbox.launch import start_sandboxed_agent
 from open_shrimp.sandbox_diagnosis import diagnose
 
 if TYPE_CHECKING:
@@ -385,19 +386,12 @@ async def _launch_target_sandbox(
         )
         sandbox = manager.create_sandbox(target, ctx, runtime=runtime)
 
-        def _start() -> Any:
-            # Same typed failure as the live-session path, so a sub-query
-            # against a machine that is missing a prerequisite reports the
-            # remedy instead of whichever line noticed first.
-            try:
-                sandbox.ensure_environment()
-                sandbox.ensure_running()
-                sandbox.provision_workspace()
-                return sandbox.start_agent(runtime)
-            except Exception as e:
-                raise SandboxStartupError(target, backend_name, e) from e
-
-        handle = await asyncio.to_thread(_start)
+        # The same launch as the live-session path, down to the typed failure,
+        # so a sub-query against a machine missing a prerequisite reports the
+        # remedy rather than whichever line noticed first.
+        handle = await start_sandboxed_agent(
+            sandbox, runtime, context_name=target, backend=backend_name,
+        )
         return _SandboxLaunch(
             cli_path=handle.cli_path,
             endpoint=handle.endpoint,

@@ -30,7 +30,12 @@ from open_shrimp.client_manager import (
     receive_events,
     reconnect_session,
 )
-from open_shrimp.config import Config, ContextConfig, is_sandboxed
+from open_shrimp.config import (
+    Config,
+    ContextConfig,
+    is_sandboxed,
+    sandbox_backend,
+)
 from open_shrimp.db import ChatScope, get_pinned_message_id, get_session_id, set_session_id
 from open_shrimp.handlers.approval import (
     _send_approval_keyboard,
@@ -105,8 +110,8 @@ def _select_sandbox_manager(
     from open_shrimp.sandbox import SandboxManager
 
     managers: dict[str, SandboxManager] | None = bot_data.get("sandbox_managers")
-    if managers and ctx_config.sandbox:
-        return managers.get(ctx_config.sandbox.backend)
+    if managers and is_sandboxed(ctx_config):
+        return managers.get(sandbox_backend(ctx_config))
     return None
 
 

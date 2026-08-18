@@ -204,10 +204,10 @@ class _FakeSandbox:
     def host_address(self) -> str:
         return "host.docker.internal"
 
-    def ensure_environment(self) -> None:
+    def ensure_environment(self, *, log_file=None) -> None:
         pass
 
-    def ensure_running(self) -> None:
+    def ensure_running(self, *, log_file=None) -> None:
         pass
 
     def provision_workspace(self, *, log_file=None) -> None:

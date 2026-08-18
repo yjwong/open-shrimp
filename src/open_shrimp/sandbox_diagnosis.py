@@ -18,19 +18,18 @@ anything yet, and this is a reply to someone whose message just failed and who
 needs to know that it did not run and what to do about it now.
 
 A check that crashed is not a check that passed.  Where one could not answer,
-this refuses to claim the host is fine, exactly as ``readiness`` refuses to.
+this refuses to claim the host is fine, and says only what the checks did
+establish.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 
 from open_shrimp.config import Config
+from open_shrimp.doctor import Outcome, prerequisites
 from open_shrimp.sandbox.base import SandboxStartupError
-
-logger = logging.getLogger(__name__)
 
 # How long a diagnosis stands before the checks are run again.  ``docker
 # info`` shells out and the libvirt check opens a connection, and a scope that
@@ -39,45 +38,44 @@ logger = logging.getLogger(__name__)
 # docker-group remedy alone requires logging out and in again).
 _TTL = 30.0
 
-_cache: dict[str, tuple[float, list[str], list[str]]] = {}
+_cache: dict[str, tuple[float, list[Outcome]]] = {}
+
+# One diagnosis per backend at a time: a daemon that dies takes every scope
+# with it, and they arrive together, so without this each one would spawn its
+# own ``docker info`` and hold a thread for as long as that takes.
+_locks: dict[str, asyncio.Lock] = {}
 
 
 def _now() -> float:
     return time.monotonic()
 
 
-def _run_checks(backend: str, config: Config | None) -> tuple[list[str], list[str]]:
-    """``(failing, unanswered)`` prerequisites for *backend* on this host.
-
-    Blocking: several checks shell out.  Callers reach it through a thread.
-    """
-    from open_shrimp.doctor import checks_for_backend
-
+def _fresh(backend: str) -> list[Outcome] | None:
+    """The standing diagnosis for *backend*, while it still stands."""
     cached = _cache.get(backend)
-    if cached is not None and _now() - cached[0] < _TTL:
-        return list(cached[1]), list(cached[2])
-
-    failing: list[str] = []
-    unanswered: list[str] = []
-    for label, check in checks_for_backend(backend):
-        try:
-            ok, detail = check(config)
-        except Exception:
-            logger.warning(
-                "The %s prerequisite check failed to run", label, exc_info=True
-            )
-            unanswered.append(label)
-            continue
-        if not ok:
-            failing.append(f"{label}: {detail}")
-
-    _cache[backend] = (_now(), list(failing), list(unanswered))
-    return failing, unanswered
+    if cached is None:
+        return None
+    taken, outcomes = cached
+    return outcomes if _now() - taken < _TTL else None
 
 
-def forget_diagnoses() -> None:
-    """Drop every cached diagnosis, so the next failure re-runs the checks."""
-    _cache.clear()
+async def _diagnose_host(backend: str, config: Config | None) -> list[Outcome]:
+    """What *backend*'s prerequisites say about this machine.
+
+    Answered from the standing diagnosis where there is one — that lookup
+    happens here rather than in the worker, so a repeat costs nothing at all.
+    """
+    standing = _fresh(backend)
+    if standing is not None:
+        return standing
+
+    async with _locks.setdefault(backend, asyncio.Lock()):
+        standing = _fresh(backend)
+        if standing is not None:
+            return standing
+        outcomes = await asyncio.to_thread(prerequisites, backend, config)
+        _cache[backend] = (_now(), outcomes)
+        return outcomes
 
 
 async def diagnose(
@@ -86,14 +84,16 @@ async def diagnose(
     """``(what is wrong, a prerequisite is missing)`` for a startup failure.
 
     The bool is the difference between "this machine is missing something" and
-    "this machine looks fine and the attempt failed anyway", which is what a
+    "nothing on the prerequisite list came back missing", which is what a
     caller needs to say what to do next.
     """
-    failing, unanswered = await asyncio.to_thread(_run_checks, error.backend, config)
+    outcomes = await _diagnose_host(error.backend, config)
+    failing = [o for o in outcomes if o.ok is False]
     if failing:
-        return "\n".join(failing), True
+        return "\n".join(f"{o.label}: {o.detail}" for o in failing), True
 
     reported = str(error).strip() or "the sandbox did not start"
+    unanswered = [o.label for o in outcomes if o.ok is None]
     if unanswered:
         # Not a clean bill of health: say so rather than let the silence of a
         # crashed probe read as a pass.
@@ -108,28 +108,25 @@ async def diagnose(
 async def failure_reply(error: SandboxStartupError, config: Config | None) -> str:
     """The whole reply for a scope whose message never ran.
 
-    Plain text, never MarkdownV2: the remedies carry Windows paths, shell
-    variables and parentheses, and a message Telegram rejects for a bad entity
-    is worse than the generic sentence it replaces — the same reason
-    ``mini_app._unavailable_text`` is plain.
+    Plain text, never MarkdownV2 and with nothing in it that only renders as
+    markup: the remedies carry Windows paths, shell variables and parentheses,
+    and a message Telegram rejects for a bad entity is worse than the generic
+    sentence it replaces — the same reason ``mini_app._unavailable_text`` is
+    plain.
     """
     what, prerequisite = await diagnose(error, config)
-    if prerequisite:
-        closing = (
-            "Once that's sorted, send your message again. Meanwhile /context "
-            "switches to a project that doesn't use a sandbox, and "
-            "`openshrimp doctor` prints the full report."
+    lead = (
+        "Once that's sorted, send your message again."
+        if prerequisite
+        else (
+            "Nothing on the prerequisite list came back missing, so sending "
+            "the message again may well work."
         )
-    else:
-        closing = (
-            "Everything the sandbox needs looks to be installed, so sending "
-            "the message again may well work. If it keeps failing, /context "
-            "switches to a project that doesn't use a sandbox, and "
-            "`openshrimp doctor` prints the full report."
-        )
+    )
     return (
         f'I couldn\'t start the sandbox for the "{error.context_name}" '
         "project, so your message hasn't run.\n\n"
         f"{what}\n\n"
-        f"{closing}"
+        f"{lead} Meanwhile /context switches to a project that doesn't use a "
+        "sandbox, and openshrimp doctor prints the full report."
     )

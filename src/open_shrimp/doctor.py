@@ -13,16 +13,20 @@ is nothing to check on a host that configures no HCS context.
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import shutil
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from open_shrimp.binaries import find_binary
 from open_shrimp.config import Config, SandboxConfig, load_config
 from open_shrimp.paths import init_paths
+
+logger = logging.getLogger(__name__)
 
 
 def _check_moonshine_stt(config: Config | None) -> tuple[bool, str]:
@@ -44,7 +48,7 @@ def _check_docker(config: Config | None) -> tuple[bool, str]:
     if not path:
         return False, (
             "docker CLI not found — install Docker Engine (or Docker "
-            "Desktop) and make sure `docker` is on your PATH"
+            "Desktop) and make sure docker is on your PATH"
         )
     # Check if daemon is responsive.
     import subprocess
@@ -58,7 +62,11 @@ def _check_docker(config: Config | None) -> tuple[bool, str]:
         if result.returncode != 0:
             return False, _docker_refusal(result.stderr)
     except subprocess.TimeoutExpired:
-        return False, "docker CLI found but daemon timed out"
+        return False, (
+            "docker CLI found but the daemon did not answer in 10 seconds — "
+            "it is starting up or wedged; restart it with: sudo systemctl "
+            "restart docker  (or restart Docker Desktop)"
+        )
     except Exception as e:
         return False, f"docker CLI found but check failed: {e}"
     return True, f"found at {path}, daemon running"
@@ -417,6 +425,40 @@ def checks_for_backend(backend: str) -> list[tuple[str, _Check]]:
     ]
 
 
+@dataclass(frozen=True)
+class Outcome:
+    """What one prerequisite answered.
+
+    ``ok`` is ``None`` where the check could not answer at all.  A probe that
+    crashed is neither a pass nor a failure, and every surface that renders
+    these — the boot card, the report, the reply to a sandbox that would not
+    start — has to tell those three apart, so the distinction is made once
+    here rather than three times in the rendering.
+    """
+
+    label: str
+    ok: bool | None
+    detail: str
+
+
+def run_check(label: str, check: _Check, config: Config | None) -> Outcome:
+    """*check*'s answer, or the fact that it had none."""
+    try:
+        ok, detail = check(config)
+    except Exception as e:
+        logger.warning("The %s check failed to run", label, exc_info=True)
+        return Outcome(label, None, f"this check could not run: {e!r}")
+    return Outcome(label, ok, detail)
+
+
+def prerequisites(backend: str, config: Config | None) -> list[Outcome]:
+    """Every prerequisite *backend* needs here, run against this host now."""
+    return [
+        run_check(label, check, config)
+        for label, check in checks_for_backend(backend)
+    ]
+
+
 def _load_config(path: str | None) -> Config | None:
     """The operator's config, or ``None`` when there is none to read.
 
@@ -491,13 +533,10 @@ def run_doctor(config_path: str | None = None) -> int:
     for label, check_fn, plat, _backends in _CHECKS:
         if plat is not None and current_platform != plat:
             continue
-        try:
-            ok, detail = check_fn(config)
-        except Exception as e:
-            ok, detail = False, f"this check could not run: {e!r}"
-        icon = pass_icon if ok else fail_icon
-        print(_printable(f"  {icon} {label}: {detail}"))
-        if not ok:
+        outcome = run_check(label, check_fn, config)
+        icon = pass_icon if outcome.ok else fail_icon
+        print(_printable(f"  {icon} {label}: {outcome.detail}"))
+        if not outcome.ok:
             has_failure = True
 
     return 1 if has_failure else 0

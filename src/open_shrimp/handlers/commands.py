@@ -22,7 +22,13 @@ from open_shrimp.client_manager import (
     close_session,
     get_session,
 )
-from open_shrimp.config import Config, ContextConfig, effective_backend
+from open_shrimp.config import (
+    Config,
+    ContextConfig,
+    effective_backend,
+    is_sandboxed,
+    sandbox_backend,
+)
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
 from open_shrimp.backend.factory import get_backend_by_name
 from open_shrimp.android_companion import (
@@ -359,9 +365,9 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await reset_scope(scope, ctx_name, db)
 
-    if ctx.sandbox is not None:
+    if is_sandboxed(ctx):
         sandbox_managers = context.bot_data.get("sandbox_managers") or {}
-        manager = sandbox_managers.get(ctx.sandbox.backend)
+        manager = sandbox_managers.get(sandbox_backend(ctx))
         if manager is not None:
             active = manager.get_active_sandbox(ctx_name)
             if active is not None and active.supports_port_forwarding():
