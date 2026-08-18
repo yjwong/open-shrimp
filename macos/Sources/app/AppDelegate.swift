@@ -23,6 +23,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The login item supersedes the launch agent the front end used to write
         // for itself, and one bundle must not be started by both.
         LaunchAgents.adoptAppAgent()
+        // Recorded every launch.  The menu is the only place this is shown and
+        // it exists only while it is open, so without this there is nothing
+        // anywhere that says whether the app is set to start itself — and the
+        // system keeps the answer somewhere neither launchctl nor the BTM
+        // database will give up over ssh.
+        AppLog.write("login item: \(Autostart.isEnabled ? "on" : "off")")
         reportLoginConflict()
 
         // Before anything tries to run the core: what gets spawned is the copy

@@ -566,14 +566,21 @@ final class SetupWizardModel: ObservableObject {
         // autostart that could not be registered is a downgrade, not a setup
         // failure.
         //
-        // Logged whichever way it goes.  A registered login item appears in
-        // neither launchctl nor the BTM database, so this line is the only
-        // artifact of the outcome anybody can read back afterwards.
+        // Every branch leaves a line, including the ones with nothing to do.  A
+        // registered login item appears in neither launchctl nor the BTM
+        // database, so this log is the only artifact of the outcome anybody can
+        // read back afterwards — and a branch that writes nothing cannot be
+        // told apart from one that never ran.
         var autostartFailure: String?
-        // Asked of the system rather than assumed: the agent the front end used
-        // to write for itself may already have been carried over to the login
-        // item at launch, and registering one that is registered is an error.
-        if autostart, !Autostart.isEnabled {
+        if !autostart {
+            AppLog.write("login item declined at setup")
+        } else if Autostart.isEnabled {
+            // Asked of the system rather than assumed: the agent the front end
+            // used to write for itself may already have been carried over to
+            // the login item at launch, and registering one that is registered
+            // is an error.
+            AppLog.write("login item was already registered")
+        } else {
             do {
                 try Autostart.setEnabled(true)
                 AppLog.write("registered the login item")
