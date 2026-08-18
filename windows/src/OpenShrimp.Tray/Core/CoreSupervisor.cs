@@ -123,7 +123,7 @@ internal sealed class CoreSupervisor : IAsyncDisposable
 
         try
         {
-            _process = Process.Start(new ProcessStartInfo
+            var startInfo = new ProcessStartInfo
             {
                 FileName = exe,
                 Arguments = $"--config \"{CorePaths.ConfigFile}\"",
@@ -131,7 +131,12 @@ internal sealed class CoreSupervisor : IAsyncDisposable
                 CreateNoWindow = true,
                 // The core owns its own rotating log file, so its console
                 // streams are left alone rather than pumped into a second one.
-            });
+            };
+            // Something above the core owns keeping it alive — this supervisor
+            // while the tray runs, and its logon task across sign-ins — so the
+            // core must not ask the operator to register one of its own.
+            startInfo.Environment["OPENSHRIMP_SUPERVISED"] = "1";
+            _process = Process.Start(startInfo);
         }
         catch (Exception ex)
         {

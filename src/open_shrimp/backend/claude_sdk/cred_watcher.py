@@ -36,6 +36,10 @@ HOST_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
 MACOS_KEYCHAIN_DIR = Path.home() / "Library" / "Keychains"
 MACOS_KEYCHAIN_DB_NAME = "login.keychain-db"
 
+# The Keychain item the host CLI writes its OAuth tokens to.  The name is the
+# CLI's, not ours, so it is spelled once.
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+
 RUNTIME_NAME = "claude"
 
 
@@ -47,6 +51,46 @@ def host_credentials_available() -> bool:
         # missing, the watcher simply won't propagate anything.
         return (MACOS_KEYCHAIN_DIR / MACOS_KEYCHAIN_DB_NAME).exists()
     return HOST_CREDENTIALS.exists()
+
+
+def host_signed_in() -> bool:
+    """Whether the host holds credentials a person would call signed in.
+
+    Distinct from :func:`host_credentials_available`, which asks only whether
+    there is something to sync into a sandbox and so answers yes on macOS for
+    every logged-in user.  This answer is shown to that user as "you are
+    signed in", so the macOS branch asks the Keychain for the item itself —
+    for its attributes and never its secret, because reading the secret from
+    a binary that did not create the item raises an authorization dialog, and
+    nothing that runs at boot may put a modal on someone's screen.
+
+    The Keychain is not the last word even there: the host CLI falls back to
+    writing the credentials file when a Keychain write fails, and a user whose
+    agent authenticates perfectly must not be told to sign in again.
+    """
+    if sys.platform != "darwin":
+        return host_credentials_available()
+
+    import getpass
+    import subprocess
+
+    try:
+        found = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                getpass.getuser(),
+            ],
+            capture_output=True,
+            timeout=5,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        logger.debug("Could not ask the Keychain about credentials", exc_info=True)
+        found = False
+    return found or HOST_CREDENTIALS.exists()
 
 
 def write_target(home_dir: Path, payload: str) -> None:
@@ -157,10 +201,12 @@ def watch_host_credentials(stop: threading.Event) -> None:
 
 __all__ = [
     "HOST_CREDENTIALS",
+    "KEYCHAIN_SERVICE",
     "MACOS_KEYCHAIN_DB_NAME",
     "MACOS_KEYCHAIN_DIR",
     "RUNTIME_NAME",
     "host_credentials_available",
+    "host_signed_in",
     "watch_host_credentials",
     "write_target",
 ]

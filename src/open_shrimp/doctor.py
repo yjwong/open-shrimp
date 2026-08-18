@@ -331,22 +331,43 @@ def _missing_freerdp_dlls(directory: Path) -> list[str]:
     ]
 
 
-# Each check: (label, function, platform filter or None for all).
-_CHECKS: list[tuple[str, Callable[[Config | None], tuple[bool, str]], str | None]] = [
-    ("moonshine-stt", _check_moonshine_stt, None),
-    ("cloudflared", _check_cloudflared, None),
-    ("Docker", _check_docker, "Linux"),
-    ("libvirt", _check_libvirt, "Linux"),
-    ("virtiofsd", _check_virtiofsd, "Linux"),
-    ("Lima", _check_lima, "Darwin"),
-    ("win32more", _check_win32more, "Windows"),
-    ("Hyper-V rights", _check_hyperv_rights, "Windows"),
-    ("HCS kernel", _check_hcs_kernel, "Windows"),
-    ("HCS control initramfs", _check_hcs_initrd, "Windows"),
-    ("csc", _check_csc, "Windows"),
-    ("HCS base image", _check_hcs_base_image, "Windows"),
-    ("HCS RDP helper", _check_hcs_rdp_helper, "Windows"),
+# Each check: (label, function, platform filter or None for all, the sandbox
+# backends it is a prerequisite of).  The backend tag lives here rather than in
+# a table beside it so the two cannot come to name different things.
+_Check = Callable[[Config | None], tuple[bool, str]]
+_CHECKS: list[tuple[str, _Check, str | None, tuple[str, ...]]] = [
+    ("moonshine-stt", _check_moonshine_stt, None, ()),
+    ("cloudflared", _check_cloudflared, None, ()),
+    ("Docker", _check_docker, "Linux", ("docker",)),
+    ("libvirt", _check_libvirt, "Linux", ("libvirt",)),
+    ("virtiofsd", _check_virtiofsd, "Linux", ("libvirt",)),
+    ("Lima", _check_lima, "Darwin", ("lima",)),
+    ("win32more", _check_win32more, "Windows", ("hcs",)),
+    ("Hyper-V rights", _check_hyperv_rights, "Windows", ("hcs",)),
+    ("HCS kernel", _check_hcs_kernel, "Windows", ("hcs",)),
+    ("HCS control initramfs", _check_hcs_initrd, "Windows", ("hcs",)),
+    ("csc", _check_csc, "Windows", ("hcs",)),
+    ("HCS base image", _check_hcs_base_image, "Windows", ("hcs",)),
+    ("HCS RDP helper", _check_hcs_rdp_helper, "Windows", ("hcs",)),
 ]
+
+
+def checks_for_backend(backend: str) -> list[tuple[str, _Check]]:
+    """``(label, check)`` for every prerequisite *backend* needs on this host.
+
+    The remedies these return are the ones an operator should see wherever a
+    sandbox refuses to start, not only under ``openshrimp doctor`` — so the
+    platform filter is applied exactly as the report applies it, and the two
+    cannot disagree about which checks even ran.  A host where none of them
+    apply gets an empty list, which is a caller's cue to say nothing rather
+    than to report a pass nobody established.
+    """
+    current = platform.system()
+    return [
+        (label, fn)
+        for label, fn, plat, backends in _CHECKS
+        if backend in backends and (plat is None or plat == current)
+    ]
 
 
 def _load_config(path: str | None) -> Config | None:
@@ -412,7 +433,7 @@ def run_doctor(config_path: str | None = None) -> int:
     pass_icon, fail_icon = _icons()
     has_failure = False
 
-    for label, check_fn, plat in _CHECKS:
+    for label, check_fn, plat, _backends in _CHECKS:
         if plat is not None and current_platform != plat:
             continue
         ok, detail = check_fn(config)

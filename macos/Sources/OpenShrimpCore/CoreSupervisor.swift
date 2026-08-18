@@ -184,6 +184,12 @@ actor CoreSupervisor {
         let process = Process()
         process.executableURL = executable
         process.arguments = ["--config", CorePaths.configFile.path]
+        // Something above the core owns keeping it alive — this supervisor
+        // while the app runs, and the app's own login item across logins — so
+        // the core must not ask the operator to install a service of its own.
+        var environment = ProcessInfo.processInfo.environment
+        environment["OPENSHRIMP_SUPERVISED"] = "1"
+        process.environment = environment
         // The core owns its own rotating log file, so its output streams are
         // left alone rather than pumped into a second one.
         do {

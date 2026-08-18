@@ -176,6 +176,73 @@ def _service_path(platform: str) -> Path:
     return _LAUNCHD_PLIST_PATH
 
 
+def _capture(args: list[str]) -> str | None:
+    """*args*' stdout when it exits zero, or ``None`` when it did not run.
+
+    Bounded and non-raising because the readiness card asks these questions
+    at boot: a query tool that is missing, slow or angry must cost an unknown
+    answer, never a stall or a traceback.
+    """
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _task_name(instance_name: str | None) -> str:
+    """The Windows logon task's name, which the tray app computes identically.
+
+    Instance-scoped, and reduced to characters ``schtasks`` cannot misread
+    rather than escaped — the same reduction as ``Autostart.TaskName`` in the
+    tray, because whoever asks must arrive at the name whoever registered it
+    used.
+    """
+    if not instance_name:
+        return "OpenShrimp"
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in instance_name)
+    return f"OpenShrimp-{safe}"
+
+
+def is_service_installed(instance_name: str | None = None) -> bool:
+    """Whether the bot is registered to come back without a terminal.
+
+    The question is not whether a file was written but whether closing the
+    window keeps the bot alive, so each platform is asked the version of that
+    question it can answer: systemd whether the unit is *enabled*, launchd
+    whether the label is actually loaded, and Windows whether the task will
+    run rather than merely exist.  A plist on disk that launchd refused, a
+    disabled logon task and a disabled unit all start nothing.
+    """
+    try:
+        platform = _detect_platform()
+    except RuntimeError:
+        return False
+
+    if platform == "windows":
+        xml = _capture(
+            ["schtasks", "/Query", "/TN", _task_name(instance_name), "/XML"]
+        )
+        if xml is None:
+            return False
+        # schtasks may hand back UTF-16 decoded as if it were not; the flag is
+        # only ever read for its absence, so the nulls are dropped rather than
+        # the encoding guessed.
+        return "<enabled>false</enabled>" not in xml.replace("\x00", "").lower()
+
+    if not _service_path(platform).exists():
+        return False
+    if platform == "linux":
+        return (
+            _capture(["systemctl", "--user", "is-enabled", "open-shrimp.service"])
+            is not None
+        )
+    return (
+        _capture(["launchctl", "print", f"gui/{os.getuid()}/{_LAUNCHD_LABEL}"])
+        is not None
+    )
+
+
 def install_service(config_path: str) -> None:
     """Install OpenShrimp as a system service.
 

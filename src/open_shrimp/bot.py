@@ -509,13 +509,24 @@ async def run_bot(
 
     # The enrollment handshake spends Telegram's one-shot START press, so the
     # bot's explanation of itself has to arrive unprompted, and only once the
-    # core is actually alive.
-    from open_shrimp.first_boot import send_orientation
+    # core is actually alive — which is also the first moment its readiness
+    # can be reported honestly.
+    #
+    # Off the boot path, though: the card probes the network and shells out to
+    # the sandbox prerequisites, and nothing below this line may wait on that.
+    # Sandbox activation, the idle sweep, event sources and the schedule
+    # runner all come after, and a bot polling Telegram with none of them
+    # started is the failure this whole module exists to prevent.
+    from open_shrimp.first_boot import send_first_boot
 
-    try:
-        await send_orientation(app.bot, db, config)
-    except Exception:
-        logger.warning("Failed to send the first-boot orientation", exc_info=True)
+    async def _first_boot() -> None:
+        try:
+            await send_first_boot(app.bot, db, config)
+        except Exception:
+            logger.warning("Failed to send the first-boot card", exc_info=True)
+
+    _first_boot_task = asyncio.create_task(_first_boot())
+    app.bot_data["first_boot_task"] = _first_boot_task
 
     # Instantiate one SandboxManager per backend used in the config.
     _sandbox_managers = sandbox_managers or create_sandbox_managers(config)
