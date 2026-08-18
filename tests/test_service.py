@@ -18,6 +18,7 @@ from open_shrimp.service import (
     _generate_systemd_unit,
     _generate_windows_task_xml,
     _install_windows,
+    _task_exists,
     _task_name,
     install_service,
     is_service_installed,
@@ -211,6 +212,31 @@ class TestCurrentUser:
         assert r"<UserId>WIN11SPIKE\me</UserId>" in xml
 
 
+class TestTaskExists:
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_a_disabled_task_still_holds_the_name(self, _plat: MagicMock) -> None:
+        # The two questions must disagree here, and the disagreement is the
+        # point: a disabled task starts nothing, so autostart is off, but it
+        # still occupies the name and registering over it destroys whatever
+        # its owner put there.
+        query = "\ufeff" + "".join(
+            f"{c}\x00"
+            for c in "<Task><Settings><Enabled>false</Enabled></Settings></Task>"
+        )
+        with patch("open_shrimp.service._capture", return_value=query):
+            assert is_service_installed(None) is False
+            assert _task_exists(None) is True
+
+    @patch("open_shrimp.service._capture", return_value=None)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_an_absent_task_holds_nothing(
+        self,
+        _plat: MagicMock,
+        _cap: MagicMock,
+    ) -> None:
+        assert _task_exists(None) is False
+
+
 class TestTaskName:
     def test_a_hostile_instance_name_cannot_retarget_the_task(self) -> None:
         name = _task_name('a" /Delete /TN "OpenShrimp')
@@ -402,7 +428,7 @@ class TestInstallService:
 
 
 class TestInstallWindows:
-    @patch("open_shrimp.service.is_service_installed", return_value=False)
+    @patch("open_shrimp.service._task_exists", return_value=False)
     def test_the_definition_is_utf16_with_a_bom(self, _installed: MagicMock) -> None:
         # Anything else and schtasks rejects it with an unhelpful parse error,
         # so the bytes are read back off disk before the finally deletes them.
@@ -424,10 +450,10 @@ class TestInstallWindows:
         assert not Path(str(seen["path"])).exists()
 
     @patch("open_shrimp.service._run", side_effect=_ok)
-    @patch("open_shrimp.service.is_service_installed", return_value=False)
+    @patch("open_shrimp.service._task_exists", return_value=False)
     def test_a_fresh_install_registers_the_task(
         self,
-        _installed: MagicMock,
+        _exists: MagicMock,
         mock_run: MagicMock,
     ) -> None:
         _install_windows(None, [r"C:\openshrimp.exe"], r"C:\config.yaml")
@@ -438,14 +464,14 @@ class TestInstallWindows:
         assert argv[0][-1] == "/F"
 
     @patch("open_shrimp.service._run", side_effect=_ok)
-    @patch("open_shrimp.service.is_service_installed", return_value=True)
+    @patch("open_shrimp.service._task_exists", return_value=True)
     @pytest.mark.parametrize(
         ("answer", "replaced"),
         [("n", False), ("", False), ("y", True), ("yes", True)],
     )
     def test_an_existing_task_is_replaced_only_when_asked(
         self,
-        _installed: MagicMock,
+        _exists: MagicMock,
         mock_run: MagicMock,
         answer: str,
         replaced: bool,
@@ -463,10 +489,34 @@ class TestInstallWindows:
         assert any("/Create" in a for a in argv) is replaced
 
     @patch("open_shrimp.service._run", side_effect=_ok)
-    @patch("open_shrimp.service.is_service_installed", return_value=True)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_a_disabled_task_is_still_asked_about(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+    ) -> None:
+        # Driven through the real predicate rather than a patched one: a
+        # disabled task makes is_service_installed answer False, and gating on
+        # that would replace the tray's registration without a word.
+        query = "\ufeff" + "".join(
+            f"{c}\x00"
+            for c in "<Task><Settings><Enabled>false</Enabled></Settings></Task>"
+        )
+        with (
+            patch("open_shrimp.service._capture", return_value=query),
+            patch("open_shrimp.service.sys.stdin.isatty", return_value=False),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                _install_windows(None, [r"C:\openshrimp.exe"], r"C:\config.yaml")
+
+        assert exc.value.code != 0
+        mock_run.assert_not_called()
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service._task_exists", return_value=True)
     def test_an_existing_task_stops_a_non_interactive_install(
         self,
-        _installed: MagicMock,
+        _exists: MagicMock,
         mock_run: MagicMock,
     ) -> None:
         with patch("open_shrimp.service.sys.stdin.isatty", return_value=False):
@@ -477,7 +527,7 @@ class TestInstallWindows:
         mock_run.assert_not_called()
 
     @patch("open_shrimp.service._run", side_effect=_ok)
-    @patch("open_shrimp.service.is_service_installed", return_value=False)
+    @patch("open_shrimp.service._task_exists", return_value=False)
     @patch(
         "open_shrimp.service._detect_executable",
         return_value=[r"C:\openshrimp.exe"],
@@ -487,7 +537,7 @@ class TestInstallWindows:
         self,
         _plat: MagicMock,
         _exe: MagicMock,
-        _installed: MagicMock,
+        _exists: MagicMock,
         mock_run: MagicMock,
         tmp_path: Path,
     ) -> None:
@@ -579,6 +629,26 @@ class TestUninstallService:
 
         cmd_lists = [c[0][0] for c in mock_run.call_args_list]
         assert cmd_lists == [["schtasks", "/Delete", "/TN", "OpenShrimp", "/F"]]
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_an_unreadable_task_list_is_not_an_empty_one(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Enumerating every task on the machine can time out; saying "not
+        # installed" on the strength of a question nobody managed to ask
+        # reports a removal that never happened.
+        with patch("open_shrimp.service._capture", return_value=None):
+            with pytest.raises(SystemExit) as exc:
+                uninstall_service(str(tmp_path / "gone.yaml"))
+
+        assert exc.value.code != 0
+        assert "Nothing was removed" in capsys.readouterr().err
+        mock_run.assert_not_called()
 
     @patch("open_shrimp.service._run", side_effect=_ok)
     @patch("open_shrimp.service._detect_platform", return_value="windows")

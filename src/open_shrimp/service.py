@@ -307,29 +307,47 @@ def _print_banner(headline: str, commands: list[tuple[str, str]]) -> None:
         print(f"  {command:<{width}}   # {note}")
 
 
-def _capture(args: list[str]) -> str | None:
+def _capture(args: list[str], *, timeout: float = 5) -> str | None:
     """*args*' stdout when it exits zero, or ``None`` when it did not run.
 
     Bounded and non-raising because the readiness card asks these questions
     at boot: a query tool that is missing, slow or angry must cost an unknown
-    answer, never a stall or a traceback.
+    answer, never a stall or a traceback.  The default bound is the one that
+    boot can afford; a caller no card is waiting on may buy more.
     """
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout if result.returncode == 0 else None
 
 
-def _schtasks_query(args: list[str]) -> str | None:
+def _schtasks_query(args: list[str], *, timeout: float = 5) -> str | None:
     """*args*' stdout, or ``None`` when schtasks did not answer.
 
     schtasks may hand back UTF-16 decoded as if it were not.  Its output is
     only ever matched against, never re-encoded, so the nulls are dropped here
     once rather than the encoding guessed at each call site.
     """
-    out = _capture(args)
+    out = _capture(args, timeout=timeout)
     return None if out is None else out.replace("\x00", "")
+
+
+def _task_exists(instance_name: str | None) -> bool:
+    """Whether a task of this name is registered at all, enabled or not.
+
+    A different question from ``is_service_installed``, which answers whether
+    autostart would *start* anything: a disabled task starts nothing but still
+    occupies the name, and registering over one destroys whatever its owner —
+    possibly the tray — put there.  Consent is owed for the name, so it is
+    asked for on presence.
+    """
+    return (
+        _schtasks_query(["schtasks", "/Query", "/TN", _task_name(instance_name)])
+        is not None
+    )
 
 
 def _task_name(instance_name: str | None) -> str:
@@ -492,7 +510,7 @@ def _install_windows(
     """
     task = _task_name(instance_name)
 
-    if is_service_installed(instance_name) and not _may_replace(
+    if _task_exists(instance_name) and not _may_replace(
         f"A logon task already exists: {task}"
     ):
         return
@@ -617,8 +635,17 @@ def uninstall_service(config_path: str) -> None:
         config = _loadable_config(str(Path(config_path).expanduser().resolve()))
         if config is not None:
             _uninstall_windows([_task_name(config.instance_name)])
-        else:
-            _uninstall_windows(_registered_task_names())
+            return
+        names = _registered_task_names()
+        if names is None:
+            # Saying "not installed" here would report a removal that was
+            # never attempted, on the strength of a question nobody managed
+            # to ask.
+            _refuse(
+                "Could not read the list of scheduled tasks.",
+                "Nothing was removed. Try 'openshrimp uninstall' again.",
+            )
+        _uninstall_windows(names)
         return
     svc_path = _unit_file_path(platform)
 
@@ -632,16 +659,25 @@ def uninstall_service(config_path: str) -> None:
         _uninstall_launchd(svc_path)
 
 
-def _registered_task_names() -> list[str]:
+def _registered_task_names() -> list[str] | None:
     """Every OpenShrimp logon task registered at the root, whoever owns it.
+
+    ``None`` when schtasks could not be asked, which is not the same answer as
+    an empty list: "nothing is registered" and "nobody looked" differ by
+    whether a caller may report having removed everything.
 
     Only the root folder, because that is where a task of this name is one of
     ours or the tray's; a task nested in a folder shares the prefix by
     coincidence.
+
+    This enumerates every task on the machine, there being no name filter to
+    ask schtasks for, so it is given longer than a boot-time query would get.
     """
-    listing = _schtasks_query(["schtasks", "/Query", "/FO", "CSV", "/NH"])
+    listing = _schtasks_query(
+        ["schtasks", "/Query", "/FO", "CSV", "/NH"], timeout=60
+    )
     if listing is None:
-        return []
+        return None
     names: list[str] = []
     for row in csv.reader(io.StringIO(listing)):
         if not row:
