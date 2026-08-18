@@ -299,14 +299,15 @@ contexts:
 The easiest way to deploy is with the built-in install command:
 
 ```bash
-# Install as a systemd user service (Linux) or launchd agent (macOS)
+# Install as a systemd user service (Linux), a launchd agent (macOS),
+# or a logon task (Windows)
 openshrimp install
 
-# Remove the service
+# Remove it
 openshrimp uninstall
 ```
 
-This auto-detects your platform, finds the executable path, and sets everything up — including enabling lingering on Linux so the service runs without an active login session.
+This auto-detects your platform, finds the executable path, and sets everything up — including enabling lingering on Linux so the service runs without an active login session. It refuses to install unless it finds a config the bot can load, so complete the setup wizard first — which offers to do this for you at the end anyway.
 
 <details>
 <summary>Manual setup</summary>

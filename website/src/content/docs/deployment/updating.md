@@ -74,6 +74,10 @@ systemctl --user restart open-shrimp
 
 # launchd (macOS)
 launchctl kickstart gui/$(id -u)/com.openshrimp.bot
+
+# Windows (logon task) — the task only starts the bot at sign-in, so /restart
+# above is the way to restart one that is already running
+schtasks /Run /TN OpenShrimp
 ```
 
 The `/restart` command is the quickest way to restart without SSH access.
