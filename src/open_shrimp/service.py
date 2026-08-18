@@ -10,8 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 from textwrap import dedent
+from typing import NoReturn
 
-from open_shrimp.config import DEFAULT_CONFIG_PATH
+from open_shrimp.config import Config, load_config
 
 logger = logging.getLogger("open_shrimp")
 
@@ -243,6 +244,44 @@ def is_service_installed(instance_name: str | None = None) -> bool:
     )
 
 
+def _refuse(reason: str, remedy: str) -> NoReturn:
+    """Stop the install, saying what is wrong and what to do about it.
+
+    Both halves or neither: an operator told only that the install stopped has
+    been left exactly where the install would have left them.
+    """
+    print(reason, file=sys.stderr)
+    print(remedy, file=sys.stderr)
+    sys.exit(1)
+
+
+def _config_to_install_against(resolved_config: str) -> Config:
+    """The config the installed service will start from.
+
+    The unit restarts the core on failure, so a core that cannot start is a
+    core that restarts forever — visible to the operator as a machine that does
+    nothing and says nothing.  A config the core can load is therefore a
+    precondition of installing, settled before anything is written, asked or
+    registered.
+
+    Absent and unreadable are one decision and two remedies: the wizard writes
+    a config only where there is none, so sending the operator to it is the
+    answer to the first and a round trip back to here for the second.
+    """
+    try:
+        return load_config(resolved_config)
+    except FileNotFoundError:
+        _refuse(
+            f"No config file at {resolved_config}",
+            "Run 'openshrimp' first to complete the setup wizard.",
+        )
+    except Exception as exc:
+        _refuse(
+            f"Config file cannot be loaded: {resolved_config}\n  {exc}",
+            "Fix it, or delete it and run 'openshrimp' to set up again.",
+        )
+
+
 def install_service(config_path: str) -> None:
     """Install OpenShrimp as a system service.
 
@@ -252,11 +291,12 @@ def install_service(config_path: str) -> None:
     Args:
         config_path: Path to the OpenShrimp config file.
     """
+    resolved_config = str(Path(config_path).expanduser().resolve())
+    _config_to_install_against(resolved_config)
+
     platform = _detect_platform()
     if platform == "windows":
-        _print_windows_instructions(
-            str(Path(config_path).expanduser().resolve())
-        )
+        _print_windows_instructions(resolved_config)
         return
     svc_path = _service_path(platform)
 
@@ -287,12 +327,6 @@ def install_service(config_path: str) -> None:
             print(f"Service file already exists: {svc_path}", file=sys.stderr)
             print("Run interactively to overwrite.", file=sys.stderr)
             sys.exit(1)
-
-    # Resolve config path
-    resolved_config = str(Path(config_path).expanduser().resolve())
-    if not Path(resolved_config).exists():
-        print(f"Warning: config file does not exist yet: {resolved_config}")
-        print("Run 'openshrimp' first to complete the setup wizard.\n")
 
     # Detect executable
     exec_args = _detect_executable()

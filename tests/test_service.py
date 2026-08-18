@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from open_shrimp.config import DEFAULT_CONFIG_PATH
+from open_shrimp.config import write_config
 from open_shrimp.service import (
     _detect_executable,
     _detect_platform,
@@ -17,6 +17,26 @@ from open_shrimp.service import (
     install_service,
     uninstall_service,
 )
+from open_shrimp.setup import build_config_dict, build_context_dict
+
+
+def _write_config(tmp_path: Path) -> Path:
+    """A config the core would really start from, which install requires.
+
+    Built by the same functions the wizard builds a first config with, so this
+    cannot go on passing once the shape they write stops loading.
+    """
+    config = tmp_path / "config.yaml"
+    write_config(
+        config,
+        build_config_dict(
+            "123456:token",
+            1,
+            "default",
+            build_context_dict(str(tmp_path), "test"),
+        ),
+    )
+    return config
 
 
 class TestDetectPlatform:
@@ -115,8 +135,7 @@ class TestInstallService:
         mock_run: MagicMock,
         tmp_path: Path,
     ) -> None:
-        config = tmp_path / "config.yaml"
-        config.write_text("test: true")
+        config = _write_config(tmp_path)
         svc_path = tmp_path / "open-shrimp.service"
 
         with patch("open_shrimp.service._SYSTEMD_UNIT_PATH", svc_path):
@@ -143,8 +162,7 @@ class TestInstallService:
         mock_run: MagicMock,
         tmp_path: Path,
     ) -> None:
-        config = tmp_path / "config.yaml"
-        config.write_text("test: true")
+        config = _write_config(tmp_path)
         svc_path = tmp_path / "com.openshrimp.bot.plist"
         log_dir = tmp_path / "logs"
 
@@ -165,6 +183,7 @@ class TestInstallService:
         _plat: MagicMock,
         tmp_path: Path,
     ) -> None:
+        config = _write_config(tmp_path)
         svc_path = tmp_path / "open-shrimp.service"
         svc_path.write_text("existing")
 
@@ -175,10 +194,85 @@ class TestInstallService:
         ):
             mock_sys.stdin.isatty.return_value = True
             mock_sys.platform = "linux"
-            install_service(str(DEFAULT_CONFIG_PATH))
+            install_service(str(config))
 
         # Should not have been overwritten
         assert svc_path.read_text() == "existing"
+
+    @patch("open_shrimp.service._run")
+    @patch("open_shrimp.service._detect_platform", return_value="linux")
+    def test_a_missing_config_installs_nothing(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        svc_path = tmp_path / "open-shrimp.service"
+        missing = tmp_path / "config.yaml"
+
+        with patch("open_shrimp.service._SYSTEMD_UNIT_PATH", svc_path):
+            with pytest.raises(SystemExit) as exc:
+                install_service(str(missing))
+
+        assert exc.value.code != 0
+        assert "setup wizard" in capsys.readouterr().err
+        # A unit that exists and has been enabled is the failure being
+        # prevented, so neither half may have happened.
+        assert not svc_path.exists()
+        mock_run.assert_not_called()
+
+    @patch("open_shrimp.service._run")
+    @patch("open_shrimp.service._detect_platform", return_value="linux")
+    def test_an_unparseable_config_installs_nothing(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        svc_path = tmp_path / "open-shrimp.service"
+        config = tmp_path / "config.yaml"
+        config.write_text("contexts: [", encoding="utf-8")
+
+        with patch("open_shrimp.service._SYSTEMD_UNIT_PATH", svc_path):
+            with pytest.raises(SystemExit) as exc:
+                install_service(str(config))
+
+        assert exc.value.code != 0
+        # The wizard writes a config only where there is none, so this operator
+        # is told what is wrong instead of being sent on a round trip.
+        err = capsys.readouterr().err
+        assert "cannot be loaded" in err
+        assert "setup wizard" not in err
+        assert not svc_path.exists()
+        mock_run.assert_not_called()
+
+    @patch("open_shrimp.service._run")
+    @patch("open_shrimp.service._detect_platform", return_value="linux")
+    def test_the_refusal_precedes_the_overwrite_prompt(
+        self,
+        _plat: MagicMock,
+        _run_: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        svc_path = tmp_path / "open-shrimp.service"
+        svc_path.write_text("existing")
+        missing = tmp_path / "config.yaml"
+
+        # A terminal, so that reaching the prompt is what the refusal is being
+        # tested against: without one, the non-interactive branch below exits
+        # for its own reasons and the test would pass on either code.
+        with (
+            patch("open_shrimp.service._SYSTEMD_UNIT_PATH", svc_path),
+            patch("open_shrimp.service.sys.stdin.isatty", return_value=True),
+            patch("builtins.input") as mock_input,
+        ):
+            with pytest.raises(SystemExit):
+                install_service(str(missing))
+
+        mock_input.assert_not_called()
+        assert svc_path.read_bytes() == b"existing"
 
 
 class TestUninstallService:
