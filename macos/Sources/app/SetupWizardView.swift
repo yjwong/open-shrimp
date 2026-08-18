@@ -257,7 +257,36 @@ struct SetupWizardView: View {
                         .textFieldStyle(.roundedBorder)
                 }
             }
+
+            autostartOffer
         }
+    }
+
+    /// The offer, with the consequence in words rather than a bare label: this
+    /// is the only place the wizard mentions that a bot it just said is running
+    /// stops at the next logout.
+    private var autostartOffer: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("Keep OpenShrimp running after you sign in", isOn: $model.autostart)
+                .disabled(model.autostartConflicted)
+
+            Text(autostartNote)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                // Indented to the toggle's label, not to its box.
+                .padding(.leading, 20)
+        }
+    }
+
+    /// Why the offer is off and unchangeable, when it is — said in the same
+    /// words the menu's conflict dialog uses, and never as "a launchd agent".
+    private var autostartNote: String {
+        if model.autostartConflicted {
+            return "A separate background copy of OpenShrimp is already set to start "
+                + "when you log in, and they cannot both connect to Telegram."
+        }
+        return "Without this, OpenShrimp stops when you quit the app or sign out."
     }
 
     private func field<Content: View>(

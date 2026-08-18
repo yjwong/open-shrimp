@@ -48,7 +48,9 @@ final class SetupWizard: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         self.window = window
 
-        model.onCompleted = { [weak self] username in self?.confirm(username) }
+        model.onCompleted = { [weak self] username, autostartFailure in
+            self?.confirm(username, autostartFailure: autostartFailure)
+        }
         model.prepare()
 
         AppLog.write("setup wizard opened")
@@ -71,7 +73,7 @@ final class SetupWizard: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func confirm(_ botUsername: String?) {
+    private func confirm(_ botUsername: String?, autostartFailure: String?) {
         wroteConfig = true
 
         guard let window else {
@@ -83,10 +85,19 @@ final class SetupWizard: NSObject, NSWindowDelegate {
             return
         }
 
+        var text =
+            "OpenShrimp will start now. Say hello to @\(botUsername ?? "your bot") on Telegram."
+        // Said here rather than in a notification, because this is the last
+        // moment the user is still looking at the wizard they asked it in.
+        if let autostartFailure {
+            text += "\n\nOpenShrimp could not be set to start when you sign in: "
+                + "\(autostartFailure)\n\nYou can switch Start at Login on from the "
+                + "OpenShrimp menu."
+        }
+
         let alert = NSAlert()
         alert.messageText = "Setup complete"
-        alert.informativeText =
-            "OpenShrimp will start now. Say hello to @\(botUsername ?? "your bot") on Telegram."
+        alert.informativeText = text
         alert.addButton(withTitle: "OK")
         alert.beginSheetModal(for: window) { _ in
             MainActor.assumeIsolated {

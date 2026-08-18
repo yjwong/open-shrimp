@@ -69,6 +69,21 @@ final class SetupWizardModel: ObservableObject {
     @Published var customModel = ""
     @Published private(set) var directory: String?
 
+    /// Whether finishing registers the app as a login item.
+    ///
+    /// The app supervises the core and is its own login item, so autostart here
+    /// is the app registering itself — never a service.
+    @Published var autostart = !LaunchAgents.headlessAgentInstalled
+
+    /// Whether a headless core is already set to start at every login.
+    ///
+    /// A machine configured to start a core without this app is left alone:
+    /// two cores cannot share one bot token, so the offer is shown off and
+    /// unchangeable rather than arranging the double start the menu exists to
+    /// report.  Read once, because it is a property of the machine the wizard
+    /// opened on and not a step the user is being walked through.
+    let autostartConflicted = LaunchAgents.headlessAgentInstalled
+
     @Published private(set) var stage: EnrollStage = .waiting
     /// The deep-link accelerator, shown beside the search instruction.  One
     /// click where Telegram Desktop is on this machine; the code path is what
@@ -109,8 +124,9 @@ final class SetupWizardModel: ObservableObject {
     private var warmup: Task<Void, Never>?
 
     /// Called once the config has been written, with the bot the token belongs
-    /// to.  The window is the caller's to dismiss.
-    var onCompleted: ((String?) -> Void)?
+    /// to and, if one was asked for and refused, why the login item could not
+    /// be registered.  The window is the caller's to dismiss.
+    var onCompleted: ((String?, String?) -> Void)?
 
     var isLastStep: Bool { step == Self.stepCount - 1 }
 
@@ -523,8 +539,33 @@ final class SetupWizardModel: ObservableObject {
         }
 
         AppLog.write("config written for @\(verifiedUsername ?? "unknown")")
+
+        // Registered before the completion is reported, so a failure can be
+        // said in the same dialog rather than in a notification raised at a
+        // screen the user has already walked away from.  It never blocks the
+        // finish: the config is written and the core is about to start, so an
+        // autostart that could not be registered is a downgrade, not a setup
+        // failure.
+        //
+        // Logged whichever way it goes.  A registered login item appears in
+        // neither launchctl nor the BTM database, so this line is the only
+        // artifact of the outcome anybody can read back afterwards.
+        var autostartFailure: String?
+        // Asked of the system rather than assumed: the agent the front end used
+        // to write for itself may already have been carried over to the login
+        // item at launch, and registering one that is registered is an error.
+        if autostart, !Autostart.isEnabled {
+            do {
+                try Autostart.setEnabled(true)
+                AppLog.write("registered the login item")
+            } catch {
+                AppLog.write("could not register the login item: \(error.localizedDescription)")
+                autostartFailure = error.localizedDescription
+            }
+        }
+
         message = WizardMessage(tone: .success, text: "Config written.")
-        onCompleted?(verifiedUsername)
+        onCompleted?(verifiedUsername, autostartFailure)
     }
 
     private func trimmed(_ text: String) -> String {

@@ -669,9 +669,33 @@ public sealed partial class SetupWindow : Window
                 return;
             }
 
-            await ShowDialogAsync(
-                "Setup complete",
-                $"OpenShrimp will start now. Say hello to @{_verifiedUsername} on Telegram.");
+            var complete = $"OpenShrimp will start now. Say hello to @{_verifiedUsername} on Telegram.";
+
+            // The tray supervises the core and is its own logon task, so
+            // autostart here is the tray registering itself — never a service:
+            // two cores cannot share one bot token.
+            //
+            // Registered before the dialog, so a failure is said in the same
+            // dialog rather than in a toast raised at a window the user has
+            // already walked away from — and never allowed to stop the wizard.
+            // The config is written and the core is about to start, so an
+            // autostart that could not be registered is a downgrade, not a
+            // setup failure.
+            if (AutostartBox.IsChecked == true)
+            {
+                // The instance name scopes the task, and it is readable only
+                // now: until the write above returned there was no config to
+                // read it from.
+                var failure = Autostart.Enable(ConfigPeek.ReadInstanceName(CorePaths.ConfigFile));
+                if (failure is not null)
+                {
+                    TrayLog.Write($"Start at Login could not be registered: {failure}");
+                    complete += $"\n\nOpenShrimp could not be set to start when you sign in: {failure}"
+                        + " You can switch Start at Login on from the OpenShrimp menu.";
+                }
+            }
+
+            await ShowDialogAsync("Setup complete", complete);
 
             Completed?.Invoke();
             done = true;
