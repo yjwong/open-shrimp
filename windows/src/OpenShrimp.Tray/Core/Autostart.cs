@@ -12,8 +12,10 @@ namespace OpenShrimp.Tray.Core;
 /// would leave it unsupervised and give the user nothing to stop it with.
 ///
 /// Driven through schtasks.exe with an XML definition rather than a COM
-/// interop package — no extra dependency, and it stays the same recipe
-/// service.py documents for the headless CLI install.
+/// interop package — no extra dependency, and it is the same mechanism the
+/// headless CLI install in service.py uses. The two share that mechanism and
+/// the task name, and target different executables: this one the tray, that
+/// one the core.
 /// </summary>
 internal static class Autostart
 {

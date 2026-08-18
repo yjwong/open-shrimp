@@ -1,16 +1,27 @@
-"""Install/uninstall OpenShrimp as a system service (systemd or launchd)."""
+"""Install/uninstall OpenShrimp as a system service.
+
+One command per platform for the same question — what starts the core when
+nobody is at a terminal: a systemd user unit, a launchd user agent, or a
+Windows logon task.
+"""
 
 from __future__ import annotations
 
+import csv
+import ctypes
+import getpass
+import io
 import logging
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from textwrap import dedent
 from typing import NoReturn
+from xml.sax.saxutils import escape
 
 from open_shrimp.config import Config, load_config
 
@@ -25,6 +36,10 @@ _LAUNCHD_PLIST_PATH = (
 )
 _LAUNCHD_LOG_DIR = Path.home() / "Library" / "Logs" / "OpenShrimp"
 _LAUNCHD_LABEL = "com.openshrimp.bot"
+
+# GetUserNameEx's NameSamCompatible: the DOMAIN\user spelling a logon task's
+# UserId must resolve from.
+_NAME_SAM_COMPATIBLE = 2
 
 
 def _detect_platform() -> str:
@@ -43,33 +58,6 @@ def _detect_platform() -> str:
         f"Unsupported platform: {sys.platform}. "
         "Only Linux (systemd), macOS (launchd), and Windows are supported."
     )
-
-
-def _print_windows_instructions(config_path: str) -> None:
-    """Windows has no managed service install; print the manual recipe.
-
-    A Windows *service* proper (SCM) needs a wrapper like NSSM or WinSW;
-    the supported path is a Scheduled Task that starts at logon.
-    """
-    exec_args = _detect_executable()
-    cmd = " ".join(
-        f'"{a}"' if " " in a else a
-        for a in [*exec_args, "--config", config_path]
-    )
-    print("Automatic service install is not supported on Windows.")
-    print("Run the bot manually:")
-    print(f"  {cmd}")
-    print()
-    # schtasks takes the whole command line as one /TR argument. cmd.exe gives
-    # single quotes no meaning, so the value is wrapped in double quotes and the
-    # quotes already inside it are backslash-escaped for the CRT argv parser.
-    task_run = cmd.replace('"', '\\"')
-    print("Or register a Scheduled Task that starts it at logon:")
-    print(
-        f'  schtasks /Create /TN OpenShrimp /SC ONLOGON /TR "{task_run}"'
-    )
-    print("Remove it later with:")
-    print("  schtasks /Delete /TN OpenShrimp /F")
 
 
 def _detect_executable() -> list[str]:
@@ -165,16 +153,158 @@ def _generate_launchd_plist(
     return "\n".join(lines)
 
 
+def _current_user() -> str:
+    """The account the logon task triggers for, as Windows resolves it.
+
+    Asked of Windows rather than assembled out of ``%USERDOMAIN%``: on a
+    machine that is not domain-joined that variable reads ``WORKGROUP``, which
+    names no authority, and a ``UserId`` that resolves to no SID is refused —
+    taking the whole definition with it, not just the trigger.  The fallback
+    is bare for the same reason: a name with no domain resolves against
+    whichever authority owns the account, and a guessed one does not.
+    """
+    try:
+        get_user_name_ex = ctypes.WinDLL("secur32").GetUserNameExW
+        size = ctypes.c_ulong(0)
+        get_user_name_ex(_NAME_SAM_COMPATIBLE, None, ctypes.byref(size))
+        buf = ctypes.create_unicode_buffer(size.value or 256)
+        size = ctypes.c_ulong(len(buf))
+        if get_user_name_ex(_NAME_SAM_COMPATIBLE, buf, ctypes.byref(size)):
+            return buf.value
+    except (AttributeError, OSError):
+        pass
+    try:
+        return os.environ.get("USERNAME") or getpass.getuser()
+    except (KeyError, OSError):
+        return ""
+
+
+def _generate_windows_task_xml(
+    exec_args: list[str],
+    config_path: str,
+) -> str:
+    """Generate the logon task definition that starts the core.
+
+    The mechanism is the tray's — schtasks fed an XML definition — and the
+    target is not: this task runs the core itself, so the settings describe a
+    supervisor that must never be timed out or hard-terminated rather than a
+    job that runs and ends.
+    """
+    user = escape(_current_user())
+    command = escape(exec_args[0])
+    arguments = escape(
+        " ".join(
+            f'"{a}"' if " " in a else a
+            for a in [*exec_args[1:], "--config", config_path]
+        )
+    )
+    return dedent(f"""\
+        <?xml version="1.0" encoding="UTF-16"?>
+        <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+          <RegistrationInfo>
+            <Description>Starts OpenShrimp when you sign in.</Description>
+          </RegistrationInfo>
+          <Triggers>
+            <LogonTrigger>
+              <Enabled>true</Enabled>
+              <UserId>{user}</UserId>
+            </LogonTrigger>
+          </Triggers>
+          <Principals>
+            <Principal id="Author">
+              <UserId>{user}</UserId>
+              <LogonType>InteractiveToken</LogonType>
+              <RunLevel>LeastPrivilege</RunLevel>
+            </Principal>
+          </Principals>
+          <Settings>
+            <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+            <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+            <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+            <AllowHardTerminate>false</AllowHardTerminate>
+            <StartWhenAvailable>true</StartWhenAvailable>
+            <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+            <IdleSettings>
+              <StopOnIdleEnd>false</StopOnIdleEnd>
+              <RestartOnIdle>false</RestartOnIdle>
+            </IdleSettings>
+            <AllowStartOnDemand>true</AllowStartOnDemand>
+            <Enabled>true</Enabled>
+            <Hidden>false</Hidden>
+            <RunOnlyIfIdle>false</RunOnlyIfIdle>
+            <WakeToRun>false</WakeToRun>
+            <!-- A long-running supervisor, not a job: never time it out. -->
+            <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+            <Priority>7</Priority>
+            <RestartOnFailure>
+              <Interval>PT1M</Interval>
+              <Count>3</Count>
+            </RestartOnFailure>
+          </Settings>
+          <Actions Context="Author">
+            <Exec>
+              <Command>{command}</Command>
+              <Arguments>{arguments}</Arguments>
+            </Exec>
+          </Actions>
+        </Task>
+    """)
+
+
 def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     """Run a subprocess, capturing output."""
     return subprocess.run(args, capture_output=True, text=True, check=check)
 
 
-def _service_path(platform: str) -> Path:
-    """Return the service file path for the given platform."""
+def _unit_file_path(platform: str) -> Path:
+    """The unit file's path on a platform that installs one.
+
+    Windows registers a task rather than writing a file and has no answer to
+    this question, so it never asks it.
+    """
     if platform == "linux":
         return _SYSTEMD_UNIT_PATH
     return _LAUNCHD_PLIST_PATH
+
+
+def _may_replace(what: str) -> bool:
+    """Whether the operator consents to replacing *what*.
+
+    Autostart is registered under one name per instance on every platform, so
+    whatever holds that name was put there by somebody — possibly a different
+    owner, as on Windows, where the name is also the tray's.  Consent is asked
+    for once here rather than per platform, so that one command cannot answer
+    the same question three ways.  Silence is a no, and there is no way to say
+    yes without a terminal.
+    """
+    if not sys.stdin.isatty():
+        print(what, file=sys.stderr)
+        print("Run interactively to overwrite.", file=sys.stderr)
+        sys.exit(1)
+
+    print(what)
+    try:
+        answer = input("Overwrite? [y/N]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print("\nInstall cancelled.")
+        return False
+    if answer not in ("y", "yes"):
+        print("Install cancelled.")
+        return False
+    return True
+
+
+def _print_banner(headline: str, commands: list[tuple[str, str]]) -> None:
+    """Say what was installed, then how to look after it.
+
+    The columns are computed rather than spaced by hand: three platforms print
+    this and hand-alignment drifts the moment one of them gains a command.
+    """
+    print(f"\n{headline}")
+    print("\nUseful commands:")
+    width = max(len(command) for command, _ in commands)
+    for command, note in commands:
+        print(f"  {command:<{width}}   # {note}")
 
 
 def _capture(args: list[str]) -> str | None:
@@ -189,6 +319,17 @@ def _capture(args: list[str]) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout if result.returncode == 0 else None
+
+
+def _schtasks_query(args: list[str]) -> str | None:
+    """*args*' stdout, or ``None`` when schtasks did not answer.
+
+    schtasks may hand back UTF-16 decoded as if it were not.  Its output is
+    only ever matched against, never re-encoded, so the nulls are dropped here
+    once rather than the encoding guessed at each call site.
+    """
+    out = _capture(args)
+    return None if out is None else out.replace("\x00", "")
 
 
 def _task_name(instance_name: str | None) -> str:
@@ -221,17 +362,14 @@ def is_service_installed(instance_name: str | None = None) -> bool:
         return False
 
     if platform == "windows":
-        xml = _capture(
+        xml = _schtasks_query(
             ["schtasks", "/Query", "/TN", _task_name(instance_name), "/XML"]
         )
         if xml is None:
             return False
-        # schtasks may hand back UTF-16 decoded as if it were not; the flag is
-        # only ever read for its absence, so the nulls are dropped rather than
-        # the encoding guessed.
-        return "<enabled>false</enabled>" not in xml.replace("\x00", "").lower()
+        return "<enabled>false</enabled>" not in xml.lower()
 
-    if not _service_path(platform).exists():
+    if not _unit_file_path(platform).exists():
         return False
     if platform == "linux":
         return (
@@ -287,46 +425,36 @@ def install_service(config_path: str) -> None:
 
     On Linux, installs a systemd user unit and enables it.
     On macOS, installs a launchd user agent and loads it.
+    On Windows, registers a logon task that starts the core.
 
     Args:
         config_path: Path to the OpenShrimp config file.
     """
     resolved_config = str(Path(config_path).expanduser().resolve())
-    _config_to_install_against(resolved_config)
+    config = _config_to_install_against(resolved_config)
 
     platform = _detect_platform()
     if platform == "windows":
-        _print_windows_instructions(resolved_config)
+        _install_windows(
+            config.instance_name, _detect_executable(), resolved_config
+        )
         return
-    svc_path = _service_path(platform)
+    svc_path = _unit_file_path(platform)
 
-    # Check for existing installation
     if svc_path.exists():
-        if sys.stdin.isatty():
-            print(f"Service file already exists: {svc_path}")
-            try:
-                answer = input("Overwrite? [y/N]: ").strip().lower()
-            except (KeyboardInterrupt, EOFError):
-                print("\nInstall cancelled.")
-                return
-            if answer not in ("y", "yes"):
-                print("Install cancelled.")
-                return
-            # Stop existing service before overwriting
-            if platform == "linux":
-                _run(
-                    ["systemctl", "--user", "stop", "open-shrimp.service"],
-                    check=False,
-                )
-            else:
-                _run(
-                    ["launchctl", "bootout", f"gui/{os.getuid()}", str(svc_path)],
-                    check=False,
-                )
+        if not _may_replace(f"Service file already exists: {svc_path}"):
+            return
+        # Stop what the file describes before overwriting the description.
+        if platform == "linux":
+            _run(
+                ["systemctl", "--user", "stop", "open-shrimp.service"],
+                check=False,
+            )
         else:
-            print(f"Service file already exists: {svc_path}", file=sys.stderr)
-            print("Run interactively to overwrite.", file=sys.stderr)
-            sys.exit(1)
+            _run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}", str(svc_path)],
+                check=False,
+            )
 
     # Detect executable
     exec_args = _detect_executable()
@@ -347,6 +475,55 @@ def install_service(config_path: str) -> None:
         _install_systemd(svc_path)
     else:
         _install_launchd(svc_path)
+
+
+def _install_windows(
+    instance_name: str | None,
+    exec_args: list[str],
+    config_path: str,
+) -> None:
+    """Register the logon task that starts the core.
+
+    A logon task and a systemd unit answer the same question on their
+    platform: what starts the core when nobody is at a terminal.  The name is
+    the tray's, because whoever asks whether autostart is on must arrive at
+    the name whoever registered it used — so an existing task of that name is
+    another owner's, and is never replaced without being asked about.
+    """
+    task = _task_name(instance_name)
+
+    if is_service_installed(instance_name) and not _may_replace(
+        f"A logon task already exists: {task}"
+    ):
+        return
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as scratch:
+        xml_path = Path(scratch) / "task.xml"
+        # schtasks reads the definition as UTF-16 with a BOM; anything else is
+        # rejected with an unhelpful parse error.
+        xml_path.write_text(
+            _generate_windows_task_xml(exec_args, config_path),
+            encoding="utf-16",
+        )
+        # schtasks has no atomic create-if-absent, so /F is what writing the
+        # definition means; the overwrite it can perform was consented to above.
+        result = _run(
+            ["schtasks", "/Create", "/TN", task, "/XML", str(xml_path), "/F"],
+            check=False,
+        )
+
+    if result.returncode != 0:
+        print(f"Warning: could not register {task}: {result.stderr}", file=sys.stderr)
+        return
+
+    _print_banner(
+        f"OpenShrimp will start when you sign in, as the task {task}.",
+        [
+            (f"schtasks /Query /TN {task}", "check status"),
+            (f"schtasks /Run /TN {task}", "start it now"),
+            ("openshrimp uninstall", "remove the task"),
+        ],
+    )
 
 
 def _install_systemd(svc_path: Path) -> None:
@@ -372,12 +549,15 @@ def _install_systemd(svc_path: Path) -> None:
             f"  loginctl enable-linger {os.environ.get('USER', '')}"
         )
 
-    print("\nOpenShrimp is installed and running as a systemd user service.")
-    print("\nUseful commands:")
-    print("  systemctl --user status open-shrimp   # check status")
-    print("  journalctl --user -u open-shrimp -f   # follow logs")
-    print("  systemctl --user restart open-shrimp   # restart")
-    print("  openshrimp uninstall                   # remove the service")
+    _print_banner(
+        "OpenShrimp is installed and running as a systemd user service.",
+        [
+            ("systemctl --user status open-shrimp", "check status"),
+            ("journalctl --user -u open-shrimp -f", "follow logs"),
+            ("systemctl --user restart open-shrimp", "restart"),
+            ("openshrimp uninstall", "remove the service"),
+        ],
+    )
 
 
 def _install_launchd(svc_path: Path) -> None:
@@ -389,28 +569,58 @@ def _install_launchd(svc_path: Path) -> None:
     if result.returncode != 0:
         print(f"Warning: launchctl bootstrap failed: {result.stderr}", file=sys.stderr)
 
-    print("\nOpenShrimp is installed and running as a launchd user agent.")
-    print("\nUseful commands:")
-    print(f"  launchctl list | grep {_LAUNCHD_LABEL}           # check status")
-    print(f"  tail -f ~/Library/Logs/OpenShrimp/openshrimp.stderr.log  # follow logs")
-    print(f"  launchctl kickstart gui/{os.getuid()}/{_LAUNCHD_LABEL}  # restart")
-    print("  openshrimp uninstall                                     # remove the service")
+    _print_banner(
+        "OpenShrimp is installed and running as a launchd user agent.",
+        [
+            (f"launchctl list | grep {_LAUNCHD_LABEL}", "check status"),
+            ("tail -f ~/Library/Logs/OpenShrimp/openshrimp.stderr.log", "follow logs"),
+            (f"launchctl kickstart gui/{os.getuid()}/{_LAUNCHD_LABEL}", "restart"),
+            ("openshrimp uninstall", "remove the service"),
+        ],
+    )
 
 
-def uninstall_service() -> None:
+def _loadable_config(resolved_config: str) -> Config | None:
+    """The config at *resolved_config*, or ``None`` when the core cannot use it.
+
+    Absent and unparseable arrive as one answer because removing a service
+    asks only what the config can still tell us, never whether it is fit to
+    start from — the reason it is unusable changes nothing about what has to
+    be removed.
+    """
+    try:
+        return load_config(resolved_config)
+    except Exception as exc:
+        logger.debug("config at %s is unusable: %r", resolved_config, exc)
+        return None
+
+
+def uninstall_service(config_path: str) -> None:
     """Remove the OpenShrimp system service.
 
     On Linux, stops, disables, and removes the systemd user unit.
     On macOS, unloads and removes the launchd user agent.
+    On Windows, deletes the logon task.
+
+    Args:
+        config_path: Path to the OpenShrimp config file, read only for the
+            instance name the Windows task is scoped by.
     """
     platform = _detect_platform()
     if platform == "windows":
-        print(
-            "No managed service on Windows. If you registered a Scheduled "
-            "Task, remove it with:\n  schtasks /Delete /TN OpenShrimp /F"
-        )
+        # Installing demands a config the core can start from; removing must
+        # not.  Without one the instance name is unknowable, and guessing the
+        # unscoped one removes a task nobody asked about while leaving the
+        # operator's own registered and still reported as on — so every
+        # OpenShrimp task is removed instead.  Uninstall is the one command
+        # entitled to that: it is asked to leave nothing starting at logon.
+        config = _loadable_config(str(Path(config_path).expanduser().resolve()))
+        if config is not None:
+            _uninstall_windows([_task_name(config.instance_name)])
+        else:
+            _uninstall_windows(_registered_task_names())
         return
-    svc_path = _service_path(platform)
+    svc_path = _unit_file_path(platform)
 
     if not svc_path.exists():
         print("OpenShrimp service is not installed.")
@@ -420,6 +630,47 @@ def uninstall_service() -> None:
         _uninstall_systemd(svc_path)
     else:
         _uninstall_launchd(svc_path)
+
+
+def _registered_task_names() -> list[str]:
+    """Every OpenShrimp logon task registered at the root, whoever owns it.
+
+    Only the root folder, because that is where a task of this name is one of
+    ours or the tray's; a task nested in a folder shares the prefix by
+    coincidence.
+    """
+    listing = _schtasks_query(["schtasks", "/Query", "/FO", "CSV", "/NH"])
+    if listing is None:
+        return []
+    names: list[str] = []
+    for row in csv.reader(io.StringIO(listing)):
+        if not row:
+            continue
+        name = row[0].strip().lstrip("\\")
+        if "\\" in name or name in names:
+            continue
+        if name == "OpenShrimp" or name.startswith("OpenShrimp-"):
+            names.append(name)
+    return names
+
+
+def _uninstall_windows(task_names: list[str]) -> None:
+    """Delete *task_names*, so nothing starts the core at the next sign-in.
+
+    Deleted without asking whether each is there first: a disabled task still
+    exists and still has to go, and ``is_service_installed`` reports one as
+    absent.
+    """
+    if not task_names:
+        print("OpenShrimp logon task is not installed.")
+        return
+    for task in task_names:
+        result = _run(["schtasks", "/Delete", "/TN", task, "/F"], check=False)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            print(f"No OpenShrimp logon task {task} was removed. {detail}".rstrip())
+            continue
+        print(f"OpenShrimp logon task {task} has been removed.")
 
 
 def _uninstall_systemd(svc_path: Path) -> None:

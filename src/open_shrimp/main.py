@@ -155,7 +155,10 @@ def _parse_args() -> argparse.Namespace:
     subparsers.add_parser(
         "install",
         parents=[common],
-        help="Install OpenShrimp as a system service (systemd/launchd)",
+        help=(
+            "Install OpenShrimp as a system service "
+            "(systemd/launchd/Windows logon task)"
+        ),
     )
 
     subparsers.add_parser(
@@ -681,7 +684,7 @@ def main() -> None:
     if args.subcommand == "uninstall":
         from open_shrimp.service import uninstall_service
 
-        uninstall_service()
+        uninstall_service(args.config)
         return
 
     if args.subcommand == "doctor":

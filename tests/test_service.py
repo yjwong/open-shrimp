@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -10,14 +11,24 @@ import pytest
 
 from open_shrimp.config import write_config
 from open_shrimp.service import (
+    _current_user,
     _detect_executable,
     _detect_platform,
     _generate_launchd_plist,
     _generate_systemd_unit,
+    _generate_windows_task_xml,
+    _install_windows,
+    _task_name,
     install_service,
+    is_service_installed,
     uninstall_service,
 )
 from open_shrimp.setup import build_config_dict, build_context_dict
+
+
+def _ok(args: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess:
+    """A command that ran and was happy about it."""
+    return subprocess.CompletedProcess(args, 0, "", "")
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -122,6 +133,121 @@ class TestGenerateLaunchdPlist:
         assert "<string>/usr/bin/python</string>" in plist
         assert "<string>-m</string>" in plist
         assert "<string>open_shrimp</string>" in plist
+
+
+class TestGenerateWindowsTaskXml:
+    def test_the_task_xml_starts_the_core_with_its_config(self) -> None:
+        xml = _generate_windows_task_xml(
+            [r"C:\Program Files\OpenShrimp\openshrimp.exe"],
+            r"C:\Users\me\config.yaml",
+        )
+        assert (
+            r"<Command>C:\Program Files\OpenShrimp\openshrimp.exe</Command>" in xml
+        )
+        assert "--config" in xml
+        assert r"C:\Users\me\config.yaml" in xml
+
+    def test_the_module_fallback_keeps_its_own_arguments(self) -> None:
+        # _detect_executable can hand back [python, "-m", "open_shrimp"], so
+        # everything past the executable belongs in <Arguments>, not lost.
+        xml = _generate_windows_task_xml(
+            [r"C:\Python\python.exe", "-m", "open_shrimp"],
+            r"C:\config.yaml",
+        )
+        assert r"<Command>C:\Python\python.exe</Command>" in xml
+        assert (
+            r"<Arguments>-m open_shrimp --config C:\config.yaml</Arguments>" in xml
+        )
+
+    def test_a_path_with_spaces_stays_one_argument(self) -> None:
+        xml = _generate_windows_task_xml(
+            [r"C:\openshrimp.exe"], r"C:\Users\my name\config.yaml"
+        )
+        assert r'"C:\Users\my name\config.yaml"' in xml
+
+    def test_the_task_xml_carries_a_logon_trigger_and_no_time_limit(self) -> None:
+        xml = _generate_windows_task_xml([r"C:\openshrimp.exe"], r"C:\config.yaml")
+        assert "<LogonTrigger>" in xml
+        # A task that times out is a bot that stops mid-afternoon with no
+        # message.
+        assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml
+        assert "<LogonType>InteractiveToken</LogonType>" in xml
+        assert "<RunLevel>LeastPrivilege</RunLevel>" in xml
+        assert "<Interval>PT1M</Interval>" in xml
+
+    def test_the_task_xml_never_carries_the_api_key(self) -> None:
+        xml = _generate_windows_task_xml([r"C:\openshrimp.exe"], r"C:\config.yaml")
+        assert "ANTHROPIC_API_KEY" not in xml
+
+    def test_an_interpolated_ampersand_is_escaped(self) -> None:
+        xml = _generate_windows_task_xml(
+            [r"C:\Rock & Roll\openshrimp.exe"], r"C:\config.yaml"
+        )
+        assert "Rock &amp; Roll" in xml
+        assert "Rock & Roll" not in xml
+
+
+class TestCurrentUser:
+    def test_a_workgroup_is_never_spelled_into_the_user_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A machine that is not domain-joined reports USERDOMAIN=WORKGROUP,
+        # which names no authority: schtasks resolves no SID for
+        # WORKGROUP\me and rejects the whole definition, not just the
+        # trigger.  The fallback stays bare rather than guessing a domain.
+        monkeypatch.setenv("USERDOMAIN", "WORKGROUP")
+        monkeypatch.setenv("USERNAME", "me")
+        assert _current_user() == "me"
+
+    def test_the_user_id_reaches_the_definition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "open_shrimp.service._current_user", lambda: r"WIN11SPIKE\me"
+        )
+        xml = _generate_windows_task_xml([r"C:\openshrimp.exe"], r"C:\config.yaml")
+        assert r"<UserId>WIN11SPIKE\me</UserId>" in xml
+
+
+class TestTaskName:
+    def test_a_hostile_instance_name_cannot_retarget_the_task(self) -> None:
+        name = _task_name('a" /Delete /TN "OpenShrimp')
+        assert '"' not in name
+        assert " " not in name
+
+
+class TestIsServiceInstalled:
+    @patch("open_shrimp.service._capture", return_value=None)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_a_missing_task_is_not_installed(
+        self,
+        _plat: MagicMock,
+        _cap: MagicMock,
+    ) -> None:
+        assert is_service_installed(None) is False
+
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_a_disabled_task_does_not_count_as_installed(
+        self,
+        _plat: MagicMock,
+    ) -> None:
+        # schtasks hands back UTF-16 that commonly arrives decoded as if it
+        # were not, so the flag has to be found through the interleaved nulls.
+        query = "\ufeff" + "".join(
+            f"{c}\x00" for c in "<Task><Settings><Enabled>false</Enabled></Settings></Task>"
+        )
+        with patch("open_shrimp.service._capture", return_value=query):
+            assert is_service_installed(None) is False
+
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_an_enabled_task_is_installed(self, _plat: MagicMock) -> None:
+        query = "\ufeff" + "".join(
+            f"{c}\x00" for c in "<Task><Settings><Enabled>true</Enabled></Settings></Task>"
+        )
+        with patch("open_shrimp.service._capture", return_value=query):
+            assert is_service_installed(None) is True
 
 
 class TestInstallService:
@@ -275,7 +401,200 @@ class TestInstallService:
         assert svc_path.read_bytes() == b"existing"
 
 
+class TestInstallWindows:
+    @patch("open_shrimp.service.is_service_installed", return_value=False)
+    def test_the_definition_is_utf16_with_a_bom(self, _installed: MagicMock) -> None:
+        # Anything else and schtasks rejects it with an unhelpful parse error,
+        # so the bytes are read back off disk before the finally deletes them.
+        seen: dict[str, object] = {}
+
+        def _read_the_definition(
+            args: list[str], **_kw: object
+        ) -> subprocess.CompletedProcess:
+            xml_path = Path(args[args.index("/XML") + 1])
+            seen["bytes"] = xml_path.read_bytes()
+            seen["path"] = xml_path
+            return _ok(args)
+
+        with patch("open_shrimp.service._run", side_effect=_read_the_definition):
+            _install_windows(None, [r"C:\openshrimp.exe"], r"C:\config.yaml")
+
+        assert isinstance(seen["bytes"], bytes)
+        assert seen["bytes"].startswith(b"\xff\xfe")
+        assert not Path(str(seen["path"])).exists()
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service.is_service_installed", return_value=False)
+    def test_a_fresh_install_registers_the_task(
+        self,
+        _installed: MagicMock,
+        mock_run: MagicMock,
+    ) -> None:
+        _install_windows(None, [r"C:\openshrimp.exe"], r"C:\config.yaml")
+
+        argv = [c[0][0] for c in mock_run.call_args_list]
+        assert len(argv) == 1
+        assert argv[0][:4] == ["schtasks", "/Create", "/TN", "OpenShrimp"]
+        assert argv[0][-1] == "/F"
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service.is_service_installed", return_value=True)
+    @pytest.mark.parametrize(
+        ("answer", "replaced"),
+        [("n", False), ("", False), ("y", True), ("yes", True)],
+    )
+    def test_an_existing_task_is_replaced_only_when_asked(
+        self,
+        _installed: MagicMock,
+        mock_run: MagicMock,
+        answer: str,
+        replaced: bool,
+    ) -> None:
+        # The task of this name may be the tray's, which supervises the core
+        # and gives the user something to quit it with.  Anything short of
+        # yes must leave it exactly where it is.
+        with (
+            patch("open_shrimp.service.sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value=answer),
+        ):
+            _install_windows(None, [r"C:\openshrimp.exe"], r"C:\config.yaml")
+
+        argv = [c[0][0] for c in mock_run.call_args_list]
+        assert any("/Create" in a for a in argv) is replaced
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service.is_service_installed", return_value=True)
+    def test_an_existing_task_stops_a_non_interactive_install(
+        self,
+        _installed: MagicMock,
+        mock_run: MagicMock,
+    ) -> None:
+        with patch("open_shrimp.service.sys.stdin.isatty", return_value=False):
+            with pytest.raises(SystemExit) as exc:
+                _install_windows(None, [r"C:\openshrimp.exe"], r"C:\config.yaml")
+
+        assert exc.value.code != 0
+        mock_run.assert_not_called()
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service.is_service_installed", return_value=False)
+    @patch(
+        "open_shrimp.service._detect_executable",
+        return_value=[r"C:\openshrimp.exe"],
+    )
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_the_instance_name_reaches_the_task_name(
+        self,
+        _plat: MagicMock,
+        _exe: MagicMock,
+        _installed: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        config = _write_config(tmp_path)
+        config.write_text(
+            config.read_text(encoding="utf-8") + "instance_name: work\n",
+            encoding="utf-8",
+        )
+
+        install_service(str(config))
+
+        argv = [c[0][0] for c in mock_run.call_args_list]
+        assert argv[0][argv[0].index("/TN") + 1] == "OpenShrimp-work"
+
+
 class TestUninstallService:
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_uninstall_deletes_the_task(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config = _write_config(tmp_path)
+
+        uninstall_service(str(config))
+
+        cmd_lists = [c[0][0] for c in mock_run.call_args_list]
+        assert ["schtasks", "/Delete", "/TN", "OpenShrimp", "/F"] in cmd_lists
+        # Not a recipe for the user to run themselves.
+        assert "schtasks" not in capsys.readouterr().out
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_uninstall_survives_an_unusable_config(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # Someone who deleted their config still has a task to be rid of, and
+        # the instance name that scopes it is exactly what the lost config
+        # carried — so every OpenShrimp task goes, not the guessed one.
+        listing = '"\\OpenShrimp","N/A","Ready"\n"\\OpenShrimp-work","N/A","Ready"\n'
+        with patch("open_shrimp.service._capture", return_value=listing):
+            uninstall_service(str(tmp_path / "gone.yaml"))
+
+        cmd_lists = [c[0][0] for c in mock_run.call_args_list]
+        assert ["schtasks", "/Delete", "/TN", "OpenShrimp", "/F"] in cmd_lists
+        assert ["schtasks", "/Delete", "/TN", "OpenShrimp-work", "/F"] in cmd_lists
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_a_named_instance_is_the_only_task_removed(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # A config that loads names the task exactly, so nothing else is
+        # touched — the wide removal is what a lost config costs, not the rule.
+        config = _write_config(tmp_path)
+        config.write_text(
+            config.read_text(encoding="utf-8") + "instance_name: work\n",
+            encoding="utf-8",
+        )
+
+        uninstall_service(str(config))
+
+        cmd_lists = [c[0][0] for c in mock_run.call_args_list]
+        assert cmd_lists == [["schtasks", "/Delete", "/TN", "OpenShrimp-work", "/F"]]
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_a_task_in_a_folder_is_not_ours(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        listing = (
+            '"\\OpenShrimp","N/A","Ready"\n'
+            '"\\Vendor\\OpenShrimp-lookalike","N/A","Ready"\n'
+        )
+        with patch("open_shrimp.service._capture", return_value=listing):
+            uninstall_service(str(tmp_path / "gone.yaml"))
+
+        cmd_lists = [c[0][0] for c in mock_run.call_args_list]
+        assert cmd_lists == [["schtasks", "/Delete", "/TN", "OpenShrimp", "/F"]]
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch("open_shrimp.service._detect_platform", return_value="windows")
+    def test_nothing_registered_says_so(
+        self,
+        _plat: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with patch("open_shrimp.service._capture", return_value=""):
+            uninstall_service(str(tmp_path / "gone.yaml"))
+
+        mock_run.assert_not_called()
+        assert "not installed" in capsys.readouterr().out
+
     @patch("open_shrimp.service._run")
     @patch("open_shrimp.service._detect_platform", return_value="linux")
     def test_uninstall_linux(
@@ -288,7 +607,7 @@ class TestUninstallService:
         svc_path.write_text("[Unit]\nDescription=test")
 
         with patch("open_shrimp.service._SYSTEMD_UNIT_PATH", svc_path):
-            uninstall_service()
+            uninstall_service(str(tmp_path / "config.yaml"))
 
         assert not svc_path.exists()
         calls = mock_run.call_args_list
@@ -309,7 +628,7 @@ class TestUninstallService:
         svc_path.write_text("<plist>test</plist>")
 
         with patch("open_shrimp.service._LAUNCHD_PLIST_PATH", svc_path):
-            uninstall_service()
+            uninstall_service(str(tmp_path / "config.yaml"))
 
         assert not svc_path.exists()
 
@@ -323,7 +642,7 @@ class TestUninstallService:
         svc_path = tmp_path / "open-shrimp.service"
 
         with patch("open_shrimp.service._SYSTEMD_UNIT_PATH", svc_path):
-            uninstall_service()
+            uninstall_service(str(tmp_path / "config.yaml"))
 
         captured = capsys.readouterr()
         assert "not installed" in captured.out
