@@ -53,10 +53,12 @@ def _typed(text: str, *, after: int = 1) -> Callable[[_Wizard], str]:
 class _Wizard:
     """Drives ``run_setup_wizard`` against a fake Telegram.
 
-    ``answers`` are consumed in order for every prompt except two: the token,
-    which comes from ``tokens``, and the code, which comes from ``codes``.
-    ``codes`` defaults to answering every prompt with the code the operator
-    actually received — the handshake is exercised, not stubbed.
+    ``answers`` are consumed in order for every prompt except three: the
+    token, which comes from ``tokens``; the code, which comes from ``codes``;
+    and the autostart offer, which comes from ``autostart`` so that a test
+    saying nothing about it is not made to.  ``codes`` defaults to answering
+    every prompt with the code the operator actually received — the handshake
+    is exercised, not stubbed.
     """
 
     def __init__(
@@ -67,18 +69,26 @@ class _Wizard:
         tokens: tuple[str, ...] = ("111:AAA-bbb",),
         codes: tuple[Answer, ...] = (),
         clients: tuple[Callable[[], object], ...] = (),
+        autostart: str = "n",
+        installed: bool = False,
     ):
         self.fake = fake
         self.operator = operator
         self.code_prompts = 0
+        self.prompts: list[str] = []
         self._answers = iter(answers)
         self._tokens = list(tokens)
         self._codes = list(codes)
         self._clients = list(clients)
+        self._autostart = autostart
+        self._installed = installed
 
     def __call__(self, prompt: str = "") -> str:
+        self.prompts.append(prompt)
         if prompt.startswith("Telegram bot token") and self._tokens:
             return self._tokens.pop(0)
+        if prompt.startswith("Keep OpenShrimp running"):
+            return self._autostart
         if prompt.startswith("Setup code"):
             self.code_prompts += 1
             answer = self._codes.pop(0) if self._codes else _code_for(self.operator)
@@ -89,9 +99,16 @@ class _Wizard:
         return (self._clients.pop(0) if self._clients else self.fake.client)()
 
     def run(self, config_path: Path) -> None:
+        # Whether autostart is already registered decides whether the wizard
+        # asks about it at all, so it is answered here rather than left to the
+        # machine the tests happen to run on.
         with patch("builtins.input", side_effect=self):
             with patch.object(setup_mod, "_open_client", self._client):
-                run_setup_wizard(config_path)
+                with patch(
+                    "open_shrimp.service.is_service_installed",
+                    lambda name: self._installed,
+                ):
+                    run_setup_wizard(config_path)
 
 
 def _fake_with_operator(**kwargs) -> FakeTelegram:
@@ -452,6 +469,97 @@ class TestRunSetupWizard:
         assert config.telegram.token == "111:AAA-bbb"
         assert config.allowed_users == [OPERATOR]
         assert config.default_context == "default"
+
+
+class TestAutostartOffer:
+    """The last question the wizard asks, and what it does with the answer."""
+
+    @pytest.fixture
+    def registrations(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+        """Every install_service call, without one ever being made.
+
+        Nothing here may reach the real installer: it writes the unit file
+        this machine is already served by, which no instance name scopes away.
+        """
+        monkeypatch.delenv("OPENSHRIMP_SUPERVISED", raising=False)
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            "open_shrimp.service.install_service",
+            lambda config_path, **kwargs: calls.append((config_path, kwargs)),
+        )
+        return calls
+
+    def test_accepting_the_offer_registers_but_does_not_start(
+        self, tmp_path: Path, registrations: list[tuple]
+    ) -> None:
+        """One core owns the Telegram poll, and the wizard hands over to one
+        the moment it returns — so what is registered here is registered for
+        the next login and started at no point."""
+        config_path = tmp_path / "config.yaml"
+        _Wizard(
+            _fake_with_operator(), "y", "default", "/tmp", "test", "1", autostart="y"
+        ).run(config_path)
+
+        assert registrations == [(str(config_path), {"start": False})]
+
+    def test_declining_leaves_nothing_registered(
+        self,
+        tmp_path: Path,
+        registrations: list[tuple],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _Wizard(
+            _fake_with_operator(), "y", "default", "/tmp", "test", "1", autostart="n"
+        ).run(tmp_path / "config.yaml")
+
+        assert registrations == []
+        # Declining must still say what happens next and how to change it.
+        assert "openshrimp install" in capsys.readouterr().out
+
+    def test_a_supervised_wizard_is_not_asked(
+        self,
+        tmp_path: Path,
+        registrations: list[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The desktop apps spawn the core and are their own login item, so a
+        service registered underneath one is a second core on one token."""
+        monkeypatch.setenv("OPENSHRIMP_SUPERVISED", "1")
+        wizard = _Wizard(_fake_with_operator(), "y", "default", "/tmp", "test", "1")
+        wizard.run(tmp_path / "config.yaml")
+
+        assert not [p for p in wizard.prompts if p.startswith("Keep OpenShrimp running")]
+        assert registrations == []
+
+    def test_an_existing_registration_is_not_asked_about(
+        self, tmp_path: Path, registrations: list[tuple]
+    ) -> None:
+        wizard = _Wizard(
+            _fake_with_operator(), "y", "default", "/tmp", "test", "1", installed=True
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        assert not [p for p in wizard.prompts if p.startswith("Keep OpenShrimp running")]
+        assert registrations == []
+
+    def test_a_failed_registration_does_not_lose_the_config(
+        self, tmp_path: Path, registrations: list[tuple], monkeypatch
+    ) -> None:
+        """The config is the irreplaceable artifact: an autostart that could
+        not be registered is a downgrade, not a setup failure.  Refusing to
+        install is spelled sys.exit, so that is what is thrown here."""
+
+        def _refuse(*_a: object, **_k: object) -> None:
+            raise SystemExit(1)
+
+        monkeypatch.setattr("open_shrimp.service.install_service", _refuse)
+        config_path = tmp_path / "config.yaml"
+        _Wizard(
+            _fake_with_operator(), "y", "default", "/tmp", "test", "1", autostart="y"
+        ).run(config_path)
+
+        raw = yaml.safe_load(config_path.read_text())
+        assert raw["allowed_users"] == [OPERATOR]
 
 
 class TestPathCompleter:

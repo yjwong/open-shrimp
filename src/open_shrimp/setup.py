@@ -528,6 +528,44 @@ def build_config_dict(
     }
 
 
+def _offer_autostart(config_path: Path) -> None:
+    """Offer to keep the bot running once this window is gone.
+
+    Asked only where the answer is the core's to give: a supervisor above it
+    already owns restarting it, and an autostart already registered has
+    nothing to add — so both are skipped without a prompt rather than asked
+    and ignored.
+
+    Registered for the next login, never started: the wizard hands straight
+    over to a core that already owns this login's Telegram poll.
+    """
+    from open_shrimp import readiness, service
+
+    if os.environ.get(readiness.SUPERVISED_ENV):
+        return
+    # The wizard writes no instance name, so the unscoped install is the one
+    # this config would be served by.
+    if service.is_service_installed(None):
+        return
+
+    print()
+    if not _prompt_yes_no("Keep OpenShrimp running after you close this window?"):
+        print(f"  {readiness.NO_AUTOSTART}")
+        return
+
+    print()
+    try:
+        service.install_service(str(config_path), start=False)
+    except (Exception, SystemExit):
+        # The config is written and the core is about to boot, so an autostart
+        # that could not be registered is a downgrade and not a setup failure.
+        # SystemExit as well as Exception because refusing to install is
+        # spelled sys.exit, and that would take the config's news down with it.
+        logger.warning("Could not register autostart", exc_info=True)
+        print("\n  I could not set that up.")
+        print(f"  {readiness.NO_AUTOSTART}")
+
+
 def run_setup_wizard(config_path: Path) -> None:
     """Run the interactive setup wizard.
 
@@ -565,4 +603,9 @@ def run_setup_wizard(config_path: Path) -> None:
 
     print(f"\nConfig written to {config_path}")
     print("You can edit it later to add more contexts, tools, or users.")
-    print("Starting OpenShrimp...\n")
+
+    # Installing demands a config the core can start from, so the offer comes
+    # after the file it would register against exists.
+    _offer_autostart(config_path)
+
+    print("\nStarting OpenShrimp...\n")

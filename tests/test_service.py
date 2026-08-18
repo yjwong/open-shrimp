@@ -426,6 +426,61 @@ class TestInstallService:
         mock_input.assert_not_called()
         assert svc_path.read_bytes() == b"existing"
 
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch(
+        "open_shrimp.service._detect_executable", return_value=["/usr/bin/openshrimp"]
+    )
+    @patch("open_shrimp.service._detect_platform", return_value="linux")
+    def test_the_wizard_path_enables_without_starting(
+        self,
+        _plat: MagicMock,
+        _exe: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        config = _write_config(tmp_path)
+        svc_path = tmp_path / "open-shrimp.service"
+
+        with patch("open_shrimp.service._SYSTEMD_UNIT_PATH", svc_path):
+            install_service(str(config), start=False)
+
+        argv = [c[0][0] for c in mock_run.call_args_list]
+        # Enabling is the whole point, and starts nothing.
+        assert ["systemctl", "--user", "enable", "open-shrimp.service"] in argv
+        # A start here is a second core polling one bot token.
+        assert ["systemctl", "--user", "start", "open-shrimp.service"] not in argv
+
+    @patch("open_shrimp.service._run", side_effect=_ok)
+    @patch(
+        "open_shrimp.service._detect_executable", return_value=["/usr/bin/openshrimp"]
+    )
+    @patch("open_shrimp.service._detect_platform", return_value="macos")
+    def test_the_agent_still_loads_at_the_next_login(
+        self,
+        _plat: MagicMock,
+        _exe: MagicMock,
+        mock_run: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # Registering without starting must not degrade into not registering:
+        # the plist is the whole of what brings the core back at the next
+        # login, and RunAtLoad is the half of it that says so.
+        config = _write_config(tmp_path)
+        svc_path = tmp_path / "com.openshrimp.bot.plist"
+
+        with (
+            patch("open_shrimp.service._LAUNCHD_PLIST_PATH", svc_path),
+            patch("open_shrimp.service._LAUNCHD_LOG_DIR", tmp_path / "logs"),
+        ):
+            install_service(str(config), start=False)
+
+        plist = svc_path.read_text()
+        assert "<key>RunAtLoad</key>" in plist
+        assert plist.split("<key>RunAtLoad</key>", 1)[1].lstrip().startswith("<true/>")
+        # Bootstrapping an agent with RunAtLoad set starts it immediately.
+        argv = [c[0][0] for c in mock_run.call_args_list]
+        assert not any("bootstrap" in a for a in argv)
+
 
 class TestInstallWindows:
     @patch("open_shrimp.service._task_exists", return_value=False)

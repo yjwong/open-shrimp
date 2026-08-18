@@ -438,7 +438,7 @@ def _config_to_install_against(resolved_config: str) -> Config:
         )
 
 
-def install_service(config_path: str) -> None:
+def install_service(config_path: str, *, start: bool = True) -> None:
     """Install OpenShrimp as a system service.
 
     On Linux, installs a systemd user unit and enables it.
@@ -447,6 +447,12 @@ def install_service(config_path: str) -> None:
 
     Args:
         config_path: Path to the OpenShrimp config file.
+        start: Whether to run what was registered as well as register it.
+            One core owns the Telegram poll.  Registering autostart says what
+            should happen at the next login; whatever is already serving this
+            login keeps serving it, so a caller that is itself about to serve
+            passes ``False`` and nothing is started here.  Windows has nothing
+            to gate: a logon task is registered, never run.
     """
     resolved_config = str(Path(config_path).expanduser().resolve())
     config = _config_to_install_against(resolved_config)
@@ -490,9 +496,9 @@ def install_service(config_path: str) -> None:
 
     # Enable and start
     if platform == "linux":
-        _install_systemd(svc_path)
+        _install_systemd(svc_path, start=start)
     else:
-        _install_launchd(svc_path)
+        _install_launchd(svc_path, start=start)
 
 
 def _install_windows(
@@ -544,8 +550,12 @@ def _install_windows(
     )
 
 
-def _install_systemd(svc_path: Path) -> None:
-    """Enable and start the systemd user service."""
+def _install_systemd(svc_path: Path, *, start: bool) -> None:
+    """Enable the systemd user service, and start it when asked to.
+
+    Reloading, enabling and lingering all describe the next login rather than
+    this one, so they run either way; only the start is gated.
+    """
     result = _run(["systemctl", "--user", "daemon-reload"])
     if result.returncode != 0:
         print(f"Warning: daemon-reload failed: {result.stderr}", file=sys.stderr)
@@ -554,9 +564,10 @@ def _install_systemd(svc_path: Path) -> None:
     if result.returncode != 0:
         print(f"Warning: enable failed: {result.stderr}", file=sys.stderr)
 
-    result = _run(["systemctl", "--user", "start", "open-shrimp.service"])
-    if result.returncode != 0:
-        print(f"Warning: start failed: {result.stderr}", file=sys.stderr)
+    if start:
+        result = _run(["systemctl", "--user", "start", "open-shrimp.service"])
+        if result.returncode != 0:
+            print(f"Warning: start failed: {result.stderr}", file=sys.stderr)
 
     # Enable lingering so the service runs without an active login session
     result = _run(["loginctl", "enable-linger"], check=False)
@@ -567,8 +578,9 @@ def _install_systemd(svc_path: Path) -> None:
             f"  loginctl enable-linger {os.environ.get('USER', '')}"
         )
 
+    state = "installed and running" if start else "installed"
     _print_banner(
-        "OpenShrimp is installed and running as a systemd user service.",
+        f"OpenShrimp is {state} as a systemd user service.",
         [
             ("systemctl --user status open-shrimp", "check status"),
             ("journalctl --user -u open-shrimp -f", "follow logs"),
@@ -578,17 +590,28 @@ def _install_systemd(svc_path: Path) -> None:
     )
 
 
-def _install_launchd(svc_path: Path) -> None:
-    """Load the launchd user agent."""
-    result = _run(
-        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(svc_path)],
-        check=False,
-    )
-    if result.returncode != 0:
-        print(f"Warning: launchctl bootstrap failed: {result.stderr}", file=sys.stderr)
+def _install_launchd(svc_path: Path, *, start: bool) -> None:
+    """Load the launchd user agent, when loading it is what was asked for.
 
+    The plist keeps ``RunAtLoad`` either way: it is the agent's instruction
+    for the next login, and dropping it would turn registering-without-
+    starting into not registering at all.  Bootstrapping is what would start
+    one now, so that is the half that is gated.
+    """
+    if start:
+        result = _run(
+            ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(svc_path)],
+            check=False,
+        )
+        if result.returncode != 0:
+            print(
+                f"Warning: launchctl bootstrap failed: {result.stderr}",
+                file=sys.stderr,
+            )
+
+    state = "installed and running" if start else "installed"
     _print_banner(
-        "OpenShrimp is installed and running as a launchd user agent.",
+        f"OpenShrimp is {state} as a launchd user agent.",
         [
             (f"launchctl list | grep {_LAUNCHD_LABEL}", "check status"),
             ("tail -f ~/Library/Logs/OpenShrimp/openshrimp.stderr.log", "follow logs"),

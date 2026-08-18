@@ -43,6 +43,14 @@ logger = logging.getLogger(__name__)
 # somebody's job.  The desktop apps set it; a terminal does not.
 SUPERVISED_ENV = "OPENSHRIMP_SUPERVISED"
 
+# What the core says when nothing will bring it back.  The readiness card and
+# the wizard that was told not to register autostart report the same fact, so
+# they read it from the same place and cannot drift apart.
+NO_AUTOSTART = (
+    "I stop when the terminal that started me closes. Run "
+    "`openshrimp install` there to keep me running after you log in."
+)
+
 # How long any one check may take to answer before it is reported as unknown.
 _BUDGET = 30.0
 
@@ -264,11 +272,7 @@ def _autostart(config: Config) -> Verdict:
 
     if is_service_installed(config.instance_name):
         return State.OK, ""
-    return (
-        State.PROBLEM,
-        "I stop when the terminal that started me closes. Run "
-        "`openshrimp install` there to keep me running after you log in.",
-    )
+    return State.PROBLEM, NO_AUTOSTART
 
 
 # The one place a row's key and label are written.  Onceness is tracked against
