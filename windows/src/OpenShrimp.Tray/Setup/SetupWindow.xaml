@@ -129,13 +129,16 @@
                         </StackPanel>
                     </StackPanel>
                     <ComboBox x:Name="ModelBox" Header="Model" Width="320" />
+                    <TextBlock x:Name="ContextMessage" TextWrapping="Wrap" />
+                </StackPanel>
 
-                    <!--
-                        Ticked by default, and the consequence in words rather
-                        than a bare label: a user who finishes here is told the
-                        bot is running, and nothing else would mention that it
-                        stops at the next sign-out.
-                    -->
+                <!--
+                    Step 3: autostart.  A step of its own rather than a fourth
+                    field on the context form, because it asks about the app and
+                    not about the context.  Ticked by default, with the
+                    consequence in words rather than a bare label.
+                -->
+                <StackPanel x:Name="StepFinish" Spacing="10" Visibility="Collapsed">
                     <StackPanel Spacing="2">
                         <CheckBox x:Name="AutostartBox"
                                   Content="Keep OpenShrimp running after you sign in"
@@ -147,8 +150,6 @@
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
-
-                    <TextBlock x:Name="ContextMessage" TextWrapping="Wrap" />
                 </StackPanel>
             </Grid>
 

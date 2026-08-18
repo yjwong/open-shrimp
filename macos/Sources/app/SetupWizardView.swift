@@ -40,7 +40,8 @@ struct SetupWizardView: View {
         case 1:
             if case .confirming = model.stage { return "Is this you?" }
             return "Who may use it?"
-        default: return "Your first context"
+        case 2: return "Your first context"
+        default: return "One last thing"
         }
     }
 
@@ -59,7 +60,8 @@ struct SetupWizardView: View {
                 // Says why the step exists; the body says how to get through it.
                 return "Only the account you enroll here will be allowed to talk to the bot."
             }
-        default: return "A working directory the agent will operate in."
+        case 2: return "A working directory the agent will operate in."
+        default: return "OpenShrimp runs only while this app is open."
         }
     }
 
@@ -120,7 +122,8 @@ struct SetupWizardView: View {
         switch model.step {
         case 0: tokenStep
         case 1: enrollStep
-        default: contextStep
+        case 2: contextStep
+        default: autostartStep
         }
     }
 
@@ -257,15 +260,14 @@ struct SetupWizardView: View {
                         .textFieldStyle(.roundedBorder)
                 }
             }
-
-            autostartOffer
         }
     }
 
-    /// The offer, with the consequence in words rather than a bare label: this
-    /// is the only place the wizard mentions that a bot it just said is running
-    /// stops at the next logout.
-    private var autostartOffer: some View {
+    /// A step of its own rather than a fourth field on the context form: this
+    /// asks about the app, not about the context, and it is the only place the
+    /// wizard mentions that a bot it is about to call running stops at the next
+    /// logout.
+    private var autostartStep: some View {
         VStack(alignment: .leading, spacing: 2) {
             Toggle("Keep OpenShrimp running after you sign in", isOn: $model.autostart)
                 .disabled(model.autostartConflicted)

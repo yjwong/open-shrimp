@@ -52,7 +52,7 @@ enum EnrollStage: Equatable {
 /// are for immediate feedback, and the core's own answer is shown verbatim.
 @MainActor
 final class SetupWizardModel: ObservableObject {
-    static let stepCount = 3
+    static let stepCount = 4
 
     /// The characters a context name may hold.  Deliberately ASCII: a context
     /// name is typed back into Telegram to switch to it.
@@ -203,6 +203,7 @@ final class SetupWizardModel: ObservableObject {
         switch step {
         case 0: await leaveTokenStep()
         case 1: await leaveEnrollmentStep()
+        case 2: leaveContextStep()
         default: await finish()
         }
     }
@@ -473,27 +474,30 @@ final class SetupWizardModel: ObservableObject {
 
     // -- Finish ---------------------------------------------------------------
 
-    private func finish() async {
+    /// The context step's fields, checked together.  Returns nil and says what
+    /// is wrong; the answer is the same whether it is being asked to leave the
+    /// step or to write the config.
+    private func validatedContext() -> (name: String, directory: String, model: String?)? {
         let name = trimmed(contextName)
         guard !name.isEmpty, name.unicodeScalars.allSatisfy(Self.nameCharacters.contains) else {
             message = WizardMessage(
                 tone: .failure,
                 text: "Use only letters, numbers, hyphens and underscores."
             )
-            return
+            return nil
         }
 
         guard let directory else {
             message = WizardMessage(tone: .failure, text: "Choose a project folder.")
-            return
+            return nil
         }
 
         let model: String?
         switch selection {
         case .cliDefault:
             model = nil
-        case .alias(let name, _):
-            model = name
+        case .alias(let alias, _):
+            model = alias
         case .custom:
             let custom = trimmed(customModel)
             guard !custom.isEmpty else {
@@ -501,10 +505,25 @@ final class SetupWizardModel: ObservableObject {
                     tone: .failure,
                     text: "Enter a model name, or pick one from the list."
                 )
-                return
+                return nil
             }
             model = custom
         }
+
+        return (name, directory, model)
+    }
+
+    /// The context step is left on its fields alone.  Nothing is written here:
+    /// the config write belongs to the last step, so that a wizard abandoned on
+    /// the autostart question leaves no config behind.
+    private func leaveContextStep() {
+        guard validatedContext() != nil else { return }
+        message = nil
+        step = 3
+    }
+
+    private func finish() async {
+        guard let context = validatedContext() else { return }
 
         guard let token = verifiedToken, let userID = enrolledUserID else {
             message = WizardMessage(tone: .failure, text: "Go back and complete the earlier steps.")
@@ -523,10 +542,10 @@ final class SetupWizardModel: ObservableObject {
             ConfigWriteRequest(
                 token: token,
                 userID: userID,
-                contextName: name,
-                directory: directory,
+                contextName: context.name,
+                directory: context.directory,
                 description: "Default context",
-                model: model
+                model: context.model
             )
         )
 

@@ -45,7 +45,7 @@ internal enum EnrollStage
 /// </summary>
 public sealed partial class SetupWindow : Window
 {
-    private const int StepCount = 3;
+    private const int StepCount = 4;
 
     private int _step;
     private string? _verifiedToken;
@@ -153,6 +153,7 @@ public sealed partial class SetupWindow : Window
         StepToken.Visibility = step == 0 ? Visibility.Visible : Visibility.Collapsed;
         StepEnroll.Visibility = step == 1 ? Visibility.Visible : Visibility.Collapsed;
         StepContext.Visibility = step == 2 ? Visibility.Visible : Visibility.Collapsed;
+        StepFinish.Visibility = step == 3 ? Visibility.Visible : Visibility.Collapsed;
 
         BackButton.IsEnabled = step > 0;
 
@@ -179,7 +180,8 @@ public sealed partial class SetupWindow : Window
         {
             0 => ("Connect your bot", "Create a bot with @BotFather and paste its token here."),
             1 => EnrollHeader(),
-            _ => ("Your first context", "A working directory the agent will operate in."),
+            2 => ("Your first context", "A working directory the agent will operate in."),
+            _ => ("One last thing", "OpenShrimp runs only while this app is open."),
         };
 
         NextButton.Content = _step switch
@@ -246,7 +248,10 @@ public sealed partial class SetupWindow : Window
     {
         0 => await ValidateTokenAsync(),
         1 => await LeaveEnrollmentStepAsync(),
-        _ => ValidateContext(),
+        2 => ValidateContext(),
+        // The autostart step has nothing to check: a checkbox is answered by
+        // being in one state or the other.
+        _ => true,
     };
 
     private async Task<bool> ValidateTokenAsync()
