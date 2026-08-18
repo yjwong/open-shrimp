@@ -22,6 +22,26 @@ if TYPE_CHECKING:
     from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime
 
 
+class SandboxStartupError(RuntimeError):
+    """A sandbox refused to come up for *context_name* on *backend*.
+
+    It carries no remedy of its own, deliberately.  Most of the lifecycle's
+    raise sites are failure reports rather than remedies, and the ones that do
+    know a remedy know only their own — whereas the prerequisite checks for
+    *backend* can be re-run against the machine as it is at the moment of the
+    failure and answer the question the operator actually has.  So this type
+    carries only what is needed to ask them: which context, and which backend.
+
+    ``RuntimeError`` because that is what the lifecycle already raises, so
+    every existing ``except`` around it keeps catching.
+    """
+
+    def __init__(self, context_name: str, backend: str, cause: BaseException) -> None:
+        super().__init__(str(cause) or type(cause).__name__)
+        self.context_name = context_name
+        self.backend = backend
+
+
 @dataclass(frozen=True)
 class PortForward:
     """A live guest→host TCP port forward exposed by a sandbox.

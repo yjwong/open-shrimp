@@ -36,7 +36,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from open_shrimp.mini_app import make_web_app_button
 
 from open_shrimp.agent import AgentEvent
-from open_shrimp.config import ContextConfig, is_sandboxed
+from open_shrimp.config import ContextConfig, is_sandboxed, sandbox_backend
 from open_shrimp.db import (
     ChatScope,
     delete_session,
@@ -48,7 +48,7 @@ from open_shrimp.hooks import (
     HostBashApprovalCallback,
     QuestionCallback,
 )
-from open_shrimp.sandbox import Sandbox, SandboxManager
+from open_shrimp.sandbox import Sandbox, SandboxManager, SandboxStartupError
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     AgentRuntime,
@@ -588,19 +588,30 @@ async def get_or_create_session(
             _sandbox = sandbox  # capture for closure
             _mgr = sandbox_manager  # capture for closure
 
+            _backend_name = sandbox_backend(context)
+
             def _ensure_and_start_agent() -> "AgentHandle":
+                # Everything the lifecycle raises leaves here as one type
+                # naming the context and the backend, so the handler can ask
+                # that backend's prerequisite checks what is wrong with the
+                # machine instead of rendering a traceback nobody can act on.
                 try:
-                    _sandbox.ensure_environment(log_file=log_file)
-                    _sandbox.ensure_running(log_file=log_file)
-                    # Keep the build log registered through provisioning so
-                    # long steps (e.g. the one-time Waydroid image download)
-                    # stream to the terminal Mini App.
-                    _sandbox.provision_workspace(log_file=log_file)
-                finally:
-                    if log_file is not None:
-                        assert _mgr is not None
-                        _mgr.unregister_build(context_name)
-                return _sandbox.start_agent(_runtime)
+                    try:
+                        _sandbox.ensure_environment(log_file=log_file)
+                        _sandbox.ensure_running(log_file=log_file)
+                        # Keep the build log registered through provisioning so
+                        # long steps (e.g. the one-time Waydroid image download)
+                        # stream to the terminal Mini App.
+                        _sandbox.provision_workspace(log_file=log_file)
+                    finally:
+                        if log_file is not None:
+                            assert _mgr is not None
+                            _mgr.unregister_build(context_name)
+                    return _sandbox.start_agent(_runtime)
+                except Exception as e:
+                    raise SandboxStartupError(
+                        context_name, _backend_name, e
+                    ) from e
 
             handle = await asyncio.to_thread(_ensure_and_start_agent)
             # WrappedCLI → cli_path; ServedEndpoint → endpoint.

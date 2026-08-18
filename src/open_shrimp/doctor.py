@@ -22,6 +22,7 @@ from pathlib import Path
 
 from open_shrimp.binaries import find_binary
 from open_shrimp.config import Config, SandboxConfig, load_config
+from open_shrimp.paths import init_paths
 
 
 def _check_moonshine_stt(config: Config | None) -> tuple[bool, str]:
@@ -41,7 +42,10 @@ def _check_cloudflared(config: Config | None) -> tuple[bool, str]:
 def _check_docker(config: Config | None) -> tuple[bool, str]:
     path = shutil.which("docker")
     if not path:
-        return False, "docker CLI not found"
+        return False, (
+            "docker CLI not found — install Docker Engine (or Docker "
+            "Desktop) and make sure `docker` is on your PATH"
+        )
     # Check if daemon is responsive.
     import subprocess
 
@@ -52,7 +56,7 @@ def _check_docker(config: Config | None) -> tuple[bool, str]:
             timeout=10,
         )
         if result.returncode != 0:
-            return False, "docker CLI found but daemon is not running"
+            return False, _docker_refusal(result.stderr)
     except subprocess.TimeoutExpired:
         return False, "docker CLI found but daemon timed out"
     except Exception as e:
@@ -60,35 +64,78 @@ def _check_docker(config: Config | None) -> tuple[bool, str]:
     return True, f"found at {path}, daemon running"
 
 
+def _docker_refusal(stderr: bytes) -> str:
+    """Why ``docker info`` failed, told apart by what the daemon said.
+
+    A socket that refuses this account and a daemon that is not there both
+    exit non-zero, and the remedies are opposites: one is a group membership,
+    the other is starting a service.  Conflating them sends an operator to
+    start a daemon that is already running, so the permission case is split
+    out on the only evidence there is — the CLI's own words.
+    """
+    said = stderr.decode("utf-8", "replace").lower()
+    if "permission denied" in said:
+        return (
+            "docker CLI found, but this account is not allowed to talk to the "
+            "Docker daemon — the daemon may well be running; add yourself to "
+            "the docker group with: sudo usermod -aG docker $USER  — then log "
+            "out and back in, because the group is read from the token your "
+            "session was created with, so a new terminal in the same session "
+            "still will not have it"
+        )
+    return (
+        "docker CLI found but daemon is not running — start it with: sudo "
+        "systemctl start docker  (or launch Docker Desktop)"
+    )
+
+
 def _check_libvirt(config: Config | None) -> tuple[bool, str]:
+    from open_shrimp.sandbox.libvirt_helpers import LIBVIRT_INSTALL_REMEDY
+
     try:
         import libvirt  # type: ignore[import-untyped]
     except ImportError:
-        return False, "libvirt-python not installed"
+        return False, f"libvirt-python not installed — {LIBVIRT_INSTALL_REMEDY}"
 
     try:
         conn = libvirt.open("qemu:///session")
         conn.close()
     except Exception as e:
-        return False, f"libvirt-python installed but cannot connect: {e}"
+        return False, (
+            f"libvirt-python installed but cannot connect: {e} — install "
+            "the daemon with: sudo apt install libvirt-daemon qemu-system-x86"
+        )
     return True, "libvirt-python installed, qemu:///session reachable"
 
 
 def _check_virtiofsd(config: Config | None) -> tuple[bool, str]:
+    """The filesystem daemon the VMs share the project through.
+
+    An absent one is not a problem to report: the manager downloads a patched
+    build on first use, so this passes on the strength of that download the
+    same way the HCS control initramfs check does.  Only the version-gated
+    system binaries it would fall back to are inspected here, because a check
+    must not fetch anything.
+    """
     # Re-use the same logic from libvirt_helpers.
     from open_shrimp.sandbox.libvirt_helpers import find_virtiofsd
 
     path = find_virtiofsd()
     if path:
         return True, f"found at {path}"
-    return False, "not found (required for libvirt sandbox)"
+    return True, (
+        "not staged — a patched build will be downloaded on first use"
+    )
 
 
 def _check_lima(config: Config | None) -> tuple[bool, str]:
-    path = _find_managed_or_path("limactl")
+    path = find_binary("limactl")
     if path:
         return True, f"found at {path}"
-    return False, "not found (required for Lima sandbox on macOS)"
+    return False, (
+        "not found (required for the Lima sandbox on macOS) — install it "
+        "with: brew install lima"
+    )
 
 
 # -- HCS (Windows) ------------------------------------------------------------
@@ -426,9 +473,17 @@ def _icons() -> tuple[str, str]:
 
 
 def run_doctor(config_path: str | None = None) -> int:
-    """Run all checks and print results. Returns 0 if all pass, 1 otherwise."""
+    """Run all checks and print results. Returns 0 if all pass, 1 otherwise.
+
+    The instance paths are initialised first because several checks look for
+    managed binaries under them — in the bot the core does it at startup, and
+    a report that dies partway through is the one thing a diagnostic may not
+    do.  One check's crash is likewise not the report's: the rest still run,
+    and the failure is printed as itself rather than swallowed into a pass.
+    """
     current_platform = platform.system()
     config = _load_config(config_path)
+    init_paths(config.instance_name if config is not None else None)
     _use_utf8_output()
     pass_icon, fail_icon = _icons()
     has_failure = False
@@ -436,7 +491,10 @@ def run_doctor(config_path: str | None = None) -> int:
     for label, check_fn, plat, _backends in _CHECKS:
         if plat is not None and current_platform != plat:
             continue
-        ok, detail = check_fn(config)
+        try:
+            ok, detail = check_fn(config)
+        except Exception as e:
+            ok, detail = False, f"this check could not run: {e!r}"
         icon = pass_icon if ok else fail_icon
         print(_printable(f"  {icon} {label}: {detail}"))
         if not ok:

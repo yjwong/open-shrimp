@@ -38,7 +38,9 @@ from open_shrimp.handlers.approval import (
     _send_host_bash_approval,
 )
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
-from open_shrimp.markdown import escape as _escape_md
+from open_shrimp.markdown import escape as _escape_md, split_message
+from open_shrimp.sandbox.base import SandboxStartupError
+from open_shrimp.sandbox_diagnosis import failure_reply
 from open_shrimp.web_url import mini_app_base
 from open_shrimp.handlers.questions import (
     _complete_other_input,
@@ -1293,6 +1295,25 @@ async def _start_agent_task(
                 )
             except Exception:
                 logger.exception("Failed to send error message")
+        except SandboxStartupError as exc:
+            # No session was stored — a live one would have been returned
+            # before the sandbox was ever touched — so there is nothing here
+            # to close, and closing would take this scope's host monitors
+            # with it.
+            logger.exception("Sandbox startup failed for scope %s", scope)
+            try:
+                # Plain, and split rather than clamped: these remedies carry
+                # Windows paths and shell variables that MarkdownV2 would
+                # reject, and a message Telegram refuses is worse than the
+                # generic sentence it replaces.
+                for part in split_message(await failure_reply(exc, config)):
+                    await context.bot.send_message(
+                        chat_id=scope.chat_id,
+                        text=part,
+                        **_thread_kwargs(scope),
+                    )
+            except Exception:
+                logger.exception("Failed to send sandbox failure message")
         except Exception:
             logger.exception("Agent task failed for scope %s", scope)
             try:

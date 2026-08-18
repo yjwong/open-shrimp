@@ -34,6 +34,15 @@ from open_shrimp.sandbox.skill_paths import (
 
 logger = logging.getLogger(__name__)
 
+# What an operator has to install before this backend can run at all.  Written
+# once because two places speak it — the manager, when the binding is missing
+# at startup, and ``doctor``'s prerequisite check — and an operator who reads
+# both must not be told two different things.
+LIBVIRT_INSTALL_REMEDY = (
+    "install it with: pip install libvirt-python  (and: sudo apt install "
+    "libvirt-daemon qemu-system-x86)"
+)
+
 
 # ---------------------------------------------------------------------------
 # Constants

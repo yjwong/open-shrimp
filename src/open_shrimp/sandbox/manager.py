@@ -897,13 +897,17 @@ class LibvirtSandboxManager:
 
         try:
             import libvirt
-        except ImportError:
-            logger.error(
-                "libvirt-python not installed — install with: "
-                "pip install libvirt-python  (and: sudo apt install "
-                "libvirt-daemon qemu-system-x86)"
+        except ImportError as e:
+            # The remedy rides on the exception, not only in the log: a caller
+            # rendering ``str(exc)`` would otherwise get "No module named
+            # 'libvirt'", which names the symptom and no way out of it.
+            from open_shrimp.sandbox.libvirt_helpers import (
+                LIBVIRT_INSTALL_REMEDY,
             )
-            raise
+
+            raise ImportError(
+                f"libvirt-python not installed — {LIBVIRT_INSTALL_REMEDY}"
+            ) from e
 
         try:
             import libvirtaio

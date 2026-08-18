@@ -94,6 +94,19 @@ def is_sandboxed(context: "ContextConfig") -> bool:
     return False
 
 
+def sandbox_backend(context: "ContextConfig") -> str:
+    """Which sandbox backend *context* runs on.
+
+    The name the manager registry and ``doctor``'s prerequisite tags are both
+    keyed by, so whoever needs it asks here rather than re-deriving it — a
+    context declaring only ``container`` is on Docker, the same reading
+    :func:`is_sandboxed` and ``referenced_backends`` already take.
+    """
+    if context.sandbox is not None:
+        return context.sandbox.backend
+    return "docker"
+
+
 @dataclass
 class ContextConfig:
     directory: str

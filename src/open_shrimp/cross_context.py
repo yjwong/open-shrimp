@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from telegram import Bot, InlineKeyboardMarkup
 
 from open_shrimp.mini_app import make_web_app_button
+from open_shrimp.sandbox.base import SandboxStartupError
+from open_shrimp.sandbox_diagnosis import diagnose
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -363,8 +365,9 @@ async def _launch_target_sandbox(
     back to a host-local client while permissions think it is isolated.
     """
     from open_shrimp.client_manager import _context_locks
+    from open_shrimp.config import sandbox_backend
 
-    backend_name = ctx.sandbox.backend if ctx.sandbox is not None else "docker"
+    backend_name = sandbox_backend(ctx)
     manager = (sandbox_managers or {}).get(backend_name)
     if manager is None:
         raise RuntimeError(
@@ -383,10 +386,16 @@ async def _launch_target_sandbox(
         sandbox = manager.create_sandbox(target, ctx, runtime=runtime)
 
         def _start() -> Any:
-            sandbox.ensure_environment()
-            sandbox.ensure_running()
-            sandbox.provision_workspace()
-            return sandbox.start_agent(runtime)
+            # Same typed failure as the live-session path, so a sub-query
+            # against a machine that is missing a prerequisite reports the
+            # remedy instead of whichever line noticed first.
+            try:
+                sandbox.ensure_environment()
+                sandbox.ensure_running()
+                sandbox.provision_workspace()
+                return sandbox.start_agent(runtime)
+            except Exception as e:
+                raise SandboxStartupError(target, backend_name, e) from e
 
         handle = await asyncio.to_thread(_start)
         return _SandboxLaunch(
@@ -1173,6 +1182,17 @@ async def _run_inline_query(
             target=target,
             sandbox_managers=sandbox_managers,
         ) if sandboxed else None
+    except SandboxStartupError as exc:
+        # The requesting scope's answer, not a silent sub-query failure: the
+        # asking agent is the only one who can relay this, and "No module
+        # named 'libvirt'" is not something a user can act on.
+        logger.exception("ask_context sandbox launch failed")
+        what, _prerequisite = await diagnose(exc, config)
+        return _text_result(
+            f"The sandbox for context {target!r} would not start, so the "
+            f"question was not asked.\n\n{what}",
+            is_error=True,
+        )
     except Exception as exc:
         logger.exception("ask_context sandbox launch failed")
         return _text_result(str(exc), is_error=True)

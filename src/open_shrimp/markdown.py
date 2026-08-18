@@ -251,7 +251,7 @@ def _back_off_escape(text: str, split_at: int) -> int:
     return split_at
 
 
-def _split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
+def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
     """Split a rendered message into chunks of at most max_length characters.
 
     Splits at natural boundaries: paragraph breaks, then line breaks.
@@ -309,4 +309,4 @@ def gfm_to_telegram(text: str) -> list[str]:
         plugins=["strikethrough", "table"],
     )
     rendered = md(text)
-    return _split_message(rendered)
+    return split_message(rendered)
