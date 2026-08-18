@@ -897,19 +897,16 @@ def _view_output_keyboard(
     is_private_chat: bool,
 ) -> InlineKeyboardMarkup | None:
     """Build the 📺 View output button for the Terminal Mini App, if enabled."""
-    if not terminal_base_url:
-        return None
-    app_url = f"{terminal_base_url}/terminal/?type=task&id={task_id}"
-    return InlineKeyboardMarkup([[
-        make_web_app_button(
-            "📺 View output",
-            app_url,
-            chat_id=chat_id,
-            user_id=user_id,
-            bot_token=config.telegram.token,
-            is_private_chat=is_private_chat,
-        ),
-    ]])
+    button = make_web_app_button(
+        "📺 View output",
+        terminal_base_url,
+        f"/terminal/?type=task&id={task_id}",
+        chat_id=chat_id,
+        user_id=user_id,
+        bot_token=config.telegram.token,
+        is_private_chat=is_private_chat,
+    )
+    return InlineKeyboardMarkup([[button]]) if button else None
 
 
 def _format_tool_result(target: str, result: _SubQueryResult) -> dict[str, Any]:

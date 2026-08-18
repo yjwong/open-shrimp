@@ -764,20 +764,18 @@ class ClaudeSdkPolicy:
                     if thread_id is not None
                     else ""
                 )
-                app_url = (
-                    f"{base_url}/preview/"
-                    f"?content_id={content_id}"
-                    f"&chat_id={chat_id}"
-                    f"{thread_param}"
-                )
-                extras.pre_primary_rows.append([make_web_app_button(
+                view_plan = make_web_app_button(
                     "\U0001f4cb View plan",
-                    app_url,
+                    base_url,
+                    f"/preview/?content_id={content_id}"
+                    f"&chat_id={chat_id}{thread_param}",
                     chat_id=chat_id,
                     user_id=user_id,
                     bot_token=bot_token,
                     is_private_chat=is_private_chat,
-                )])
+                )
+                if view_plan:
+                    extras.pre_primary_rows.append([view_plan])
 
         return extras
 

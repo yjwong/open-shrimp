@@ -28,8 +28,7 @@ from open_shrimp.host_shell import (
     kill_host_shell_tree,
     spawn_host_shell,
 )
-from open_shrimp.mini_app import make_web_app_button
-from open_shrimp.web_url import mini_app_base
+from open_shrimp.mini_app import make_web_app_button, mini_app_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -363,26 +362,18 @@ def create_openshrimp_tools(
         def _preview_button(label: str, app: str) -> InlineKeyboardMarkup | None:
             """Build a Mini App button opening *app* (e.g. "preview", "pdf")
             on *path*, or None when Telegram could not open a Mini App."""
-            base_url = mini_app_base(config)
-            if not base_url:
-                return None
-
             from urllib.parse import quote
 
             params = f"path={quote(path, safe='')}&chat_id={chat_id}"
             if thread_id is not None:
                 params += f"&thread_id={thread_id}"
-            url = f"{base_url}/{app}/?{params}"
-            return InlineKeyboardMarkup([[
-                make_web_app_button(
-                    label,
-                    url,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    bot_token=config.telegram.token,
-                    is_private_chat=is_private_chat,
-                ),
-            ]])
+            return mini_app_keyboard(
+                [(label, f"/{app}/?{params}")],
+                config=config,
+                chat_id=chat_id,
+                user_id=user_id,
+                is_private_chat=is_private_chat,
+            )
 
         # Build a Mini App button for reviewable file types.
         reply_markup = None
@@ -1054,19 +1045,13 @@ def create_openshrimp_tools(
         or ``None`` when Telegram could not open a Mini App."""
         if not (context_name and config is not None):
             return None
-        base_url = mini_app_base(config)
-        if not base_url:
-            return None
-        return InlineKeyboardMarkup([[
-            make_web_app_button(
-                label,
-                f"{base_url}/vnc/?context={context_name}",
-                chat_id=chat_id,
-                user_id=user_id,
-                bot_token=config.telegram.token,
-                is_private_chat=is_private_chat,
-            ),
-        ]])
+        return mini_app_keyboard(
+            [(label, f"/vnc/?context={context_name}")],
+            config=config,
+            chat_id=chat_id,
+            user_id=user_id,
+            is_private_chat=is_private_chat,
+        )
 
     if _cu_sandbox is not None and computer_use:
 
@@ -1836,22 +1821,22 @@ def create_openshrimp_tools(
             # Best-effort — presentation must never break the monitor.
             from open_shrimp.handlers.utils import _escape_mdv2
 
-            reply_markup = None
-            if terminal_base_url and config is not None:
-                app_url = (
-                    f"{terminal_base_url}/terminal/"
-                    f"?type=task&id={mon.monitor_id}"
+            view_output = (
+                make_web_app_button(
+                    "📺 View output",
+                    terminal_base_url,
+                    f"/terminal/?type=task&id={mon.monitor_id}",
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    bot_token=config.telegram.token,
+                    is_private_chat=is_private_chat,
                 )
-                reply_markup = InlineKeyboardMarkup([[
-                    make_web_app_button(
-                        "📺 View output",
-                        app_url,
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        bot_token=config.telegram.token,
-                        is_private_chat=is_private_chat,
-                    ),
-                ]])
+                if config is not None
+                else None
+            )
+            reply_markup = (
+                InlineKeyboardMarkup([[view_output]]) if view_output else None
+            )
             status_msg = None
             try:
                 status_msg = await bot.send_message(

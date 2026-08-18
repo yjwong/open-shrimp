@@ -557,22 +557,24 @@ async def get_or_create_session(
                 else:
                     progress_text = "Starting sandbox\\.\\.\\."
 
-                keyboard = None
-                if terminal_base_url and config is not None:
-                    app_url = (
-                        f"{terminal_base_url}/terminal/"
-                        f"?type=container_build&id={context_name}"
+                build_log_button = (
+                    make_web_app_button(
+                        "📺 View build log",
+                        terminal_base_url,
+                        f"/terminal/?type=container_build&id={context_name}",
+                        chat_id=scope.chat_id,
+                        user_id=user_id,
+                        bot_token=config.telegram.token,
+                        is_private_chat=is_private_chat,
                     )
-                    keyboard = InlineKeyboardMarkup([[
-                        make_web_app_button(
-                            "📺 View build log",
-                            app_url,
-                            chat_id=scope.chat_id,
-                            user_id=user_id,
-                            bot_token=config.telegram.token,
-                            is_private_chat=is_private_chat,
-                        )
-                    ]])
+                    if config is not None
+                    else None
+                )
+                keyboard = (
+                    InlineKeyboardMarkup([[build_log_button]])
+                    if build_log_button
+                    else None
+                )
                 await bot.send_message(
                     chat_id=scope.chat_id,
                     message_thread_id=scope.thread_id,

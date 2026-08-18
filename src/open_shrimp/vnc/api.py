@@ -27,6 +27,7 @@ from open_shrimp.security_key.api import (
     DEFAULT_SESSION_LIFETIME_SECONDS,
     create_security_key_session,
     get_or_create_registry,
+    phone_url,
     security_key_destination_label,
 )
 from open_shrimp.security_key.bootstrap import start_vm_helper
@@ -585,11 +586,10 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
         idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
     )
 
-    phone_base = phone_websocket_base(config)
     relay_base = (
         f"ws://{sandbox.host_address}:{config.review.port}"
         if sandbox is not None
-        else phone_base
+        else phone_websocket_base(config)
     )
     helper_result = None
     if sandbox is not None:
@@ -606,10 +606,7 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
     record = await get_security_key_session_record(
         request.app.state.db, session_id=session.id
     )
-    phone_url = (
-        f"{phone_base}/api/security-key/sessions/{session.id}/phone"
-        f"?token={session.phone_token}"
-    )
+    session_phone_url = phone_url(config, session)
 
     return JSONResponse(
         {
@@ -621,8 +618,8 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
             "requested_device_id": (
                 record["requested_device_id"] if record is not None else None
             ),
-            "manual_fallback": {"phone_url": phone_url},
-            "phone_url": phone_url,
+            "manual_fallback": {"phone_url": session_phone_url},
+            "phone_url": session_phone_url,
             "vm_helper_command": (
                 "sudo openshrimp-security-key-vm-helper "
                 f"--relay-url {relay_base} "

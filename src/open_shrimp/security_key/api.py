@@ -81,7 +81,7 @@ def get_or_create_registry(state: Any) -> SecurityKeySessionRegistry:
     return registry
 
 
-def _phone_url(config: Config, session: SecurityKeyRelaySession) -> str:
+def phone_url(config: Config, session: SecurityKeyRelaySession) -> str:
     return (
         f"{phone_websocket_base(config)}/api/security-key/sessions/{session.id}/phone"
         f"?token={session.phone_token}"
@@ -178,7 +178,7 @@ async def create_session_endpoint(request: Request) -> JSONResponse:
             "destination_label": security_key_destination_label(
                 config, context_name, sandbox_id
             ),
-            "phone_url": _phone_url(config, session),
+            "phone_url": phone_url(config, session),
             "phone_token": session.phone_token,
             "vm_token": session.vm_token,
         },
@@ -513,7 +513,7 @@ async def android_claim_session_endpoint(request: Request) -> JSONResponse:
             "destination_label": security_key_destination_label(
                 request.app.state.config, record["context_name"], record["sandbox_id"]
             ),
-            "phone_url": _phone_url(request.app.state.config, session),
+            "phone_url": phone_url(request.app.state.config, session),
         }
     )
 

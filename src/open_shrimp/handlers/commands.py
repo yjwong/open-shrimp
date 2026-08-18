@@ -63,6 +63,7 @@ from open_shrimp.security_key.api import (
     DEFAULT_SESSION_LIFETIME_SECONDS,
     create_security_key_session,
     get_or_create_registry,
+    phone_url,
     security_key_destination_label,
 )
 from open_shrimp.security_key.bootstrap import start_vm_helper
@@ -1325,17 +1326,15 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context_name, ctx = await _get_context(scope, config, db)
 
-    chat_type = update.effective_chat.type if update.effective_chat else "private"
-
     escaped_context = _escape_mdv2(context_name)
     dirs = [ctx.directory] + (ctx.additional_directories or [])
     thread_param = f"&thread_id={scope.thread_id}" if scope.thread_id is not None else ""
 
     if len(dirs) == 1:
-        rows = [[(
+        buttons = [(
             "\U0001f4dd Open Review",
             f"/app/?chat_id={scope.chat_id}{thread_param}",
-        )]]
+        )]
         escaped_dir = _escape_mdv2(ctx.directory)
         text = (
             f"Review changes in *{escaped_context}*\n"
@@ -1343,11 +1342,11 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     else:
         # Multiple directories: one button per directory.
-        rows = [
-            [(
+        buttons = [
+            (
                 f"\U0001f4c1 {d.rstrip('/').rsplit('/', 1)[-1]}",
                 f"/app/?chat_id={scope.chat_id}&dir={i}{thread_param}",
-            )]
+            )
             for i, d in enumerate(dirs)
         ]
         text = f"Review changes in *{escaped_context}*"
@@ -1355,10 +1354,10 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await reply_mini_app(
         update.message,
         text=text,
-        rows=rows,
+        buttons=buttons,
         config=config,
         user_id=update.effective_user.id,
-        is_private_chat=chat_type == "private",
+        is_private_chat=_is_private_chat(update),
         opens="the page that shows what I've changed",
         still_works=(
             "Chatting with me here still works, and so does everything I do "
@@ -1395,38 +1394,38 @@ async def _open_vnc_viewer(
 
     context_name, ctx = await _get_context(scope, config, db)
 
+    # The screen the user sees, which is not the capability's name: a
+    # phone-use context shows Android inside the same labwc desktop, and the
+    # config key gating a desktop is ``computer_use``.
+    noun = "phone" if phone else "desktop"
     if phone:
         enabled = ctx.sandbox is not None and ctx.sandbox.phone_use
-        missing_msg = "does not have phone use enabled"
+        capability = "phone use"
     else:
         enabled = (
             (ctx.container is not None and ctx.container.computer_use)
             or (ctx.sandbox is not None and ctx.sandbox.computer_use)
         )
-        missing_msg = "does not have computer use enabled"
+        capability = "computer use"
     if not enabled:
         await update.message.reply_text(
-            f"Context `{_escape_mdv2(context_name)}` {missing_msg}\\.",
+            f"Context `{_escape_mdv2(context_name)}` does not have "
+            f"{capability} enabled\\.",
             parse_mode="MarkdownV2",
         )
         return
 
-    chat_type = update.effective_chat.type if update.effective_chat else "private"
-    label = "View phone" if phone else "View desktop"
-    screen = "phone screen" if phone else "desktop"
-
     escaped_context = _escape_mdv2(context_name)
-    title = "Phone" if phone else "Desktop"
     await reply_mini_app(
         update.message,
-        text=f"{title} for *{escaped_context}*",
-        rows=[[(label, f"/vnc/?context={context_name}")]],
+        text=f"{noun.capitalize()} for *{escaped_context}*",
+        buttons=[(f"View {noun}", f"/vnc/?context={context_name}")],
         config=config,
         user_id=update.effective_user.id,
-        is_private_chat=chat_type == "private",
-        opens=f"the live view of the {screen}",
+        is_private_chat=_is_private_chat(update),
+        opens=f"the live view of the {noun}",
         still_works=(
-            f"I can still use the {screen} myself, and I can take a "
+            f"I can still use the {noun} myself, and I can take a "
             "screenshot and send it to you here whenever you ask — you just "
             "can't watch or click on it live."
         ),
@@ -1536,16 +1535,11 @@ async def security_key_handler(
         idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
     )
 
-    phone_base = phone_websocket_base(config)
-    phone_url = (
-        f"{phone_base}/api/security-key/sessions/{session.id}/phone"
-        f"?token={session.phone_token}"
-    )
-
+    session_phone_url = phone_url(config, session)
     if sandbox is not None:
         relay_base = f"ws://{sandbox.host_address}:{config.review.port}"
     else:
-        relay_base = phone_base
+        relay_base = phone_websocket_base(config)
     helper_cmd = (
         "sudo openshrimp-security-key-vm-helper "
         f"--relay-url {relay_base} "
@@ -1575,7 +1569,7 @@ async def security_key_handler(
     manual_fallback_lines = (
         [
             r"Manual phone URL \(advanced debug fallback\):",
-            f"`{_escape_mdv2(phone_url)}`",
+            f"`{_escape_mdv2(session_phone_url)}`",
         ]
         if show_manual_fallback
         else [
@@ -1727,18 +1721,16 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if backend is not None:
         body = backend.copy().login_mini_app_body or body
 
-    chat_type = update.effective_chat.type if update.effective_chat else "private"
-
     # The sign-in page is the only way to authenticate from Telegram, so its
     # explanation names that consequence rather than leaving the user to
     # discover it as a failed turn later.
     await reply_mini_app(
         update.message,
         text=_escape_mdv2(body),
-        rows=[[("Open login", "/terminal/?mode=login")]],
+        buttons=[("Open login", "/terminal/?mode=login")],
         config=config,
         user_id=update.effective_user.id,
-        is_private_chat=chat_type == "private",
+        is_private_chat=_is_private_chat(update),
         opens="the sign-in page",
         still_works=(
             "This is the only way to sign in from Telegram, so until it's "
@@ -2235,16 +2227,13 @@ async def config_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
         return
 
-    chat_type = update.effective_chat.type if update.effective_chat else "private"
-
     await reply_mini_app(
         message,
         text="OpenShrimp configuration",
-        rows=[[("\u2699\ufe0f Edit Configuration", "/config/")]],
+        buttons=[("\u2699\ufe0f Edit Configuration", "/config/")],
         config=config,
         user_id=update.effective_user.id,
-        is_private_chat=chat_type == "private",
-        parse_mode=None,
+        is_private_chat=_is_private_chat(update),
         opens="the settings page",
         still_works=(
             "Chatting with me here still works, and every setting is also "

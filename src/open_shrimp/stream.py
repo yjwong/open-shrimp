@@ -924,31 +924,24 @@ async def stream_response(
                         desc = event.description or "Background task"
                         chunks = gfm_to_telegram(f"⏳ {desc}")
                         text = chunks[0] if chunks else f"⏳ {desc}"
-                        buttons: list[InlineKeyboardButton] = []
-                        if terminal_base_url:
-                            task_type_param = (
-                                f"&task_type={event.task_type}"
-                                if event.task_type
-                                else ""
-                            )
-                            app_url = (
-                                f"{terminal_base_url}/terminal/"
-                                f"?type=task&id={event.task_id}"
-                                f"{task_type_param}"
-                            )
-                            buttons.append(
-                                make_web_app_button(
-                                    "📺 View output",
-                                    app_url,
-                                    chat_id=state.chat_id,
-                                    user_id=state.user_id,
-                                    bot_token=state.bot_token,
-                                    is_private_chat=state.is_private_chat,
-                                )
-                            )
+                        task_type_param = (
+                            f"&task_type={event.task_type}"
+                            if event.task_type
+                            else ""
+                        )
+                        view_output = make_web_app_button(
+                            "📺 View output",
+                            terminal_base_url,
+                            f"/terminal/?type=task&id={event.task_id}"
+                            f"{task_type_param}",
+                            chat_id=state.chat_id,
+                            user_id=state.user_id,
+                            bot_token=state.bot_token,
+                            is_private_chat=state.is_private_chat,
+                        )
                         keyboard = (
-                            InlineKeyboardMarkup([buttons])
-                            if buttons
+                            InlineKeyboardMarkup([[view_output]])
+                            if view_output
                             else None
                         )
                         await bot.send_message(
