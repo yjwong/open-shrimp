@@ -477,7 +477,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
 
 
 def _attach_file_logging() -> None:
-    """Log to a rotating file where nothing else captures stderr.
+    """Log to a rotating file at a path we can name, on every platform.
 
     A core launched by a menu-bar or tray front end, or by a logon task, writes
     to a console nobody can read; the front end deliberately leaves its output
@@ -485,13 +485,15 @@ def _attach_file_logging() -> None:
     here rather than in the supervisor means it survives however the core was
     started.
 
-    Not on Linux, where the core is run from a terminal or from a service
-    manager that already captures stderr, and a second copy on disk would be
-    duplication nobody asked for.
+    Linux is no exception.  The systemd user unit sets neither StandardOutput
+    nor StandardError, so stderr does reach the journal and the file is a
+    second copy of it — that is accepted, not overlooked.  A journal is only
+    readable to someone who will run ``journalctl --user -u open-shrimp``, and
+    an operator who would not is exactly the one who needs to hand a
+    post-mortem over.  The artifact has to already exist before anybody can be
+    asked for it, so it is written unconditionally rather than where we guess
+    stderr goes unread.
     """
-    if sys.platform not in ("win32", "darwin"):
-        return
-
     root = logging.getLogger()
     if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
         return

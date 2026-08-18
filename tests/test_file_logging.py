@@ -1,8 +1,11 @@
-"""Windows file logging.
+"""The core's own log file.
 
-A core started by a tray app or a logon task has no console anyone can read,
-so it owns its own rotating log.  Everywhere else the log already has a home
-and this must stay out of the way.
+A core started by a tray app, a logon task or a service manager has no console
+anyone can read, so it owns a rotating log at a path it can name — on every
+platform, because a post-mortem nobody can be handed is one that does not
+exist.  What is tested here is mostly what it refuses to do: crash the boot
+because the directory would not open, and stack a second handler that doubles
+every line.
 """
 
 from __future__ import annotations
@@ -38,19 +41,13 @@ def test_log_dir_is_instance_scoped():
     assert "blue" in str(scoped)
 
 
-def test_no_file_handler_off_windows(clean_root_handlers, monkeypatch, tmp_path):
-    monkeypatch.setattr("sys.platform", "linux")
-    monkeypatch.setattr("open_shrimp.main.log_dir", lambda: tmp_path)
-
-    _attach_file_logging()
-
-    assert not any(
-        isinstance(h, RotatingFileHandler) for h in clean_root_handlers.handlers
-    )
-
-
-def test_windows_gets_a_rotating_file(clean_root_handlers, monkeypatch, tmp_path):
-    monkeypatch.setattr("sys.platform", "win32")
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+def test_every_platform_gets_a_rotating_file(
+    clean_root_handlers, monkeypatch, tmp_path, platform: str
+):
+    """Linux included: the journal is only a log for someone who will run
+    journalctl, so the platform must not decide whether a post-mortem exists."""
+    monkeypatch.setattr("sys.platform", platform)
     monkeypatch.setattr("open_shrimp.main.log_dir", lambda: tmp_path / "Logs")
 
     _attach_file_logging()
@@ -65,10 +62,27 @@ def test_windows_gets_a_rotating_file(clean_root_handlers, monkeypatch, tmp_path
     assert "hello from the core" in (tmp_path / "Logs" / "openshrimp.log").read_text()
 
 
+def test_the_file_rotates_rather_than_growing_without_a_bound(
+    clean_root_handlers, monkeypatch, tmp_path
+):
+    """An unbounded handler on a core that runs for months fills the disk it
+    was installed to help debug."""
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("open_shrimp.main.log_dir", lambda: tmp_path / "Logs")
+
+    _attach_file_logging()
+
+    handler = next(
+        h for h in clean_root_handlers.handlers if isinstance(h, RotatingFileHandler)
+    )
+    assert handler.maxBytes > 0
+    assert handler.backupCount > 0
+
+
 def test_attaching_twice_does_not_duplicate(clean_root_handlers, monkeypatch, tmp_path):
     """run_bot_async is re-entered by the macOS app; a second run must not
     stack another handler and double every line."""
-    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("sys.platform", "linux")
     monkeypatch.setattr("open_shrimp.main.log_dir", lambda: tmp_path / "Logs")
 
     _attach_file_logging()
@@ -80,18 +94,25 @@ def test_attaching_twice_does_not_duplicate(clean_root_handlers, monkeypatch, tm
     )
 
 
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 def test_unwritable_log_dir_does_not_stop_the_core(
-    clean_root_handlers, monkeypatch, tmp_path
+    clean_root_handlers, monkeypatch, tmp_path, platform: str
 ):
-    monkeypatch.setattr("sys.platform", "win32")
+    """A log file is a convenience; refusing to boot without one would trade a
+    missing post-mortem for a bot that never comes up at all."""
+    monkeypatch.setattr("sys.platform", platform)
 
     def _boom():
         raise OSError("read-only filesystem")
 
     monkeypatch.setattr("open_shrimp.main.log_dir", _boom)
+    before = list(clean_root_handlers.handlers)
 
     _attach_file_logging()  # must not raise
 
     assert not any(
         isinstance(h, RotatingFileHandler) for h in clean_root_handlers.handlers
     )
+    # The failure cost the file, not the stream: whatever was carrying the log
+    # before is still attached and still carrying it.
+    assert clean_root_handlers.handlers == before
