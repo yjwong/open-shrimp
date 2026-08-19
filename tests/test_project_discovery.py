@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from open_shrimp.backend.claude_sdk.projects import discover_claude_projects
-from open_shrimp.main import _run_projects_discover
+from open_shrimp.main import _run_projects_discover, _run_projects_name
 
 
 def _real(session: str = "abc-123", **extra) -> dict:
@@ -259,3 +259,63 @@ def test_an_empty_result_is_still_valid_json(tmp_path, monkeypatch, capsys):
 
     assert _run_projects_discover(json_output=True) == 0
     assert json.loads(capsys.readouterr().out) == {"projects": []}
+
+
+# ---------------------------------------------------------------------------
+# Naming one folder
+#
+# A wizard with a folder picker has the same question about the folder the
+# user chose, and no way to answer it: the rule for a legal context name lives
+# in Python.  Answering it here is what stops a GUI naming a folder it picked
+# differently from the same folder found by discovery.
+# ---------------------------------------------------------------------------
+
+
+def _named(capsys, path: str, taken: str = "") -> dict:
+    assert _run_projects_name(path=path, taken=taken, json_output=True) == 0
+    rows = json.loads(capsys.readouterr().out)["projects"]
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_naming_answers_in_the_same_shape_as_discovery(tmp_path, monkeypatch, capsys):
+    """So both GUIs decode it with the decoder they already have."""
+    _write_claude_json(
+        tmp_path, monkeypatch, {"/home/ada/real": _real(lastStartTime=17)}
+    )
+    assert _run_projects_discover(json_output=True) == 0
+    discovered = json.loads(capsys.readouterr().out)["projects"][0]
+
+    assert _named(capsys, "/home/ada/real").keys() == discovered.keys()
+
+
+def test_a_hand_picked_folder_is_named_by_the_same_rule(capsys):
+    """The rule discovery applies, applied to a folder the picker found."""
+    assert _named(capsys, "/home/ada/work/talenthub.glints.com") == {
+        "directory": "/home/ada/work/talenthub.glints.com",
+        "name": "talenthub.glints.com",
+        "context_name": "talenthub-glints-com",
+        "last_start_time": None,
+    }
+
+
+def test_the_names_the_caller_already_used_are_avoided(capsys):
+    """Uniqueness is a property of the list being built, and only the caller
+    holding that list knows what is in it."""
+    assert _named(capsys, "/home/ada/api", taken="api,api-2")["context_name"] == "api-3"
+
+
+def test_the_reserved_name_is_refused_here_too(capsys):
+    assert _named(capsys, "/home/ada/openshrimp")["context_name"] == "openshrimp-2"
+
+
+def test_a_unicode_folder_name_survives(capsys):
+    """The validator is Unicode-aware, so a name it would accept must not be
+    mangled for looking foreign — and no front end may narrow it."""
+    assert _named(capsys, "/home/ada/café")["context_name"] == "café"
+
+
+def test_an_empty_taken_list_names_nothing_taken(capsys):
+    """A GUI adding its first row sends no names, which must not read as one
+    empty name already spoken for."""
+    assert _named(capsys, "/home/ada/api", taken="")["context_name"] == "api"

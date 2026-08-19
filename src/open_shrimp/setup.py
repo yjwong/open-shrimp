@@ -176,6 +176,26 @@ def _prompt_yes_no(label: str, *, default: bool = True) -> bool:
         print("  Please answer y or n.")
 
 
+def _prompt_choice(label: str, count: int, *, default: str | None = None) -> int:
+    """Ask for one of *count* numbered options, and return the number typed.
+
+    Every numbered list in the wizard is bounded the same way, so the bound and
+    the sentence that states it are written once: a list whose refusal names a
+    range it does not enforce is the way an off-by-one reaches a user.
+    """
+
+    def _check(value: str) -> str | None:
+        try:
+            choice = int(value)
+        except ValueError:
+            return f"Enter a number between 1 and {count}."
+        if not 1 <= choice <= count:
+            return f"Enter a number between 1 and {count}."
+        return None
+
+    return int(_prompt(label, default=default, validator=_check))
+
+
 def _open_client() -> httpx.AsyncClient:
     """The HTTP client every Telegram call in the wizard runs on.
 
@@ -554,18 +574,9 @@ def _prompt_sandbox(count: int) -> str | None:
         for offer in missing:
             print(f"    {offer.label} — {offer.detail}")
 
-    def _check(value: str) -> str | None:
-        try:
-            choice = int(value)
-        except ValueError:
-            return f"Enter a number between 1 and {len(ready) + 1}."
-        if not 1 <= choice <= len(ready) + 1:
-            return f"Enter a number between 1 and {len(ready) + 1}."
-        return None
-
     # No default: an isolation setting nobody chose is the one thing this
     # question exists to prevent.
-    choice = int(_prompt("Sandbox", validator=_check))
+    choice = _prompt_choice("Sandbox", len(ready) + 1)
     return ready[choice - 1].backend if choice <= len(ready) else None
 
 
@@ -578,16 +589,7 @@ def _prompt_model() -> str | None:
         print(f"  {i}. {display} ({model_desc})")
     print(f"  {len(_MODELS) + 1}. Enter a custom model name")
 
-    def _check(value: str) -> str | None:
-        try:
-            choice = int(value)
-        except ValueError:
-            return f"Enter a number between 1 and {len(_MODELS) + 1}."
-        if not 1 <= choice <= len(_MODELS) + 1:
-            return f"Enter a number between 1 and {len(_MODELS) + 1}."
-        return None
-
-    choice = int(_prompt("Model", default="1", validator=_check))
+    choice = _prompt_choice("Model", len(_MODELS) + 1, default="1")
     if choice <= len(_MODELS):
         return _MODELS[choice - 1][0]
     return _prompt("Custom model name")

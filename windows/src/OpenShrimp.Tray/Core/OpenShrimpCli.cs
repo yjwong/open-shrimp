@@ -162,24 +162,39 @@ internal static class OpenShrimpCli
             : lastLine;
     }
 
-    public static async Task<IReadOnlyList<ModelChoice>> GetModelsAsync(CancellationToken ct = default)
+    /// <summary>
+    /// The rows of a <c>--json</c> listing command, or an empty list if it had
+    /// none to give.
+    ///
+    /// Every listing command answers the same shape — one object holding one
+    /// array under a named key — so a command that could not be run, could not
+    /// be parsed or exited non-zero all come back as "nothing", which is a
+    /// screen each caller already has.
+    /// </summary>
+    private static async Task<IReadOnlyList<T>> ListAsync<T>(
+        string arguments, string key, CancellationToken ct)
     {
         try
         {
-            var result = await RunAsync("models --json", null, ct).ConfigureAwait(false);
-            if (result.ExitCode != 0) return Array.Empty<ModelChoice>();
+            var result = await RunAsync(arguments, null, ct).ConfigureAwait(false);
+            if (result.ExitCode != 0) return Array.Empty<T>();
 
             using var document = JsonDocument.Parse(result.Stdout);
-            return document.RootElement.GetProperty("models")
-                .Deserialize<List<ModelChoice>>(ControlJson.Options) ?? new List<ModelChoice>();
+            return document.RootElement.GetProperty(key)
+                .Deserialize<List<T>>(ControlJson.Options) ?? (IReadOnlyList<T>)Array.Empty<T>();
         }
         catch (Exception)
         {
-            // The picker falls back to "CLI default" rather than blocking the
-            // wizard on a catalog it can only offer as a convenience.
-            return Array.Empty<ModelChoice>();
+            return Array.Empty<T>();
         }
     }
+
+    /// <summary>
+    /// The model catalog. The picker falls back to "CLI default" rather than
+    /// blocking the wizard on a catalog it can only offer as a convenience.
+    /// </summary>
+    public static Task<IReadOnlyList<ModelChoice>> GetModelsAsync(CancellationToken ct = default) =>
+        ListAsync<ModelChoice>("models --json", "models", ct);
 
     /// <summary>
     /// The projects the core found worth offering to import.
@@ -188,25 +203,32 @@ internal static class OpenShrimpCli
     /// this wizard cannot call Python, so it asks rather than reading
     /// <c>~/.claude.json</c> itself. An empty list is an answer — a fresh
     /// machine has no such file — so a failure here renders as "none found",
-    /// which is a screen the step already has.
+    /// which is a screen this step already has.
     /// </summary>
-    public static async Task<IReadOnlyList<DiscoveredProject>> GetProjectsAsync(
-        CancellationToken ct = default)
-    {
-        try
-        {
-            var result = await RunAsync("projects discover --json", null, ct).ConfigureAwait(false);
-            if (result.ExitCode != 0) return Array.Empty<DiscoveredProject>();
+    public static Task<IReadOnlyList<DiscoveredProject>> GetProjectsAsync(
+        CancellationToken ct = default) =>
+        ListAsync<DiscoveredProject>("projects discover --json", "projects", ct);
 
-            using var document = JsonDocument.Parse(result.Stdout);
-            return document.RootElement.GetProperty("projects")
-                .Deserialize<List<DiscoveredProject>>(ControlJson.Options)
-                ?? new List<DiscoveredProject>();
-        }
-        catch (Exception)
-        {
-            return Array.Empty<DiscoveredProject>();
-        }
+    /// <summary>
+    /// What one folder the user picked should be called as a context.
+    ///
+    /// Asked rather than derived: what a folder may be called is a rule with
+    /// one implementation, in the core, and a folder name is under no
+    /// obligation to obey it — <c>talenthub.glints.com</c> is an ordinary
+    /// directory and an illegal context. Answering it here would be a second
+    /// rule, and the same folder would be named one way when discovery found
+    /// it and another when the picker did. <paramref name="taken"/> is what
+    /// the list already holds, because uniqueness is a property of that list
+    /// and only the caller knows what is in it.
+    /// </summary>
+    public static async Task<DiscoveredProject?> GetProjectNameAsync(
+        string directory, IEnumerable<string> taken, CancellationToken ct = default)
+    {
+        var rows = await ListAsync<DiscoveredProject>(
+            $"projects name --path \"{directory}\" --taken \"{string.Join(",", taken)}\" --json",
+            "projects",
+            ct).ConfigureAwait(false);
+        return rows.Count == 0 ? null : rows[0];
     }
 
     /// <summary>
@@ -216,24 +238,9 @@ internal static class OpenShrimpCli
     /// met, is <c>doctor</c>'s answer. Offering one this PC cannot run would
     /// write a config that fails on every turn from then on.
     /// </summary>
-    public static async Task<IReadOnlyList<SandboxChoice>> GetSandboxesAsync(
-        CancellationToken ct = default)
-    {
-        try
-        {
-            var result = await RunAsync("sandboxes --json", null, ct).ConfigureAwait(false);
-            if (result.ExitCode != 0) return Array.Empty<SandboxChoice>();
-
-            using var document = JsonDocument.Parse(result.Stdout);
-            return document.RootElement.GetProperty("sandboxes")
-                .Deserialize<List<SandboxChoice>>(ControlJson.Options)
-                ?? new List<SandboxChoice>();
-        }
-        catch (Exception)
-        {
-            return Array.Empty<SandboxChoice>();
-        }
-    }
+    public static Task<IReadOnlyList<SandboxChoice>> GetSandboxesAsync(
+        CancellationToken ct = default) =>
+        ListAsync<SandboxChoice>("sandboxes --json", "sandboxes", ct);
 
     /// <summary>Writes config.yaml. Returns null on success, else the reason.</summary>
     public static async Task<string?> WriteConfigAsync(ConfigWriteRequest request, CancellationToken ct = default)

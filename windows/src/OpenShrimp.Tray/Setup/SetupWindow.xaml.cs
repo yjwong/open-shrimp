@@ -60,10 +60,6 @@ public sealed partial class SetupWindow : Window
 {
     private const int StepCount = 4;
 
-    /// The one name a project may not take: OpenShrimp builds that context in
-    /// code and refuses it in config.yaml.
-    private const string ReservedContextName = "openshrimp";
-
     private int _step;
     private string? _verifiedToken;
     private string? _verifiedUsername;
@@ -633,32 +629,27 @@ public sealed partial class SetupWindow : Window
         var chosen = ChosenRows();
         if (chosen.Count == 0) return Array.Empty<ConfigContext>();
 
+        // What a context may be called is the core's rule, and config write
+        // refuses a name that breaks it with a reason this wizard shows
+        // verbatim — so nothing here restates it. These two are checks the core
+        // cannot make: it never sees an empty field, and it is handed a
+        // mapping, where two rows sharing a name would leave one behind and
+        // report an import of two projects that produced one.
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var row in chosen)
         {
             var name = row.NameBox.Text.Trim();
-            if (name.Length == 0 || !name.All(c => char.IsLetterOrDigit(c) || c is '-' or '_'))
+            if (name.Length == 0)
             {
                 SetMessage(
                     ContextMessage,
-                    $"\"{row.Label}\": use only letters, numbers, hyphens and underscores.",
+                    $"\"{row.Label}\": give this project a name.",
                     error: true);
                 return null;
             }
-            // Refused here rather than by the core, because a mapping would
-            // keep the last of two and report an import of two projects that
-            // produced one.
             if (!seen.Add(name))
             {
                 SetMessage(ContextMessage, $"Two projects are both called \"{name}\".", error: true);
-                return null;
-            }
-            if (name == ReservedContextName)
-            {
-                SetMessage(
-                    ContextMessage,
-                    $"\"{name}\" is reserved for OpenShrimp's own context.",
-                    error: true);
                 return null;
             }
         }
@@ -712,7 +703,14 @@ public sealed partial class SetupWindow : Window
     /// </summary>
     private async Task LoadCoreFactsAsync()
     {
-        _models = await OpenShrimpCli.GetModelsAsync();
+        // Together, not one after another: none of the three depends on the
+        // others, and each is a separate spawn that re-pays interpreter and
+        // import startup.
+        var models = OpenShrimpCli.GetModelsAsync();
+        var projects = OpenShrimpCli.GetProjectsAsync();
+        var sandboxes = OpenShrimpCli.GetSandboxesAsync();
+        await Task.WhenAll(models, projects, sandboxes);
+        _models = await models;
 
         ModelBox.Items.Clear();
         ModelBox.Items.Add(new ComboBoxItem { Content = "CLI default (recommended)", Tag = null });
@@ -720,10 +718,10 @@ public sealed partial class SetupWindow : Window
             ModelBox.Items.Add(new ComboBoxItem { Content = $"{model.Alias} — {model.Description}", Tag = model.Alias });
         ModelBox.SelectedIndex = 0;
 
-        foreach (var project in await OpenShrimpCli.GetProjectsAsync())
+        foreach (var project in await projects)
             AddProjectRow(project.ContextName, project.Directory, project.Name);
 
-        BuildSandboxChoices(await OpenShrimpCli.GetSandboxesAsync());
+        BuildSandboxChoices(await sandboxes);
 
         DiscoverySpinner.IsActive = false;
         DiscoveryLabel.Visibility = Visibility.Collapsed;
@@ -816,10 +814,16 @@ public sealed partial class SetupWindow : Window
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null) return;
 
-        // The folder's own name goes in the name box unaltered: it is validated
-        // in front of the user, and the core is the authority on what a context
-        // may be called.
-        AddProjectRow(folder.Name, folder.Path, folder.Name);
+        // The name comes from the core, not from the folder: what a context may
+        // be called is a rule with one implementation, and a folder name is
+        // under no obligation to obey it. Naming it here would be a second
+        // rule, and the same folder would end up called one thing when
+        // discovery found it and another when this picker did. A core that
+        // cannot answer leaves the basename in an editable box, which is the
+        // screen this step already has for a name that needs correcting.
+        var named = await OpenShrimpCli.GetProjectNameAsync(
+            folder.Path, _rows.Select(row => row.NameBox.Text.Trim()));
+        AddProjectRow(named?.ContextName ?? folder.Name, folder.Path, folder.Name);
         UpdateProjectStep();
     }
 

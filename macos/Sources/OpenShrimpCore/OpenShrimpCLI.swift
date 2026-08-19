@@ -199,30 +199,52 @@ enum OpenShrimpCLI {
         return lastLine ?? "Core exited \(result.exitCode) without starting"
     }
 
-    static func models() async -> [ModelChoice] {
+    /// The rows of a `--json` listing command, or an empty list if it had none
+    /// to give.
+    ///
+    /// Every listing command answers the same shape — one object holding one
+    /// array under a named key — so a command that cannot be read, cannot be
+    /// parsed or exited non-zero all come back as "nothing", which is a screen
+    /// each caller already has.
+    private static func jsonList(_ arguments: [String], key: String) async -> [[String: Any]] {
         do {
-            let result = try await run(["models", "--json"])
+            let result = try await run(arguments)
             if result.exitCode != 0 { return [] }
 
             guard
                 let parsed = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
                     as? [String: Any],
-                let models = parsed["models"] as? [[String: Any]]
+                let rows = parsed[key] as? [[String: Any]]
             else { return [] }
-
-            return models.compactMap { entry in
-                guard let alias = entry["alias"] as? String else { return nil }
-                return ModelChoice(
-                    alias: alias,
-                    modelID: entry["model_id"] as? String ?? "",
-                    description: entry["description"] as? String ?? ""
-                )
-            }
+            return rows
         } catch {
-            // The picker falls back to "CLI default" rather than blocking the
-            // wizard on a catalog it can only offer as a convenience.
             return []
         }
+    }
+
+    /// The picker falls back to "CLI default" rather than blocking the wizard
+    /// on a catalog it can only offer as a convenience.
+    static func models() async -> [ModelChoice] {
+        await jsonList(["models", "--json"], key: "models").compactMap { entry in
+            guard let alias = entry["alias"] as? String else { return nil }
+            return ModelChoice(
+                alias: alias,
+                modelID: entry["model_id"] as? String ?? "",
+                description: entry["description"] as? String ?? ""
+            )
+        }
+    }
+
+    private static func project(_ entry: [String: Any]) -> DiscoveredProject? {
+        guard
+            let directory = entry["directory"] as? String,
+            let contextName = entry["context_name"] as? String
+        else { return nil }
+        return DiscoveredProject(
+            directory: directory,
+            name: entry["name"] as? String ?? contextName,
+            contextName: contextName
+        )
     }
 
     /// The projects the core found worth offering to import.
@@ -233,30 +255,26 @@ enum OpenShrimpCLI {
     /// has no such file — so a failure here renders as "none found", which is
     /// a screen the step already has.
     static func projects() async -> [DiscoveredProject] {
-        do {
-            let result = try await run(["projects", "discover", "--json"])
-            if result.exitCode != 0 { return [] }
+        await jsonList(["projects", "discover", "--json"], key: "projects")
+            .compactMap(project)
+    }
 
-            guard
-                let parsed = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
-                    as? [String: Any],
-                let found = parsed["projects"] as? [[String: Any]]
-            else { return [] }
-
-            return found.compactMap { entry in
-                guard
-                    let directory = entry["directory"] as? String,
-                    let contextName = entry["context_name"] as? String
-                else { return nil }
-                return DiscoveredProject(
-                    directory: directory,
-                    name: entry["name"] as? String ?? contextName,
-                    contextName: contextName
-                )
-            }
-        } catch {
-            return []
-        }
+    /// What one folder the user picked should be called as a context.
+    ///
+    /// Asked rather than derived: what a folder may be called is a rule with
+    /// one implementation, in the core, and a folder name is under no
+    /// obligation to obey it — `talenthub.glints.com` is an ordinary directory
+    /// and an illegal context.  Answering it here would be a second rule, and
+    /// the same folder would be named one way when discovery found it and
+    /// another when the picker did.  *taken* is what this list already holds,
+    /// because uniqueness is a property of the list and only it knows.
+    static func name(directory: String, taken: [String]) async -> DiscoveredProject? {
+        let rows = await jsonList(
+            ["projects", "name", "--path", directory, "--taken", taken.joined(separator: ","),
+             "--json"],
+            key: "projects"
+        )
+        return rows.first.flatMap(project)
     }
 
     /// The sandbox backends this host can actually start a project in.
@@ -265,28 +283,15 @@ enum OpenShrimpCLI {
     /// met, is `doctor`'s answer.  Offering one this Mac cannot run would
     /// write a config that fails on every turn from then on.
     static func sandboxes() async -> [SandboxChoice] {
-        do {
-            let result = try await run(["sandboxes", "--json"])
-            if result.exitCode != 0 { return [] }
-
-            guard
-                let parsed = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
-                    as? [String: Any],
-                let found = parsed["sandboxes"] as? [[String: Any]]
-            else { return [] }
-
-            return found.compactMap { entry in
-                guard let backend = entry["backend"] as? String else { return nil }
-                return SandboxChoice(
-                    backend: backend,
-                    label: entry["label"] as? String ?? backend,
-                    summary: entry["summary"] as? String ?? "",
-                    available: entry["available"] as? Bool ?? false,
-                    detail: entry["detail"] as? String ?? ""
-                )
-            }
-        } catch {
-            return []
+        await jsonList(["sandboxes", "--json"], key: "sandboxes").compactMap { entry in
+            guard let backend = entry["backend"] as? String else { return nil }
+            return SandboxChoice(
+                backend: backend,
+                label: entry["label"] as? String ?? backend,
+                summary: entry["summary"] as? String ?? "",
+                available: entry["available"] as? Bool ?? false,
+                detail: entry["detail"] as? String ?? ""
+            )
         }
     }
 

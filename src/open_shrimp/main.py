@@ -12,13 +12,16 @@ import sys
 from collections.abc import Awaitable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from open_shrimp.bot import run_bot
 from open_shrimp.config import DEFAULT_CONFIG_PATH, load_config
 from open_shrimp.db import init_db
 from open_shrimp.paths import init_paths, log_dir
 from open_shrimp.sandbox import SandboxManager, create_sandbox_managers
+
+if TYPE_CHECKING:
+    from open_shrimp.backend.claude_sdk.projects import ClaudeProject
 
 logger = logging.getLogger("open_shrimp")
 
@@ -202,6 +205,26 @@ def _parse_args() -> argparse.Namespace:
         help="List the projects already opened in Claude Code",
     )
     sub_projects_discover.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON (for a setup UI)",
+    )
+    sub_projects_name = projects_subs.add_parser(
+        "name",
+        parents=[common],
+        help="What one folder should be called as a context",
+    )
+    sub_projects_name.add_argument(
+        "--path",
+        required=True,
+        help="The folder to name",
+    )
+    sub_projects_name.add_argument(
+        "--taken",
+        default="",
+        help="Comma-separated names already spoken for, so the answer is unique",
+    )
+    sub_projects_name.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON (for a setup UI)",
@@ -592,18 +615,14 @@ def _run_models(*, json_output: bool, config_path: str) -> int:
     return 0
 
 
-def _run_projects_discover(*, json_output: bool) -> int:
-    """List the projects a setup UI can offer to import.
+def _emit_projects(projects: list[ClaudeProject], *, json_output: bool) -> int:
+    """Report importable projects in the one shape every front end decodes.
 
-    The filter that decides what counts as a project lives in Python, and the
-    two GUI wizards cannot call Python, so they read it from here.  A machine
-    with no ``~/.claude.json`` reports an empty list and exits zero: "nothing
-    to import" is an answer a wizard renders, not a failure it reports.
+    ``discover`` and ``name`` answer the same question about a different number
+    of folders, so they answer it in the same shape: a GUI that has a decoder
+    for one has a decoder for both, and cannot end up naming a folder it picked
+    differently from one the core found.
     """
-    from open_shrimp.backend.claude_sdk.projects import discover_claude_projects
-
-    projects = discover_claude_projects()
-
     if json_output:
         json.dump(
             {
@@ -622,8 +641,46 @@ def _run_projects_discover(*, json_output: bool) -> int:
         sys.stdout.write("\n")
     else:
         for project in projects:
-            print(f"{project.name:<24} {project.directory}")
+            print(f"{project.context_name:<24} {project.directory}")
     return 0
+
+
+def _run_projects_discover(*, json_output: bool) -> int:
+    """List the projects a setup UI can offer to import.
+
+    The filter that decides what counts as a project lives in Python, and the
+    two GUI wizards cannot call Python, so they read it from here.  A machine
+    with no ``~/.claude.json`` reports an empty list and exits zero: "nothing
+    to import" is an answer a wizard renders, not a failure it reports.
+    """
+    from open_shrimp.backend.claude_sdk.projects import discover_claude_projects
+
+    return _emit_projects(discover_claude_projects(), json_output=json_output)
+
+
+def _run_projects_name(*, path: str, taken: str, json_output: bool) -> int:
+    """What one folder the user picked by hand should be called.
+
+    The rule for a legal context name has one implementation, in ``config``,
+    and a folder name is under no obligation to obey it — so a front end with a
+    folder picker asks here rather than offering the basename.  Without this a
+    folder found by discovery and the same folder picked by hand are named
+    differently by the same wizard.
+
+    *taken* is what the caller has already used, because uniqueness is a
+    property of the list being built and only the caller knows it.
+    """
+    from open_shrimp.backend.claude_sdk.projects import ClaudeProject
+    from open_shrimp.config import unique_context_name
+
+    directory = str(Path(path).expanduser())
+    label = Path(directory).name or directory
+    already = {name for name in (part.strip() for part in taken.split(",")) if name}
+
+    return _emit_projects(
+        [ClaudeProject(directory, label, unique_context_name(label, already), None)],
+        json_output=json_output,
+    )
 
 
 def _run_sandboxes(*, json_output: bool) -> int:
@@ -854,7 +911,16 @@ def main() -> None:
     if args.subcommand == "projects":
         if args.projects_command == "discover":
             sys.exit(_run_projects_discover(json_output=args.json))
-        print("usage: openshrimp projects discover [--json]", file=sys.stderr)
+        if args.projects_command == "name":
+            sys.exit(
+                _run_projects_name(
+                    path=args.path, taken=args.taken, json_output=args.json
+                )
+            )
+        print(
+            "usage: openshrimp projects (discover | name --path DIR) [--json]",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     if args.subcommand == "sandboxes":

@@ -17,6 +17,7 @@ import json
 import pytest
 
 from open_shrimp import doctor
+from open_shrimp.config import _SANDBOX_BACKENDS
 from open_shrimp.main import _run_sandboxes
 
 
@@ -45,6 +46,23 @@ def test_only_what_the_platform_can_run_is_offered(
     _on(monkeypatch, system)
 
     assert [offer.backend for offer in doctor.sandbox_offers(None)] == expected
+
+
+def test_every_backend_the_config_accepts_reaches_a_wizard(
+    monkeypatch: pytest.MonkeyPatch, all_pass: None
+) -> None:
+    """The offer list is the config's own registry, not a second copy of it.
+
+    A backend added to ``_SANDBOX_BACKENDS`` and left out of the offers would
+    be a choice the wizard silently never shows, with nothing failing — so the
+    two are pinned equal here rather than kept equal by hand.
+    """
+    offered: set[str] = set()
+    for system in ("Linux", "Darwin", "Windows"):
+        _on(monkeypatch, system)
+        offered |= {offer.backend for offer in doctor.sandbox_offers(None)}
+
+    assert offered == _SANDBOX_BACKENDS
 
 
 def test_a_backend_that_cannot_start_here_keeps_its_remedy(

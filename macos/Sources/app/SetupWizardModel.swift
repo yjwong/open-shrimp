@@ -42,6 +42,20 @@ struct ProjectRow: Identifiable, Hashable {
     var chosen: Bool
 }
 
+/// The isolation answer, including not having given one.
+///
+/// Three states, not an optional string with a sentinel in it: "unanswered"
+/// and "runs on the host" are different answers, and the wire spells the
+/// second of them as the absence the first would also have to be.
+enum SandboxSelection: Hashable {
+    /// Deliberate: importing several folders in one tap is a large increase in
+    /// what a Telegram message can reach, and a pre-filled answer is one
+    /// nobody reads.
+    case unanswered
+    case host
+    case backend(String)
+}
+
 /// Where the enrollment step is.
 ///
 /// Enrollment is an authentication step, so it has more states than a text
@@ -69,16 +83,6 @@ enum EnrollStage: Equatable {
 final class SetupWizardModel: ObservableObject {
     static let stepCount = 4
 
-    /// The characters a context name may hold.  Deliberately ASCII: a context
-    /// name is typed back into Telegram to switch to it.
-    private static let nameCharacters = CharacterSet(
-        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    )
-
-    /// The one name a project may not take: OpenShrimp builds that context in
-    /// code and refuses it in `config.yaml`.
-    private static let reservedName = "openshrimp"
-
     @Published private(set) var step = 0
 
     @Published var token = ""
@@ -99,13 +103,8 @@ final class SetupWizardModel: ObservableObject {
     /// than as a missing feature.
     @Published private(set) var sandboxes: [SandboxChoice] = []
 
-    /// The chosen backend, `SetupWizardModel.noSandbox` for the host, or nil
-    /// for "not answered yet".  Deliberately unanswered at first: importing
-    /// several folders in one tap is a large increase in what a Telegram
-    /// message can reach, and a pre-filled answer is one nobody reads.
-    @Published var sandbox: String?
-
-    static let noSandbox = ""
+    /// How the imported projects run, once the user has said.
+    @Published var sandbox: SandboxSelection = .unanswered
 
     /// Whether finishing registers the app as a login item.
     ///
@@ -156,10 +155,15 @@ final class SetupWizardModel: ObservableObject {
     private var offset: Int64 = 0
     private var enrolledUserID: Int64?
 
-    /// The catalog fetch, which is also the first thing that runs the core at
-    /// all.  Held so the config write can wait for it out rather than launch the
-    /// same self-installing binary alongside it.
+    /// The first thing that runs the core at all.  Held so the config write can
+    /// wait for it out rather than launch the same self-installing binary
+    /// alongside it.
     private var warmup: Task<Void, Never>?
+
+    /// Everything the import step reads off the core.  Separate from the
+    /// warmup, so Finish waits for the bootstrap it races and not for a model
+    /// catalog and a set of sandbox probes it never needed.
+    private var discovery: Task<Void, Never>?
 
     /// Called once the config has been written, with the bot the token belongs
     /// to and, if one was asked for and refused, why the login item could not
@@ -195,49 +199,69 @@ final class SetupWizardModel: ObservableObject {
 
     // -- Setup ----------------------------------------------------------------
 
-    /// Warm the core binary, then fill the picker from its catalog.
+    /// Warm the core binary, then read off it everything the import step asks.
     ///
     /// This is the first thing in the app that runs the core at all — a core
     /// with no config is never started — so it also absorbs the launcher's
-    /// first-run unpack, which takes minutes on a fresh machine.
+    /// first-run unpack, which takes minutes on a fresh machine.  Everything
+    /// after that unpack is one spawn each and depends on none of the others,
+    /// so the three run together rather than paying interpreter startup three
+    /// times in a row.
     func prepare() {
-        warmup = Task {
+        let warmup = Task {
             if let reason = await OpenShrimpCLI.ensureRuntime() {
                 // Notified, not just logged: the wizard runs fine without a
                 // catalog, so nothing else here would tell the user that the
                 // core cannot run until they had finished every step.
                 Notifier.post("The core is not ready to run: \(reason)")
             }
-            let choices = await OpenShrimpCLI.models()
+        }
+        self.warmup = warmup
+
+        // Discovered here rather than when the step is reached: the answer
+        // decides what that step asks — a list to prune, or a folder to pick —
+        // and a step that renders empty and then fills itself has already
+        // asked the wrong question once.
+        discovery = Task {
+            await warmup.value
+            async let choices = OpenShrimpCLI.models()
+            async let found = OpenShrimpCLI.projects()
+            async let isolation = OpenShrimpCLI.sandboxes()
+
             // A catalog that could not be read is a convenience the wizard does
             // without.  Blocking setup on it would make a core that cannot run
             // unfixable from the only UI that could correct its config.
             options = [.cliDefault]
-                + choices.map { .alias(name: $0.alias, description: $0.description) }
+                + (await choices).map { .alias(name: $0.alias, description: $0.description) }
                 + [.custom]
             catalogLoaded = true
 
-            // Discovered here rather than when the step is reached: the answer
-            // decides what that step asks — a list to prune, or a folder to
-            // pick — and a step that renders empty and then fills itself has
-            // already asked the wrong question once.
-            rows = await OpenShrimpCLI.projects().map {
+            rows = await found.map {
                 ProjectRow(name: $0.contextName, directory: $0.directory,
                            label: $0.name, chosen: true)
             }
-            sandboxes = await OpenShrimpCLI.sandboxes()
+            sandboxes = await isolation
             discoveryFinished = true
         }
     }
 
-    /// Append a folder the user picked, ticked, with the folder's own name in
-    /// the editable name field.  Nothing is sanitised here: the field is
-    /// validated in front of the user, and the core is the authority on what a
-    /// context may be called.
-    func addDirectory(_ path: String) {
+    /// Append a folder the user picked, ticked, under the name the core says
+    /// that folder should have.
+    ///
+    /// Asked rather than assumed: the basename is often not a legal context
+    /// name, and it is often already taken by a row discovery added.  Naming it
+    /// here would be a second implementation of a rule the core owns, and the
+    /// same folder would end up called one thing when discovery found it and
+    /// another when the picker did.  A core that cannot answer leaves the
+    /// basename in an editable field, which is the screen this step already
+    /// has for a name that needs correcting.
+    func addDirectory(_ path: String) async {
         let label = (path as NSString).lastPathComponent
+        let named = await OpenShrimpCLI.name(
+            directory: path, taken: rows.map { trimmed($0.name) })
         rows.append(
-            ProjectRow(name: label, directory: path, label: label, chosen: true))
+            ProjectRow(name: named?.contextName ?? label, directory: path,
+                       label: label, chosen: true))
         message = nil
     }
 
@@ -553,20 +577,22 @@ final class SetupWizardModel: ObservableObject {
         let chosen = chosenRows
         if chosen.isEmpty { return [] }
 
+        // What a context may be called is the core's rule, and `config write`
+        // refuses a name that breaks it with a reason this wizard shows
+        // verbatim — so nothing here restates it.  These two are checks the
+        // core cannot make: it never sees an empty field, and it is handed a
+        // mapping, where two rows sharing a name would leave one behind and
+        // report an import of two projects that produced one.
         var seen: Set<String> = []
         for row in chosen {
             let name = trimmed(row.name)
-            guard !name.isEmpty,
-                  name.unicodeScalars.allSatisfy(Self.nameCharacters.contains) else {
+            guard !name.isEmpty else {
                 message = WizardMessage(
                     tone: .failure,
-                    text: "\"\(row.label)\": use only letters, numbers, hyphens and underscores."
+                    text: "\"\(row.label)\": give this project a name."
                 )
                 return nil
             }
-            // Refused here rather than by the core, because a mapping would
-            // keep the last of two and report an import of two projects that
-            // produced one.
             guard seen.insert(name).inserted else {
                 message = WizardMessage(
                     tone: .failure,
@@ -574,21 +600,20 @@ final class SetupWizardModel: ObservableObject {
                 )
                 return nil
             }
-            guard name != Self.reservedName else {
-                message = WizardMessage(
-                    tone: .failure,
-                    text: "\"\(name)\" is reserved for OpenShrimp's own context."
-                )
-                return nil
-            }
         }
 
-        guard let sandbox else {
+        let backend: String?
+        switch sandbox {
+        case .unanswered:
             message = WizardMessage(
                 tone: .failure,
                 text: "Choose how these projects run."
             )
             return nil
+        case .host:
+            backend = nil
+        case .backend(let name):
+            backend = name
         }
 
         let model: String?
@@ -615,7 +640,7 @@ final class SetupWizardModel: ObservableObject {
                 directory: $0.directory,
                 description: $0.label,
                 model: model,
-                sandbox: sandbox == Self.noSandbox ? nil : sandbox
+                sandbox: backend
             )
         }
     }
@@ -639,10 +664,12 @@ final class SetupWizardModel: ObservableObject {
 
         message = WizardMessage(tone: .progress, text: "Writing the config…")
 
-        // The catalog fetch runs the same self-installing binary, and its first
-        // run unpacks an interpreter underneath it.  A second launch racing that
+        // The bootstrap runs the same self-installing binary, and its first run
+        // unpacks an interpreter underneath it.  A second launch racing that
         // leaves an installation directory that exists but holds no project,
-        // which the launcher then skips installing into forever.
+        // which the launcher then skips installing into forever.  Only the
+        // bootstrap is waited for: discovery reads a catalog and probes
+        // sandboxes, and this write depends on neither.
         await warmup?.value
 
         let failure = await OpenShrimpCLI.writeConfig(

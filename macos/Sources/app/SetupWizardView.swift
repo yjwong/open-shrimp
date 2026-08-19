@@ -306,13 +306,13 @@ struct SetupWizardView: View {
         VStack(alignment: .leading, spacing: 4) {
             field("Runs in") {
                 Picker("", selection: $model.sandbox) {
-                    Text("Choose…").tag(String?.none)
+                    Text("Choose…").tag(SandboxSelection.unanswered)
                     ForEach(model.availableSandboxes, id: \.backend) { choice in
                         Text("\(choice.label) — \(choice.summary)")
-                            .tag(String?.some(choice.backend))
+                            .tag(SandboxSelection.backend(choice.backend))
                     }
                     Text("No sandbox — directly on this Mac")
-                        .tag(String?.some(SetupWizardModel.noSandbox))
+                        .tag(SandboxSelection.host)
                 }
                 .labelsHidden()
             }
@@ -406,7 +406,12 @@ struct SetupWizardView: View {
         panel.canCreateDirectories = true
 
         guard panel.runModal() == .OK else { return }
-        for url in panel.urls { model.addDirectory(url.path) }
+        // In order, and awaited one at a time: each folder is named against
+        // the names the rows already hold, so two folders picked together must
+        // not be named against the same list and land on the same name.
+        Task {
+            for url in panel.urls { await model.addDirectory(url.path) }
+        }
     }
 
     private func telegramLink(_ title: String, domain: String) -> some View {

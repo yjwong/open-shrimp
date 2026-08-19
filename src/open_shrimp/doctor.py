@@ -23,7 +23,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from open_shrimp.binaries import find_binary, managed_binary
-from open_shrimp.config import Config, SandboxConfig, load_config
+from open_shrimp.config import (
+    _SANDBOX_BACKENDS,
+    Config,
+    SandboxConfig,
+    load_config,
+)
 from open_shrimp.paths import init_paths
 
 logger = logging.getLogger(__name__)
@@ -485,6 +490,11 @@ class SandboxOffer:
 # words an operator debugging one needs.  Beside the offer rather than in the
 # three wizards, so the answer to "what does this do to my project" is the
 # same sentence on every platform.
+#
+# Which backends exist is not decided here: the offer list is driven off the
+# registry the config validates against, so a backend added there and not
+# given words is a KeyError a test catches rather than a choice the wizard
+# silently never shows.
 _SANDBOX_LABELS: dict[str, tuple[str, str]] = {
     "docker": ("Docker", "each project runs in a container on this computer"),
     "libvirt": ("libvirt", "each project runs in its own virtual machine"),
@@ -504,12 +514,11 @@ def sandbox_offers(config: Config | None = None) -> list[SandboxOffer]:
     from then on, far from the wizard that could still have picked another.
     """
     offers: list[SandboxOffer] = []
-    for backend, (label, summary) in _SANDBOX_LABELS.items():
-        checks = checks_for_backend(backend)
-        if not checks:
+    for backend in sorted(_SANDBOX_BACKENDS):
+        if not checks_for_backend(backend):
             continue
-        outcomes = [run_check(name, check, config) for name, check in checks]
-        failed = [o for o in outcomes if not o.ok]
+        label, summary = _SANDBOX_LABELS[backend]
+        failed = [o for o in prerequisites(backend, config) if not o.ok]
         # The check's own name is dropped where it repeats the backend's, so a
         # single-prerequisite backend reads as "Docker — docker CLI not found"
         # rather than naming Docker twice in one line.
