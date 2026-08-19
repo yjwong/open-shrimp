@@ -147,9 +147,10 @@ export default function ContextEditor({
       directory,
       description,
       allowed_tools: allowedTools,
-      ...(disallowedTools.length > 0
-        ? { disallowed_tools: disallowedTools }
-        : {}),
+      // Every field the editor models is sent on every save, empty ones
+      // included: the server preserves keys it was not sent, so omitting a
+      // cleared field would restore it from disk instead of clearing it.
+      disallowed_tools: disallowedTools,
       model: model.trim() || null,
       effort: (effort as EffortLevel) || null,
       backend: backend.trim() || null,
