@@ -19,9 +19,14 @@ review:
 
 That's it. On startup, OpenShrimp will:
 
-1. Download the `cloudflared` binary if not already installed
+1. Download its own `cloudflared` binary, unless it already did so once before
 2. Start a quick tunnel pointing to the local HTTP server
 3. Set `public_url` automatically from the assigned `trycloudflare.com` URL
+
+OpenShrimp always runs the copy it downloaded, under a config file it writes
+itself. A `cloudflared` you have installed separately is left alone, and your
+own `~/.cloudflared/config.yml` and `TUNNEL_*` environment variables have no
+effect on the tunnel it starts.
 
 The tunnel URL changes each time the bot restarts. This is fine for personal use — Telegram caches Mini App URLs per session.
 

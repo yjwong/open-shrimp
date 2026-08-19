@@ -70,7 +70,9 @@ class TestBinaryNaming:
             patch.object(binaries, "EXE_SUFFIX", ""),
             patch.object(binaries, "BIN_DIR", tmp_path),
         ):
-            assert binaries.local_binary_path("cloudflared") == tmp_path / "cloudflared"
+            assert (
+                binaries.managed_binary_path("cloudflared") == tmp_path / "cloudflared"
+            )
 
     def test_windows_name_carries_exe(self, tmp_path: Path) -> None:
         with (
@@ -78,7 +80,8 @@ class TestBinaryNaming:
             patch.object(binaries, "BIN_DIR", tmp_path),
         ):
             assert (
-                binaries.local_binary_path("cloudflared") == tmp_path / "cloudflared.exe"
+                binaries.managed_binary_path("cloudflared")
+                == tmp_path / "cloudflared.exe"
             )
 
     def test_windows_lookup_finds_the_downloaded_name(self, tmp_path: Path) -> None:
@@ -86,13 +89,12 @@ class TestBinaryNaming:
         with (
             patch.object(binaries, "EXE_SUFFIX", ".exe"),
             patch.object(binaries, "BIN_DIR", tmp_path),
-            patch("shutil.which", return_value=None),
         ):
-            target = binaries.local_binary_path("moonshine-stt")
-            assert binaries.find_binary("moonshine-stt") is None
+            target = binaries.managed_binary_path("moonshine-stt")
+            assert binaries.managed_binary("moonshine-stt") is None
             target.write_bytes(b"MZ")
             target.chmod(0o755)  # Windows infers this from the extension.
-            assert binaries.find_binary("moonshine-stt") == str(target)
+            assert binaries.managed_binary("moonshine-stt") == str(target)
 
     def test_windows_lookup_ignores_bare_name(self, tmp_path: Path) -> None:
         """A suffix-less file is not executable on Windows and must not match."""
@@ -100,9 +102,18 @@ class TestBinaryNaming:
         with (
             patch.object(binaries, "EXE_SUFFIX", ".exe"),
             patch.object(binaries, "BIN_DIR", tmp_path),
-            patch("shutil.which", return_value=None),
         ):
-            assert binaries.find_binary("cloudflared") is None
+            assert binaries.managed_binary("cloudflared") is None
+
+    def test_lookup_never_consults_path(self, tmp_path: Path) -> None:
+        """A copy installed on the machine is not the one that gets run."""
+        with (
+            patch.object(binaries, "EXE_SUFFIX", ""),
+            patch.object(binaries, "BIN_DIR", tmp_path),
+            patch("shutil.which", return_value="/usr/bin/cloudflared") as which,
+        ):
+            assert binaries.managed_binary("cloudflared") is None
+            which.assert_not_called()
 
     def test_make_executable_sets_mode_on_posix(self, tmp_path: Path) -> None:
         # Asserted on the chmod call, not the resulting st_mode: Windows

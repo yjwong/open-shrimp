@@ -22,25 +22,31 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from open_shrimp.binaries import find_binary
+from open_shrimp.binaries import find_binary, managed_binary
 from open_shrimp.config import Config, SandboxConfig, load_config
 from open_shrimp.paths import init_paths
 
 logger = logging.getLogger(__name__)
 
 
+# Both downloads are reported on the managed copy alone, because that is the
+# only copy they will ever run — a build on $PATH reads as absent here rather
+# than passing the check on a binary that is never reached.  Neither absence
+# is a fault to fix: the download happens on first use.
+
+
 def _check_moonshine_stt(config: Config | None) -> tuple[bool, str]:
-    path = find_binary("moonshine-stt")
+    path = managed_binary("moonshine-stt")
     if path:
         return True, f"found at {path}"
-    return False, "not found (voice transcription unavailable)"
+    return False, "not downloaded yet (fetched on first transcription)"
 
 
 def _check_cloudflared(config: Config | None) -> tuple[bool, str]:
-    path = find_binary("cloudflared")
+    path = managed_binary("cloudflared")
     if path:
         return True, f"found at {path}"
-    return False, "not found (tunnel support unavailable)"
+    return False, "not downloaded yet (fetched on first tunnel start)"
 
 
 def _check_docker(config: Config | None) -> tuple[bool, str]:

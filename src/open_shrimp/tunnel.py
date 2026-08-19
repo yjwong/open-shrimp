@@ -1,7 +1,11 @@
 """Cloudflared tunnel management for the review app.
 
-Manages the lifecycle of a cloudflared quick tunnel, including
-auto-downloading the binary if not found on the system.
+The tunnel runs on a cloudflared this project downloads and owns, reading a
+config this project writes.  A cloudflared already installed on the machine
+is never used and the operator's own cloudflared settings never apply: both
+carry a version, an autoupdate policy, log destinations and ingress rules
+outside this project's control, and a throwaway quick tunnel to the review
+app has nothing to gain from inheriting any of them.
 """
 
 from __future__ import annotations
@@ -14,9 +18,9 @@ from pathlib import Path
 
 from open_shrimp.binaries import (
     BIN_DIR,
-    find_binary,
-    local_binary_path,
     make_executable,
+    managed_binary,
+    managed_binary_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,9 +46,43 @@ def _get_binary_name() -> str | None:
     return _BINARY_MAP.get((system, machine))
 
 
-def _find_cloudflared() -> str | None:
-    """Find the cloudflared binary, checking our bin dir first, then $PATH."""
-    return find_binary("cloudflared")
+# The config cloudflared is pointed at.  Not instance-scoped, for the same
+# reason the binary is not: its contents never vary.
+CONFIG_PATH = BIN_DIR.parent / "cloudflared.yml"
+
+# A quick tunnel needs no settings at all, so this file exists only to
+# occupy --config and displace the operator's.  It cannot be empty —
+# cloudflared logs an error for an empty config — and disabling autoupdate
+# is the one setting worth pinning: the binary is ours to replace.
+_CONFIG_BODY = "no-autoupdate: true\n"
+
+# Every environment variable the cloudflared `tunnel` command reads is
+# either prefixed or named here, and all of them are the operator's rather
+# than ours — including ones --config cannot override, such as
+# TUNNEL_LOGFILE, which would divert the output the URL is parsed from.
+_ENV_PREFIX = "TUNNEL_"
+_ENV_NAMES = frozenset({"NO_AUTOUPDATE", "NO_TLS_VERIFY"})
+
+
+def managed_cloudflared() -> Path:
+    """Path of the one cloudflared this project will run."""
+    return managed_binary_path("cloudflared")
+
+
+def _write_config() -> Path:
+    """Write the config cloudflared is run against, and return its path."""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(_CONFIG_BODY)
+    return CONFIG_PATH
+
+
+def _tunnel_env() -> dict[str, str]:
+    """The environment for cloudflared, with its own settings stripped."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(_ENV_PREFIX) and key not in _ENV_NAMES
+    }
 
 
 async def _download_cloudflared() -> str:
@@ -65,7 +103,7 @@ async def _download_cloudflared() -> str:
         )
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    target = local_binary_path("cloudflared")
+    target = managed_cloudflared()
     url = f"{_DOWNLOAD_BASE}/{binary_name}"
 
     logger.info("Downloading cloudflared from %s ...", url)
@@ -133,31 +171,29 @@ async def _download_and_extract_tgz(url: str, dest: Path) -> None:
 
 
 async def ensure_cloudflared() -> str:
-    """Ensure cloudflared is available, downloading if necessary.
+    """Ensure the managed cloudflared is present, downloading if not.
 
     Returns the path to the cloudflared binary.
 
     Raises:
-        RuntimeError: If cloudflared cannot be found or downloaded.
+        RuntimeError: If cloudflared cannot be downloaded.
     """
-    path = _find_cloudflared()
+    path = managed_binary("cloudflared")
     if path:
-        logger.info("Found cloudflared at %s", path)
+        logger.info("Using cloudflared at %s", path)
         return path
 
-    logger.info("cloudflared not found, attempting auto-download...")
+    logger.info(
+        "cloudflared not present at %s, downloading...", managed_cloudflared()
+    )
     return await _download_cloudflared()
 
 
-async def start_tunnel(
-    port: int, cloudflared_path: str | None = None
-) -> tuple[asyncio.subprocess.Process, str]:
+async def start_tunnel(port: int) -> tuple[asyncio.subprocess.Process, str]:
     """Start a cloudflared quick tunnel pointing to the given port.
 
     Args:
         port: Local port the HTTP server is listening on.
-        cloudflared_path: Path to cloudflared binary. If None, will be
-            located/downloaded automatically.
 
     Returns:
         (process, public_url) — the subprocess handle and the assigned
@@ -167,8 +203,7 @@ async def start_tunnel(
         RuntimeError: If cloudflared cannot be started or URL cannot be
             parsed from output.
     """
-    if cloudflared_path is None:
-        cloudflared_path = await ensure_cloudflared()
+    cloudflared_path = await ensure_cloudflared()
 
     logger.info(
         "Starting cloudflared tunnel to http://localhost:%d ...", port
@@ -177,10 +212,13 @@ async def start_tunnel(
     proc = await asyncio.create_subprocess_exec(
         cloudflared_path,
         "tunnel",
+        "--config",
+        str(_write_config()),
         "--url",
         f"http://localhost:{port}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_tunnel_env(),
     )
 
     # cloudflared prints the assigned URL to stderr.  We need to read

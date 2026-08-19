@@ -11,10 +11,13 @@ import pytest
 
 from open_shrimp import binaries
 from open_shrimp.tunnel import (
-    _find_cloudflared,
+    _CONFIG_BODY,
     _get_binary_name,
     _parse_tunnel_url,
+    _tunnel_env,
+    _write_config,
     ensure_cloudflared,
+    managed_cloudflared,
     start_tunnel,
     stop_tunnel,
 )
@@ -54,38 +57,61 @@ class TestGetBinaryName:
             assert _get_binary_name() is None
 
 
-class TestFindCloudflared:
-    """Tests for _find_cloudflared()."""
+class TestManagedCloudflared:
+    """Tests for managed_cloudflared()."""
 
-    def test_finds_in_bin_dir(self, tmp_path: Path) -> None:
-        """Should find cloudflared in our managed bin directory."""
-        # Named the way this platform's download writes it — bare on POSIX,
-        # cloudflared.exe on Windows.
-        fake_bin = tmp_path / f"cloudflared{binaries.EXE_SUFFIX}"
-        fake_bin.write_text("#!/bin/sh\n")
-        fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IXUSR)
+    def test_names_the_bin_dir_copy(self, tmp_path: Path) -> None:
+        """Should name the managed bin directory's copy, however spelled.
 
+        Named the way this platform's download writes it — bare on POSIX,
+        cloudflared.exe on Windows.
+        """
         with patch("open_shrimp.binaries.BIN_DIR", tmp_path):
-            result = _find_cloudflared()
-            assert result == str(fake_bin)
+            assert managed_cloudflared() == (
+                tmp_path / f"cloudflared{binaries.EXE_SUFFIX}"
+            )
 
-    def test_finds_in_path(self) -> None:
-        """Should fall back to $PATH lookup."""
-        with (
-            patch("open_shrimp.binaries.BIN_DIR", Path("/nonexistent")),
-            patch("shutil.which", return_value="/usr/bin/cloudflared"),
-        ):
-            result = _find_cloudflared()
-            assert result == "/usr/bin/cloudflared"
 
-    def test_not_found(self) -> None:
-        """Should return None if not found anywhere."""
-        with (
-            patch("open_shrimp.binaries.BIN_DIR", Path("/nonexistent")),
-            patch("shutil.which", return_value=None),
-        ):
-            result = _find_cloudflared()
-            assert result is None
+class TestTunnelEnv:
+    """Tests for _tunnel_env()."""
+
+    def test_strips_cloudflared_settings(self) -> None:
+        """Every variable cloudflared reads is dropped, others survive."""
+        env = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/someone",
+            "TUNNEL_LOGFILE": "/tmp/elsewhere.log",
+            "TUNNEL_URL": "http://evil",
+            "NO_AUTOUPDATE": "0",
+            "NO_TLS_VERIFY": "1",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            result = _tunnel_env()
+
+        assert result == {"PATH": "/usr/bin", "HOME": "/home/someone"}
+
+
+class TestWriteConfig:
+    """Tests for _write_config()."""
+
+    def test_writes_a_non_empty_config(self, tmp_path: Path) -> None:
+        """cloudflared errors on an empty config, so ours must have content."""
+        target = tmp_path / "nested" / "cloudflared.yml"
+        with patch("open_shrimp.tunnel.CONFIG_PATH", target):
+            assert _write_config() == target
+
+        assert target.read_text() == _CONFIG_BODY
+        assert _CONFIG_BODY.strip()
+
+    def test_overwrites_previous_contents(self, tmp_path: Path) -> None:
+        """The file cloudflared reads is ours on every start, not once."""
+        target = tmp_path / "cloudflared.yml"
+        target.write_text("loglevel: debug\n")
+
+        with patch("open_shrimp.tunnel.CONFIG_PATH", target):
+            _write_config()
+
+        assert target.read_text() == _CONFIG_BODY
 
 
 class TestParseTunnelUrl:
@@ -141,35 +167,59 @@ class TestEnsureCloudflared:
     """Tests for ensure_cloudflared()."""
 
     @pytest.mark.asyncio
-    async def test_already_installed(self) -> None:
-        """Should return existing path if found."""
-        with patch(
-            "open_shrimp.tunnel._find_cloudflared",
-            return_value="/usr/bin/cloudflared",
+    async def test_already_downloaded(self, tmp_path: Path) -> None:
+        """Should return the managed path when it is already there."""
+        fake_bin = tmp_path / f"cloudflared{binaries.EXE_SUFFIX}"
+        fake_bin.write_text("#!/bin/sh\n")
+        fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IXUSR)
+
+        with (
+            patch("open_shrimp.binaries.BIN_DIR", tmp_path),
+            patch("open_shrimp.tunnel._download_cloudflared") as mock_download,
         ):
             result = await ensure_cloudflared()
-            assert result == "/usr/bin/cloudflared"
+
+        assert result == str(fake_bin)
+        mock_download.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_downloads_if_not_found(self) -> None:
-        """Should attempt download if not found."""
+    async def test_downloads_if_absent(self, tmp_path: Path) -> None:
+        """Should download when the managed copy is not there."""
         with (
-            patch("open_shrimp.tunnel._find_cloudflared", return_value=None),
+            patch("open_shrimp.binaries.BIN_DIR", tmp_path),
             patch(
                 "open_shrimp.tunnel._download_cloudflared",
-                return_value="/home/user/.config/openshrimp/bin/cloudflared",
+                return_value=str(tmp_path / "cloudflared"),
             ) as mock_download,
         ):
             result = await ensure_cloudflared()
-            assert result == "/home/user/.config/openshrimp/bin/cloudflared"
-            mock_download.assert_called_once()
+
+        assert result == str(tmp_path / "cloudflared")
+        mock_download.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ignores_a_system_install(self, tmp_path: Path) -> None:
+        """A cloudflared on $PATH is not the one this project runs."""
+        with (
+            patch("open_shrimp.binaries.BIN_DIR", tmp_path),
+            patch("shutil.which", return_value="/usr/bin/cloudflared") as which,
+            patch(
+                "open_shrimp.tunnel._download_cloudflared",
+                return_value=str(tmp_path / "cloudflared"),
+            ) as mock_download,
+        ):
+            result = await ensure_cloudflared()
+
+        assert result != "/usr/bin/cloudflared"
+        which.assert_not_called()
+        mock_download.assert_called_once()
 
 
 class TestStartTunnel:
     """Tests for start_tunnel()."""
 
     @pytest.mark.asyncio
-    async def test_starts_and_returns_url(self) -> None:
+    async def test_starts_and_returns_url(self, tmp_path: Path) -> None:
         """Should start cloudflared and return the tunnel URL."""
         mock_proc = MagicMock()
         mock_proc.stderr = AsyncMock()
@@ -181,10 +231,15 @@ class TestStartTunnel:
         ]
         mock_proc.stderr.readline = AsyncMock(side_effect=lines)
 
+        config = tmp_path / "cloudflared.yml"
+        env = {"PATH": "/usr/bin", "TUNNEL_LOGFILE": "/tmp/elsewhere.log"}
+
         with (
+            patch("open_shrimp.tunnel.CONFIG_PATH", config),
+            patch.dict("os.environ", env, clear=True),
             patch(
                 "open_shrimp.tunnel.ensure_cloudflared",
-                return_value="/usr/bin/cloudflared",
+                return_value=str(tmp_path / "cloudflared"),
             ),
             patch(
                 "asyncio.create_subprocess_exec",
@@ -195,14 +250,18 @@ class TestStartTunnel:
             assert url == "https://test-tunnel-abc.trycloudflare.com"
             assert proc is mock_proc
 
-            # Verify the subprocess was called correctly.
+            # Run against our own config, in an environment carrying none of
+            # cloudflared's own settings.
             mock_exec.assert_called_once_with(
-                "/usr/bin/cloudflared",
+                str(tmp_path / "cloudflared"),
                 "tunnel",
+                "--config",
+                str(config),
                 "--url",
                 "http://localhost:8080",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env={"PATH": "/usr/bin"},
             )
 
 

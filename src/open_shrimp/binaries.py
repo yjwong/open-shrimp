@@ -4,6 +4,12 @@ cloudflared and moonshine-stt are both fetched from GitHub releases into a
 managed bin directory.  Windows only resolves and executes files carrying an
 executable extension, so the on-disk name is platform-dependent — every
 lookup and every download target goes through here so the two agree.
+
+A managed binary is only ever run from that directory.  A copy of the same
+program installed on the machine carries a version, an update policy and a
+configuration this project does not control, and the download exists so that
+none of it is inherited — so a caller that finds nothing downloads rather
+than falling back to ``$PATH``.
 """
 
 from __future__ import annotations
@@ -24,17 +30,21 @@ BIN_DIR = user_data_path("openshrimp") / "bin"
 EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
 
 
-def local_binary_path(name: str) -> Path:
-    """Return the managed path a downloaded *name* binary lives at."""
+def managed_binary_path(name: str) -> Path:
+    """Return the only path a managed *name* binary is ever run from."""
     return BIN_DIR / f"{name}{EXE_SUFFIX}"
 
 
-def find_binary(name: str) -> str | None:
-    """Find *name*, checking the managed bin dir first, then ``$PATH``."""
-    local = local_binary_path(name)
-    if local.is_file() and os.access(local, os.X_OK):
-        return str(local)
+def managed_binary(name: str) -> str | None:
+    """Return the managed *name* binary, or *None* if it is not downloaded."""
+    path = managed_binary_path(name)
+    if path.is_file() and os.access(path, os.X_OK):
+        return str(path)
+    return None
 
+
+def find_binary(name: str) -> str | None:
+    """Find *name* on ``$PATH`` — for programs this project does not manage."""
     return shutil.which(name)
 
 

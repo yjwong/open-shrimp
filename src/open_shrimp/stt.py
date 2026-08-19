@@ -1,7 +1,10 @@
 """Speech-to-text via the moonshine-stt binary.
 
 Downloads the moonshine-stt binary on first use (same pattern as
-cloudflared in tunnel.py) and shells out to it for transcription.
+cloudflared in tunnel.py) and shells out to it for transcription.  The
+downloaded copy is the only one ever run: a moonshine-stt on ``$PATH`` is a
+build of unknown vintage, and the model weights and JSON output shape it
+would be invoked for are the downloaded build's.
 """
 
 from __future__ import annotations
@@ -12,12 +15,13 @@ import logging
 import os
 import platform
 import tempfile
+from pathlib import Path
 
 from open_shrimp.binaries import (
     BIN_DIR,
-    find_binary,
-    local_binary_path,
     make_executable,
+    managed_binary,
+    managed_binary_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,9 +40,9 @@ _BINARY_MAP: dict[tuple[str, str], str] = {
 }
 
 
-def _find_moonshine_stt() -> str | None:
-    """Find the moonshine-stt binary, checking our bin dir first, then $PATH."""
-    return find_binary("moonshine-stt")
+def managed_moonshine_stt() -> Path:
+    """Path of the one moonshine-stt this project will run."""
+    return managed_binary_path("moonshine-stt")
 
 
 async def _download_moonshine_stt() -> str:
@@ -61,7 +65,7 @@ async def _download_moonshine_stt() -> str:
         )
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    target = local_binary_path("moonshine-stt")
+    target = managed_moonshine_stt()
     url = f"{_DOWNLOAD_BASE}/{binary_name}"
 
     logger.info("Downloading moonshine-stt from %s ...", url)
@@ -89,23 +93,25 @@ async def _download_moonshine_stt() -> str:
 
 
 async def ensure_moonshine_stt() -> str:
-    """Ensure moonshine-stt is available, downloading if necessary.
+    """Ensure the managed moonshine-stt is present, downloading if not.
 
     Returns the path to the moonshine-stt binary.
 
     Raises:
-        RuntimeError: If moonshine-stt cannot be found or downloaded.
+        RuntimeError: If moonshine-stt cannot be downloaded.
     """
-    path = _find_moonshine_stt()
+    path = managed_binary("moonshine-stt")
     if path:
-        logger.info("Found moonshine-stt at %s", path)
+        logger.info("Using moonshine-stt at %s", path)
         return path
 
-    logger.info("moonshine-stt not found, attempting auto-download...")
+    logger.info(
+        "moonshine-stt not present at %s, downloading...", managed_moonshine_stt()
+    )
     return await _download_moonshine_stt()
 
 
-async def transcribe(audio_data: bytes, binary_path: str | None = None) -> str:
+async def transcribe(audio_data: bytes) -> str:
     """Transcribe audio data (OGG/Opus) to text.
 
     Writes the audio bytes to a temp file, invokes moonshine-stt, and
@@ -113,8 +119,6 @@ async def transcribe(audio_data: bytes, binary_path: str | None = None) -> str:
 
     Args:
         audio_data: Raw audio file bytes (OGG/Opus from Telegram).
-        binary_path: Path to the moonshine-stt binary.  If None, will
-            be located/downloaded automatically.
 
     Returns:
         Transcribed text string.
@@ -122,8 +126,7 @@ async def transcribe(audio_data: bytes, binary_path: str | None = None) -> str:
     Raises:
         RuntimeError: If transcription fails.
     """
-    if binary_path is None:
-        binary_path = await ensure_moonshine_stt()
+    binary_path = await ensure_moonshine_stt()
 
     # Write audio to a temp file.
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
