@@ -36,7 +36,13 @@ from open_shrimp.config import (
     is_sandboxed,
     sandbox_backend,
 )
-from open_shrimp.db import ChatScope, get_pinned_message_id, get_session_id, set_session_id
+from open_shrimp.db import (
+    ChatScope,
+    get_active_context,
+    get_pinned_message_id,
+    get_session_id,
+    set_session_id,
+)
 from open_shrimp.handlers.approval import (
     _send_approval_keyboard,
     _send_auto_approved_diff,
@@ -46,6 +52,10 @@ from open_shrimp.hooks import matches_approval_rule as _matches_rule
 from open_shrimp.markdown import escape as _escape_md, split_message
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox_diagnosis import failure_reply
+from open_shrimp.supervisor import (
+    SupervisorDispatchRefused,
+    is_supervisor_context,
+)
 from open_shrimp.web_url import mini_app_base
 from open_shrimp.handlers.questions import (
     _complete_other_input,
@@ -384,13 +394,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info("message_handler: unauthorized user %s", update.effective_user)
         return
 
-    # Refuse before transcribing voice, downloading attachments, or posting a
-    # placeholder that promises work this turn cannot start.  _start_agent_task
-    # guards again for the paths that do not come through here.
-    if not config.contexts:
-        await reply_no_context(message)
-        return
-
     scope = chat_scope_from_message(message)
 
     # Check if this is a text response to an "Other..." question prompt.
@@ -410,6 +413,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     bot_username = (await context.bot.get_me()).username or ""
     if not _is_bot_addressed(update, bot_username):
         logger.info("message_handler: bot not addressed, ignoring")
+        return
+
+    # Refuse before batching an album, transcribing a voice note, downloading
+    # attachments, or posting a placeholder that promises work this turn
+    # cannot start.  _start_agent_task guards again for the paths that do not
+    # come through here.  This is the same question those guards ask, so a
+    # scope bound to something outside ``contexts`` — the supervisor — needs
+    # no special case: _get_context_name already resolves it.
+    if await _get_context_name(scope, config, db) is None:
+        await reply_no_context(message)
         return
 
     # If this message is part of a media group (album), batch it.
@@ -658,6 +671,38 @@ def _reinject_runtime_credentials(session: Any) -> None:
             "Per-dispatch credential re-inject failed for runtime %s",
             runtime.name, exc_info=True,
         )
+
+
+async def dispatch_from_registry(
+    prompt: str,
+    scope: ChatScope,
+    config: Config,
+    db: aiosqlite.Connection,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    placeholder: str | None = None,
+) -> None:
+    """Start a turn that no user message asked for.
+
+    The ``dispatch_registry`` path: scheduled tasks, ``host_monitor``
+    events and inbound-event pick-up all arrive here.  Pick-up carries
+    text OpenShrimp did not write, so the supervisor — which reports the
+    running configuration — must not be startable from it.  Refusing on
+    the whole registry rather than on pick-up alone means a future source
+    inherits the refusal instead of having to remember it.
+
+    Raises:
+        SupervisorDispatchRefused: if *scope* is bound to the supervisor.
+    """
+    if is_supervisor_context(await get_active_context(db, scope)):
+        raise SupervisorDispatchRefused(
+            "The OpenShrimp supervisor context only answers a user "
+            "message; scheduled tasks, host monitors and inbound events "
+            "cannot start a turn there."
+        )
+    await _dispatch_to_agent(
+        prompt, [], scope, config, db, context, placeholder=placeholder,
+    )
 
 
 async def _dispatch_to_agent(

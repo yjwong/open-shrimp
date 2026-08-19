@@ -5,7 +5,6 @@ inside a context that the config Mini App does not model."""
 from __future__ import annotations
 
 import json
-import types
 
 import pytest
 
@@ -15,12 +14,12 @@ from open_shrimp.config import (
     load_raw_yaml,
     write_raw_yaml,
 )
-from open_shrimp.config_app import api as config_api
 from open_shrimp.config_app.api import (
     _patch_raw_yaml,
     config_get_endpoint,
     config_put_endpoint,
 )
+from tests.config_app_stub import disable_auth, make_request, write_config
 
 
 def _base_raw() -> dict:
@@ -249,50 +248,15 @@ def test_merge_preserves_comments_round_trip(tmp_path):
 
 @pytest.fixture
 def _no_auth(monkeypatch):
-    async def fake_auth(request):
-        return 1
-
-    monkeypatch.setattr(config_api, "_authenticate", fake_auth)
+    disable_auth(monkeypatch)
 
 
 def _make_request(config, config_path, body=None):
-    return types.SimpleNamespace(
-        app=types.SimpleNamespace(
-            state=types.SimpleNamespace(config=config, config_path=str(config_path)),
-        ),
-        headers={},
-        json=_async_body(body),
-    )
-
-
-def _async_body(body):
-    async def _json():
-        return body
-
-    return _json
+    return make_request(config, config_path, body)
 
 
 def _write_config(tmp_path):
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text(
-        "telegram:\n"
-        "  token: t\n"
-        "allowed_users:\n"
-        "  - 1\n"
-        "contexts:\n"
-        "  default:\n"
-        "    directory: /tmp\n"
-        "    description: d\n"
-        "    allowed_tools: []\n"
-        "    mcp:\n"
-        "      playwright:\n"
-        "        command: npx\n"
-        "        args:\n"
-        "          - '@playwright/mcp'\n"
-        "default_context: default\n",
-        encoding="utf-8",
-    )
-    return config_file
+    return write_config(tmp_path, mcp=True)
 
 
 @pytest.mark.asyncio

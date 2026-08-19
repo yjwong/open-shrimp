@@ -182,11 +182,12 @@ class _StubContext:
 
 
 # Each entry is (command text, handler attribute name).  Every command that
-# reaches for a context must survive having none.
+# reaches for a context must survive having none.  ``/context`` is absent:
+# it is the one command that has something to offer on an empty install (the
+# supervisor), so it answers with the picker rather than a pointer to
+# ``/config`` — see ``test_context_picker_offers_supervisor_when_empty``.
 _COMMANDS = [
     ("/start", "start_handler"),
-    ("/context", "context_handler"),
-    ("/context someproject", "context_handler"),
     ("/clear", "clear_handler"),
     ("/status", "status_handler"),
     ("/model", "model_handler"),

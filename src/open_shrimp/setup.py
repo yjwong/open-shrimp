@@ -28,6 +28,7 @@ except ImportError:
     readline = None  # type: ignore[assignment]
 
 from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
+from open_shrimp.config import RESERVED_CONTEXT_NAME
 
 
 def _path_completer(text: str, state: int) -> str | None:
@@ -152,9 +153,14 @@ def _validate_directory(value: str) -> str | None:
 
 
 def _validate_context_name(value: str) -> str | None:
-    """Validate a context name is a simple identifier."""
+    """Validate a context name is a simple identifier and not reserved."""
     if not value.replace("-", "").replace("_", "").isalnum():
         return "Use only letters, numbers, hyphens, and underscores."
+    if value == RESERVED_CONTEXT_NAME:
+        return (
+            f"'{RESERVED_CONTEXT_NAME}' is reserved for OpenShrimp's own "
+            f"context. Pick another name."
+        )
     return None
 
 

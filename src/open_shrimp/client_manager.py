@@ -59,6 +59,11 @@ from open_shrimp.sandbox.agent_runtime_watcher import (
     register_sandbox as register_cred_sandbox,
     unregister_sandbox as unregister_cred_sandbox,
 )
+from open_shrimp.supervisor import (
+    SUPERVISOR_TOOL_NAMES,
+    is_supervisor_context,
+    system_prompt as supervisor_system_prompt,
+)
 from open_shrimp.tools import OpenShrimpTool, create_openshrimp_tools
 
 logger = logging.getLogger(__name__)
@@ -431,8 +436,18 @@ async def get_or_create_session(
         # Auto-approve ask_context at the parent session: it renders its
         # own tailored approval card per call, so the generic can_use_tool
         # card must not also fire (which would show the raw wire name).
+        # The supervisor gets its own three tools instead.  All three read —
+        # one fetches a documentation page from a host pinned in code, one
+        # reports the config, one stats a path — so none has an approval to
+        # ask for.
         if config is not None:
-            allowed_tools.append("mcp__openshrimp__ask_context")
+            if is_supervisor_context(context_name):
+                allowed_tools.extend(
+                    f"mcp__openshrimp__{name}"
+                    for name in SUPERVISOR_TOOL_NAMES
+                )
+            else:
+                allowed_tools.append("mcp__openshrimp__ask_context")
         # Auto-approve host_monitor_stop when host escape is enabled: it only
         # kills a process OpenShrimp owns, so it needs no fresh approval (the
         # host_monitor arm already got one).  host_monitor and host_bash are
@@ -638,6 +653,9 @@ async def get_or_create_session(
     )
 
     system_prompt_parts: list[str] = []
+
+    if is_supervisor_context(context_name):
+        system_prompt_parts.append(supervisor_system_prompt())
 
     if scope.thread_id is not None:
         system_prompt_parts.append(

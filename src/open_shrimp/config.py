@@ -16,6 +16,12 @@ from platformdirs import user_config_path
 
 DEFAULT_CONFIG_PATH = user_config_path("openshrimp") / "config.yaml"
 
+# The supervisor context is built in code (see ``open_shrimp.supervisor``),
+# so this name may not appear in ``contexts:``.  Declared here rather than
+# there because validation must reject it and ``supervisor`` imports this
+# module.
+RESERVED_CONTEXT_NAME = "openshrimp"
+
 
 @dataclass
 class TelegramConfig:
@@ -92,6 +98,20 @@ def is_sandboxed(context: "ContextConfig") -> bool:
     if context.container is not None and context.container.enabled:
         return True
     return False
+
+
+def check_directory(path_str: str) -> dict[str, Any]:
+    """Whether *path_str* names an existing directory, and its real path.
+
+    The one answer given wherever a context directory is checked before it
+    is accepted — the config Mini App's validate-path endpoint and the
+    supervisor's ``validate_directory`` tool — so the two cannot disagree.
+    ``~`` expands; the path is resolved only when it exists, so a typo
+    comes back as the user typed it.
+    """
+    p = Path(path_str).expanduser()
+    exists = p.is_dir()
+    return {"exists": exists, "path": str(p.resolve()) if exists else str(p)}
 
 
 def sandbox_backend(context: "ContextConfig") -> str:
@@ -255,6 +275,11 @@ def _validate_raw(raw: dict) -> None:
     if not isinstance(contexts, dict):
         raise ValueError("contexts must be a mapping")
     for name, ctx in contexts.items():
+        if name == RESERVED_CONTEXT_NAME:
+            raise ValueError(
+                f"Context '{name}' is reserved: OpenShrimp builds it in code "
+                f"and it must not appear in contexts. Rename this context."
+            )
         if not isinstance(ctx, dict):
             raise ValueError(f"Context '{name}' must be a mapping")
         for field_name in ("directory", "description", "allowed_tools"):

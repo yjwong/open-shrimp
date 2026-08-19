@@ -66,6 +66,7 @@ from open_shrimp.handlers.utils import (
     reply_no_context,
     require_context,
 )
+from open_shrimp.supervisor import resolve_context, selectable_contexts
 from open_shrimp.android_push import get_push_sender
 from open_shrimp.security_key.api import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -141,8 +142,14 @@ _CONTEXT_PAGE_SIZE = 6
 def _build_context_page(
     config: Config, current: str | None, page: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Build a page of context buttons with optional pagination."""
-    names = list(config.contexts.keys())
+    """Build a page of context buttons with optional pagination.
+
+    Offers the supervisor alongside the configured projects — picking it is
+    the only way into it, and on an install with no projects it is the only
+    entry the picker has.
+    """
+    selectable = selectable_contexts(config)
+    names = list(selectable.keys())
     total = len(names)
     total_pages = max(1, (total + _CONTEXT_PAGE_SIZE - 1) // _CONTEXT_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
@@ -151,7 +158,7 @@ def _build_context_page(
 
     buttons: list[list[InlineKeyboardButton]] = []
     for name in page_names:
-        ctx = config.contexts[name]
+        ctx = selectable[name]
         label = f"{'• ' if name == current else ''}{name} — {ctx.description}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"ctx:{name}")])
 
@@ -184,10 +191,6 @@ async def handle_context_callback(
         if not query.message:
             await query.answer()
             return True
-        if not config.contexts:
-            # The last context went away while this keyboard was on screen.
-            await answer_no_context(query)
-            return True
         scope = chat_scope_from_message(query.message)
         current = await _get_context_name(scope, config, db)
         text, markup = _build_context_page(config, current, page)
@@ -212,7 +215,7 @@ async def handle_context_callback(
         if ctx_name is not None and target == ctx_name:
             await reset_scope(scope, ctx_name, db)
 
-        ctx = config.contexts.get(target)
+        ctx = resolve_context(config, target)
         desc = _escape_mdv2(ctx.description) if ctx else ""
         target_escaped = _escape_mdv2(target)
         try:
@@ -237,7 +240,8 @@ async def handle_context_callback(
 
         scope = chat_scope_from_message(query.message)
 
-        if target not in config.contexts:
+        ctx = resolve_context(config, target)
+        if ctx is None:
             await query.answer("Context no longer exists.")
             return True
 
@@ -262,7 +266,6 @@ async def handle_context_callback(
         from open_shrimp.db import set_active_context
 
         await set_active_context(db, scope, target)
-        ctx = config.contexts[target]
         desc = _escape_mdv2(ctx.description)
         target_escaped = _escape_mdv2(target)
 
@@ -303,13 +306,6 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     scope = chat_scope_from_message(message)
     args = message.text.split() if message.text else []
 
-    # With no projects, every branch below is a dead end: the picker would be
-    # empty, no chat can be locked to a context that does not exist, and no
-    # name can be switched to.
-    if not config.contexts:
-        await reply_no_context(message)
-        return
-
     if len(args) < 2:
         # List contexts as inline keyboard
         current = await _get_context_name(scope, config, db)
@@ -327,10 +323,12 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=markup)
         return
 
-    # Switch context
+    # Switch context.  The supervisor is offered alongside the projects, so
+    # the name list is never empty even on an install with no projects.
+    selectable = selectable_contexts(config)
     target = args[1]
-    if target not in config.contexts:
-        names = ", ".join(f"`{n}`" for n in config.contexts)
+    if target not in selectable:
+        names = ", ".join(f"`{n}`" for n in selectable)
         await message.reply_text(
             f"Unknown context: `{target}`\\. Available: {names}",
             parse_mode="MarkdownV2",
@@ -357,7 +355,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     from open_shrimp.db import set_active_context
 
     await set_active_context(db, scope, target)
-    ctx = config.contexts[target]
+    ctx = selectable[target]
     desc = _escape_mdv2(ctx.description)
     target_escaped = _escape_mdv2(target)
 
@@ -558,10 +556,10 @@ async def handle_model_callback(
 
     scope = chat_scope_from_message(query.message)
     ctx_name = await _get_context_name(scope, config, db)
-    if ctx_name is None:
+    ctx = resolve_context(config, ctx_name)
+    if ctx is None:
         await answer_no_context(query)
         return True
-    ctx = config.contexts[ctx_name]
     backend = get_backend_by_name(effective_backend(ctx, config))
 
     if data == "model_reset":
@@ -609,13 +607,13 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     scope = chat_scope_from_message(message)
     ctx_name = await _get_context_name(scope, config, db)
-    if ctx_name is None:
-        await reply_no_context(message)
-        return
     # The configured default, deliberately read unmerged: _get_context folds
     # any active /model override into its copy, which is the value this
     # command exists to show separately from.
-    ctx = config.contexts[ctx_name]
+    ctx = resolve_context(config, ctx_name)
+    if ctx is None:
+        await reply_no_context(message)
+        return
     ctx_default_model = ctx.model
     backend = get_backend_by_name(effective_backend(ctx, config))
     current_override = _model_overrides.get(scope)
@@ -697,12 +695,13 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     scope = chat_scope_from_message(message)
     ctx_name = await _get_context_name(scope, config, db)
-    if ctx_name is None:
-        await reply_no_context(message)
-        return
     # Unmerged for the same reason as /model: _get_context would fold an
     # active /effort override into the value shown as the context default.
-    ctx_default_effort = config.contexts[ctx_name].effort
+    ctx_unmerged = resolve_context(config, ctx_name)
+    if ctx_unmerged is None:
+        await reply_no_context(message)
+        return
+    ctx_default_effort = ctx_unmerged.effort
     current_override = _effort_overrides.get(scope)
     args = message.text.split() if message.text else []
 
@@ -795,7 +794,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if resolved is None:
         return
     ctx_name, ctx = resolved
-    ctx_dir = config.contexts[ctx_name].directory
+    ctx_dir = ctx.directory
 
     # Parse: strip the /add_dir command, then check for "remove" prefix.
     # Join remaining tokens to support paths with spaces.
@@ -804,8 +803,10 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     rest = raw.split(None, 1)[1].strip() if " " in raw else ""
 
     if not rest:
-        # List directories
-        base_dirs = config.contexts[ctx_name].additional_directories
+        # List directories.  Read unmerged: ``ctx`` already folds in the
+        # runtime ``/add_dir`` entries this branch reports separately.
+        unmerged = resolve_context(config, ctx_name)
+        base_dirs = unmerged.additional_directories if unmerged else []
         runtime_dirs = await get_additional_directories(db, scope, ctx_name)
 
         lines: list[str] = []
@@ -1287,7 +1288,7 @@ async def handle_resume_callback(
         scope = chat_scope_from_message(query.message)
         # The keyboard carries the context it was rendered for; if that
         # context is gone there is no meaningful page to redraw.
-        ctx = config.contexts.get(ctx_name_req)
+        ctx = resolve_context(config, ctx_name_req)
         if ctx is None:
             await query.answer("Context no longer exists.")
             return True

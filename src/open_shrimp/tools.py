@@ -28,6 +28,7 @@ from open_shrimp.host_shell import (
     kill_host_shell_tree,
     spawn_host_shell,
 )
+from open_shrimp.supervisor import is_supervisor_context
 from open_shrimp.mini_app import make_web_app_button, mini_app_keyboard
 
 logger = logging.getLogger(__name__)
@@ -1976,11 +1977,26 @@ def create_openshrimp_tools(
             handler=host_monitor_stop,
         ))
 
+    # --- supervisor tools ---
+    # The reserved ``openshrimp`` context only.  It has no shell and no
+    # file tools, so these three are all it can do.
+    if config is not None and is_supervisor_context(context_name):
+        from open_shrimp.supervisor_tools import build_supervisor_tools
+
+        tools_list.extend(build_supervisor_tools(config))
+
     # --- ask_context (cross-context query) ---
     # Lets the agent ask a focused question of another context and get a
     # synchronous answer.  Requires the full config (for the contexts map)
     # and the current context name (to exclude self and guard recursion).
-    if config is not None and context_name is not None:
+    # Withheld from the supervisor: a project context has the shell and the
+    # file tools the supervisor is denied, so delegating to one would hand
+    # back exactly what section-2 of the design takes away.
+    if (
+        config is not None
+        and context_name is not None
+        and not is_supervisor_context(context_name)
+    ):
         from open_shrimp.cross_context import build_ask_context_tool
 
         ask_tool = build_ask_context_tool(

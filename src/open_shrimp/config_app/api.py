@@ -24,6 +24,7 @@ from open_shrimp.client_manager import close_sessions_for_context
 from open_shrimp.config import (
     Config,
     _validate_raw,
+    check_directory,
     config_to_dict,
     effective_backend,
     load_config,
@@ -431,13 +432,7 @@ async def validate_path_endpoint(request: Request) -> JSONResponse:
             {"error": "path is required"}, status_code=400
         )
 
-    p = Path(path_str).expanduser()
-    exists = p.is_dir()
-
-    return JSONResponse({
-        "exists": exists,
-        "path": str(p.resolve()) if exists else str(p),
-    })
+    return JSONResponse(check_directory(path_str))
 
 
 def create_config_routes() -> list[Route | Mount]:

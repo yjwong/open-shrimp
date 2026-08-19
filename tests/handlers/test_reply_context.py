@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from open_shrimp.config import ContextConfig
 from open_shrimp.db import (
     init_db,
     insert_inbound_event,
@@ -182,8 +183,22 @@ async def test_message_handler_wires_reference_into_dispatch(
     )
     context = SimpleNamespace(
         bot=bot,
-        # A context must exist or message_handler refuses the turn outright.
-        bot_data={"config": SimpleNamespace(contexts={"default": object()}), "db": db},
+        # The scope must resolve a context or message_handler refuses the turn
+        # outright, so this is a real one rather than a placeholder.
+        bot_data={
+            "config": SimpleNamespace(
+                contexts={
+                    "default": ContextConfig(
+                        directory="/tmp",
+                        description="d",
+                        allowed_tools=[],
+                        default_for_chats=[CHAT_ID],
+                    )
+                },
+                default_context="default",
+            ),
+            "db": db,
+        },
     )
 
     await message_handler(update, context)  # type: ignore[arg-type]

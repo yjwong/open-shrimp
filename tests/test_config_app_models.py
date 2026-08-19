@@ -11,6 +11,7 @@ import pytest
 from open_shrimp.config import _parse
 from open_shrimp.config_app import api as config_api
 from open_shrimp.config_app.api import _normalise_model_options, models_endpoint
+from tests.config_app_stub import disable_auth
 
 
 def _base_raw(**extra):
@@ -95,10 +96,7 @@ def _body(response):
 
 @pytest.fixture(autouse=True)
 def _no_auth(monkeypatch):
-    async def fake_auth(request):
-        return 1
-
-    monkeypatch.setattr(config_api, "_authenticate", fake_auth)
+    disable_auth(monkeypatch)
 
 
 @pytest.mark.asyncio

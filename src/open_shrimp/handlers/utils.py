@@ -23,6 +23,7 @@ from open_shrimp.handlers.state import (
     _effort_overrides,
     _model_overrides,
 )
+from open_shrimp.supervisor import is_supervisor_context, resolve_context
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +72,15 @@ async def _get_context_name(
 ) -> str | None:
     """Get the active context name for a scope (persisted in DB).
 
-    Every branch returns a name that is present in ``config.contexts``, so a
-    caller may subscript with the result.  ``None`` means the scope has no
+    Every branch returns a name :func:`resolve_context` resolves, so a
+    caller may look the result up with it.  ``None`` means the scope has no
     project to bind to: nothing is saved, no chat default applies, and
     ``default_context`` is unset or names a context that no longer exists.
+
+    The supervisor is reachable only through the saved binding, which the
+    user creates by picking it.  No fallback below can produce it: it is
+    not in ``config.contexts``, so no chat default and no
+    ``default_context`` can name it.
     """
     # If locked, always use that context regardless of what's saved
     locked = _get_locked_context(scope.chat_id, config)
@@ -83,7 +89,7 @@ async def _get_context_name(
         return locked
 
     saved = await get_active_context(db, scope)
-    if saved and saved in config.contexts:
+    if saved and (saved in config.contexts or is_supervisor_context(saved)):
         return saved
 
     # Check if this chat has a default context configured
@@ -115,7 +121,9 @@ async def _get_context(
     name = await _get_context_name(scope, config, db)
     if name is None:
         return None
-    ctx = config.contexts[name]
+    ctx = resolve_context(config, name)
+    if ctx is None:
+        return None
 
     model_override = _model_overrides.get(scope)
     effort_override = _effort_overrides.get(scope)
