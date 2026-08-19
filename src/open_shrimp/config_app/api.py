@@ -29,6 +29,8 @@ from open_shrimp.config import (
     effective_backend,
     load_config,
     load_raw_yaml,
+    patch_raw_yaml,
+    to_plain,
     write_raw_yaml,
 )
 from open_shrimp.review.auth import AuthError, authenticate
@@ -44,80 +46,6 @@ async def _authenticate(request: Request) -> int:
     return await authenticate(
         authorization, config.telegram.token, config.allowed_users
     )
-
-
-def _to_plain(obj: Any) -> Any:
-    """Recursively convert ruamel.yaml CommentedMap/Seq to plain dicts/lists.
-
-    ``_validate_raw`` uses ``isinstance(x, dict)`` checks that fail on
-    ``CommentedMap`` unless we convert first.
-    """
-    if hasattr(obj, "items"):  # Mapping-like (CommentedMap, dict)
-        return {k: _to_plain(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_to_plain(v) for v in obj]
-    return obj
-
-
-def _patch_contexts(raw: Any, incoming: dict[str, Any]) -> None:
-    """Merge the client's ``contexts`` mapping into *raw* in-place.
-
-    Two levels of deletion semantics, both driven by what the payload can
-    express:
-
-    * The payload carries the *whole* contexts mapping, so a context that
-      is absent from it has been deleted and is removed from disk.
-    * Within a context the payload carries only the fields the client
-      models, and it sends every one of those on each save — cleared
-      fields arrive as ``null`` or ``[]``, never by omission.  A key the
-      client did not send is therefore one it does not know about
-      (``mcp``, ``container``), and is preserved from disk.
-
-    Merging into the existing ``CommentedMap`` rather than replacing it
-    also keeps comments on individual contexts.
-    """
-    existing = raw.get("contexts")
-    if not hasattr(existing, "items"):
-        raw["contexts"] = incoming
-        return
-
-    for name in [n for n in existing if n not in incoming]:
-        del existing[name]
-
-    for name, ctx in incoming.items():
-        current = existing.get(name)
-        if not hasattr(current, "items") or not isinstance(ctx, dict):
-            existing[name] = ctx
-            continue
-        for key, value in ctx.items():
-            current[key] = value
-
-
-def _patch_raw_yaml(raw: Any, body: dict[str, Any]) -> None:
-    """Patch a ruamel.yaml round-trip structure with changes from the API.
-
-    Modifies *raw* in-place, replacing only the editable top-level keys
-    (``contexts``, ``allowed_users``, ``default_context``, ``backend``) while
-    leaving everything else (``telegram``, ``review``, comments) untouched.
-    """
-    if "allowed_users" in body:
-        raw["allowed_users"] = body["allowed_users"]
-
-    if "default_context" in body:
-        raw["default_context"] = body["default_context"]
-
-    if "backend" in body:
-        # Mirror ``config_to_dict``'s omit-when-default rule: only persist a
-        # non-default backend; clearing it (null/empty/"claude_sdk") removes
-        # the key so we never write the redundant default.
-        value = body["backend"]
-        if isinstance(value, str) and value and value != "claude_sdk":
-            raw["backend"] = value
-        else:
-            raw.pop("backend", None)
-
-    if "contexts" in body:
-        _patch_contexts(raw, body["contexts"])
 
 
 async def config_get_endpoint(request: Request) -> JSONResponse:
@@ -173,11 +101,11 @@ async def config_put_endpoint(request: Request) -> JSONResponse:
         )
 
     # Patch only the editable fields into the round-trip structure.
-    _patch_raw_yaml(raw, body)
+    patch_raw_yaml(raw, body)
 
     # Validate the patched config (needs plain dicts for isinstance checks).
     try:
-        _validate_raw(_to_plain(raw))
+        _validate_raw(to_plain(raw))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
 

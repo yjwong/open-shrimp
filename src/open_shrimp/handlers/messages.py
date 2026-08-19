@@ -46,6 +46,7 @@ from open_shrimp.db import (
 from open_shrimp.handlers.approval import (
     _send_approval_keyboard,
     _send_auto_approved_diff,
+    _send_config_write_approval,
     _send_host_bash_approval,
 )
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
@@ -1057,6 +1058,45 @@ async def _start_agent_task(
                         todos=_scope_todos.get(scope),
                     )
 
+            async def request_config_write(
+                tool: str,
+                tool_input: dict[str, Any],
+                tool_use_id: str,
+            ) -> str | None:
+                config_path = context.bot_data.get("config_path")
+                if not config_path:
+                    return (
+                        "This install has no config file path, so nothing "
+                        "can be written to it."
+                    )
+                await finalize_and_reset(context.bot, draft_state)
+                await notify_agent_status(
+                    context.bot_data, config, db, scope, "running",
+                    title=ctx_name,
+                    text=f"Approve a change to config.yaml ({tool})?",
+                    awaiting=True,
+                    tool_use_id=tool_use_id,
+                    tool_name=tool,
+                    todos=_scope_todos.get(scope),
+                )
+                try:
+                    return await _send_config_write_approval(
+                        bot=context.bot,
+                        chat_id=scope.chat_id,
+                        config_path=str(config_path),
+                        tool=tool,
+                        tool_input=tool_input,
+                        tool_use_id=tool_use_id,
+                        thread_id=scope.thread_id,
+                        scope=scope,
+                    )
+                finally:
+                    await notify_agent_status(
+                        context.bot_data, config, db, scope, "running",
+                        title=ctx_name,
+                        todos=_scope_todos.get(scope),
+                    )
+
             # Mutable container for the latest task checklist.
             # Preserved across stream_response iterations so the pinned
             # message retains the task list when usage is updated.
@@ -1096,6 +1136,7 @@ async def _start_agent_task(
                 ctx=ctx_config,
                 ctx_name=ctx_name,
                 sandbox_managers=context.bot_data.get("sandbox_managers"),
+                config_path=context.bot_data.get("config_path"),
             )
             persistent_rules = await policy.load_persistent_rules(
                 directory=ctx_config.directory,
@@ -1121,6 +1162,7 @@ async def _start_agent_task(
                     _session_approved_dirs.get((scope, ctx_name), set())
                 ),
                 request_host_bash_approval=request_host_bash,
+                request_config_write_approval=request_config_write,
             )
 
             session = await get_or_create_session(

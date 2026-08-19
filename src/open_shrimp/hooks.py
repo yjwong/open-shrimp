@@ -74,6 +74,17 @@ HostBashApprovalCallback = Callable[
     [dict[str, Any], str, bool], Awaitable[HostBashOutcome]
 ]
 
+# Type for the config-write approval callback: receives the bare tool name
+# (write_context / remove_context), the tool's input dict, and a
+# tool_use_id; returns None when the user approved, or the sentence to
+# hand back to the model when they did not.  A string rather than a bool
+# because most refusals never reach a person — a stale state token, a
+# withheld field, a write that would not validate — and the model can only
+# act on being told which.
+ConfigWriteApprovalCallback = Callable[
+    [str, dict[str, Any], str], Awaitable[str | None]
+]
+
 # Type for the auto-approved edit notification callback.
 EditNotifyCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -220,6 +231,7 @@ def make_can_use_tool(
     is_containerized: bool = False,
     get_session_approved_dirs: Callable[[], list[str]] | None = None,
     request_host_bash_approval: HostBashApprovalCallback | None = None,
+    request_config_write_approval: ConfigWriteApprovalCallback | None = None,
     policy: "BackendPolicy | None" = None,
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext], Awaitable[PermissionResult]
@@ -257,6 +269,8 @@ def make_can_use_tool(
             this session" button.
         request_host_bash_approval: Optional callback for the host_bash
             tool's dedicated approval flow.
+        request_config_write_approval: Optional callback for the
+            supervisor's config-write approval flow.
         policy: The backend's tool taxonomy and rendering.  Required in
             normal use; when omitted, the process-wide default backend's
             policy is resolved lazily.
@@ -305,6 +319,31 @@ def make_can_use_tool(
             return PermissionResultDeny(
                 message=f"User denied the {label} command.",
             )
+
+        # config write (write_context / remove_context): always route to the
+        # dedicated approval callback, which renders a diff of config.yaml and
+        # asks.  Beside the host-escape check and above everything else for
+        # the same reason — a context is a directory plus a tool policy, so
+        # writing one can hand the next turn a shell that never passed a
+        # host_bash approval.  No pattern, session rule, accept-all-edits
+        # grant or containerized fast-path may answer for the user here, and
+        # every one of those lives below this line.
+        config_write = p.config_write_tool(tool_name)
+        if config_write is not None:
+            if request_config_write_approval is None:
+                logger.warning(
+                    "%s invoked but no approval callback wired; denying",
+                    config_write,
+                )
+                return PermissionResultDeny(
+                    message="Config write approval is not configured.",
+                )
+            refusal = await request_config_write_approval(
+                config_write, tool_input, context.tool_use_id,
+            )
+            if refusal is None:
+                return PermissionResultAllow()
+            return PermissionResultDeny(message=refusal)
 
         # port_forward: list/remove don't expose new attack surface — only
         # create needs the approval prompt.

@@ -189,6 +189,22 @@ class BackendPolicy(Protocol):
         and is auto-approved."""
         ...
 
+    def config_write_tool(self, tool_name: str) -> str | None:
+        """The bare name of the config-write tool *tool_name* is, else None.
+
+        ``write_context`` and ``remove_context`` in the backend's wire
+        vocabulary (SDK: ``mcp__openshrimp__write_context``; OpenCode:
+        ``openshrimp_write_context``).  Drives the config-write approval
+        pre-check in ``hooks.py``, which sits in the same early slot as
+        ``is_host_escape`` for the same reason: writing a context is
+        writing a directory and a tool policy, so no session rule or
+        accept-all grant may answer for the user.
+
+        Returns the bare name rather than a boolean because the caller
+        has to plan the write, and planning needs to know which of the
+        two tools it is."""
+        ...
+
     def is_checklist_tool(self, tool_name: str) -> bool:
         """True for tools that change the session checklist.  Drives the
         pinned-message refresh in ``stream.py``."""

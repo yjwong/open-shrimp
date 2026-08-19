@@ -1,4 +1,4 @@
-"""``_patch_raw_yaml`` round-trips the editable top-level keys, including the
+"""``patch_raw_yaml`` round-trips the editable top-level keys, including the
 ``backend`` selector, while leaving everything else untouched — including keys
 inside a context that the config Mini App does not model."""
 
@@ -12,10 +12,10 @@ from open_shrimp.config import (
     _validate_raw,
     load_config,
     load_raw_yaml,
+    patch_raw_yaml,
     write_raw_yaml,
 )
 from open_shrimp.config_app.api import (
-    _patch_raw_yaml,
     config_get_endpoint,
     config_put_endpoint,
 )
@@ -39,35 +39,35 @@ def _base_raw() -> dict:
 
 def test_top_level_backend_set():
     raw = _base_raw()
-    _patch_raw_yaml(raw, {"backend": "opencode"})
+    patch_raw_yaml(raw, {"backend": "opencode"})
     assert raw["backend"] == "opencode"
 
 
 def test_top_level_backend_default_removes_key():
     raw = _base_raw()
     raw["backend"] = "opencode"
-    _patch_raw_yaml(raw, {"backend": "claude_sdk"})
+    patch_raw_yaml(raw, {"backend": "claude_sdk"})
     assert "backend" not in raw
 
 
 def test_top_level_backend_null_removes_key():
     raw = _base_raw()
     raw["backend"] = "opencode"
-    _patch_raw_yaml(raw, {"backend": None})
+    patch_raw_yaml(raw, {"backend": None})
     assert "backend" not in raw
 
 
 def test_top_level_backend_empty_removes_key():
     raw = _base_raw()
     raw["backend"] = "opencode"
-    _patch_raw_yaml(raw, {"backend": ""})
+    patch_raw_yaml(raw, {"backend": ""})
     assert "backend" not in raw
 
 
 def test_top_level_backend_absent_leaves_untouched():
     raw = _base_raw()
     raw["backend"] = "opencode"
-    _patch_raw_yaml(raw, {"allowed_users": [2]})
+    patch_raw_yaml(raw, {"allowed_users": [2]})
     assert raw["backend"] == "opencode"
     assert raw["allowed_users"] == [2]
 
@@ -85,7 +85,7 @@ def test_per_context_backend_round_trips_through_contexts():
             }
         }
     }
-    _patch_raw_yaml(raw, body)
+    patch_raw_yaml(raw, body)
     assert raw["contexts"]["default"]["backend"] == "opencode"
     assert raw["contexts"]["default"]["model"] == "openai/gpt-5.5"
 
@@ -116,7 +116,7 @@ def test_phone_use_context_patches_and_validates():
             }
         }
     }
-    _patch_raw_yaml(raw, body)
+    patch_raw_yaml(raw, body)
     sandbox = raw["contexts"]["phone"]["sandbox"]
     assert sandbox["phone_use"] is True
     assert sandbox["android"]["image_type"] == "GAPPS"
@@ -148,7 +148,7 @@ def test_saving_a_context_preserves_unmodelled_mcp_block():
     }
     ctx = _saved_context()
     ctx["description"] = "edited"
-    _patch_raw_yaml(raw, {"contexts": {"default": ctx}})
+    patch_raw_yaml(raw, {"contexts": {"default": ctx}})
     assert raw["contexts"]["default"]["description"] == "edited"
     assert raw["contexts"]["default"]["mcp"] == {
         "playwright": {"command": "npx", "args": ["@playwright/mcp"]},
@@ -158,7 +158,7 @@ def test_saving_a_context_preserves_unmodelled_mcp_block():
 def test_saving_a_context_preserves_every_unsent_key():
     raw = _base_raw()
     raw["contexts"]["default"]["some_future_field"] = {"a": 1}
-    _patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
+    patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
     assert raw["contexts"]["default"]["some_future_field"] == {"a": 1}
 
 
@@ -170,7 +170,7 @@ def test_removing_a_context_deletes_it():
         "allowed_tools": [],
         "mcp": {"srv": {"command": "x"}},
     }
-    _patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
+    patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
     assert set(raw["contexts"]) == {"default"}
 
 
@@ -178,7 +178,7 @@ def test_clearing_a_list_is_written_not_restored():
     raw = _base_raw()
     raw["contexts"]["default"]["disallowed_tools"] = ["Bash"]
     raw["contexts"]["default"]["additional_directories"] = ["/srv"]
-    _patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
+    patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
     assert raw["contexts"]["default"]["disallowed_tools"] == []
     assert raw["contexts"]["default"]["additional_directories"] == []
 
@@ -187,7 +187,7 @@ def test_clearing_a_scalar_is_written_not_restored():
     raw = _base_raw()
     raw["contexts"]["default"]["model"] = "opus"
     raw["contexts"]["default"]["sandbox"] = {"backend": "docker"}
-    _patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
+    patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
     assert raw["contexts"]["default"]["model"] is None
     assert raw["contexts"]["default"]["sandbox"] is None
 
@@ -196,7 +196,7 @@ def test_new_context_is_added_alongside_existing():
     raw = _base_raw()
     raw["contexts"]["default"]["mcp"] = {"srv": {"command": "x"}}
     body = {"contexts": {"default": _saved_context(), "new": _saved_context()}}
-    _patch_raw_yaml(raw, body)
+    patch_raw_yaml(raw, body)
     assert set(raw["contexts"]) == {"default", "new"}
     assert raw["contexts"]["default"]["mcp"] == {"srv": {"command": "x"}}
     assert "mcp" not in raw["contexts"]["new"]
@@ -227,7 +227,7 @@ def test_merge_preserves_comments_round_trip(tmp_path):
     raw = load_raw_yaml(config_file)
     ctx = _saved_context()
     ctx["description"] = "edited"
-    _patch_raw_yaml(raw, {"contexts": {"default": ctx}})
+    patch_raw_yaml(raw, {"contexts": {"default": ctx}})
     write_raw_yaml(config_file, raw)
 
     text = config_file.read_text(encoding="utf-8")

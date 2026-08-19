@@ -70,14 +70,32 @@ SUPERVISOR_DISALLOWED_TOOLS: tuple[str, ...] = (
 # ``webfetch``), so one entry serves both.
 SUPERVISOR_ALLOWED_TOOLS: tuple[str, ...] = ("WebFetch",)
 
-# The supervisor's own MCP tools.  Named here rather than in
+# The supervisor's read-only MCP tools.  Named here rather than in
 # ``supervisor_tools`` because ``client_manager`` has to auto-approve them
 # and must not import the tool module to learn what they are called; the
 # builder asserts it produces exactly these.
+#
+# The write tools are deliberately not in this list.  Auto-approval is
+# spelled by adding a tool to the backend's ``allowed_tools``, which is
+# also what stops it ever reaching ``can_use_tool`` — so absence here is
+# not a preference about how the write tools are handled, it is the
+# mechanism by which they are handled at all.
 SUPERVISOR_TOOL_NAMES: tuple[str, ...] = (
     "read_docs",
     "list_contexts",
     "validate_directory",
+)
+
+# The two tools that can change ``config.yaml``.  A context is a
+# directory plus a tool policy, so writing one is a privilege escalation:
+# a context with a broad directory and a shell in ``allowed_tools`` is a
+# host shell that never passed a ``host_bash`` approval.  Every call
+# therefore renders a diff and asks, in the same early slot in
+# ``hooks.py`` that ``is_host_escape`` occupies, ahead of every rule that
+# could otherwise answer for the user.
+SUPERVISOR_WRITE_TOOL_NAMES: tuple[str, ...] = (
+    "write_context",
+    "remove_context",
 )
 
 _DESCRIPTION = "OpenShrimp itself — docs and configuration"
@@ -169,11 +187,22 @@ def system_prompt() -> str:
         "Use list_contexts to report what is configured, and "
         "validate_directory to check whether a path the user names "
         "exists.\n\n"
-        "You have no shell and no file tools, by design. You cannot read "
-        "or change config.yaml, and you cannot run commands. When a user "
-        "asks for a configuration change, explain what to change and "
-        "where, and point them at /config for the configuration Mini App. "
-        "Do not claim you have made a change."
+        "You have no shell and no file tools, by design. You cannot run "
+        "commands, and the only file you can change is config.yaml, "
+        "through write_context and remove_context.\n\n"
+        "Both take the state_token that list_contexts returns, and both "
+        "refuse if config.yaml has changed since. When one refuses, call "
+        "list_contexts again and propose the change against the token it "
+        "returns. Every write shows the user a diff and waits for them to "
+        "approve it, so describe what you are about to do before you call "
+        "the tool, and never say a change is made until the tool tells you "
+        "it is.\n\n"
+        "You can set a project's directory, description, model, effort and "
+        "sandbox. You cannot set which tools it may run, which extra "
+        "directories it may touch, or whether it can escape its sandbox — "
+        "those decide what a project is allowed to do, and they are set by "
+        "the user in the configuration Mini App, which they open with "
+        "/config. Say so plainly when asked; do not work around it."
     )
 
 
@@ -181,6 +210,7 @@ __all__ = [
     "DOCS_BASE_URL",
     "DOCS_INDEX_PATH",
     "SUPERVISOR_TOOL_NAMES",
+    "SUPERVISOR_WRITE_TOOL_NAMES",
     "SupervisorDispatchRefused",
     "is_supervisor_context",
     "resolve_context",

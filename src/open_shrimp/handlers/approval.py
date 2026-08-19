@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,6 +22,8 @@ from open_shrimp.cross_context import handle_handoff_callback
 from open_shrimp.db import ChatScope
 
 from open_shrimp.handlers.state import (
+    CONFIG_WRITE_APPROVE_PREFIX as _CONFIG_WRITE_APPROVE_PREFIX,
+    HOST_BASH_APPROVE_PREFIX as _HOST_BASH_APPROVE_PREFIX,
     _approval_futures,
     _approval_metadata,
     _approval_resolved_via,
@@ -34,6 +37,7 @@ from open_shrimp.handlers.state import (
     take_pending_approvals,
 )
 from open_shrimp.handlers.utils import _escape_mdv2
+from open_shrimp.markdown import escape_code
 from open_shrimp.hooks import ApprovalRule, HostBashOutcome
 from open_shrimp.sudo_audit import log_sudo
 
@@ -57,6 +61,33 @@ def _resolve_policy(
 # ---------------------------------------------------------------------------
 # Approval keyboard & auto-approved diff notification
 # ---------------------------------------------------------------------------
+
+
+async def _close_card(
+    bot: Bot, chat_id: int, message_id: int, text: str,
+) -> None:
+    """Replace a card's body with its outcome and take the buttons away.
+
+    A card whose buttons outlive its decision invites a tap that resolves
+    nothing.  Falling back to stripping the markup alone matters when the
+    replacement text is what Telegram refused: the buttons still have to
+    go, or the card stays live-looking forever.
+    """
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode="MarkdownV2",
+            reply_markup=None,
+        )
+    except Exception:
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=message_id, reply_markup=None,
+            )
+        except Exception:
+            logger.debug("Failed to close an approval card", exc_info=True)
 
 
 async def _send_auto_approved_diff(
@@ -316,7 +347,6 @@ async def retire_pending_approvals(scope: ChatScope) -> None:
 
 _HOST_BASH_TIMEOUT_SECONDS = 30.0
 _HOST_BASH_TICK_SECONDS = 2.0
-_HOST_BASH_APPROVE_PREFIX = "hb_approve:"
 _HOST_BASH_DENY_PREFIX = "hb_deny:"
 
 
@@ -540,6 +570,166 @@ async def _send_host_bash_approval(
         outcome=outcome,
     )
     return outcome
+
+
+# ---------------------------------------------------------------------------
+# Config-write approval — the supervisor's write_context / remove_context.
+#
+# Its own callback prefixes, and no "accept all" button of any kind: the
+# Edit/Write session grant deliberately does not reach config.yaml, and a
+# card that offered to stop asking would put it back.  No auto-deny timer
+# either — like every other approval here, an untapped card waits.
+# ---------------------------------------------------------------------------
+
+
+_CONFIG_WRITE_DENY_PREFIX = "cw_deny:"
+
+
+def _config_write_keyboard(tool_use_id: str) -> InlineKeyboardMarkup:
+    """[Approve] [Deny], and nothing that grants anything beyond this call."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "Approve",
+            callback_data=f"{_CONFIG_WRITE_APPROVE_PREFIX}{tool_use_id}",
+        ),
+        InlineKeyboardButton(
+            "Deny",
+            callback_data=f"{_CONFIG_WRITE_DENY_PREFIX}{tool_use_id}",
+        ),
+    ]])
+
+
+def _format_config_write(headline: str, diff: str, note: str = "") -> str:
+    """The card: what it does in a sentence, then the diff that proves it.
+
+    The diff goes through ``escape_code``, not the prose escaper: inside a
+    code entity Telegram honours only ``\\`` and a backtick, so escaping
+    the rest would print the backslashes — and a diff is almost entirely
+    the characters the prose escaper touches.
+    """
+    parts = [f"⚙️ *Change OpenShrimp's configuration*\n\n{_escape_mdv2(headline)}\\."]
+    if note:
+        parts.append(_escape_mdv2(note))
+    parts.append(f"```diff\n{escape_code(diff)}\n```")
+    return "\n\n".join(parts)
+
+
+async def _send_config_write_approval(
+    bot: Bot,
+    chat_id: int,
+    config_path: str,
+    tool: str,
+    tool_input: dict[str, Any],
+    tool_use_id: str,
+    thread_id: int | None = None,
+    scope: ChatScope | None = None,
+) -> str | None:
+    """Show what the write would do and wait; None once the user approves.
+
+    The plan is built before anything is sent, so a write that could
+    never happen — a stale state token, a withheld field, a change that
+    would not validate — is refused to the model without troubling the
+    user with a card they would only have to deny.
+
+    The state token is checked again on approval, because a card waits
+    without a deadline and the user can edit the same file in the config
+    Mini App while it sits there.  On a mismatch the card is re-rendered
+    with the diff the request would produce against the file as it now
+    stands, and nothing is written: what the user reads and what lands on
+    disk are the same bytes or there is no write.
+    """
+    from open_shrimp.supervisor_write import (
+        ConfigWriteRefused,
+        plan_config_write,
+    )
+
+    path = Path(config_path)
+    try:
+        plan = plan_config_write(path, tool, tool_input)
+    except ConfigWriteRefused as exc:
+        return str(exc)
+
+    thread_kwargs: dict[str, Any] = {}
+    if thread_id is not None:
+        thread_kwargs["message_thread_id"] = thread_id
+
+    approve_data = f"{_CONFIG_WRITE_APPROVE_PREFIX}{tool_use_id}"
+    deny_data = f"{_CONFIG_WRITE_DENY_PREFIX}{tool_use_id}"
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[bool] = loop.create_future()
+    _approval_futures[approve_data] = future
+    _approval_futures[deny_data] = future
+    # Deliberately not registered in ``_approval_metadata``: that is what
+    # ``_auto_resolve_pending_approvals`` walks when the user grants "accept
+    # all edits", and a config write must never be answered by a grant given
+    # to something else.
+
+    text = _format_config_write(plan.headline, plan.diff)
+    sent_msg = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="MarkdownV2",
+        reply_markup=_config_write_keyboard(tool_use_id),
+        **thread_kwargs,
+    )
+    pending = register_pending_approval(
+        scope, chat_id, sent_msg.message_id, future, bot=bot, text=text,
+    )
+
+    try:
+        approved = await future
+    finally:
+        release_pending_approval(scope, pending)
+        _approval_futures.pop(approve_data, None)
+        _approval_futures.pop(deny_data, None)
+
+    if not approved:
+        await _close_card(
+            bot, chat_id, sent_msg.message_id, f"{text}\n\n❌ *Denied\\.*",
+        )
+        return (
+            "The user denied that change, so config.yaml is unchanged. Ask "
+            "them what they would rather do; do not propose the same change "
+            "again unhandled."
+        )
+
+    # Ask the planner the same question a second time rather than
+    # comparing tokens here: it enforces the token the model supplied, so
+    # succeeding *is* the answer to "is this still the file I rendered",
+    # and it is the one place that knows every other way a write can stop
+    # being possible while a card waits.
+    try:
+        plan_config_write(path, tool, tool_input)
+    except ConfigWriteRefused as exc:
+        stale = str(exc)
+    else:
+        await _close_card(
+            bot, chat_id, sent_msg.message_id, f"{text}\n\n✅ *Approved\\.*",
+        )
+        return None
+
+    # The file moved under the card.  Show what the same request would do
+    # now — the user is owed a sight of it — and write nothing.
+    note = (
+        "config.yaml changed while this was waiting, so nothing was "
+        "written. Here is what this request would do to the file as it "
+        "now stands."
+    )
+    try:
+        restated = plan_config_write(path, tool, tool_input, enforce_token=False)
+        replacement = _format_config_write(restated.headline, restated.diff, note)
+    except ConfigWriteRefused as exc:
+        replacement = _format_config_write(
+            plan.headline, plan.diff, f"{note} It would now be refused: {exc}",
+        )
+    await _close_card(
+        bot, chat_id, sent_msg.message_id, replacement,
+    )
+    return (
+        f"{stale} The user approved a diff that no longer describes the file, "
+        f"so the approval was spent and nothing was written. Tell them what "
+        f"changed before proposing it again."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -959,15 +1149,21 @@ async def handle_approval_callback(
             )
         return True
 
-    # Handle host_bash (sudo mode) approve/deny.
-    if data.startswith(_HOST_BASH_APPROVE_PREFIX) or data.startswith(
-        _HOST_BASH_DENY_PREFIX,
-    ):
+    # host_bash (sudo mode) and config-write approve/deny.  Both senders own
+    # their card's text and edit it themselves once the future resolves, so
+    # this only has to answer the tap.
+    _OWN_CARD_PREFIXES = (
+        _HOST_BASH_APPROVE_PREFIX, _HOST_BASH_DENY_PREFIX,
+        _CONFIG_WRITE_APPROVE_PREFIX, _CONFIG_WRITE_DENY_PREFIX,
+    )
+    if data.startswith(_OWN_CARD_PREFIXES):
         future = _approval_futures.get(data)
         if not future or future.done():
-            await query.answer("This approval has expired.")
+            await query.answer("This approval is no longer live.")
             return True
-        approved = data.startswith(_HOST_BASH_APPROVE_PREFIX)
+        approved = data.startswith(
+            (_HOST_BASH_APPROVE_PREFIX, _CONFIG_WRITE_APPROVE_PREFIX),
+        )
         future.set_result(approved)
         await query.answer("Approved." if approved else "Denied.")
         return True

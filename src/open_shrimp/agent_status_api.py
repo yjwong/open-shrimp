@@ -45,30 +45,35 @@ async def resolve_agent_approval_endpoint(request: Request) -> JSONResponse:
             {"error": "decision must be 'approve' or 'deny'"}, status_code=400
         )
 
-    # The keyboard sender registers the same future under both the
-    # ``approve:`` and ``deny:`` callback keys; either resolves it.  Host-escape
-    # (sudo) prompts use their own ``hb_approve:``/``hb_deny:`` keys, so fall
-    # back to that prefix before giving up.
+    # Each card sender registers the same future under its own approve and
+    # deny callback keys; either resolves it.  The senders differ only in
+    # which prefix they used, and the phone knows the tool_use_id and
+    # nothing else, so every prefix is probed rather than named here — a
+    # sender this file has not heard of is one the phone cannot answer.
     from open_shrimp.handlers.state import (
+        APPROVE_CALLBACK_PREFIXES,
         RESOLVED_VIA_ANDROID,
+        STANDARD_APPROVE_PREFIX,
         _approval_futures,
         _approval_resolved_via,
     )
 
-    future = _approval_futures.get(f"approve:{tool_use_id}")
-    is_host_escape = False
-    if future is None:
-        future = _approval_futures.get(f"hb_approve:{tool_use_id}")
-        is_host_escape = future is not None
+    future = None
+    matched = ""
+    for prefix in APPROVE_CALLBACK_PREFIXES:
+        future = _approval_futures.get(f"{prefix}{tool_use_id}")
+        if future is not None:
+            matched = prefix
+            break
     if future is None or future.done():
         # Already resolved or never existed — treat as a benign no-op so the
         # phone doesn't surface an error when the user was simply too late.
         return JSONResponse({"status": "expired"})
 
-    # The host-escape flow edits its own message unconditionally and never
-    # reads ``_approval_resolved_via``, so only the standard path needs the
-    # "resolved on phone" marker (and its cleanup).
-    if not is_host_escape:
+    # The host-escape and config-write flows edit their own message
+    # unconditionally and never read ``_approval_resolved_via``, so only the
+    # standard path needs the "resolved on phone" marker (and its cleanup).
+    if matched == STANDARD_APPROVE_PREFIX:
         _approval_resolved_via[tool_use_id] = RESOLVED_VIA_ANDROID
     future.set_result(decision == "approve")
     logger.info(

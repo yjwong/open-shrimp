@@ -112,6 +112,30 @@ _scope_todos: dict[ChatScope, list[dict[str, Any]]] = {}
 _approval_futures: dict[str, asyncio.Future[bool]] = {}
 
 # ---------------------------------------------------------------------------
+# Every approval card's approve-button prefix, one entry per card sender in
+# ``handlers/approval.py``.
+#
+# The Android companion resolves a card by ``tool_use_id`` alone and has no
+# way to learn which sender made it, so it probes these in order.  A sender
+# missing from this tuple is one the phone can *display* — the awaiting
+# overlay is pushed from the tool's own callback — and can never resolve:
+# the tap answers "expired", nothing happens, and a card that by design has
+# no deadline waits for a tap that will never work.  Adding a card sender
+# means adding its prefix here.
+#
+# ``approve:`` is also the only sender that does not edit its own card when
+# the future resolves, which is why it alone is marked resolved-on-phone.
+# ---------------------------------------------------------------------------
+STANDARD_APPROVE_PREFIX = "approve:"
+HOST_BASH_APPROVE_PREFIX = "hb_approve:"
+CONFIG_WRITE_APPROVE_PREFIX = "cw_approve:"
+APPROVE_CALLBACK_PREFIXES: tuple[str, ...] = (
+    STANDARD_APPROVE_PREFIX,
+    HOST_BASH_APPROVE_PREFIX,
+    CONFIG_WRITE_APPROVE_PREFIX,
+)
+
+# ---------------------------------------------------------------------------
 # Resolution source for pending approvals: tool_use_id -> "android".
 # Set by the authenticated Android approve/deny endpoint just before it
 # resolves the future, so the keyboard sender knows to clean up the Telegram

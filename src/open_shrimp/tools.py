@@ -253,6 +253,7 @@ def create_openshrimp_tools(
     port_relay_registry: Any | None = None,
     push_sender: Any | None = None,
     pickup_event_id: int | None = None,
+    config_path: str | None = None,
 ) -> list[OpenShrimpTool]:
     """Build the transport-neutral OpenShrimp tool descriptors.
 
@@ -1979,11 +1980,12 @@ def create_openshrimp_tools(
 
     # --- supervisor tools ---
     # The reserved ``openshrimp`` context only.  It has no shell and no
-    # file tools, so these three are all it can do.
+    # file tools, so these are all it can do — and without a
+    # ``config_path`` the two write tools among them are not built.
     if config is not None and is_supervisor_context(context_name):
         from open_shrimp.supervisor_tools import build_supervisor_tools
 
-        tools_list.extend(build_supervisor_tools(config))
+        tools_list.extend(build_supervisor_tools(config, config_path))
 
     # --- ask_context (cross-context query) ---
     # Lets the agent ask a focused question of another context and get a

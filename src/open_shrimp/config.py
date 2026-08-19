@@ -1265,6 +1265,47 @@ def write_config(config_path: Path, config_dict: dict[str, Any]) -> None:
     )
 
 
+# ── The shape of one context ──
+#
+# Here rather than in ``setup.py`` because the setup wizard is no longer
+# the only thing that creates a context: the supervisor's ``write_context``
+# tool does too, and it is a security-gated path whose grant of
+# ``allowed_tools`` must not be decided by a helper filed under the
+# interactive wizard's ergonomics.
+
+
+def _validate_context_name(value: str) -> str | None:
+    """Validate a context name is a simple identifier and not reserved."""
+    if not value.replace("-", "").replace("_", "").isalnum():
+        return "Use only letters, numbers, hyphens, and underscores."
+    if value == RESERVED_CONTEXT_NAME:
+        return (
+            f"'{RESERVED_CONTEXT_NAME}' is reserved for OpenShrimp's own "
+            f"context. Pick another name."
+        )
+    return None
+
+
+def build_context_dict(
+    directory: str,
+    description: str,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Assemble one context entry.
+
+    Shared by every front end that can create a first config, so the shape
+    cannot drift between them.
+    """
+    context: dict[str, Any] = {
+        "directory": str(Path(directory).expanduser().resolve()),
+        "description": description,
+        "allowed_tools": ["LSP", "AskUserQuestion"],
+    }
+    if model is not None:
+        context["model"] = model
+    return context
+
+
 # ── Round-trip YAML helpers (comment-preserving) ──
 
 
@@ -1283,10 +1324,12 @@ def load_raw_yaml(config_path: Path) -> Any:
     return ry.load(config_path.read_text(encoding="utf-8"))
 
 
-def write_raw_yaml(config_path: Path, data: Any) -> None:
-    """Write a ruamel.yaml round-trip structure back to a YAML file.
+def dump_raw_yaml(data: Any) -> str:
+    """Render a ruamel.yaml round-trip structure back to YAML text.
 
-    Preserves comments and formatting from the original load.
+    Split from :func:`write_raw_yaml` so a caller can show the proposed
+    file before committing to it, and then write exactly the bytes it
+    showed rather than a second render of the same tree.
     """
     from io import StringIO
 
@@ -1298,5 +1341,98 @@ def write_raw_yaml(config_path: Path, data: Any) -> None:
 
     buf = StringIO()
     ry.dump(data, buf)
+    return buf.getvalue()
+
+
+def write_raw_yaml(config_path: Path, data: Any) -> None:
+    """Write a ruamel.yaml round-trip structure back to a YAML file.
+
+    Preserves comments and formatting from the original load.
+    """
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(buf.getvalue(), encoding="utf-8")
+    config_path.write_text(dump_raw_yaml(data), encoding="utf-8")
+
+
+# ── Patching a round-trip structure ──
+#
+# The one path by which anything in this process edits ``config.yaml``
+# in place.  It lives here, next to the loader and the validator, because
+# both surfaces that use it — the config Mini App and the supervisor
+# context's write tools — must agree on what a save means, and the one
+# that drifted would be the one an agent drives.
+
+
+def to_plain(obj: Any) -> Any:
+    """Recursively convert ruamel.yaml CommentedMap/Seq to dicts/lists.
+
+    :func:`_validate_raw` uses ``isinstance(x, dict)`` checks that fail
+    on ``CommentedMap`` unless we convert first.
+    """
+    if hasattr(obj, "items"):  # Mapping-like (CommentedMap, dict)
+        return {k: to_plain(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [to_plain(v) for v in obj]
+    return obj
+
+
+def patch_contexts(raw: Any, incoming: dict[str, Any]) -> None:
+    """Merge a ``contexts`` mapping into *raw* in-place.
+
+    Two levels of deletion semantics, both driven by what a caller can
+    express:
+
+    * The payload carries the *whole* contexts mapping, so a context that
+      is absent from it has been deleted and is removed from disk.
+    * Within a context the payload carries only the fields the caller
+      means to set, and it sends every one of those — cleared fields
+      arrive as ``null`` or ``[]``, never by omission.  A key the caller
+      did not send is therefore one it does not mean to touch, and is
+      preserved from disk.  An empty mapping is how a context is named
+      as surviving while being left entirely alone.
+
+    Merging into the existing ``CommentedMap`` rather than replacing it
+    also keeps comments on individual contexts.
+    """
+    existing = raw.get("contexts")
+    if not hasattr(existing, "items"):
+        raw["contexts"] = incoming
+        return
+
+    for name in [n for n in existing if n not in incoming]:
+        del existing[name]
+
+    for name, ctx in incoming.items():
+        current = existing.get(name)
+        if not hasattr(current, "items") or not isinstance(ctx, dict):
+            existing[name] = ctx
+            continue
+        for key, value in ctx.items():
+            current[key] = value
+
+
+def patch_raw_yaml(raw: Any, body: dict[str, Any]) -> None:
+    """Patch a ruamel.yaml round-trip structure with a set of changes.
+
+    Modifies *raw* in-place, replacing only the editable top-level keys
+    (``contexts``, ``allowed_users``, ``default_context``, ``backend``)
+    while leaving everything else (``telegram``, ``review``, comments)
+    untouched.
+    """
+    if "allowed_users" in body:
+        raw["allowed_users"] = body["allowed_users"]
+
+    if "default_context" in body:
+        raw["default_context"] = body["default_context"]
+
+    if "backend" in body:
+        # Mirror ``config_to_dict``'s omit-when-default rule: only persist a
+        # non-default backend; clearing it (null/empty/"claude_sdk") removes
+        # the key so we never write the redundant default.
+        value = body["backend"]
+        if isinstance(value, str) and value and value != "claude_sdk":
+            raw["backend"] = value
+        else:
+            raw.pop("backend", None)
+
+    if "contexts" in body:
+        patch_contexts(raw, body["contexts"])

@@ -28,7 +28,11 @@ except ImportError:
     readline = None  # type: ignore[assignment]
 
 from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
-from open_shrimp.config import RESERVED_CONTEXT_NAME
+from open_shrimp.config import (
+    RESERVED_CONTEXT_NAME,
+    _validate_context_name,
+    build_context_dict,
+)
 
 
 def _path_completer(text: str, state: int) -> str | None:
@@ -149,18 +153,6 @@ def _validate_directory(value: str) -> str | None:
     p = Path(value).expanduser()
     if not p.is_dir():
         return f"Directory does not exist: {p}"
-    return None
-
-
-def _validate_context_name(value: str) -> str | None:
-    """Validate a context name is a simple identifier and not reserved."""
-    if not value.replace("-", "").replace("_", "").isalnum():
-        return "Use only letters, numbers, hyphens, and underscores."
-    if value == RESERVED_CONTEXT_NAME:
-        return (
-            f"'{RESERVED_CONTEXT_NAME}' is reserved for OpenShrimp's own "
-            f"context. Pick another name."
-        )
     return None
 
 
@@ -493,26 +485,6 @@ def _prompt_context() -> tuple[str, dict[str, Any]]:
         model = _prompt("Custom model name")
 
     return name, build_context_dict(directory, description, model)
-
-
-def build_context_dict(
-    directory: str,
-    description: str,
-    model: str | None = None,
-) -> dict[str, Any]:
-    """Assemble one context entry.
-
-    Shared by every front end that can create a first config, so the shape
-    cannot drift between them.
-    """
-    context: dict[str, Any] = {
-        "directory": str(Path(directory).expanduser().resolve()),
-        "description": description,
-        "allowed_tools": ["LSP", "AskUserQuestion"],
-    }
-    if model is not None:
-        context["model"] = model
-    return context
 
 
 def build_config_dict(

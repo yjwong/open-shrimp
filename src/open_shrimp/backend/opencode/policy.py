@@ -27,6 +27,7 @@ from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
 from open_shrimp.mini_app import make_web_app_button
+from open_shrimp.supervisor import SUPERVISOR_WRITE_TOOL_NAMES
 
 if TYPE_CHECKING:
     from open_shrimp.db import ChatScope
@@ -75,6 +76,12 @@ HOST_BASH_TOOL_NAME = "openshrimp_host_bash"
 #: Fully-qualified name of the host_monitor MCP tool — the streaming
 #: host-escape sibling of host_bash (OpenCode's ``<server>_<tool>`` prefix).
 HOST_MONITOR_TOOL_NAME = "openshrimp_host_monitor"
+
+#: The supervisor's config-write tools, wire name to bare name.  Routed
+#: through the same fresh-approval pre-check as the host-escape pair.
+CONFIG_WRITE_TOOL_NAMES: dict[str, str] = {
+    f"openshrimp_{name}": name for name in SUPERVISOR_WRITE_TOOL_NAMES
+}
 
 #: Prefixes to skip when extracting the bash command name.
 _BASH_SKIP_PREFIXES = {"sudo", "env", "nohup", "nice", "ionice", "time", "strace"}
@@ -655,6 +662,9 @@ class OpenCodePolicy:
 
     def is_host_escape(self, tool_name: str) -> bool:
         return tool_name in (HOST_BASH_TOOL_NAME, HOST_MONITOR_TOOL_NAME)
+
+    def config_write_tool(self, tool_name: str) -> str | None:
+        return CONFIG_WRITE_TOOL_NAMES.get(tool_name)
 
     def is_checklist_tool(self, tool_name: str) -> bool:
         return tool_name == "todowrite"

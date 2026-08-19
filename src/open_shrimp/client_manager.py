@@ -45,6 +45,7 @@ from open_shrimp.db import (
 from open_shrimp.hooks import (
     ApprovalCallback,
     EditNotifyCallback,
+    ConfigWriteApprovalCallback,
     HostBashApprovalCallback,
     QuestionCallback,
 )
@@ -85,6 +86,7 @@ class CallbackContext:
     is_tool_auto_approved: Callable[[str, dict[str, Any]], bool] | None = None
     get_session_approved_dirs: Callable[[], list[str]] | None = None
     request_host_bash_approval: HostBashApprovalCallback | None = None
+    request_config_write_approval: ConfigWriteApprovalCallback | None = None
 
 
 @dataclass
@@ -248,6 +250,7 @@ async def get_or_create_session(
     port_relay_registry: Any | None = None,
     push_sender: Any | None = None,
     backend: Backend | None = None,
+    config_path: str | None = None,
 ) -> AgentSession:
     """Return an existing live session or create a new one.
 
@@ -284,6 +287,7 @@ async def get_or_create_session(
                 existing.callback_context.is_tool_auto_approved = callback_context.is_tool_auto_approved
                 existing.callback_context.get_session_approved_dirs = callback_context.get_session_approved_dirs
                 existing.callback_context.request_host_bash_approval = callback_context.request_host_bash_approval
+                existing.callback_context.request_config_write_approval = callback_context.request_config_write_approval
                 existing.last_activity = time.monotonic()
                 logger.info(
                     "Reusing live client for scope %s context %s",
@@ -351,6 +355,7 @@ async def get_or_create_session(
         is_containerized=is_sandboxed(context),
         get_session_approved_dirs=_make_session_dirs_proxy(callback_context),
         request_host_bash_approval=_make_host_bash_approval_proxy(callback_context),
+        request_config_write_approval=_make_config_write_approval_proxy(callback_context),
         policy=backend.policy,
     )
 
@@ -736,6 +741,7 @@ async def get_or_create_session(
                     port_relay_registry=port_relay_registry,
                     push_sender=push_sender,
                     pickup_event_id=pickup_event_id,
+                    config_path=config_path,
                 )
 
             # Some sandbox backends can't reach host loopback services
@@ -1311,6 +1317,24 @@ def _make_session_dirs_proxy(
         if ctx.get_session_approved_dirs is None:
             return []
         return ctx.get_session_approved_dirs()
+
+    return _proxy
+
+
+def _make_config_write_approval_proxy(
+    ctx: CallbackContext,
+) -> ConfigWriteApprovalCallback:
+    async def _proxy(
+        tool: str, tool_input: dict[str, Any], tool_use_id: str,
+    ) -> str | None:
+        if ctx.request_config_write_approval is None:
+            logger.warning(
+                "config write invoked but no approval callback set; denying"
+            )
+            return "Config write approval is not configured."
+        return await ctx.request_config_write_approval(
+            tool, tool_input, tool_use_id,
+        )
 
     return _proxy
 

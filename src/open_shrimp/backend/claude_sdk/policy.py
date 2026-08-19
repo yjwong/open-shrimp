@@ -16,6 +16,7 @@ from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
 from open_shrimp.mini_app import make_web_app_button
+from open_shrimp.supervisor import SUPERVISOR_WRITE_TOOL_NAMES
 
 if TYPE_CHECKING:
     from open_shrimp.db import ChatScope
@@ -108,6 +109,12 @@ HOST_BASH_TOOL_NAME = "mcp__openshrimp__host_bash"
 #: host-escape sibling of host_bash.  Routed through the same fresh-approval
 #: pre-check as host_bash.
 HOST_MONITOR_TOOL_NAME = "mcp__openshrimp__host_monitor"
+
+#: The supervisor's config-write tools, wire name to bare name.  Routed
+#: through the same fresh-approval pre-check as the host-escape pair.
+CONFIG_WRITE_TOOL_NAMES: dict[str, str] = {
+    f"mcp__openshrimp__{name}": name for name in SUPERVISOR_WRITE_TOOL_NAMES
+}
 
 #: Bash commands that are auto-approved when "accept all edits" is active.
 #: Mirrors Claude Code's acceptEdits mode allowlist — these are common
@@ -634,6 +641,9 @@ class ClaudeSdkPolicy:
 
     def is_host_escape(self, tool_name: str) -> bool:
         return tool_name in (HOST_BASH_TOOL_NAME, HOST_MONITOR_TOOL_NAME)
+
+    def config_write_tool(self, tool_name: str) -> str | None:
+        return CONFIG_WRITE_TOOL_NAMES.get(tool_name)
 
     def is_checklist_tool(self, tool_name: str) -> bool:
         return tool_name in _CHECKLIST_TOOLS

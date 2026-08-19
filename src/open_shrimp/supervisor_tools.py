@@ -1,36 +1,61 @@
-"""The supervisor's tools: read the docs, report the config, check a path.
+"""The supervisor's tools: read the docs, report the config, change it.
 
-All three are read-only.  The supervisor has no shell and no file tools
-(see :mod:`open_shrimp.supervisor`), so this module is the whole of what
-it can do.
+The supervisor has no shell and no file tools (see
+:mod:`open_shrimp.supervisor`), so this module is the whole of what it
+can do.  Three tools read and two write.
 
 ``read_docs`` builds its own URL from a path against a base pinned in
 code.  The model supplies a path, never a host, and a path that resolves
 off the documentation site is refused rather than fetched.
+
+``list_contexts`` reads ``config.yaml`` rather than the ``Config`` the
+session was built with, and returns a state token alongside it.  Both are
+the same decision: the process hot-reloads the file, so a snapshot taken
+when the session started is stale by its second turn, and a token that
+did not describe the file the report came from would be worth nothing.
+
+``write_context`` and ``remove_context`` require that token and hand the
+whole planning job to :mod:`open_shrimp.supervisor_write`, which is also
+what the approval card in front of them uses.  They are the only tools
+here that are not auto-approved; every call renders a diff and asks.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 
 from open_shrimp.config import (
+    _SANDBOX_BACKENDS,
+    _VALID_EFFORT_LEVELS,
     Config,
     check_directory,
     effective_backend,
     is_sandboxed,
+    load_config,
     sandbox_backend,
 )
 from open_shrimp.supervisor import (
     DOCS_BASE_URL,
     DOCS_INDEX_PATH,
     SUPERVISOR_TOOL_NAMES,
+    SUPERVISOR_WRITE_TOOL_NAMES,
 )
-from open_shrimp.tools import OpenShrimpTool, _text_result
+from open_shrimp.supervisor_write import (
+    REMOVE_CONTEXT,
+    WRITABLE_FIELDS,
+    WRITE_CONTEXT,
+    ConfigWriteRefused,
+    apply_plan,
+    plan_config_write,
+    state_token,
+)
+from open_shrimp.tools import OpenShrimpTool, ToolHandler, _text_result
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +92,80 @@ _validate_directory_schema: dict[str, Any] = {
         },
     },
     "required": ["path"],
+}
+
+_STATE_TOKEN_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "The state_token from the most recent list_contexts call. The write "
+        "is refused if config.yaml has changed since, so re-read it rather "
+        "than remembering one from earlier in the conversation."
+    ),
+}
+
+# ``additionalProperties: false`` so a field this tool may not set is a
+# schema error at the model, before it can be quietly dropped and then
+# reported to the user as done.
+_write_context_schema: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "state_token": _STATE_TOKEN_PROPERTY,
+        "name": {
+            "type": "string",
+            "description": (
+                "The project's key in config.yaml. Letters, numbers, hyphens "
+                "and underscores. An existing name updates that project; a "
+                "new one creates it."
+            ),
+        },
+        "directory": {
+            "type": "string",
+            "description": (
+                "Absolute path to the project directory. It must already "
+                "exist — check with validate_directory first."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": (
+                "One short phrase naming the project, shown in the /context "
+                "menu. Required when creating."
+            ),
+        },
+        "model": {
+            "type": "string",
+            "description": "Model id for this project. Omit to inherit.",
+        },
+        "effort": {
+            "type": "string",
+            "enum": list(_VALID_EFFORT_LEVELS),
+            "description": "Reasoning effort for this project.",
+        },
+        "sandbox": {
+            "type": "string",
+            "enum": sorted(_SANDBOX_BACKENDS),
+            "description": (
+                "Run this project inside a sandbox on the named backend. Can "
+                "only be given to a project that has none; changing or "
+                "removing a sandbox is done in the Mini App at /config."
+            ),
+        },
+    },
+    "required": ["state_token", "name"],
+    "additionalProperties": False,
+}
+
+_remove_context_schema: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "state_token": _STATE_TOKEN_PROPERTY,
+        "name": {
+            "type": "string",
+            "description": "The project to remove from config.yaml.",
+        },
+    },
+    "required": ["state_token", "name"],
+    "additionalProperties": False,
 }
 
 
@@ -171,23 +270,79 @@ async def _validate_directory(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def build_supervisor_tools(config: Config) -> list[OpenShrimpTool]:
-    """The supervisor's three read-only tools, bound to *config*."""
+def build_supervisor_tools(
+    config: Config, config_path: str | None = None
+) -> list[OpenShrimpTool]:
+    """The supervisor's tools, bound to *config*.
+
+    Without a *config_path* the two write tools are not built at all.
+    There is no file to write, no state token to hand out, and a tool
+    that exists only to refuse is worse than one the model never sees.
+    """
+    path = Path(config_path) if config_path else None
 
     async def list_contexts(args: dict[str, Any]) -> dict[str, Any]:
+        # Read from disk, not from the session's ``config``: the process
+        # hot-reloads the file, so the snapshot this closure was built
+        # with is stale from the second turn onwards — and the state
+        # token has to describe the file the report came from.
+        if path is None:
+            current, token = config, None
+        else:
+            try:
+                current, token = load_config(str(path)), state_token(path)
+            except (OSError, ValueError) as exc:
+                return _text_result(
+                    f"config.yaml could not be read: {exc}. Tell the user; "
+                    f"the running configuration is whatever loaded last.",
+                    is_error=True,
+                )
+
         report: dict[str, Any] = {
-            "default_context": config.default_context,
-            "backend": config.backend,
+            "default_context": current.default_context,
+            "backend": current.backend,
             "contexts": [
-                _context_summary(name, config) for name in config.contexts
+                _context_summary(name, current) for name in current.contexts
             ],
         }
-        if not config.contexts:
+        if token is not None:
+            report["state_token"] = token
+        if not current.contexts:
             report["note"] = (
-                "No projects are configured yet. Contexts are added in the "
-                "configuration Mini App, reachable with /config."
+                "No projects are configured yet. Add one with write_context, "
+                "or the user can add one in the Mini App at /config."
             )
         return _text_result(json.dumps(report, indent=2))
+
+    def write_handler(tool: str, write_path: Path) -> ToolHandler:
+        """Bind one write tool to the file it may write.
+
+        Plans and applies from scratch. The approval card ahead of this
+        call planned the same write and checked the same token; both
+        happen again because the card released a decision, not a lock —
+        the file can move between the tap and this call, and the second
+        check is what makes that a refusal rather than a write of
+        something nobody read.
+        """
+
+        async def handler(args: dict[str, Any]) -> dict[str, Any]:
+            try:
+                plan = plan_config_write(write_path, tool, args)
+                token = apply_plan(write_path, plan)
+            except ConfigWriteRefused as exc:
+                return _text_result(str(exc), is_error=True)
+            except OSError as exc:
+                logger.warning("Config write failed: %s", exc)
+                return _text_result(
+                    f"config.yaml could not be written: {exc}", is_error=True,
+                )
+            return _text_result(
+                f"Done — {plan.headline[0].lower()}{plan.headline[1:]}. It is "
+                f"live now; no restart is needed. The new state_token is "
+                f"{token}."
+            )
+
+        return handler
 
     tools = [
         OpenShrimpTool(
@@ -205,9 +360,11 @@ def build_supervisor_tools(config: Config) -> list[OpenShrimpTool]:
         OpenShrimpTool(
             name="list_contexts",
             description=(
-                "Report the contexts configured on this OpenShrimp install: "
+                "Report the projects configured on this OpenShrimp install: "
                 "directory, description, tools, sandbox and model for each, "
-                "plus the default context and agent backend."
+                "plus the default project and agent backend. Also returns a "
+                "state_token that write_context and remove_context require, "
+                "so call this immediately before proposing a change."
             ),
             input_schema={"type": "object", "properties": {}},
             read_only=True,
@@ -229,7 +386,40 @@ def build_supervisor_tools(config: Config) -> list[OpenShrimpTool]:
     # ``client_manager`` auto-approves by name without importing this module,
     # so the two lists have to be the same list.
     assert tuple(tool.name for tool in tools) == SUPERVISOR_TOOL_NAMES
-    return tools
+
+    if path is None:
+        return tools
+
+    write_tools = [
+        OpenShrimpTool(
+            name=WRITE_CONTEXT,
+            description=(
+                "Add a project to config.yaml, or change one that is already "
+                "there. Takes effect on the next turn with no restart. Needs "
+                f"the state_token from list_contexts, and shows the user a "
+                f"diff to approve before anything is written. Sets "
+                f"{', '.join(WRITABLE_FIELDS)} and nothing else — the fields "
+                "that decide what a project may run are set by the user in "
+                "the Mini App at /config."
+            ),
+            input_schema=_write_context_schema,
+            read_only=False,
+            handler=write_handler(WRITE_CONTEXT, path),
+        ),
+        OpenShrimpTool(
+            name=REMOVE_CONTEXT,
+            description=(
+                "Remove a project from config.yaml. Deletes no files — only "
+                "the entry that made the directory reachable from Telegram. "
+                "Needs the state_token from list_contexts, and shows the user "
+                "a diff to approve first."
+            ),
+            input_schema=_remove_context_schema,
+            read_only=False,
+            handler=write_handler(REMOVE_CONTEXT, path),
+        ),
+    ]
+    return tools + write_tools
 
 
 __all__ = ["build_supervisor_tools"]

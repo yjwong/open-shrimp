@@ -215,6 +215,55 @@ def test_android_approval_resolves_host_escape_future(tmp_path: Path) -> None:
         asyncio.run(db.close())
 
 
+def test_android_approval_resolves_config_write_future(tmp_path: Path) -> None:
+    """A config-write card the phone can show, it must also be able to answer.
+
+    The card's awaiting overlay is pushed exactly like every other
+    approval's, and the phone knows only the ``tool_use_id`` — so a
+    sender whose prefix this endpoint does not probe produces a tap that
+    silently resolves nothing, in front of a card that by design has no
+    deadline.
+    """
+    from open_shrimp.handlers.state import _approval_futures, _approval_resolved_via
+
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    device_id = "android-configwrite-device"
+    tool_use_id = "tool-cw"
+    future = _FakeFuture()
+    _approval_futures[f"cw_approve:{tool_use_id}"] = future  # type: ignore[assignment]
+    _approval_futures[f"cw_deny:{tool_use_id}"] = future  # type: ignore[assignment]
+    try:
+        _pair(client, private_key, device_id)
+        path = f"/api/agent/approvals/{tool_use_id}"
+        body = b'{"decision":"approve"}'
+        resp = client.post(
+            path,
+            content=body,
+            headers={
+                "content-type": "application/json",
+                **_android_headers(
+                    private_key,
+                    device_id=device_id,
+                    method="POST",
+                    path=path,
+                    body=body,
+                    nonce="nonce-configwrite",
+                ),
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "resolved", "decision": "approve"}
+        assert future.result_value is True
+        # Like host escape, this flow edits its own card, so no phone marker.
+        assert tool_use_id not in _approval_resolved_via
+    finally:
+        _approval_futures.pop(f"cw_approve:{tool_use_id}", None)
+        _approval_futures.pop(f"cw_deny:{tool_use_id}", None)
+        _approval_resolved_via.pop(tool_use_id, None)
+        client.close()
+        asyncio.run(db.close())
+
 def test_android_approval_noops_when_future_missing(tmp_path: Path) -> None:
     client, db = _make_client(tmp_path)
     private_key = ec.generate_private_key(ec.SECP256R1())
