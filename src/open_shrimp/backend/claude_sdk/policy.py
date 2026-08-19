@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
+from open_shrimp.markdown import escape_code
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.supervisor import SUPERVISOR_WRITE_TOOL_NAMES
 
@@ -328,7 +329,7 @@ def _format_edit_approval(
         "new_source", "",
     )
 
-    escaped_path = _escape_mdv2(file_path)
+    escaped_path = escape_code(file_path)
     is_notebook = "notebook_path" in tool_input
     label = "NotebookEdit" if is_notebook else "Edit"
     header = f"✏️ *{label}:* `{escaped_path}`"
@@ -348,7 +349,7 @@ def _format_edit_approval(
     if len(diff_body) > max_diff_len:
         diff_body = diff_body[:max_diff_len] + "\n..."
 
-    escaped_diff = _escape_mdv2(diff_body)
+    escaped_diff = escape_code(diff_body)
     return f"{header}\n\n```diff\n{escaped_diff}\n```"
 
 
@@ -366,7 +367,7 @@ def _format_bash_approval(tool_input: dict[str, Any]) -> str:
     max_cmd_len = 4096 - 200
     if len(command) > max_cmd_len:
         command = command[:max_cmd_len] + "\n..."
-    escaped_cmd = _escape_mdv2(command)
+    escaped_cmd = escape_code(command)
     parts.append(f"```bash\n{escaped_cmd}\n```")
 
     return "\n\n".join(parts)
@@ -389,7 +390,7 @@ def _format_monitor_approval(tool_input: dict[str, Any]) -> str:
     max_cmd_len = 4096 - 200
     if len(command) > max_cmd_len:
         command = command[:max_cmd_len] + "\n..."
-    parts.append(f"```bash\n{_escape_mdv2(command)}\n```")
+    parts.append(f"```bash\n{escape_code(command)}\n```")
 
     return "\n\n".join(parts)
 
@@ -401,14 +402,14 @@ def _format_write_approval(
     file_path = _relative_path(tool_input.get("file_path", "unknown"), cwd)
     content = tool_input.get("content", "")
 
-    escaped_path = _escape_mdv2(file_path)
+    escaped_path = escape_code(file_path)
     header = f"\U0001f4dd *Write:* `{escaped_path}`"
 
     max_content_len = 4096 - 200
     if len(content) > max_content_len:
         content = content[:max_content_len] + "\n..."
 
-    escaped_content = _escape_mdv2(content)
+    escaped_content = escape_code(content)
     return f"{header}\n\n```\n{escaped_content}\n```"
 
 
@@ -437,7 +438,7 @@ def _format_agent_approval(
         display_prompt = prompt
         if len(display_prompt) > max_prompt_len:
             display_prompt = display_prompt[:max_prompt_len] + "\n..."
-        parts.append(f"```\n{_escape_mdv2(display_prompt)}\n```")
+        parts.append(f"```\n{escape_code(display_prompt)}\n```")
 
     return "\n\n".join(parts)
 

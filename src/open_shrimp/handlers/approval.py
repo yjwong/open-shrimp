@@ -355,7 +355,7 @@ def _render_command_block(command: str, max_len: int) -> str:
     shown = command
     if len(shown) > max_len:
         shown = shown[:max_len] + "\n..."
-    return f"```bash\n{_escape_mdv2(shown)}\n```"
+    return f"```bash\n{escape_code(shown)}\n```"
 
 
 def _format_host_bash_approval(
@@ -376,7 +376,7 @@ def _format_host_bash_approval(
         parts.append(_escape_mdv2(description))
     parts.append(_render_command_block(command, 4096 - 400))
     if cwd:
-        parts.append(f"_cwd:_ `{_escape_mdv2(cwd)}`")
+        parts.append(f"_cwd:_ `{escape_code(cwd)}`")
     secs = max(0, int(round(remaining)))
     if is_monitor:
         parts.append(
@@ -1047,7 +1047,7 @@ async def handle_approval_callback(
         )
 
         future.set_result(True)
-        escaped_dir = _escape_mdv2(directory)
+        escaped_dir = escape_code(directory)
         await query.answer(
             f"Approved. {directory}/ allowed for this session."
         )

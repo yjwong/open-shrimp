@@ -463,9 +463,10 @@ class TestApprovalText:
             "apply_patch", {"patchText": _SAMPLE_PATCH}, None,
         )
         assert "ApplyPatch" in text
-        # Mentions both files (the dot is escaped by MarkdownV2 → ``\.``).
-        assert "foo\\.py" in text
-        assert "bar\\.py" in text
+        # Mentions both files.  They render inside code entities, where only
+        # ``\`` and a backtick are escaped, so the dot is shown as written.
+        assert "foo.py" in text
+        assert "bar.py" in text
 
 
 # ---------------------------------------------------------------------------

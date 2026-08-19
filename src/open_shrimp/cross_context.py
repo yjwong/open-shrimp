@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from telegram import Bot, InlineKeyboardMarkup
 
+from open_shrimp.markdown import escape_code
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox.launch import start_sandboxed_agent
@@ -1064,7 +1065,7 @@ async def _run_handoff(
     await _edit_outer_card(
         bot, chat_id, card_message_id,
         f"↗️ *Handed off to new topic* — running under "
-        f"`{_escape_mdv2(target)}`",
+        f"`{escape_code(target)}`",
     )
     return _text_result(
         f"Handed off to a new topic (thread {new_thread_id}) running under "

@@ -29,6 +29,7 @@ from open_shrimp.config import (
     is_sandboxed,
     sandbox_backend,
 )
+from open_shrimp.markdown import escape_code
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
 from open_shrimp.backend.factory import get_backend_by_name
 from open_shrimp.android_companion import (
@@ -508,11 +509,11 @@ def _build_model_page(
     """
     in_effect = current_override or ctx_default_model or "CLI default"
     label = "override" if current_override else "context default"
-    lines = [f"*Model:* `{_escape_mdv2(in_effect)}` \\({label}\\)"]
+    lines = [f"*Model:* `{escape_code(in_effect)}` \\({label}\\)"]
     if current_override:
         lines.append(
             "*Context default:* "
-            f"`{_escape_mdv2(ctx_default_model or 'CLI default')}`"
+            f"`{escape_code(ctx_default_model or 'CLI default')}`"
         )
 
     catalog = backend.model_catalog()
@@ -655,7 +656,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     shown = _escape_mdv2(resolved)
     if resolved != target:
-        shown = f"`{_escape_mdv2(target)}` → `{shown}`"
+        shown = f"`{escape_code(target)}` → `{shown}`"
     else:
         shown = f"`{shown}`"
     warning = (
@@ -742,7 +743,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if target not in _VALID_EFFORT_LEVELS:
         levels = ", ".join(f"`{lvl}`" for lvl in _VALID_EFFORT_LEVELS)
         await message.reply_text(
-            f"Invalid effort level: `{_escape_mdv2(target)}`\\. Valid: {levels}",
+            f"Invalid effort level: `{escape_code(target)}`\\. Valid: {levels}",
             parse_mode="MarkdownV2",
         )
         return
@@ -813,13 +814,13 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if base_dirs:
             lines.append("*Config directories:*")
             for d in base_dirs:
-                lines.append(f"  `{_escape_mdv2(d)}`")
+                lines.append(f"  `{escape_code(d)}`")
         if runtime_dirs:
             if lines:
                 lines.append("")
             lines.append("*Runtime directories \\(/add\\_dir\\):*")
             for d in runtime_dirs:
-                lines.append(f"  `{_escape_mdv2(d)}`")
+                lines.append(f"  `{escape_code(d)}`")
         if not lines:
             lines.append("No additional directories configured\\.")
         else:
@@ -843,7 +844,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         removed = await remove_additional_directory(db, scope, ctx_name, target)
         if not removed:
             await message.reply_text(
-                f"Directory not found in runtime list: `{_escape_mdv2(target)}`",
+                f"Directory not found in runtime list: `{escape_code(target)}`",
                 parse_mode="MarkdownV2",
             )
             return
@@ -855,7 +856,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _reconnect_after_dir_change(scope, ctx_name, ctx, context)
 
         await message.reply_text(
-            f"Removed `{_escape_mdv2(target)}`\\. Session will reconnect on next message\\.",
+            f"Removed `{escape_code(target)}`\\. Session will reconnect on next message\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -868,7 +869,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if not os.path.isdir(target):
         await message.reply_text(
-            f"Directory does not exist: `{_escape_mdv2(target)}`",
+            f"Directory does not exist: `{escape_code(target)}`",
             parse_mode="MarkdownV2",
         )
         return
@@ -879,7 +880,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     canonical_existing.add(os.path.realpath(ctx_dir))
     if target in canonical_existing:
         await message.reply_text(
-            f"`{_escape_mdv2(target)}` is already included\\.",
+            f"`{escape_code(target)}` is already included\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -899,7 +900,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ],
     ])
     await message.reply_text(
-        f"Add `{_escape_mdv2(target)}` to *{_escape_mdv2(ctx_name)}*?",
+        f"Add `{escape_code(target)}` to *{_escape_mdv2(ctx_name)}*?",
         parse_mode="MarkdownV2",
         reply_markup=markup,
     )
@@ -943,7 +944,7 @@ async def handle_add_dir_callback(
 
         try:
             await query.message.edit_text(
-                f"Added `{_escape_mdv2(target)}` to *{_escape_mdv2(ctx_name)}* "
+                f"Added `{escape_code(target)}` to *{_escape_mdv2(ctx_name)}* "
                 f"\\(this session\\)\\.\n"
                 f"Session will reconnect on next message\\.",
                 parse_mode="MarkdownV2",
@@ -986,7 +987,7 @@ async def handle_add_dir_callback(
 
         try:
             await query.message.edit_text(
-                f"Added `{_escape_mdv2(target)}` to *{_escape_mdv2(ctx_name)}* "
+                f"Added `{escape_code(target)}` to *{_escape_mdv2(ctx_name)}* "
                 f"\\(saved to config\\)\\.\n"
                 f"Session will reconnect on next message\\.",
                 parse_mode="MarkdownV2",
@@ -1073,7 +1074,7 @@ async def _build_resume_page(
     if not sessions:
         if page == 0:
             return (
-                f"No sessions found for context `{_escape_mdv2(ctx_name)}`\\.",
+                f"No sessions found for context `{escape_code(ctx_name)}`\\.",
                 None,
             )
         # Edge case: page beyond last – go back.
@@ -1122,7 +1123,7 @@ async def _build_resume_page(
         buttons.append(nav)
 
     page_label = f" \\(page {page + 1}\\)" if page > 0 or has_next else ""
-    text = f"*Recent sessions for* `{_escape_mdv2(ctx_name)}`*:*{page_label}"
+    text = f"*Recent sessions for* `{escape_code(ctx_name)}`*:*{page_label}"
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -1152,7 +1153,7 @@ def _build_resume_detail(
         lines.append(f"*First prompt:* {_escape_mdv2(prompt)}")
 
     if s.git_branch:
-        lines.append(f"*Branch:* `{_escape_mdv2(s.git_branch)}`")
+        lines.append(f"*Branch:* `{escape_code(s.git_branch)}`")
 
     lines.append(f"*Created:* {_escape_mdv2(_relative_time(s.created_at))}")
     lines.append(f"*Last active:* {_escape_mdv2(_relative_time(s.last_modified))}")
@@ -1165,7 +1166,7 @@ def _build_resume_detail(
             size_str = f"{size_kb:.0f} KB"
         lines.append(f"*Size:* {_escape_mdv2(size_str)}")
 
-    lines.append(f"*ID:* `{_escape_mdv2(s.session_id)}`")
+    lines.append(f"*ID:* `{escape_code(s.session_id)}`")
 
     if s.session_id == current_session_id:
         lines.append("\n_This is the current session\\._")
@@ -1226,7 +1227,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if not match:
             await message.reply_text(
-                f"No session matching `{_escape_mdv2(target)}` found in context `{_escape_mdv2(ctx_name)}`\\.",
+                f"No session matching `{escape_code(target)}` found in context `{escape_code(ctx_name)}`\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -1235,7 +1236,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await set_session_id(db, scope, ctx_name, match.session_id)
         summary = _escape_mdv2(match.summary or "No summary")
         await message.reply_text(
-            f"Resumed session `{_escape_mdv2(match.session_id[:12])}...`\n_{summary}_",
+            f"Resumed session `{escape_code(match.session_id[:12])}...`\n_{summary}_",
             parse_mode="MarkdownV2",
         )
         await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
@@ -1358,7 +1359,7 @@ async def handle_resume_callback(
     await query.answer(f"Resumed session {session_id[:8]}...")
 
     try:
-        summary_text = f"\u2705 Resumed session `{_escape_mdv2(session_id[:12])}\\.\\.\\.`"
+        summary_text = f"\u2705 Resumed session `{escape_code(session_id[:12])}\\.\\.\\.`"
         await query.message.edit_text(
             text=summary_text,
             parse_mode="MarkdownV2",
@@ -1487,7 +1488,7 @@ async def _open_vnc_viewer(
         capability = "computer use"
     if not enabled:
         await update.message.reply_text(
-            f"Context `{_escape_mdv2(context_name)}` does not have "
+            f"Context `{escape_code(context_name)}` does not have "
             f"{capability} enabled\\.",
             parse_mode="MarkdownV2",
         )
@@ -1555,7 +1556,7 @@ def _push_status_text(push_status: object) -> str:
         return r"Push is not configured; open the Android app and use Find pending session\."
     if status in {"failed", "missing_token", "unsupported_provider"}:
         return (
-            rf"Push delivery failed \(`{_escape_mdv2(status)}`\); open the Android app "
+            rf"Push delivery failed \(`{escape_code(status)}`\); open the Android app "
             r"and use Find pending session\."
         )
     return (
@@ -1591,7 +1592,7 @@ async def security_key_handler(
     )
     if not has_computer_use:
         await update.message.reply_text(
-            rf"Context `{_escape_mdv2(context_name)}` does not have computer use enabled\.",
+            rf"Context `{escape_code(context_name)}` does not have computer use enabled\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -1650,7 +1651,7 @@ async def security_key_handler(
     manual_fallback_lines = (
         [
             r"Manual phone URL \(advanced debug fallback\):",
-            f"`{_escape_mdv2(session_phone_url)}`",
+            f"`{escape_code(session_phone_url)}`",
         ]
         if show_manual_fallback
         else [
@@ -1662,18 +1663,18 @@ async def security_key_handler(
     text = "\n".join(
         [
             r"Security key forwarding request created\.",
-            f"Destination: `{_escape_mdv2(destination_label)}`",
+            f"Destination: `{escape_code(destination_label)}`",
             "",
             rf"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`\.",
             _push_status_text(record["push_status"] if record is not None else None),
             *manual_fallback_lines,
             "",
             helper_status,
-            f"`{_escape_mdv2(helper_cmd)}`",
+            f"`{escape_code(helper_cmd)}`",
             *(
                 [
                     "",
-                    rf"Auto\-start error: `{_escape_mdv2(helper_error)}`",
+                    rf"Auto\-start error: `{escape_code(helper_error)}`",
                 ]
                 if helper_error
                 else []
@@ -1706,10 +1707,10 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             [
                 r"Android companion pairing code created\.",
                 "",
-                f"Code: `{_escape_mdv2(pairing['code'])}`",
-                f"Server: `{_escape_mdv2(server_id)}`",
-                f"Base URL: `{_escape_mdv2(base)}`",
-                f"Deep link: `{_escape_mdv2(pairing_url)}`",
+                f"Code: `{escape_code(pairing['code'])}`",
+                f"Server: `{escape_code(server_id)}`",
+                f"Base URL: `{escape_code(base)}`",
+                f"Deep link: `{escape_code(pairing_url)}`",
                 "",
                 r"The code expires in `10 minutes` and can be used once\.",
             ]
@@ -1739,7 +1740,7 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 else "never"
             )
             lines.append(
-                f"• `{_escape_mdv2(device['device_id'])}` — "
+                f"• `{escape_code(device['device_id'])}` — "
                 f"{_escape_mdv2(device['display_name'])} "
                 rf"\({_escape_mdv2(status)}, {_escape_mdv2(push)}, "
                 rf"last seen {_escape_mdv2(last_seen)}\)"
@@ -1793,7 +1794,7 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     backend = get_backend_for_scope(context.bot_data, scope)
     if backend is not None and "login" not in backend.command_capabilities():
         await update.message.reply_text(
-            f"/login is not available on the `{_escape_mdv2(backend.name)}` backend\\.",
+            f"/login is not available on the `{escape_code(backend.name)}` backend\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -1844,7 +1845,7 @@ async def mcp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     backend = get_backend_for_scope(context.bot_data, scope)
     if backend is not None and "mcp" not in backend.command_capabilities():
         await message.reply_text(
-            f"/mcp is not available on the `{_escape_mdv2(backend.name)}` backend\\.",
+            f"/mcp is not available on the `{escape_code(backend.name)}` backend\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -1960,7 +1961,7 @@ async def _mcp_reconnect(message: Any, session: AgentSession, server_name: str) 
     except Exception:
         logger.exception("Failed to reconnect MCP server %s", server_name)
         await message.reply_text(
-            f"Failed to reconnect `{_escape_mdv2(server_name)}`\\.",
+            f"Failed to reconnect `{escape_code(server_name)}`\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -1980,7 +1981,7 @@ async def _mcp_toggle(message: Any, session: AgentSession, server_name: str, *, 
     except Exception:
         logger.exception("Failed to %s MCP server %s", action, server_name)
         await message.reply_text(
-            f"Failed to {_escape_mdv2(action)} `{_escape_mdv2(server_name)}`\\.",
+            f"Failed to {_escape_mdv2(action)} `{escape_code(server_name)}`\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -2124,7 +2125,7 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if not matched_task:
             await message.reply_text(
-                f"No active task matching `{_escape_mdv2(target)}`\\.",
+                f"No active task matching `{escape_code(target)}`\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -2137,7 +2138,7 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if stopped:
                 await message.reply_text(
                     f"Stopped host monitor "
-                    f"`{_escape_mdv2(matched_task.task_id)}`\\.",
+                    f"`{escape_code(matched_task.task_id)}`\\.",
                     parse_mode="MarkdownV2",
                 )
             else:
@@ -2229,7 +2230,7 @@ async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Mirrors the legacy single-backend "not available on <name>" message,
         # generalised over the configured set (empty list → "this install").
         if backends:
-            names = ", ".join(f"`{_escape_mdv2(b.name)}`" for b in backends)
+            names = ", ".join(f"`{escape_code(b.name)}`" for b in backends)
         else:
             names = "this install"
         await message.reply_text(

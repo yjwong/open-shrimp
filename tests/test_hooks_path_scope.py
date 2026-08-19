@@ -337,8 +337,9 @@ def test_notebook_edit_format_approval_text() -> None:
         "/cwd",
     )
     assert "NotebookEdit" in text
-    # MarkdownV2 escapes the dot: ``x.ipynb`` -> ``x\.ipynb``.
-    assert "x\\.ipynb" in text
+    # The path renders inside an inline code entity, where only ``\`` and a
+    # backtick are escaped — the dot is left alone and shown as written.
+    assert "`x.ipynb`" in text
 
 
 @pytest.mark.asyncio

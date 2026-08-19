@@ -33,7 +33,12 @@ from open_shrimp.events.pickup import (
     topic_deep_link,
 )
 from open_shrimp.events.types import Event
-from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, escape, gfm_to_telegram
+from open_shrimp.markdown import (
+    TELEGRAM_MAX_LENGTH,
+    escape,
+    escape_code,
+    gfm_to_telegram,
+)
 from open_shrimp.telegram_topics import is_topic_gone, resolve_or_create_topic
 
 logger = logging.getLogger(__name__)
@@ -69,7 +74,13 @@ def _render(event: Event) -> list[str]:
         return gfm_to_telegram(f"**{header}**\n\n{body}")
 
     bold = f"*{escape(header)}*"
-    payload = json.dumps(event.raw, indent=2, ensure_ascii=False)
+    # Escaped before it is measured, and escaped at all: this is a
+    # provider's payload, so it is the one string here nobody vetted.  A
+    # backtick in it would close the fence and let the remainder render as
+    # markup, and a backslash Telegram would silently eat.  Truncating
+    # after escaping also keeps the budget honest — escaping only grows
+    # the string.
+    payload = escape_code(json.dumps(event.raw, indent=2, ensure_ascii=False))
     budget = TELEGRAM_MAX_LENGTH - len(bold) - len("\n```json\n") - len("\n```")
     if len(payload) > budget:
         note = "\n… truncated"

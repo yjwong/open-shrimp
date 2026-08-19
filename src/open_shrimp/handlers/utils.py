@@ -10,6 +10,7 @@ from telegram import Bot, Message, Update
 from telegram.error import BadRequest
 
 from open_shrimp.config import Config, ContextConfig
+from open_shrimp.markdown import escape_code
 from open_shrimp.db import (
     ChatScope,
     get_active_context,
@@ -355,7 +356,7 @@ def _build_status_text(
         f"\U0001f916 `{escaped_model}`",
     ]
     if ctx.effort:
-        lines.append(f"\U0001f9e0 *Effort:* `{_escape_mdv2(ctx.effort)}`")
+        lines.append(f"\U0001f9e0 *Effort:* `{escape_code(ctx.effort)}`")
 
     # Context window usage from per-turn API usage (the last assistant
     # message).  input_tokens + cache tokens = current context size.
