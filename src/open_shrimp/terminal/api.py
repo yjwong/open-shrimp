@@ -12,20 +12,8 @@ import contextlib
 import json
 import logging
 import os
-import struct
-import sys
 from collections.abc import AsyncGenerator
 from pathlib import Path
-
-# The /login endpoint drives the Claude TUI through a Unix pty.  Windows
-# has no pty (ConPTY would need a different transport entirely), so there
-# the endpoint reports "unsupported" and the rest of the terminal API
-# (log tailing/reading) keeps working.
-_PTY_SUPPORTED = sys.platform != "win32"
-if _PTY_SUPPORTED:
-    import fcntl
-    import pty
-    import termios
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
@@ -38,6 +26,11 @@ from open_shrimp.config import Config
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
 from open_shrimp.terminal.log_source import LogSource, resolve
+from open_shrimp.terminal.pty_transport import (
+    PtyProcess,
+    PtyUnavailable,
+    spawn_pty,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +334,28 @@ async def read_endpoint(request: Request) -> JSONResponse:
 # accepts ``code#state`` via stdin — no localhost callback proxy needed.
 
 
+class _MarkerScanner:
+    """Reports the first appearance of a marker in a chunked stream.
+
+    Keeps the last few characters of what it has seen so a marker split
+    across two reads still matches.
+    """
+
+    def __init__(self, marker: str) -> None:
+        self._marker = marker
+        self._tail = ""
+        self._seen = False
+
+    def feed(self, text: str) -> bool:
+        """True on the read that completes the marker, once."""
+        if self._seen:
+            return False
+        combined = self._tail + text
+        self._tail = combined[-(len(self._marker) - 1):]
+        self._seen = self._marker in combined
+        return self._seen
+
+
 class _LoginSession:
     """Background PTY session for ``claude`` TUI login."""
 
@@ -351,24 +366,17 @@ class _LoginSession:
     # exit so the subprocess actually terminates.
     _SUCCESS_MARKER = "Login successful"
 
-    def __init__(
-        self,
-        proc: asyncio.subprocess.Process,
-        master_fd: int,
-    ) -> None:
-        self.proc = proc
-        self.master_fd = master_fd
-        # Circular buffer of terminal output for replay on reconnect.
-        self._output_chunks: list[str] = []
-        self._output_bytes = 0
-        self._MAX_BUFFER = 64 * 1024  # 64 KiB
+    # Tail of terminal output replayed to a client that reconnects.
+    _MAX_BUFFER = 64 * 1024
+
+    def __init__(self, pty: PtyProcess) -> None:
+        self._pty = pty
+        self._output = ""
         self._websocket: WebSocket | None = None
         self._reader_task: asyncio.Task | None = None
         self._exit_task: asyncio.Task | None = None
         self._done = asyncio.Event()
-        # Small sliding window so the marker is detected even when it
-        # straddles two os.read() boundaries.
-        self._scan_tail = ""
+        self._scanner = _MarkerScanner(self._SUCCESS_MARKER)
 
     def start_background(self) -> None:
         self._reader_task = asyncio.create_task(self._pty_reader())
@@ -378,57 +386,51 @@ class _LoginSession:
     async def attach(self, websocket: WebSocket) -> None:
         """Send buffered output, then start forwarding."""
         self._websocket = websocket
-        for chunk in self._output_chunks:
-            await websocket.send_text(chunk)
+        if self._output:
+            await websocket.send_text(self._output)
 
     def detach(self) -> None:
         self._websocket = None
 
     @property
     def alive(self) -> bool:
-        return self.proc.returncode is None
+        return self._pty.alive
 
     async def wait(self) -> None:
         await self._done.wait()
 
+    # ── Terminal input ──
+
+    def send(self, data: bytes) -> None:
+        """Write to the session's terminal."""
+        self._pty.write(data)
+
+    def resize(self, rows: int, cols: int) -> None:
+        """Resize the session's terminal."""
+        self._pty.resize(rows, cols)
+
     # ── Background tasks ──
 
+    async def _forward(self, text: str) -> None:
+        ws = self._websocket
+        if ws is None:
+            return
+        try:
+            await ws.send_text(text)
+        except Exception:
+            self._websocket = None
+
     async def _pty_reader(self) -> None:
-        loop = asyncio.get_event_loop()
         try:
             while True:
-                data = await loop.run_in_executor(
-                    None, os.read, self.master_fd, 4096
-                )
+                data = await self._pty.read()
                 if not data:
                     break
                 text = data.decode("utf-8", errors="replace")
-                # Buffer for replay.
-                self._output_chunks.append(text)
-                self._output_bytes += len(text)
-                while self._output_bytes > self._MAX_BUFFER:
-                    removed = self._output_chunks.pop(0)
-                    self._output_bytes -= len(removed)
-                # Forward to attached WebSocket.
-                ws = self._websocket
-                if ws is not None:
-                    try:
-                        await ws.send_text(text)
-                    except Exception:
-                        self._websocket = None
-                # Watch for the success marker and schedule a graceful
-                # REPL exit the first time we see it. Scan a small sliding
-                # window so a marker split across two reads still matches.
-                if self._exit_task is None:
-                    combined = self._scan_tail + text
-                    if self._SUCCESS_MARKER in combined:
-                        self._exit_task = asyncio.create_task(
-                            self._graceful_exit()
-                        )
-                    tail_len = len(self._SUCCESS_MARKER) - 1
-                    self._scan_tail = combined[-tail_len:]
-        except OSError:
-            pass
+                self._output = (self._output + text)[-self._MAX_BUFFER:]
+                await self._forward(text)
+                if self._scanner.feed(text):
+                    self._exit_task = asyncio.create_task(self._graceful_exit())
         finally:
             self._done.set()
 
@@ -446,45 +448,23 @@ class _LoginSession:
         3. ``/exit\\r`` which routes through ``gracefulShutdown`` in the
            Claude Code REPL and terminates the subprocess cleanly.
         """
-        try:
-            os.write(self.master_fd, b"\r")
-            # Give the post-login refreshes in commands/login/login.tsx
-            # (enrollTrustedDevice, refreshRemoteManagedSettings, etc.)
-            # a moment to complete before we tear the REPL down.
-            await asyncio.sleep(2.0)
-            os.write(self.master_fd, b"/exit\r")
-        except OSError:
-            pass
+        self.send(b"\r")
+        # Give the post-login refreshes in commands/login/login.tsx
+        # (enrollTrustedDevice, refreshRemoteManagedSettings, etc.)
+        # a moment to complete before we tear the REPL down.
+        await asyncio.sleep(2.0)
+        self.send(b"/exit\r")
 
     # ── Cleanup ──
 
     async def destroy(self) -> None:
+        pid = self._pty.pid
         if self._reader_task:
             self._reader_task.cancel()
         if self._exit_task:
             self._exit_task.cancel()
-        try:
-            os.close(self.master_fd)
-        except OSError:
-            pass
-        if self.proc.returncode is None:
-            self.proc.terminate()
-            try:
-                async with asyncio.timeout(3):
-                    await self.proc.wait()
-            except TimeoutError:
-                logger.warning(
-                    "claude /login (pid=%d) did not exit on SIGTERM, killing",
-                    self.proc.pid or 0,
-                )
-                try:
-                    self.proc.kill()
-                except ProcessLookupError:
-                    pass
-                with contextlib.suppress(Exception):
-                    async with asyncio.timeout(2):
-                        await self.proc.wait()
-        logger.info("Login session destroyed: pid=%d", self.proc.pid or 0)
+        await self._pty.close()
+        logger.info("Login session destroyed: pid=%d", pid)
 
 
 # The single active login session (if any).
@@ -538,28 +518,10 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
 
     await websocket.accept()
 
-    if not _PTY_SUPPORTED:
-        await websocket.send_text(
-            "\x1b[31mInteractive login is not available on Windows — "
-            "run 'claude /login' in a terminal on the bot host instead."
-            "\x1b[0m\r\n"
-        )
-        await websocket.close()
-        return
-
     # If there's an existing live session, reattach to it.
     if _login_session is not None and _login_session.alive:
         logger.info("Login WS: reattaching to existing session")
-        await _login_session.attach(websocket)
-        try:
-            while True:
-                raw = await websocket.receive_text()
-                _handle_ws_input(raw, _login_session)
-        except WebSocketDisconnect:
-            _login_session.detach()
-            logger.info("Login WS: client detached (session stays alive)")
-        except Exception:
-            _login_session.detach()
+        await _pump_ws_input(websocket, _login_session)
         return
 
     # Clean up any dead session.
@@ -576,15 +538,11 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
         await websocket.close()
         return
 
-    master_fd, slave_fd = pty.openpty()
-    fcntl.ioctl(
-        slave_fd,
-        termios.TIOCSWINSZ,
-        struct.pack("HHHH", 24, 80, 0, 0),
-    )
-
-    # BROWSER=echo: openBrowser() "succeeds" without opening anything,
-    # and the TUI falls back to showing the paste prompt after 3s.
+    # BROWSER=echo: on POSIX, openBrowser() "succeeds" without opening
+    # anything, and the TUI falls back to showing the paste prompt after
+    # 3s.  Windows ignores it and may hand the URL to the shell — nothing
+    # renders on a headless session, and the TUI prints the URL either
+    # way, which is what the Mini App scrapes into a tappable button.
     # TERM/COLORTERM: enable 256-color and truecolor output in the TUI.
     env = {
         **os.environ,
@@ -593,37 +551,40 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
         "COLORTERM": "truecolor",
     }
 
-    proc = await asyncio.create_subprocess_exec(
-        claude_bin, "/login",
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        env=env,
-        preexec_fn=os.setsid,
-    )
-    os.close(slave_fd)
+    try:
+        pty = await spawn_pty([claude_bin, "/login"], env)
+    except (PtyUnavailable, OSError) as e:
+        logger.warning("Login PTY could not start", exc_info=True)
+        await websocket.send_text(f"\x1b[31mError: {e}\x1b[0m\r\n")
+        await websocket.close()
+        return
 
-    logger.info("Login PTY started: pid=%d", proc.pid or 0)
+    logger.info("Login PTY started: pid=%d", pty.pid)
 
-    session = _LoginSession(proc, master_fd)
+    session = _LoginSession(pty)
     _login_session = session
     session.start_background()
-    await session.attach(websocket)
 
+    # Don't destroy the session when the socket goes — it stays alive for
+    # reconnection, and is cleaned up when the process exits and the next
+    # connect finds a dead session, or on a fresh /login.
+    await _pump_ws_input(websocket, session)
+
+
+async def _pump_ws_input(
+    websocket: WebSocket, session: _LoginSession
+) -> None:
+    """Replay buffered output, then feed client input to the session."""
+    await session.attach(websocket)
     try:
         while True:
-            raw = await websocket.receive_text()
-            _handle_ws_input(raw, session)
+            _handle_ws_input(await websocket.receive_text(), session)
     except WebSocketDisconnect:
-        session.detach()
         logger.info("Login WS: client detached (session stays alive)")
     except Exception:
         logger.exception("Login WS error")
+    finally:
         session.detach()
-
-    # Don't destroy the session here — it stays alive for reconnection.
-    # It will be cleaned up when the process exits and the next connect
-    # finds a dead session, or on a fresh /login.
 
 
 def _handle_ws_input(raw: str, session: _LoginSession) -> None:
@@ -631,20 +592,14 @@ def _handle_ws_input(raw: str, session: _LoginSession) -> None:
     try:
         msg = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        os.write(session.master_fd, raw.encode("utf-8"))
+        session.send(raw.encode("utf-8"))
         return
 
     msg_type = msg.get("type")
     if msg_type == "stdin":
-        os.write(session.master_fd, msg["data"].encode("utf-8"))
+        session.send(msg["data"].encode("utf-8"))
     elif msg_type == "resize":
-        cols = msg.get("cols", 80)
-        rows = msg.get("rows", 24)
-        fcntl.ioctl(
-            session.master_fd,
-            termios.TIOCSWINSZ,
-            struct.pack("HHHH", rows, cols, 0, 0),
-        )
+        session.resize(msg.get("rows", 24), msg.get("cols", 80))
 
 
 def create_terminal_routes() -> list[Route | Mount]:
