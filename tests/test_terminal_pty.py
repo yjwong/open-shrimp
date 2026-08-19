@@ -139,3 +139,54 @@ async def test_login_session_exits_repl_on_success_marker():
         assert "SAW[/exit]" in session._output
     finally:
         await session.destroy()
+
+
+@pytest.mark.asyncio
+async def test_session_dies_even_when_the_repl_ignores_exit(monkeypatch):
+    """A completed sign-in must end the process, prompt or no prompt.
+
+    Signing in on a fresh profile lands on a workspace-trust dialog that
+    swallows ``/exit``.  Nothing else reaps the session — the next
+    ``/login`` finds it alive and attaches — so the deadline is what
+    makes "signed in" and "finished" the same thing.
+    """
+    monkeypatch.setattr(_LoginSession, "_SETTLE_AFTER_LOGIN", 0.1)
+    monkeypatch.setattr(_LoginSession, "_EXIT_DEADLINE", 1.0)
+
+    # Announces success, then ignores its input forever, as a selection
+    # prompt does with a typed command.
+    script = 'printf "Login successful\\n"; while true; do sleep 5; done'
+    pty = await spawn_pty(["/bin/sh", "-c", script], dict(os.environ))
+    session = _LoginSession(pty)
+    session.start_background()
+    try:
+        async with asyncio.timeout(20):
+            await session.wait()
+        assert not session.alive
+    finally:
+        await session.destroy()
+
+
+@pytest.mark.asyncio
+async def test_succeeded_session_is_not_reattached_to():
+    """A spent session must not be offered to the next /login.
+
+    Attaching would replay whatever the CLI moved on to after signing
+    in, which reads as a broken login screen.
+    """
+    script = 'printf "waiting\\n"; read x'
+    pty = await spawn_pty(["/bin/sh", "-c", script], dict(os.environ))
+    session = _LoginSession(pty)
+    session.start_background()
+    try:
+        # The session owns the pty; read through it, never alongside it.
+        async with asyncio.timeout(10):
+            while "waiting" not in session._output:
+                await asyncio.sleep(0.05)
+        assert session.reusable, "an in-flight sign-in is resumable"
+
+        session._succeeded = True
+        assert session.alive, "still running, but spent"
+        assert not session.reusable
+    finally:
+        await session.destroy()

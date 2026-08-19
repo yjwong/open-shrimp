@@ -369,6 +369,11 @@ class _LoginSession:
     # Tail of terminal output replayed to a client that reconnects.
     _MAX_BUFFER = 64 * 1024
 
+    # Let the post-login refreshes settle before asking the REPL to go,
+    # then stop waiting for it to agree.
+    _SETTLE_AFTER_LOGIN = 2.0
+    _EXIT_DEADLINE = 15.0
+
     def __init__(self, pty: PtyProcess) -> None:
         self._pty = pty
         self._output = ""
@@ -377,6 +382,7 @@ class _LoginSession:
         self._exit_task: asyncio.Task | None = None
         self._done = asyncio.Event()
         self._scanner = _MarkerScanner(self._SUCCESS_MARKER)
+        self._succeeded = False
 
     def start_background(self) -> None:
         self._reader_task = asyncio.create_task(self._pty_reader())
@@ -395,6 +401,17 @@ class _LoginSession:
     @property
     def alive(self) -> bool:
         return self._pty.alive
+
+    @property
+    def reusable(self) -> bool:
+        """Whether a new ``/login`` should attach here rather than start over.
+
+        A sign-in the user walked away from mid-flow is worth coming back
+        to — that is what outliving the WebSocket is for.  One that has
+        already succeeded is spent: attaching would show whatever the CLI
+        moved on to instead of a login screen.
+        """
+        return self._pty.alive and not self._succeeded
 
     async def wait(self) -> None:
         await self._done.wait()
@@ -430,12 +447,13 @@ class _LoginSession:
                 self._output = (self._output + text)[-self._MAX_BUFFER:]
                 await self._forward(text)
                 if self._scanner.feed(text):
+                    self._succeeded = True
                     self._exit_task = asyncio.create_task(self._graceful_exit())
         finally:
             self._done.set()
 
     async def _graceful_exit(self) -> None:
-        """Drive the REPL to exit after ``/login`` completes.
+        """End the session once ``/login`` has completed.
 
         The ``/login`` slash command's ``onDone`` only dismisses the Login
         Dialog — it does not terminate the process. We send:
@@ -445,26 +463,51 @@ class _LoginSession:
            fire-and-forget refreshes (``enrollTrustedDevice``,
            ``refreshPolicyLimits``, etc.) start.
         2. A short delay so those in-flight network calls settle.
-        3. ``/exit\\r`` which routes through ``gracefulShutdown`` in the
+        3. ``/exit\\r``, which routes through ``gracefulShutdown`` in the
            Claude Code REPL and terminates the subprocess cleanly.
+
+        Step 3 only lands if the REPL is at its prompt to receive it.  A
+        profile signing in for the first time gets a workspace-trust
+        dialog instead, which swallows the command, and nothing else
+        reaps the session: the next ``/login`` finds it alive and
+        attaches to it. So the REPL is asked to leave, not trusted to —
+        past the deadline the pty goes regardless. The credentials are
+        on disk before the marker prints, so there is nothing left to
+        lose by then.
         """
         self.send(b"\r")
-        # Give the post-login refreshes in commands/login/login.tsx
-        # (enrollTrustedDevice, refreshRemoteManagedSettings, etc.)
-        # a moment to complete before we tear the REPL down.
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(self._SETTLE_AFTER_LOGIN)
         self.send(b"/exit\r")
+        try:
+            async with asyncio.timeout(self._EXIT_DEADLINE):
+                await self._done.wait()
+        except TimeoutError:
+            logger.info(
+                "Login REPL (pid=%d) did not take /exit; closing the pty",
+                self._pty.pid,
+            )
+            await self._teardown()
 
     # ── Cleanup ──
 
-    async def destroy(self) -> None:
+    async def _teardown(self) -> None:
+        """Stop reading and release the pty.
+
+        The reader is cancelled first: closing the pty under a parked
+        read is the ordering that leaves a transport reading a fd that
+        is already gone.
+        """
         pid = self._pty.pid
         if self._reader_task:
             self._reader_task.cancel()
-        if self._exit_task:
-            self._exit_task.cancel()
         await self._pty.close()
         logger.info("Login session destroyed: pid=%d", pid)
+
+    async def destroy(self) -> None:
+        """Tear the session down from outside, whatever it was doing."""
+        if self._exit_task:
+            self._exit_task.cancel()
+        await self._teardown()
 
 
 # The single active login session (if any).
@@ -518,13 +561,13 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
 
     await websocket.accept()
 
-    # If there's an existing live session, reattach to it.
-    if _login_session is not None and _login_session.alive:
+    # If a sign-in is still in flight, reattach to it.
+    if _login_session is not None and _login_session.reusable:
         logger.info("Login WS: reattaching to existing session")
         await _pump_ws_input(websocket, _login_session)
         return
 
-    # Clean up any dead session.
+    # Clean up any session that is finished or dead.
     if _login_session is not None:
         await _login_session.destroy()
         _login_session = None
