@@ -465,6 +465,69 @@ def prerequisites(backend: str, config: Config | None) -> list[Outcome]:
     ]
 
 
+@dataclass(frozen=True)
+class SandboxOffer:
+    """One isolation choice a first config may be given, and whether it works.
+
+    ``detail`` carries the remedy when ``available`` is false, so a wizard can
+    say why a backend it names is not on offer instead of leaving a gap the
+    user reads as a missing feature.
+    """
+
+    backend: str
+    label: str
+    summary: str
+    available: bool
+    detail: str
+
+
+# What each backend is, in the words a person choosing one needs — not the
+# words an operator debugging one needs.  Beside the offer rather than in the
+# three wizards, so the answer to "what does this do to my project" is the
+# same sentence on every platform.
+_SANDBOX_LABELS: dict[str, tuple[str, str]] = {
+    "docker": ("Docker", "each project runs in a container on this computer"),
+    "libvirt": ("libvirt", "each project runs in its own virtual machine"),
+    "lima": ("Lima", "each project runs in its own Linux virtual machine"),
+    "hcs": ("Hyper-V", "each project runs in its own Linux virtual machine"),
+}
+
+
+def sandbox_offers(config: Config | None = None) -> list[SandboxOffer]:
+    """Every sandbox backend a context on this host could be given.
+
+    A backend with no prerequisite that applies here cannot run here at all —
+    ``checks_for_backend`` already filters by platform — so it is left out
+    entirely rather than offered and then refused at the first turn.  The
+    ones that do apply are probed, because a backend whose daemon is not
+    running would otherwise be written into the config and fail every turn
+    from then on, far from the wizard that could still have picked another.
+    """
+    offers: list[SandboxOffer] = []
+    for backend, (label, summary) in _SANDBOX_LABELS.items():
+        checks = checks_for_backend(backend)
+        if not checks:
+            continue
+        outcomes = [run_check(name, check, config) for name, check in checks]
+        failed = [o for o in outcomes if not o.ok]
+        # The check's own name is dropped where it repeats the backend's, so a
+        # single-prerequisite backend reads as "Docker — docker CLI not found"
+        # rather than naming Docker twice in one line.
+        offers.append(
+            SandboxOffer(
+                backend=backend,
+                label=label,
+                summary=summary,
+                available=not failed,
+                detail="; ".join(
+                    o.detail if o.label == label else f"{o.label}: {o.detail}"
+                    for o in failed
+                ),
+            )
+        )
+    return offers
+
+
 def _load_config(path: str | None) -> Config | None:
     """The operator's config, or ``None`` when there is none to read.
 

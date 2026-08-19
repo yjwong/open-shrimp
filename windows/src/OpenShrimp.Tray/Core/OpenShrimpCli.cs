@@ -10,13 +10,44 @@ internal sealed record ModelChoice(
     [property: JsonPropertyName("model_id")] string ModelId,
     [property: JsonPropertyName("description")] string Description);
 
+internal sealed record ConfigContext(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("directory")] string Directory,
+    [property: JsonPropertyName("description")] string Description,
+    [property: JsonPropertyName("model")] string? Model,
+    // A sandbox backend name, or null to run on the host. The name only —
+    // everything else a sandbox block can hold stays with the config Mini App,
+    // so the wizard cannot grant what its one question never mentions.
+    [property: JsonPropertyName("sandbox")] string? Sandbox);
+
 internal sealed record ConfigWriteRequest(
     [property: JsonPropertyName("token")] string Token,
     [property: JsonPropertyName("user_id")] long UserId,
-    [property: JsonPropertyName("context_name")] string ContextName,
+    // May be empty: that is what "Skip" writes, and it is a config the core
+    // starts from. The user adds projects by chat afterwards.
+    [property: JsonPropertyName("contexts")] IReadOnlyList<ConfigContext> Contexts);
+
+/// <summary>One project the user has already worked in, as the core found it.</summary>
+/// <remarks>
+/// <c>Name</c> is the folder as it reads on disk — what the user recognises.
+/// <c>ContextName</c> is what that folder must be called in the config, which
+/// is narrower: a folder may be <c>talenthub.glints.com</c> and a context may
+/// not. The core decides it so this wizard and the terminal one cannot
+/// disagree about the same folder.
+/// </remarks>
+internal sealed record DiscoveredProject(
     [property: JsonPropertyName("directory")] string Directory,
-    [property: JsonPropertyName("description")] string Description,
-    [property: JsonPropertyName("model")] string? Model);
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("context_name")] string ContextName);
+
+/// <summary>One isolation choice this host could run a project in.</summary>
+internal sealed record SandboxChoice(
+    [property: JsonPropertyName("backend")] string Backend,
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("summary")] string Summary,
+    [property: JsonPropertyName("available")] bool Available,
+    // Why it is unavailable, and what to install. Empty when it is ready.
+    [property: JsonPropertyName("detail")] string Detail);
 
 /// <summary>
 /// Drives the core's non-interactive CLI.
@@ -147,6 +178,60 @@ internal static class OpenShrimpCli
             // The picker falls back to "CLI default" rather than blocking the
             // wizard on a catalog it can only offer as a convenience.
             return Array.Empty<ModelChoice>();
+        }
+    }
+
+    /// <summary>
+    /// The projects the core found worth offering to import.
+    ///
+    /// The filter that decides what counts as a project lives in Python, and
+    /// this wizard cannot call Python, so it asks rather than reading
+    /// <c>~/.claude.json</c> itself. An empty list is an answer — a fresh
+    /// machine has no such file — so a failure here renders as "none found",
+    /// which is a screen the step already has.
+    /// </summary>
+    public static async Task<IReadOnlyList<DiscoveredProject>> GetProjectsAsync(
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var result = await RunAsync("projects discover --json", null, ct).ConfigureAwait(false);
+            if (result.ExitCode != 0) return Array.Empty<DiscoveredProject>();
+
+            using var document = JsonDocument.Parse(result.Stdout);
+            return document.RootElement.GetProperty("projects")
+                .Deserialize<List<DiscoveredProject>>(ControlJson.Options)
+                ?? new List<DiscoveredProject>();
+        }
+        catch (Exception)
+        {
+            return Array.Empty<DiscoveredProject>();
+        }
+    }
+
+    /// <summary>
+    /// The sandbox backends this host can actually start a project in.
+    ///
+    /// Which ones apply to this platform, and whether their prerequisites are
+    /// met, is <c>doctor</c>'s answer. Offering one this PC cannot run would
+    /// write a config that fails on every turn from then on.
+    /// </summary>
+    public static async Task<IReadOnlyList<SandboxChoice>> GetSandboxesAsync(
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var result = await RunAsync("sandboxes --json", null, ct).ConfigureAwait(false);
+            if (result.ExitCode != 0) return Array.Empty<SandboxChoice>();
+
+            using var document = JsonDocument.Parse(result.Stdout);
+            return document.RootElement.GetProperty("sandboxes")
+                .Deserialize<List<SandboxChoice>>(ControlJson.Options)
+                ?? new List<SandboxChoice>();
+        }
+        catch (Exception)
+        {
+            return Array.Empty<SandboxChoice>();
         }
     }
 

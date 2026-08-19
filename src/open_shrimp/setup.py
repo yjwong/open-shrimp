@@ -33,6 +33,7 @@ from open_shrimp.config import (
     _validate_context_name,
     build_context_dict,
     check_directory,
+    unique_context_name,
 )
 
 
@@ -83,7 +84,7 @@ def _path_completion() -> Iterator[bool]:
 # The wizard writes a Claude SDK config, so it offers that backend's catalog.
 # "Custom model name" is the entry one past the end of this tuple.
 _MODELS: tuple[tuple[str | None, str], ...] = (
-    (None, "use CLI default (recommended)"),
+    (None, "let the agent CLI decide — recommended"),
     *((c.alias, c.description) for c in MODEL_CHOICES),
 )
 
@@ -443,49 +444,217 @@ def _close_out(token: str, enrolled: _Enrolled) -> None:
         logger.warning("Could not hand the Telegram poll back cleanly")
 
 
-def _prompt_context() -> tuple[str, dict[str, Any]]:
-    """Prompt for the first context configuration.
+@dataclass
+class _Project:
+    """One row of the import list.
 
-    Returns:
-        A tuple of (context_name, context_dict) ready for the config YAML.
+    ``name`` is what the context will be called and ``label`` is the folder
+    it came from.  They differ whenever a folder name is not a legal context
+    name, which is often enough that the two cannot be one field.
     """
-    print("\nSet up your first context.")
-    print("A context is a named shortcut for a project. You'll use the name with")
-    print("/context to switch between projects in Telegram.\n")
 
-    name = _prompt("Context name (e.g. my-project)", default="default", validator=_validate_context_name)
+    name: str
+    directory: str
+    label: str
+    chosen: bool
 
+
+def _show_projects(projects: list[_Project]) -> None:
+    """Draw the tick list, numbered from one."""
+    print()
+    for index, project in enumerate(projects, 1):
+        tick = "x" if project.chosen else " "
+        print(f"  {index:>2}. [{tick}] {project.name:<24} {project.directory}")
+    if not projects:
+        print("  (nothing yet)")
+
+
+def _toggle(projects: list[_Project], answer: str) -> None:
+    """Flip whatever the user just numbered; say so when they numbered nothing."""
+    picked = 0
+    for word in answer.replace(",", " ").split():
+        try:
+            index = int(word)
+        except ValueError:
+            print(f"  I don't know what '{word}' means.")
+            continue
+        if not 1 <= index <= len(projects):
+            print(f"  There's no project {index}.")
+            continue
+        projects[index - 1].chosen = not projects[index - 1].chosen
+        picked += 1
+    if picked == 0 and not projects:
+        print("  There's nothing to tick yet — press 'a' to add a folder.")
+
+
+def _prompt_manual_project(taken: set[str]) -> _Project:
+    """Ask for one folder by path, for a machine with nothing to import."""
     with _path_completion() as completes:
         hint = ", tab to autocomplete" if completes else ""
         directory = _prompt(
-            f"Project directory (absolute path{hint})",
+            f"Folder (absolute path{hint})",
             validator=_validate_directory,
         )
-    description = _prompt("Short description", default="Default context")
+    label = Path(directory).expanduser().name or directory
 
-    # Model selection
-    print("\nSelect a model:")
+    def _check(value: str) -> str | None:
+        error = _validate_context_name(value)
+        if error:
+            return error
+        if value in taken:
+            return f"Another project is already called '{value}'."
+        return None
+
+    # Suggested rather than demanded: the folder name is what the user thinks
+    # of this project as, and a name it cannot legally take is not a reason to
+    # make them invent one.
+    name = _prompt(
+        "Call it (this is the name you'll type after /context)",
+        default=unique_context_name(label, taken),
+        validator=_check,
+    )
+    return _Project(name, directory, label, True)
+
+
+def _prompt_sandbox(count: int) -> str | None:
+    """Ask, once for the whole import, how much of this computer to expose.
+
+    The one question of this step.  Importing several folders in a keystroke
+    is a large increase in what a Telegram message can reach, and it is the
+    moment the user is least likely to think about it.  Only backends this
+    host can actually start are offered; the rest are named with their
+    remedy, so a missing choice reads as a missing prerequisite rather than
+    as a missing feature.
+    """
+    from open_shrimp.doctor import sandbox_offers
+    from open_shrimp.paths import init_paths
+
+    subject = "these projects" if count > 1 else "this project"
+    print()
+    print(f"How should {subject} run?")
+    print(f"Anything you send me in Telegram can reach {'them' if count > 1 else 'it'},")
+    print("so this decides how much of this computer that reaches.")
+    print()
+    print("  Checking what this machine can run…")
+
+    # The wizard writes no instance name, so the unscoped install is the one
+    # these prerequisites belong to.
+    init_paths(None)
+    offers = sandbox_offers(None)
+    ready = [offer for offer in offers if offer.available]
+    missing = [offer for offer in offers if not offer.available]
+
+    print()
+    for index, offer in enumerate(ready, 1):
+        print(f"  {index}. {offer.label} — {offer.summary}")
+    print(f"  {len(ready) + 1}. No sandbox — the agent works directly on this computer")
+    if missing:
+        print()
+        print("  Not available on this machine:")
+        for offer in missing:
+            print(f"    {offer.label} — {offer.detail}")
+
+    def _check(value: str) -> str | None:
+        try:
+            choice = int(value)
+        except ValueError:
+            return f"Enter a number between 1 and {len(ready) + 1}."
+        if not 1 <= choice <= len(ready) + 1:
+            return f"Enter a number between 1 and {len(ready) + 1}."
+        return None
+
+    # No default: an isolation setting nobody chose is the one thing this
+    # question exists to prevent.
+    choice = int(_prompt("Sandbox", validator=_check))
+    return ready[choice - 1].backend if choice <= len(ready) else None
+
+
+def _prompt_model() -> str | None:
+    """Ask which model the imported projects run on, once for all of them."""
+    print()
+    print("Which model should they use?")
     for i, (model_name, model_desc) in enumerate(_MODELS, 1):
         display = model_name or "CLI default"
         print(f"  {i}. {display} ({model_desc})")
     print(f"  {len(_MODELS) + 1}. Enter a custom model name")
 
-    def _validate_model_choice(value: str) -> str | None:
+    def _check(value: str) -> str | None:
         try:
             choice = int(value)
         except ValueError:
             return f"Enter a number between 1 and {len(_MODELS) + 1}."
-        if choice < 1 or choice > len(_MODELS) + 1:
+        if not 1 <= choice <= len(_MODELS) + 1:
             return f"Enter a number between 1 and {len(_MODELS) + 1}."
         return None
 
-    choice = int(_prompt("Choice", default="1", validator=_validate_model_choice))
+    choice = int(_prompt("Model", default="1", validator=_check))
     if choice <= len(_MODELS):
-        model = _MODELS[choice - 1][0]
-    else:
-        model = _prompt("Custom model name")
+        return _MODELS[choice - 1][0]
+    return _prompt("Custom model name")
 
-    return name, build_context_dict(directory, description, model)
+
+def _prompt_projects() -> dict[str, dict[str, Any]]:
+    """Import the projects the user already works in.
+
+    Discovery runs before anything is drawn, because what this step asks
+    depends on what it found: a machine with candidates is shown a list to
+    prune, and a machine with none is shown a path prompt.  Finishing with
+    nothing is a supported outcome, not a failed step — the user reaches the
+    OpenShrimp context and adds projects by chat.
+    """
+    from open_shrimp.backend.claude_sdk.projects import discover_claude_projects
+
+    print()
+    print("Now your projects.")
+    print("A project is a folder I work in. In Telegram you switch between")
+    print("them with /context.")
+    print()
+    print("  Looking for projects you've already opened in Claude Code…")
+
+    projects = [
+        _Project(found.context_name, found.directory, found.name, True)
+        for found in discover_claude_projects()
+    ]
+    if projects:
+        print(f"  Found {len(projects)}. Everything is ticked — untick what you")
+        print("  don't want.")
+    else:
+        print("  None found on this machine.")
+
+    while True:
+        _show_projects(projects)
+        print()
+        print("  Enter — continue      a — add a folder by path")
+        print("  a number — tick or untick it")
+        print("  s — skip, and add projects later by chatting with me")
+        answer = _prompt("Projects", default="").strip().lower()
+
+        if answer == "s":
+            for project in projects:
+                project.chosen = False
+            break
+        if answer == "a":
+            projects.append(_prompt_manual_project({p.name for p in projects}))
+            continue
+        if not answer:
+            break
+        _toggle(projects, answer)
+
+    chosen = [project for project in projects if project.chosen]
+    if not chosen:
+        print()
+        print("  No projects, then. Open /context in Telegram, pick OpenShrimp,")
+        print("  and tell it which folder to add whenever you're ready.")
+        return {}
+
+    sandbox = _prompt_sandbox(len(chosen))
+    model = _prompt_model()
+    return {
+        project.name: build_context_dict(
+            project.directory, project.label, model, sandbox
+        )
+        for project in chosen
+    }
 
 
 def build_config_dict(
@@ -572,9 +741,9 @@ def run_setup_wizard(config_path: Path) -> None:
 
     token, identity = _prompt_token()
     enrolled = _prompt_operator(token, identity)
-    context_name, context = _prompt_context()
+    contexts = _prompt_projects()
 
-    config_dict = build_config_dict(token, enrolled.user_id, {context_name: context})
+    config_dict = build_config_dict(token, enrolled.user_id, contexts)
 
     from open_shrimp.config import write_config
 
@@ -589,7 +758,8 @@ def run_setup_wizard(config_path: Path) -> None:
     _close_out(token, enrolled)
 
     print(f"\nConfig written to {config_path}")
-    print("You can edit it later to add more contexts, tools, or users.")
+    print("To add another project later, open /context in Telegram and pick")
+    print("OpenShrimp — it edits this file for you.")
 
     # Installing demands a config the core can start from, so the offer comes
     # after the file it would register against exists.

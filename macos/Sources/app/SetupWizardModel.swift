@@ -27,6 +27,21 @@ struct WizardMessage: Equatable {
     let text: String
 }
 
+/// One row of the import list.
+///
+/// `name` is what the context will be called and `label` is the folder it came
+/// from.  They differ whenever a folder name is not a legal context name,
+/// which is often enough that the two cannot be one field: `talenthub.glints.com`
+/// is an ordinary directory and an illegal context.  Editable, because a user
+/// importing `api` and `api-2` should be able to say which is which.
+struct ProjectRow: Identifiable, Hashable {
+    let id = UUID()
+    var name: String
+    var directory: String
+    var label: String
+    var chosen: Bool
+}
+
 /// Where the enrollment step is.
 ///
 /// Enrollment is an authentication step, so it has more states than a text
@@ -60,14 +75,37 @@ final class SetupWizardModel: ObservableObject {
         charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
     )
 
+    /// The one name a project may not take: OpenShrimp builds that context in
+    /// code and refuses it in `config.yaml`.
+    private static let reservedName = "openshrimp"
+
     @Published private(set) var step = 0
 
     @Published var token = ""
     @Published var userID = ""
     @Published var setupCode = ""
-    @Published var contextName = "default"
     @Published var customModel = ""
-    @Published private(set) var directory: String?
+
+    /// Everything the import step could write, ticked or not.  Discovered
+    /// rows arrive pre-ticked; a folder chosen by hand is appended, also
+    /// ticked, so one list carries both routes and "Skip" is the same act of
+    /// leaving nothing ticked.
+    @Published var rows: [ProjectRow] = []
+    @Published private(set) var discoveryFinished = false
+
+    /// What this Mac can isolate a project with.  Only the ones whose
+    /// prerequisites are met are offered; the rest are named with their
+    /// remedy, so a missing choice reads as a missing prerequisite rather
+    /// than as a missing feature.
+    @Published private(set) var sandboxes: [SandboxChoice] = []
+
+    /// The chosen backend, `SetupWizardModel.noSandbox` for the host, or nil
+    /// for "not answered yet".  Deliberately unanswered at first: importing
+    /// several folders in one tap is a large increase in what a Telegram
+    /// message can reach, and a pre-filled answer is one nobody reads.
+    @Published var sandbox: String?
+
+    static let noSandbox = ""
 
     /// Whether finishing registers the app as a login item.
     ///
@@ -132,12 +170,20 @@ final class SetupWizardModel: ObservableObject {
 
     /// The first step confirms the bot before it is left, so the button says
     /// which of the two things the click will do.
+    ///
+    /// On the import step it says "Skip" when nothing is ticked, because that
+    /// is what the click does: setup finishes with no projects, and they are
+    /// added by chat afterwards.  A tick list with no visible way past it is
+    /// the one shape this step must not have.
     var primaryTitle: String {
         if isLastStep { return "Finish" }
         if step == 0 && verifiedToken != trimmed(token) { return "Verify" }
         if step == 1 && stage == .closed { return "Start again" }
+        if step == 2 && chosenRows.isEmpty { return "Skip" }
         return "Next"
     }
+
+    var chosenRows: [ProjectRow] { rows.filter(\.chosen) }
 
     /// The confirmation carries its own two buttons, and naming the consequence
     /// only works if the plain "Next" cannot bypass it.
@@ -170,13 +216,36 @@ final class SetupWizardModel: ObservableObject {
                 + choices.map { .alias(name: $0.alias, description: $0.description) }
                 + [.custom]
             catalogLoaded = true
+
+            // Discovered here rather than when the step is reached: the answer
+            // decides what that step asks — a list to prune, or a folder to
+            // pick — and a step that renders empty and then fills itself has
+            // already asked the wrong question once.
+            rows = await OpenShrimpCLI.projects().map {
+                ProjectRow(name: $0.contextName, directory: $0.directory,
+                           label: $0.name, chosen: true)
+            }
+            sandboxes = await OpenShrimpCLI.sandboxes()
+            discoveryFinished = true
         }
     }
 
-    func chooseDirectory(_ path: String) {
-        directory = path
+    /// Append a folder the user picked, ticked, with the folder's own name in
+    /// the editable name field.  Nothing is sanitised here: the field is
+    /// validated in front of the user, and the core is the authority on what a
+    /// context may be called.
+    func addDirectory(_ path: String) {
+        let label = (path as NSString).lastPathComponent
+        rows.append(
+            ProjectRow(name: label, directory: path, label: label, chosen: true))
         message = nil
     }
+
+    /// The backends worth putting in a picker: the ones this host can start.
+    var availableSandboxes: [SandboxChoice] { sandboxes.filter(\.available) }
+
+    /// The ones it cannot, with the remedy each needs.
+    var unavailableSandboxes: [SandboxChoice] { sandboxes.filter { !$0.available } }
 
     // -- Navigation -----------------------------------------------------------
 
@@ -474,21 +543,51 @@ final class SetupWizardModel: ObservableObject {
 
     // -- Finish ---------------------------------------------------------------
 
-    /// The context step's fields, checked together.  Returns nil and says what
+    /// The import step's answers, checked together.  Returns nil and says what
     /// is wrong; the answer is the same whether it is being asked to leave the
     /// step or to write the config.
-    private func validatedContext() -> (name: String, directory: String, model: String?)? {
-        let name = trimmed(contextName)
-        guard !name.isEmpty, name.unicodeScalars.allSatisfy(Self.nameCharacters.contains) else {
-            message = WizardMessage(
-                tone: .failure,
-                text: "Use only letters, numbers, hyphens and underscores."
-            )
-            return nil
+    ///
+    /// An empty result is a success, not a failure: nothing ticked is "Skip",
+    /// and a config with no projects is one the core starts from.
+    private func validatedContexts() -> [ConfigContext]? {
+        let chosen = chosenRows
+        if chosen.isEmpty { return [] }
+
+        var seen: Set<String> = []
+        for row in chosen {
+            let name = trimmed(row.name)
+            guard !name.isEmpty,
+                  name.unicodeScalars.allSatisfy(Self.nameCharacters.contains) else {
+                message = WizardMessage(
+                    tone: .failure,
+                    text: "\"\(row.label)\": use only letters, numbers, hyphens and underscores."
+                )
+                return nil
+            }
+            // Refused here rather than by the core, because a mapping would
+            // keep the last of two and report an import of two projects that
+            // produced one.
+            guard seen.insert(name).inserted else {
+                message = WizardMessage(
+                    tone: .failure,
+                    text: "Two projects are both called \"\(name)\"."
+                )
+                return nil
+            }
+            guard name != Self.reservedName else {
+                message = WizardMessage(
+                    tone: .failure,
+                    text: "\"\(name)\" is reserved for OpenShrimp's own context."
+                )
+                return nil
+            }
         }
 
-        guard let directory else {
-            message = WizardMessage(tone: .failure, text: "Choose a project folder.")
+        guard let sandbox else {
+            message = WizardMessage(
+                tone: .failure,
+                text: "Choose how these projects run."
+            )
             return nil
         }
 
@@ -510,20 +609,28 @@ final class SetupWizardModel: ObservableObject {
             model = custom
         }
 
-        return (name, directory, model)
+        return chosen.map {
+            ConfigContext(
+                name: trimmed($0.name),
+                directory: $0.directory,
+                description: $0.label,
+                model: model,
+                sandbox: sandbox == Self.noSandbox ? nil : sandbox
+            )
+        }
     }
 
-    /// The context step is left on its fields alone.  Nothing is written here:
+    /// The import step is left on its answers alone.  Nothing is written here:
     /// the config write belongs to the last step, so that a wizard abandoned on
     /// the autostart question leaves no config behind.
     private func leaveContextStep() {
-        guard validatedContext() != nil else { return }
+        guard validatedContexts() != nil else { return }
         message = nil
         step = 3
     }
 
     private func finish() async {
-        guard let context = validatedContext() else { return }
+        guard let contexts = validatedContexts() else { return }
 
         guard let token = verifiedToken, let userID = enrolledUserID else {
             message = WizardMessage(tone: .failure, text: "Go back and complete the earlier steps.")
@@ -539,14 +646,7 @@ final class SetupWizardModel: ObservableObject {
         await warmup?.value
 
         let failure = await OpenShrimpCLI.writeConfig(
-            ConfigWriteRequest(
-                token: token,
-                userID: userID,
-                contextName: context.name,
-                directory: context.directory,
-                description: "Default context",
-                model: context.model
-            )
+            ConfigWriteRequest(token: token, userID: userID, contexts: contexts)
         )
 
         if let failure {

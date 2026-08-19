@@ -145,18 +145,25 @@ async def _get_context(
     return name, ctx
 
 
-# Said wherever a scope needs a project and has none.  Names the two routes
-# that can actually create one; the picker is deliberately not offered,
-# because with no contexts configured it has nothing to show.
+# Said wherever a scope needs a project and has none.  Names the route that
+# needs nothing but this chat: the OpenShrimp context writes config.yaml, so
+# a user with no project never has to reach the machine the bot runs on.
+# /config is named second because it is a Mini App, and the supervisor
+# answers in words on any device the user is already holding.
 NO_CONTEXT_TEXT = (
     "No project is set up yet, so there's nothing for me to work in.\n\n"
-    "Add one with /config, or re-run the setup wizard on the machine I run on."
+    "Open /context, pick OpenShrimp, and tell it which folder to add — "
+    "it edits my config for you, and shows you the change before it lands. "
+    "You can also add one in /config."
 )
 
 
 # Telegram caps a callback answer at 200 characters, so the alert carries the
 # first sentence and the remedy only.
-NO_CONTEXT_ANSWER = "No project is set up yet — add one with /config."
+NO_CONTEXT_ANSWER = (
+    "No project is set up yet — open /context, pick OpenShrimp, and ask it "
+    "to add one."
+)
 
 
 async def reply_no_context(message: Message) -> None:

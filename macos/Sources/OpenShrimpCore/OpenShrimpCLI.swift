@@ -6,13 +6,45 @@ struct ModelChoice: Sendable {
     let description: String
 }
 
-struct ConfigWriteRequest: Sendable {
-    let token: String
-    let userID: Int64
-    let contextName: String
+/// One project the config will name.
+struct ConfigContext: Sendable {
+    let name: String
     let directory: String
     let description: String
     let model: String?
+    /// A sandbox backend name, or nil to run on the host.  The name only —
+    /// everything else a sandbox block can hold stays with the config Mini
+    /// App, so the wizard cannot grant what its one question never mentions.
+    let sandbox: String?
+}
+
+struct ConfigWriteRequest: Sendable {
+    let token: String
+    let userID: Int64
+    /// May be empty: that is what "Skip" writes, and it is a config the core
+    /// starts from.  The user adds projects by chat afterwards.
+    let contexts: [ConfigContext]
+}
+
+/// One project the user has already worked in, as the core found it.
+struct DiscoveredProject: Sendable, Hashable {
+    let directory: String
+    /// The folder as it reads on disk — what the user recognises.
+    let name: String
+    /// What that folder must be called in the config, which is narrower: a
+    /// folder may be `talenthub.glints.com` and a context may not.  Decided
+    /// by the core so this wizard and the terminal one cannot disagree.
+    let contextName: String
+}
+
+/// One isolation choice this host could run a project in.
+struct SandboxChoice: Sendable, Hashable {
+    let backend: String
+    let label: String
+    let summary: String
+    let available: Bool
+    /// Why it is unavailable, and what to install.  Empty when it is ready.
+    let detail: String
 }
 
 /// Drives the core's non-interactive CLI.
@@ -193,16 +225,87 @@ enum OpenShrimpCLI {
         }
     }
 
+    /// The projects the core found worth offering to import.
+    ///
+    /// The filter that decides what counts as a project lives in Python, and
+    /// this wizard cannot call Python, so it asks rather than reading
+    /// `~/.claude.json` itself.  An empty list is an answer — a fresh machine
+    /// has no such file — so a failure here renders as "none found", which is
+    /// a screen the step already has.
+    static func projects() async -> [DiscoveredProject] {
+        do {
+            let result = try await run(["projects", "discover", "--json"])
+            if result.exitCode != 0 { return [] }
+
+            guard
+                let parsed = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
+                    as? [String: Any],
+                let found = parsed["projects"] as? [[String: Any]]
+            else { return [] }
+
+            return found.compactMap { entry in
+                guard
+                    let directory = entry["directory"] as? String,
+                    let contextName = entry["context_name"] as? String
+                else { return nil }
+                return DiscoveredProject(
+                    directory: directory,
+                    name: entry["name"] as? String ?? contextName,
+                    contextName: contextName
+                )
+            }
+        } catch {
+            return []
+        }
+    }
+
+    /// The sandbox backends this host can actually start a project in.
+    ///
+    /// Which ones apply to this platform, and whether their prerequisites are
+    /// met, is `doctor`'s answer.  Offering one this Mac cannot run would
+    /// write a config that fails on every turn from then on.
+    static func sandboxes() async -> [SandboxChoice] {
+        do {
+            let result = try await run(["sandboxes", "--json"])
+            if result.exitCode != 0 { return [] }
+
+            guard
+                let parsed = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
+                    as? [String: Any],
+                let found = parsed["sandboxes"] as? [[String: Any]]
+            else { return [] }
+
+            return found.compactMap { entry in
+                guard let backend = entry["backend"] as? String else { return nil }
+                return SandboxChoice(
+                    backend: backend,
+                    label: entry["label"] as? String ?? backend,
+                    summary: entry["summary"] as? String ?? "",
+                    available: entry["available"] as? Bool ?? false,
+                    detail: entry["detail"] as? String ?? ""
+                )
+            }
+        } catch {
+            return []
+        }
+    }
+
     /// Writes config.yaml.  Returns nil on success, else the reason.
     static func writeConfig(_ request: ConfigWriteRequest) async -> String? {
-        var payload: [String: Any] = [
+        let payload: [String: Any] = [
             "token": request.token,
             "user_id": request.userID,
-            "context_name": request.contextName,
-            "directory": request.directory,
-            "description": request.description,
+            "contexts": request.contexts.map { context -> [String: Any] in
+                var entry: [String: Any] = [
+                    "name": context.name,
+                    "directory": context.directory,
+                    "description": context.description,
+                ]
+                if let model = context.model { entry["model"] = model }
+                if let sandbox = context.sandbox { entry["sandbox"] = sandbox }
+                return entry
+            },
         ]
-        if let model = request.model { payload["model"] = model }
 
         let result: Result
         do {

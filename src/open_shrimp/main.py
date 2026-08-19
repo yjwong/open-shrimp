@@ -207,6 +207,17 @@ def _parse_args() -> argparse.Namespace:
         help="Emit machine-readable JSON (for a setup UI)",
     )
 
+    sub_sandboxes = subparsers.add_parser(
+        "sandboxes",
+        parents=[common],
+        help="List the sandbox backends this host can run a context in",
+    )
+    sub_sandboxes.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON (for a setup UI)",
+    )
+
     sub_config = subparsers.add_parser(
         "config",
         parents=[common],
@@ -600,6 +611,7 @@ def _run_projects_discover(*, json_output: bool) -> int:
                     {
                         "directory": project.directory,
                         "name": project.name,
+                        "context_name": project.context_name,
                         "last_start_time": project.last_start_time,
                     }
                     for project in projects
@@ -611,6 +623,48 @@ def _run_projects_discover(*, json_output: bool) -> int:
     else:
         for project in projects:
             print(f"{project.name:<24} {project.directory}")
+    return 0
+
+
+def _run_sandboxes(*, json_output: bool) -> int:
+    """List the isolation choices a setup UI may offer for this host.
+
+    The same reason ``projects discover`` exists: which backends this
+    platform can run, and whether their prerequisites are met, is decided by
+    ``doctor`` in Python, and the two GUI wizards cannot call Python.  A
+    wizard offering a backend this host cannot start would write a config
+    that fails on its first turn.
+    """
+    from open_shrimp.doctor import _load_config, sandbox_offers
+
+    config = _load_config(None)
+    # Several checks look under the managed data directory, which is only
+    # locatable once the instance name has been read off the config — or
+    # settled as the unscoped one, when there is no config to read.
+    init_paths(config.instance_name if config is not None else None)
+    offers = sandbox_offers(config)
+
+    if json_output:
+        json.dump(
+            {
+                "sandboxes": [
+                    {
+                        "backend": offer.backend,
+                        "label": offer.label,
+                        "summary": offer.summary,
+                        "available": offer.available,
+                        "detail": offer.detail,
+                    }
+                    for offer in offers
+                ]
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    else:
+        for offer in offers:
+            state = "ready" if offer.available else offer.detail
+            print(f"{offer.backend:<10} {offer.label:<10} {state}")
     return 0
 
 
@@ -802,6 +856,9 @@ def main() -> None:
             sys.exit(_run_projects_discover(json_output=args.json))
         print("usage: openshrimp projects discover [--json]", file=sys.stderr)
         sys.exit(2)
+
+    if args.subcommand == "sandboxes":
+        sys.exit(_run_sandboxes(json_output=args.json))
 
     if args.subcommand == "config":
         if args.config_command == "write":

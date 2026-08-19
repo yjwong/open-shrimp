@@ -22,14 +22,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from open_shrimp.backend.claude_sdk.mcp_config import load_claude_config
+from open_shrimp.config import unique_context_name
 
 
 @dataclass(frozen=True)
 class ClaudeProject:
-    """One importable project: where it is, what to call it, and how recent."""
+    """One importable project: where it is, what to call it, and how recent.
+
+    ``name`` is the folder as it reads on disk, which is what the user
+    recognises.  ``context_name`` is what that folder must be called in
+    ``config.yaml``, which is a narrower thing: a folder may be
+    ``talenthub.glints.com`` and a context may not.  Both are carried
+    because both are shown — the tick list names the folder, and the config
+    names the context.
+    """
 
     directory: str
     name: str
+    context_name: str
     last_start_time: int | None
 
 
@@ -44,7 +54,7 @@ def discover_claude_projects() -> list[ClaudeProject]:
     if not isinstance(projects, dict):
         return []
 
-    found: list[ClaudeProject] = []
+    found: list[tuple[str, str, int | None]] = []
     for directory, entry in projects.items():
         if not isinstance(directory, str) or not isinstance(entry, dict):
             continue
@@ -57,17 +67,25 @@ def discover_claude_projects() -> list[ClaudeProject]:
         # and must only decide where in the order it lands.
         started = entry.get("lastStartTime")
         found.append(
-            ClaudeProject(
-                directory=directory,
-                name=Path(directory).name or directory,
-                last_start_time=(
-                    int(started) if isinstance(started, (int, float)) else None
-                ),
+            (
+                directory,
+                Path(directory).name or directory,
+                int(started) if isinstance(started, (int, float)) else None,
             )
         )
 
-    found.sort(key=lambda project: project.last_start_time or 0, reverse=True)
-    return found
+    found.sort(key=lambda entry: entry[2] or 0, reverse=True)
+
+    # Named after sorting, never before: the suffix a collision earns depends
+    # on which folder is seen first, and the order the user is shown is the
+    # order that should decide it.
+    taken: set[str] = set()
+    named: list[ClaudeProject] = []
+    for directory, name, started in found:
+        context_name = unique_context_name(name, taken)
+        taken.add(context_name)
+        named.append(ClaudeProject(directory, name, context_name, started))
+    return named
 
 
 __all__ = ["ClaudeProject", "discover_claude_projects"]

@@ -143,8 +143,114 @@ def test_discover_json_is_parsable(tmp_path, monkeypatch, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["projects"] == [
-        {"directory": "/home/ada/real", "name": "real", "last_start_time": 17}
+        {
+            "directory": "/home/ada/real",
+            "name": "real",
+            "context_name": "real",
+            "last_start_time": 17,
+        }
     ]
+
+
+# ---------------------------------------------------------------------------
+# Naming
+#
+# A folder name is under no obligation to be a legal context name, and the
+# user never typed it, so a refusal here would be a dead end in the middle of
+# an import.  These are the two ways that happens.
+# ---------------------------------------------------------------------------
+
+
+def test_a_folder_name_a_context_cannot_take_is_converted(tmp_path, monkeypatch):
+    """``talenthub.glints.com`` is a real folder and an illegal context name."""
+    _write_claude_json(
+        tmp_path,
+        monkeypatch,
+        {
+            "/home/ada/work/talenthub.glints.com": _real(lastStartTime=3),
+            "/home/ada/My Notes": _real(lastStartTime=2),
+            "/home/ada/....": _real(lastStartTime=1),
+        },
+    )
+
+    found = discover_claude_projects()
+    assert [p.context_name for p in found] == [
+        "talenthub-glints-com",
+        "My-Notes",
+        "project",
+    ]
+    # The folder is still named as it reads on disk, because that is what the
+    # user recognises in the tick list.
+    assert [p.name for p in found] == ["talenthub.glints.com", "My Notes", "...."]
+
+    from open_shrimp.config import _validate_context_name
+
+    assert all(_validate_context_name(p.context_name) is None for p in found)
+
+
+def test_two_projects_with_one_basename_get_distinct_names(tmp_path, monkeypatch):
+    """A mapping would keep the last one, and an import of two would report
+    as one."""
+    _write_claude_json(
+        tmp_path,
+        monkeypatch,
+        {
+            "/home/ada/work/api": _real(lastStartTime=3),
+            "/home/ada/play/api": _real(lastStartTime=2),
+            "/home/ada/old/a.p.i": _real(lastStartTime=1),
+        },
+    )
+
+    found = discover_claude_projects()
+    # Newest first keeps the plain name: it is the folder the user has most
+    # recently worked in.
+    assert [(p.directory, p.context_name) for p in found] == [
+        ("/home/ada/work/api", "api"),
+        ("/home/ada/play/api", "api-2"),
+        ("/home/ada/old/a.p.i", "a-p-i"),
+    ]
+
+
+def test_a_folder_called_openshrimp_cannot_take_the_reserved_name(
+    tmp_path, monkeypatch
+):
+    """The supervisor is built in code; an import must not collide with it."""
+    _write_claude_json(tmp_path, monkeypatch, {"/home/ada/openshrimp": _real()})
+
+    assert [p.context_name for p in discover_claude_projects()] == ["openshrimp-2"]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("open-shrimp", "open-shrimp"),
+        ("my_project", "my_project"),
+        ("talenthub.glints.com", "talenthub-glints-com"),
+        ("  spaced  out  ", "spaced-out"),
+        ("--leading--and--trailing--", "leading-and-trailing"),
+        ("", "project"),
+        (".", "project"),
+        ("2026", "2026"),
+        # isalnum() is Unicode-aware and the validator uses it, so a name the
+        # validator would accept is not mangled for looking foreign.
+        ("café", "café"),
+    ],
+)
+def test_the_sanitised_name_is_one_the_validator_accepts(raw, expected):
+    from open_shrimp.config import _validate_context_name, sanitise_context_name
+
+    assert sanitise_context_name(raw) == expected
+    assert _validate_context_name(expected) is None
+
+
+def test_a_taken_name_takes_the_next_number():
+    from open_shrimp.config import unique_context_name
+
+    taken: set[str] = set()
+    for expected in ("api", "api-2", "api-3"):
+        name = unique_context_name("api", taken)
+        assert name == expected
+        taken.add(name)
 
 
 def test_an_empty_result_is_still_valid_json(tmp_path, monkeypatch, capsys):

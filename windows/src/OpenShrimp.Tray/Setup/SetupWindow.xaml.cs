@@ -37,7 +37,20 @@ internal enum EnrollStage
 }
 
 /// <summary>
-/// First-run wizard: bot token, enrollment, first context.
+/// One row of the import list, and the controls that carry it.
+///
+/// <c>Label</c> is the folder as it reads on disk and the name box is what the
+/// context will be called. They differ whenever a folder name is not a legal
+/// context name, which is often enough that the two cannot be one field:
+/// <c>talenthub.glints.com</c> is an ordinary directory and an illegal
+/// context. The name box is editable, because a user importing <c>api</c> and
+/// <c>api-2</c> should be able to say which is which.
+/// </summary>
+internal sealed record ProjectRow(
+    CheckBox Tick, TextBox NameBox, string Directory, string Label);
+
+/// <summary>
+/// First-run wizard: bot token, enrollment, projects.
 ///
 /// The reason the core grew a non-interactive "config write": the terminal
 /// wizard needs a tty, which a tray app launched from Explorer or a logon task
@@ -47,11 +60,15 @@ public sealed partial class SetupWindow : Window
 {
     private const int StepCount = 4;
 
+    /// The one name a project may not take: OpenShrimp builds that context in
+    /// code and refuses it in config.yaml.
+    private const string ReservedContextName = "openshrimp";
+
     private int _step;
     private string? _verifiedToken;
     private string? _verifiedUsername;
-    private string? _directory;
     private IReadOnlyList<ModelChoice> _models = Array.Empty<ModelChoice>();
+    private readonly List<ProjectRow> _rows = new();
 
     private EnrollStage _stage = EnrollStage.Waiting;
     private EnrollmentWindow? _window;
@@ -67,7 +84,11 @@ public sealed partial class SetupWindow : Window
         InitializeComponent();
         ApplySystemAppearance();
         BuildDots();
-        _ = LoadModelsAsync();
+        // Started here rather than when the import step is reached: the answer
+        // decides what that step asks — a list to prune, or a folder to pick —
+        // and a step that renders empty and then fills itself has already asked
+        // the wrong question once.
+        _ = LoadCoreFactsAsync();
         ShowStep(0);
 
         // Ends any open enrollment window with the wizard. A poll left running
@@ -163,7 +184,9 @@ public sealed partial class SetupWindow : Window
                 i == step ? "AccentFillColorDefaultBrush" : "ControlStrongFillColorDefaultBrush");
         }
 
-        UpdateChrome();
+        // The import step's questions and its button both follow the tick
+        // state, which may have changed while the user was elsewhere.
+        if (step == 2) UpdateProjectStep(); else UpdateChrome();
     }
 
     /// <summary>
@@ -180,14 +203,21 @@ public sealed partial class SetupWindow : Window
         {
             0 => ("Connect your bot", "Create a bot with @BotFather and paste its token here."),
             1 => EnrollHeader(),
-            2 => ("Your first context", "A working directory the agent will operate in."),
+            2 => ("Your projects",
+                  "The folders you already work in. Untick anything you'd rather "
+                  + "not reach from Telegram."),
             _ => ("One last thing", "OpenShrimp runs only while this app is open."),
         };
 
+        // "Skip" on the import step with nothing ticked, because that is what
+        // the click does: setup finishes with no projects, and they are added
+        // by chat afterwards. A tick list with no visible way past it is the
+        // one shape this step must not have.
         NextButton.Content = _step switch
         {
             StepCount - 1 => "Finish",
             1 when _stage == EnrollStage.Closed => "Start again",
+            2 when ChosenRows().Count == 0 => "Skip",
             _ => "Next",
         };
         NextButton.IsEnabled = _step != 1 || _stage != EnrollStage.Confirming;
@@ -248,7 +278,7 @@ public sealed partial class SetupWindow : Window
     {
         0 => await ValidateTokenAsync(),
         1 => await LeaveEnrollmentStepAsync(),
-        2 => ValidateContext(),
+        2 => ValidateContexts() is not null,
         // The autostart step has nothing to check: a checkbox is answered by
         // being in one state or the other.
         _ => true,
@@ -590,22 +620,71 @@ public sealed partial class SetupWindow : Window
         _window = null;
     }
 
-    private bool ValidateContext()
+    /// <summary>
+    /// The import step's answers, checked together. Says what is wrong and
+    /// stays put; the answer is the same whether it is being asked to leave the
+    /// step or to write the config.
+    ///
+    /// An empty result is a success, not a failure: nothing ticked is "Skip",
+    /// and a config with no projects is one the core starts from.
+    /// </summary>
+    private IReadOnlyList<ConfigContext>? ValidateContexts()
     {
-        var name = ContextNameBox.Text.Trim();
-        if (name.Length == 0 || !name.All(c => char.IsLetterOrDigit(c) || c is '-' or '_'))
+        var chosen = ChosenRows();
+        if (chosen.Count == 0) return Array.Empty<ConfigContext>();
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in chosen)
         {
-            SetMessage(ContextMessage, "Use only letters, numbers, hyphens and underscores.", error: true);
-            return false;
+            var name = row.NameBox.Text.Trim();
+            if (name.Length == 0 || !name.All(c => char.IsLetterOrDigit(c) || c is '-' or '_'))
+            {
+                SetMessage(
+                    ContextMessage,
+                    $"\"{row.Label}\": use only letters, numbers, hyphens and underscores.",
+                    error: true);
+                return null;
+            }
+            // Refused here rather than by the core, because a mapping would
+            // keep the last of two and report an import of two projects that
+            // produced one.
+            if (!seen.Add(name))
+            {
+                SetMessage(ContextMessage, $"Two projects are both called \"{name}\".", error: true);
+                return null;
+            }
+            if (name == ReservedContextName)
+            {
+                SetMessage(
+                    ContextMessage,
+                    $"\"{name}\" is reserved for OpenShrimp's own context.",
+                    error: true);
+                return null;
+            }
         }
-        if (string.IsNullOrEmpty(_directory))
+
+        if (SandboxBox.SelectedItem is not ComboBoxItem sandboxItem)
         {
-            SetMessage(ContextMessage, "Choose a working directory.", error: true);
-            return false;
+            SetMessage(ContextMessage, "Choose how these projects run.", error: true);
+            return null;
         }
+        var sandbox = sandboxItem.Tag as string;
+
+        var model = (ModelBox.SelectedItem as ComboBoxItem)?.Tag as string;
+
         SetMessage(ContextMessage, "", error: false);
-        return true;
+        return chosen
+            .Select(row => new ConfigContext(
+                Name: row.NameBox.Text.Trim(),
+                Directory: row.Directory,
+                Description: row.Label,
+                Model: model,
+                Sandbox: sandbox))
+            .ToList();
     }
+
+    private List<ProjectRow> ChosenRows() =>
+        _rows.Where(row => row.Tick.IsChecked == true).ToList();
 
     private static void SetMessage(TextBlock target, string text, bool error)
     {
@@ -623,7 +702,15 @@ public sealed partial class SetupWindow : Window
 
     // -- Step 2 helpers -----------------------------------------------------
 
-    private async Task LoadModelsAsync()
+    /// <summary>
+    /// Everything the import step needs from the core: the model catalog, the
+    /// projects worth offering, and what this PC can isolate them with.
+    ///
+    /// None of the three blocks the wizard. A catalog that could not be read
+    /// leaves "CLI default"; a discovery that failed reads the same as "none
+    /// found", which is a screen this step already has.
+    /// </summary>
+    private async Task LoadCoreFactsAsync()
     {
         _models = await OpenShrimpCli.GetModelsAsync();
 
@@ -632,6 +719,88 @@ public sealed partial class SetupWindow : Window
         foreach (var model in _models)
             ModelBox.Items.Add(new ComboBoxItem { Content = $"{model.Alias} — {model.Description}", Tag = model.Alias });
         ModelBox.SelectedIndex = 0;
+
+        foreach (var project in await OpenShrimpCli.GetProjectsAsync())
+            AddProjectRow(project.ContextName, project.Directory, project.Name);
+
+        BuildSandboxChoices(await OpenShrimpCli.GetSandboxesAsync());
+
+        DiscoverySpinner.IsActive = false;
+        DiscoveryLabel.Visibility = Visibility.Collapsed;
+        UpdateProjectStep();
+    }
+
+    /// <summary>
+    /// The one question of this step. Importing several folders in a click is a
+    /// large increase in what a Telegram message can reach, and this is the
+    /// moment the user is least likely to think about it.
+    ///
+    /// Nothing is pre-selected: an isolation setting nobody chose is the one
+    /// thing this question exists to prevent.
+    /// </summary>
+    private void BuildSandboxChoices(IReadOnlyList<SandboxChoice> choices)
+    {
+        SandboxBox.Items.Clear();
+        foreach (var choice in choices.Where(c => c.Available))
+        {
+            SandboxBox.Items.Add(new ComboBoxItem
+            {
+                Content = $"{choice.Label} — {choice.Summary}",
+                Tag = choice.Backend,
+            });
+        }
+        SandboxBox.Items.Add(new ComboBoxItem
+        {
+            Content = "No sandbox — directly on this PC",
+            Tag = null,
+        });
+
+        // Named rather than hidden: a choice that is simply absent reads as a
+        // missing feature instead of a missing prerequisite.
+        var missing = choices
+            .Where(c => !c.Available)
+            .Select(c => $"{c.Label} is unavailable: {c.Detail}")
+            .ToList();
+        SandboxUnavailable.Text = string.Join("\n", missing);
+        SandboxUnavailable.Visibility =
+            missing.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Append one row, ticked, to the import list.</summary>
+    private void AddProjectRow(string name, string directory, string label)
+    {
+        var tick = new CheckBox { IsChecked = true, MinWidth = 0 };
+        var nameBox = new TextBox { Text = name, Width = 160 };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        row.Children.Add(tick);
+        row.Children.Add(nameBox);
+        row.Children.Add(new TextBlock
+        {
+            Text = directory,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Style = (Microsoft.UI.Xaml.Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Foreground = ThemeBrush("TextFillColorSecondaryBrush"),
+        });
+
+        // The primary button says "Skip" when nothing is ticked, so unticking
+        // the last row has to redraw the footer.
+        tick.Checked += (_, _) => UpdateProjectStep();
+        tick.Unchecked += (_, _) => UpdateProjectStep();
+
+        ProjectList.Children.Add(row);
+        _rows.Add(new ProjectRow(tick, nameBox, directory, label));
+    }
+
+    /// <summary>Redraw what the tick state decides: the questions and the button.</summary>
+    private void UpdateProjectStep()
+    {
+        var chosen = ChosenRows().Count > 0;
+        SandboxSection.Visibility = chosen ? Visibility.Visible : Visibility.Collapsed;
+        SkipNote.Visibility = chosen ? Visibility.Collapsed : Visibility.Visible;
+        ProjectListEmpty.Visibility =
+            _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateChrome();
     }
 
     private async void ChooseFolder(object sender, RoutedEventArgs e)
@@ -647,26 +816,28 @@ public sealed partial class SetupWindow : Window
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null) return;
 
-        _directory = folder.Path;
-        DirectoryLabel.Text = folder.Path;
+        // The folder's own name goes in the name box unaltered: it is validated
+        // in front of the user, and the core is the authority on what a context
+        // may be called.
+        AddProjectRow(folder.Name, folder.Path, folder.Name);
+        UpdateProjectStep();
     }
 
     // -- Finish -------------------------------------------------------------
 
     private async Task FinishAsync()
     {
+        var contexts = ValidateContexts();
+        if (contexts is null) return;
+
         var done = false;
         NextButton.IsEnabled = false;
         try
         {
-            var model = (ModelBox.SelectedItem as ComboBoxItem)?.Tag as string;
             var error = await OpenShrimpCli.WriteConfigAsync(new ConfigWriteRequest(
                 Token: _verifiedToken!,
                 UserId: _enrolledUserId!.Value,
-                ContextName: ContextNameBox.Text.Trim(),
-                Directory: _directory!,
-                Description: "Default context",
-                Model: model));
+                Contexts: contexts));
 
             if (error is not null)
             {

@@ -18,7 +18,9 @@ struct SetupWizardView: View {
             footer
         }
         .padding(24)
-        .frame(width: 480, height: 420)
+        // Taller than the other steps need, because the import step is a list
+        // and a list that scrolls at three rows is one nobody reads.
+        .frame(width: 520, height: 500)
     }
 
     // -- Chrome ---------------------------------------------------------------
@@ -40,7 +42,7 @@ struct SetupWizardView: View {
         case 1:
             if case .confirming = model.stage { return "Is this you?" }
             return "Who may use it?"
-        case 2: return "Your first context"
+        case 2: return "Your projects"
         default: return "One last thing"
         }
     }
@@ -60,7 +62,9 @@ struct SetupWizardView: View {
                 // Says why the step exists; the body says how to get through it.
                 return "Only the account you enroll here will be allowed to talk to the bot."
             }
-        case 2: return "A working directory the agent will operate in."
+        case 2:
+            return "The folders you already work in. Untick anything you'd "
+                + "rather not reach from Telegram."
         default: return "OpenShrimp runs only while this app is open."
         }
     }
@@ -219,26 +223,113 @@ struct SetupWizardView: View {
     }
 
     private var contextStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
+            projectList
+
+            HStack(spacing: 12) {
                 // Disabled with the rest: the panel spins a nested modal run
                 // loop, so a folder picked while the config write is in flight
-                // would replace the one already written into the payload.
-                Button("Choose Folder…", action: chooseFolder)
+                // would land in a list that has already been sent.
+                Button("Add Folder…", action: chooseFolder)
                     .disabled(model.busy)
-                Text(model.directory ?? "No folder selected")
+                if !model.discoveryFinished {
+                    ProgressView().controlSize(.small)
+                    Text("Looking for projects…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Asked only where it has consequences.  With nothing ticked there
+            // is nothing to isolate, and a question with no consequence teaches
+            // the user to answer without reading.
+            if model.chosenRows.isEmpty {
+                Text("Nothing ticked — you'll finish with no projects, and can "
+                     + "add them later by opening /context in Telegram and "
+                     + "picking OpenShrimp.")
                     .font(.caption)
-                    .foregroundColor(model.directory == nil ? .secondary : .primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                sandboxQuestion
+                modelPicker
+            }
+        }
+    }
+
+    /// Everything found, pre-ticked, plus whatever was added by hand.
+    ///
+    /// Scrolls rather than grows: the window is a fixed size, and a developer
+    /// machine can hold a dozen candidates.
+    private var projectList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                // By index, not by `ForEach($model.rows)`: the binding-projecting
+                // form crashes swift-frontend 6.2.1 in LocalDiscriminatorsRequest
+                // while walking this closure.  Rows are only ever appended, so
+                // the indices are stable enough to identify by.
+                ForEach(model.rows.indices, id: \.self, content: projectRow)
+                if model.rows.isEmpty && model.discoveryFinished {
+                    Text("No projects found on this Mac. Add a folder, or skip "
+                         + "and add them later by chat.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.trailing, 4)
+        }
+        .frame(maxHeight: 120)
+    }
+
+    /// One tick, one editable name, and the folder it came from.
+    private func projectRow(_ index: Int) -> some View {
+        HStack(spacing: 8) {
+            Toggle("", isOn: $model.rows[index].chosen)
+                .labelsHidden()
+            TextField("name", text: $model.rows[index].name)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 150)
+                .disabled(!model.rows[index].chosen)
+            Text(model.rows[index].directory)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.head)
+        }
+    }
+
+    /// The one question of this step.  Importing several folders in a click is
+    /// a large increase in what a Telegram message can reach, and this is the
+    /// moment the user is least likely to think about it.
+    private var sandboxQuestion: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            field("Runs in") {
+                Picker("", selection: $model.sandbox) {
+                    Text("Choose…").tag(String?.none)
+                    ForEach(model.availableSandboxes, id: \.backend) { choice in
+                        Text("\(choice.label) — \(choice.summary)")
+                            .tag(String?.some(choice.backend))
+                    }
+                    Text("No sandbox — directly on this Mac")
+                        .tag(String?.some(SetupWizardModel.noSandbox))
+                }
+                .labelsHidden()
             }
 
-            field("Context name") {
-                TextField("e.g. my-project", text: $model.contextName)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 200)
+            // Named rather than hidden: a choice that is simply absent reads as
+            // a missing feature instead of a missing prerequisite.
+            ForEach(model.unavailableSandboxes, id: \.backend) { choice in
+                Text("\(choice.label) is unavailable: \(choice.detail)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
 
+    private var modelPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
             field("Model") {
                 Picker("", selection: $model.selection) {
                     ForEach(model.options, id: \.self) { option in
@@ -309,13 +400,13 @@ struct SetupWizardView: View {
         panel.prompt = "Choose"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         // Creating one here is allowed because the panel really creates it: the
         // core refuses a config whose working directory does not exist.
         panel.canCreateDirectories = true
 
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        model.chooseDirectory(url.path)
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { model.addDirectory(url.path) }
     }
 
     private func telegramLink(_ title: String, domain: String) -> some View {

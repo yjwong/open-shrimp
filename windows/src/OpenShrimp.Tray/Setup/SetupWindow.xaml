@@ -114,21 +114,58 @@
                     <TextBlock x:Name="EnrollMessage" TextWrapping="Wrap" />
                 </StackPanel>
 
-                <!-- Step 2: first context -->
+                <!--
+                    Step 2: the projects.  A tick list of what the user already
+                    works in, everything ticked, plus one question about how
+                    much of this PC those projects reach.  The rows are built in
+                    code-behind rather than from a template: what a row holds is
+                    read back at the end, and a handful of controls answers that
+                    more directly than a binding does.
+                -->
                 <StackPanel x:Name="StepContext" Spacing="10" Visibility="Collapsed">
-                    <TextBox x:Name="ContextNameBox" Header="Context name" Text="default" />
-                    <StackPanel Spacing="4">
-                        <TextBlock Text="Working directory" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBlock x:Name="DirectoryLabel"
-                                       Text="No folder chosen"
-                                       VerticalAlignment="Center"
-                                       TextTrimming="CharacterEllipsis"
-                                       Width="280" />
-                            <Button Content="Choose…" Click="ChooseFolder" />
+                    <ScrollViewer MaxHeight="150" VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="ProjectList" Spacing="4">
+                            <TextBlock x:Name="ProjectListEmpty"
+                                       TextWrapping="Wrap"
+                                       Visibility="Collapsed"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="No projects found on this PC. Add a folder, or skip and add them later by chat." />
                         </StackPanel>
+                    </ScrollViewer>
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Add folder…" Click="ChooseFolder" />
+                        <ProgressRing x:Name="DiscoverySpinner" IsActive="True" Width="16" Height="16" />
+                        <TextBlock x:Name="DiscoveryLabel"
+                                   Text="Looking for projects…"
+                                   VerticalAlignment="Center"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
-                    <ComboBox x:Name="ModelBox" Header="Model" Width="320" />
+
+                    <!--
+                        Asked only where it has consequences: with nothing
+                        ticked there is nothing to isolate, and a question with
+                        no consequence teaches the user to answer without
+                        reading.
+                    -->
+                    <StackPanel x:Name="SandboxSection" Spacing="8">
+                        <ComboBox x:Name="SandboxBox" Header="Runs in" Width="360" />
+                        <TextBlock x:Name="SandboxUnavailable"
+                                   TextWrapping="Wrap"
+                                   Visibility="Collapsed"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <ComboBox x:Name="ModelBox" Header="Model" Width="360" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="SkipNote"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Nothing ticked — you'll finish with no projects, and can add them later by opening /context in Telegram and picking OpenShrimp." />
+
                     <TextBlock x:Name="ContextMessage" TextWrapping="Wrap" />
                 </StackPanel>
 

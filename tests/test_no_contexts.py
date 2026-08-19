@@ -211,7 +211,11 @@ async def test_command_answers_with_words_when_no_contexts(text, handler_name, d
 
     assert update.message.replies, f"{text} said nothing at all"
     joined = " ".join(update.message.replies)
-    assert "/config" in joined, f"{text} did not point anywhere useful: {joined!r}"
+    # The route that needs nothing but this chat: the OpenShrimp context
+    # writes config.yaml, so a user with no project is never sent back to the
+    # machine the bot runs on.
+    assert "OpenShrimp" in joined, f"{text} did not point anywhere useful: {joined!r}"
+    assert "/context" in joined, f"{text} did not point anywhere useful: {joined!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +266,7 @@ async def test_pickup_open_picker_explains_instead_of_empty_menu(db):
     await _open_picker(_Query(), str(event_id), _empty_config(), ctx, 0)
 
     assert answers and answers[0]["text"]
-    assert "/config" in answers[0]["text"]
+    assert "OpenShrimp" in answers[0]["text"]
     # The "Pick up" button is left in place so the event stays claimable.
     assert not edits
 
@@ -333,13 +337,29 @@ async def test_generate_meeting_notes_names_the_missing_setting():
 # ---------------------------------------------------------------------------
 
 
+def test_the_no_context_copy_points_at_the_supervisor_not_at_the_wizard():
+    """One constant carries both surfaces, and neither may send a user back to
+    the machine the bot runs on: the OpenShrimp context writes the config from
+    this chat."""
+    from open_shrimp.handlers.utils import NO_CONTEXT_ANSWER, NO_CONTEXT_TEXT
+
+    for copy in (NO_CONTEXT_TEXT, NO_CONTEXT_ANSWER):
+        assert "OpenShrimp" in copy
+        assert "/context" in copy
+        assert "setup wizard" not in copy
+
+    # Telegram truncates a callback alert past 200 characters, which would cut
+    # the remedy off the end of the sentence that carries it.
+    assert len(NO_CONTEXT_ANSWER) <= 200
+
+
 def test_orientation_text_does_not_claim_a_project_when_there_are_none():
     from open_shrimp.first_boot import orientation_text
 
     text = orientation_text(_empty_config())
     assert "I'm working on" not in text
     assert "No project is set up yet" in text
-    assert "/config" in text
+    assert "OpenShrimp" in text
 
 
 def test_orientation_text_still_names_the_project_when_there_is_one():

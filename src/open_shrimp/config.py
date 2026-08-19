@@ -2,6 +2,7 @@
 
 import platform
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -1284,6 +1285,52 @@ def _validate_context_name(value: str) -> str | None:
             f"context. Pick another name."
         )
     return None
+
+
+def sanitise_context_name(raw: str) -> str:
+    """*raw* reduced to something :func:`_validate_context_name` accepts.
+
+    A context name is typed back into Telegram to switch to it, so the rule
+    is the one that validator already enforces: letters, digits, hyphens and
+    underscores.  A folder name is under no such obligation —
+    ``talenthub.glints.com`` and ``My Notes`` are both ordinary directories
+    and both refused — so an import that offers folder names must convert
+    them rather than hand the user an error for a name they never typed.
+
+    Every rejected character becomes one hyphen, runs collapse, and leading
+    and trailing hyphens go.  A name that survives none of that falls back to
+    ``project``, because the empty string is not a name.
+    """
+    kept = "".join(
+        char if (char.isalnum() or char in "-_") else "-" for char in raw.strip()
+    )
+    while "--" in kept:
+        kept = kept.replace("--", "-")
+    kept = kept.strip("-")
+    return kept or "project"
+
+
+def unique_context_name(raw: str, taken: Collection[str]) -> str:
+    """*raw*, sanitised, and not one of *taken*.
+
+    Two projects can share a basename — ``~/work/api`` and ``~/play/api`` —
+    and sanitising makes collisions likelier still, since ``my.app`` and
+    ``my-app`` both land on ``my-app``.  Colliding names would be written to
+    a mapping, where the second silently replaces the first and an import of
+    two projects reports as one.
+
+    The first caller keeps the plain name and later ones take ``-2``, ``-3``.
+    Discovery hands them over newest-session-first, so the folder the user
+    worked in most recently is the one that keeps the name it reads as.  The
+    reserved name counts as taken: nothing may be imported as the supervisor.
+    """
+    candidate = sanitise_context_name(raw)
+    if candidate != RESERVED_CONTEXT_NAME and candidate not in taken:
+        return candidate
+    suffix = 2
+    while f"{candidate}-{suffix}" in taken:
+        suffix += 1
+    return f"{candidate}-{suffix}"
 
 
 def build_context_dict(
