@@ -23,6 +23,37 @@ DEFAULT_CONFIG_PATH = user_config_path("openshrimp") / "config.yaml"
 RESERVED_CONTEXT_NAME = "openshrimp"
 
 
+class ConfigParseError(ValueError):
+    """``config.yaml`` is not valid YAML, said in words a person can act on.
+
+    A ``yaml.YAMLError`` reaching a caller unchanged carries a traceback
+    and a parser's vocabulary; the person who just saved the file wants
+    the line they broke.  A ``ValueError`` subclass because every caller
+    that already distinguishes a bad config from a missing one catches
+    that.
+    """
+
+
+def _parse_error_message(config_path: Path, exc: Exception) -> str:
+    """Turn a YAML parse failure into one sentence naming the line.
+
+    ``problem`` and ``problem_mark`` are read off the exception rather
+    than reached through an ``isinstance``: PyYAML and ruamel raise
+    unrelated classes that both carry them, and this file is parsed by
+    both.  Positions count from zero there and from one in every editor,
+    so they are converted — a line number is only useful if it matches
+    what the person is looking at.
+    """
+    problem = getattr(exc, "problem", None) or "it could not be parsed"
+    mark = getattr(exc, "problem_mark", None)
+    where = (
+        f", line {mark.line + 1}, column {mark.column + 1}"
+        if mark is not None
+        else ""
+    )
+    return f"{config_path} is not valid YAML: {problem}{where}."
+
+
 @dataclass
 class TelegramConfig:
     token: str
@@ -1033,16 +1064,32 @@ def load_config(path: str | None = None) -> Config:
 
     Raises:
         FileNotFoundError: If the config file does not exist.
-        ValueError: If the config is invalid.
+        ValueError: If the file is unusable for any other reason — bad
+            YAML, a failed validation rule, or a shape ``_parse`` could
+            not read.  Callers distinguish "no config" from "bad config"
+            and nothing finer, so every second case answers to one type.
     """
     config_path = Path(path) if path else DEFAULT_CONFIG_PATH
 
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigParseError(_parse_error_message(config_path, exc)) from exc
     _validate_raw(raw)
-    return _parse(raw)
+    try:
+        return _parse(raw)
+    except (AttributeError, TypeError, KeyError, IndexError) as exc:
+        # ``_validate_raw`` does not type-check every field it lets
+        # through, so a hand-edit that turns a mapping into a list
+        # reaches ``_parse`` and dies on attribute access.  That is a bad
+        # edit, not a bug, and it must not be sorted with the bugs.
+        raise ConfigParseError(
+            f"{config_path} is valid YAML but OpenShrimp could not read it: "
+            f"{exc.__class__.__name__}: {exc}"
+        ) from exc
 
 
 def config_to_dict(config: Config) -> dict[str, Any]:

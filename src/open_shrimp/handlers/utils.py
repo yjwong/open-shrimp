@@ -211,6 +211,36 @@ def _is_authorized(user_id: int | None, config: Config) -> bool:
     return user_id is not None and user_id in config.allowed_users
 
 
+async def notify_operators(
+    bot: Bot,
+    allowed_users: list[int],
+    text: str,
+    parse_mode: str | None = None,
+) -> None:
+    """DM every allowed user *text*, best effort.
+
+    The write side of the policy :func:`_is_authorized` reads, and it
+    lives here for the same reason: a message from this bot confirms a
+    live instance, so who may receive one unprompted is one decision and
+    not one per caller.  Used by the announcements that belong to the
+    process rather than to a conversation — a boot, an update, a config
+    reload — which have no chat to answer into.
+
+    Delivery is per user and never raises: one blocked chat must not cost
+    the others their message, and no announcement is worth taking down
+    the loop that produced it.
+    """
+    for user_id in allowed_users:
+        try:
+            await bot.send_message(
+                chat_id=user_id, text=text, parse_mode=parse_mode,
+            )
+        except Exception:
+            logger.warning(
+                "Could not reach allowed user %s", user_id, exc_info=True
+            )
+
+
 def _is_bot_addressed(update: Update, bot_username: str) -> bool:
     """Check if the bot is @mentioned or replied to in a group chat.
 

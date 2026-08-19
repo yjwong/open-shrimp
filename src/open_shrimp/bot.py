@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Any, Callable
 
-from telegram import BotCommand, BotCommandScopeAllPrivateChats, Update
+from telegram import Bot, BotCommand, BotCommandScopeAllPrivateChats, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -70,7 +70,7 @@ from open_shrimp.handlers.commands import (
 from open_shrimp.handlers.messages import message_handler, web_app_data_handler
 from open_shrimp.handlers.questions import _handle_question_callback
 from open_shrimp.handlers.turned_away import note_unauthorized
-from open_shrimp.handlers.utils import _is_authorized
+from open_shrimp.handlers.utils import _is_authorized, notify_operators
 
 logger = logging.getLogger(__name__)
 
@@ -186,33 +186,96 @@ async def _activate_manager(
     await asyncio.to_thread(mgr.start_reaper)
 
 
-async def _watch_config(config_path: str, bot_data: dict) -> None:
+def _reload_failure_text(exc: Exception) -> str:
+    """What to say when the file on disk did not load.
+
+    ``load_config`` raises ``FileNotFoundError`` for an absent file and
+    ``ValueError`` for every other way the file can be unusable — a
+    ``ConfigParseError`` from the parser, a ``_validate_raw`` refusal, or
+    a shape ``_parse`` could not read.  All of those already read as a
+    sentence about the file and are quoted verbatim.  Anything else is a
+    bug rather than a bad edit, and gets no half-parsed detail.
+
+    Either way the closing line is the only thing the reader has to act
+    on: the process is still serving the last config that loaded, so
+    saving a corrected file is the whole remedy.
+    """
+    if isinstance(exc, FileNotFoundError):
+        reason = "The file is not there any more."
+    elif isinstance(exc, ValueError):
+        reason = str(exc) or "The file could not be read."
+    else:
+        reason = "The file could not be read."
+    return (
+        "⚠️ I could not load the new config.yaml.\n\n"
+        f"{reason}\n\n"
+        "I'm still running on the last config that loaded, so nothing has "
+        "changed. Fix the file and save it again — I'll pick it up on my own."
+    )
+
+
+def _restart_only_changes(old: Config, new: Config) -> list[str]:
+    """The reloaded fields that a restart, and only a restart, applies."""
+    return [
+        label
+        for label, changed in (
+            ("the Telegram token", new.telegram.token != old.telegram.token),
+            ("the review settings", new.review != old.review),
+        )
+        if changed
+    ]
+
+
+async def _watch_config(config_path: str, bot_data: dict, bot: Bot) -> None:
     """Watch the config file for changes and hot-reload into bot_data.
 
     Uses ``watchfiles`` (inotify on Linux, FSEvents on macOS) for
-    efficient, near-instant change detection.  Fields like
-    ``telegram.token`` and ``review.*`` require a full restart; changes
-    to those are logged as warnings but still applied so that the next
-    restart picks them up.
+    efficient, near-instant change detection.
+
+    A load that fails is reported to the operator.  The log is not a
+    delivery mechanism: whoever saved the file is holding a phone, and an
+    agent that writes the file would otherwise be told a write succeeded
+    while the running config never changed.  Loading and applying are
+    therefore separate: only the first can be blamed on the file, and
+    only the first leaves the running config untouched — which is what
+    the report goes on to promise.
+
+    ``telegram.token`` and ``review.*`` are applied so the next restart
+    picks them up, and reported, because until that restart the running
+    bot and the file on disk disagree.
     """
     from watchfiles import awatch
 
     async for _changes in awatch(config_path):
+        old_config: Config = bot_data["config"]
         try:
             new_config = load_config(config_path)
-            old_config: Config = bot_data["config"]
+        except Exception as exc:
+            logger.exception("Config reload failed, keeping current config")
+            await notify_operators(
+                bot, old_config.allowed_users, _reload_failure_text(exc)
+            )
+            continue
 
-            # Warn about fields that need a restart to take full effect.
-            if new_config.telegram.token != old_config.telegram.token:
-                logger.warning(
-                    "Config reload: telegram.token changed — restart required"
-                )
-            if new_config.review != old_config.review:
-                logger.warning(
-                    "Config reload: review.* changed — restart required to take effect"
-                )
+        # Installed before anything slow: a Telegram round-trip must not
+        # hold the reloaded config back from the handlers waiting on it.
+        bot_data["config"] = new_config
 
-            bot_data["config"] = new_config
+        try:
+            restart_needed = _restart_only_changes(old_config, new_config)
+            if restart_needed:
+                logger.warning(
+                    "Config reload: %s changed — restart required",
+                    ", ".join(restart_needed),
+                )
+                await notify_operators(
+                    bot,
+                    new_config.allowed_users,
+                    "I reloaded config.yaml. Everything in it is live except "
+                    "these, which only take effect after a restart: "
+                    + ", ".join(restart_needed)
+                    + ". Use /restart when it suits you.",
+                )
 
             # Enabling a sandbox at runtime (e.g. via the config-app) must
             # not require a restart — otherwise ``_select_sandbox_manager``
@@ -248,7 +311,9 @@ async def _watch_config(config_path: str, bot_data: dict) -> None:
             if not added and not removed:
                 logger.info("Config reloaded")
         except Exception:
-            logger.exception("Config reload failed, keeping current config")
+            # The new config is already live, so this is not the failure
+            # ``_reload_failure_text`` describes and must not claim to be.
+            logger.exception("Config reload: failed to apply the new config")
 
 
 # ── Application setup ──
@@ -541,17 +606,12 @@ async def run_bot(
     if update_version is not None:
         from open_shrimp.updater import _escape_md
 
-        for uid in config.allowed_users:
-            try:
-                await app.bot.send_message(
-                    chat_id=uid,
-                    text=f"Updated to `{_escape_md(update_version)}`\\. Back online\\.",
-                    parse_mode="MarkdownV2",
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to send update confirmation to %d", uid, exc_info=True
-                )
+        await notify_operators(
+            app.bot,
+            config.allowed_users,
+            f"Updated to `{_escape_md(update_version)}`\\. Back online\\.",
+            parse_mode="MarkdownV2",
+        )
 
     # The enrollment handshake spends Telegram's one-shot START press, so the
     # bot's explanation of itself has to arrive unprompted, and only once the
@@ -642,7 +702,9 @@ async def run_bot(
     # Start config file watcher for live reloading.
     watcher_task = None
     if config_path:
-        watcher_task = asyncio.create_task(_watch_config(config_path, app.bot_data))
+        watcher_task = asyncio.create_task(
+            _watch_config(config_path, app.bot_data, app.bot)
+        )
 
     # Keep running until stopped
     stop_event = asyncio.Event()
