@@ -355,7 +355,9 @@ class TestRunSetupWizard:
 
         raw = yaml.safe_load(config_path.read_text())
         assert "myproject" in raw["contexts"]
-        assert raw["default_context"] == "myproject"
+        # Setup names no default: it cannot know which project a topic
+        # means, and a guess binds every unbound scope to it.
+        assert "default_context" not in raw
 
         ctx = raw["contexts"]["myproject"]
         assert ctx["description"] == "My project"
@@ -370,7 +372,6 @@ class TestRunSetupWizard:
         _Wizard(_fake_with_operator(), "y", "", "/tmp", "", "").run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
-        assert raw["default_context"] == "default"
         assert raw["contexts"]["default"]["description"] == "Default context"
         assert "model" not in raw["contexts"]["default"]
 
@@ -468,7 +469,7 @@ class TestRunSetupWizard:
         config = load_config(str(config_path))
         assert config.telegram.token == "111:AAA-bbb"
         assert config.allowed_users == [OPERATOR]
-        assert config.default_context == "default"
+        assert config.default_context is None
 
 
 class TestAutostartOffer:

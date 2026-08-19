@@ -44,8 +44,7 @@ def _write_config(tmp_path: Path) -> Path:
         build_config_dict(
             "123456:token",
             1,
-            "default",
-            build_context_dict(str(tmp_path), "test"),
+            {"default": build_context_dict(str(tmp_path), "test")},
         ),
     )
     return config

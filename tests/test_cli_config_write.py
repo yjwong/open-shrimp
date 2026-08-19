@@ -31,6 +31,8 @@ from open_shrimp.main import _parse_args, _run_config_write, _run_models
         ["--config", "/A", "update"],
         ["--config", "/A", "config", "write"],
         ["config", "write", "--config", "/A"],
+        ["--config", "/A", "projects", "discover"],
+        ["projects", "discover", "--config", "/A"],
     ],
 )
 def test_config_flag_is_honoured_on_either_side_of_the_subcommand(argv, monkeypatch):
@@ -81,13 +83,21 @@ class _Args:
         self.force = force
 
 
+def _context(directory: Path, name: str = "default", **overrides) -> dict:
+    entry = {
+        "name": name,
+        "directory": str(directory),
+        "description": "written by a setup UI",
+    }
+    entry.update(overrides)
+    return entry
+
+
 def _spec(directory: Path, **overrides) -> dict:
     spec = {
         "token": "123456:ABCdefGHIjklMNOpqrs",
         "user_id": 42,
-        "context_name": "default",
-        "directory": str(directory),
-        "description": "written by a setup UI",
+        "contexts": [_context(directory)],
     }
     spec.update(overrides)
     return spec
@@ -102,14 +112,111 @@ def _write(tmp_path, monkeypatch, capsys, spec, **kwargs) -> tuple[int, dict]:
 
 
 def test_written_config_loads(tmp_path, monkeypatch, capsys):
-    code, out = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path, model="sonnet"))
+    spec = _spec(tmp_path)
+    spec["contexts"][0]["model"] = "sonnet"
+    code, out = _write(tmp_path, monkeypatch, capsys, spec)
 
     assert code == 0 and out["ok"] is True
 
     config = load_config(out["config_path"])
-    assert config.default_context == "default"
     assert config.allowed_users == [42]
     assert config.contexts["default"].directory == str(tmp_path)
+    assert config.contexts["default"].model == "claude-sonnet-5"
+
+
+def test_no_default_context_is_named(tmp_path, monkeypatch, capsys):
+    """Setup cannot know which of several imported projects a topic should
+    mean, and a guess binds every unbound scope to it on the first message."""
+    code, out = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path))
+
+    assert code == 0
+    assert load_config(out["config_path"]).default_context is None
+
+
+def test_several_contexts_are_all_written(tmp_path, monkeypatch, capsys):
+    """The whole point of the import: a user with four projects gets four."""
+    directories = []
+    for name in ("alpha", "beta", "gamma"):
+        directory = tmp_path / name
+        directory.mkdir()
+        directories.append(directory)
+
+    spec = _spec(
+        tmp_path,
+        contexts=[
+            _context(directory, name=directory.name) for directory in directories
+        ],
+    )
+    code, out = _write(tmp_path, monkeypatch, capsys, spec)
+
+    assert code == 0
+    config = load_config(out["config_path"])
+    assert sorted(config.contexts) == ["alpha", "beta", "gamma"]
+    assert config.contexts["beta"].directory == str(tmp_path / "beta")
+
+
+def test_an_empty_context_list_is_valid(tmp_path, monkeypatch, capsys):
+    """What "Skip" produces.  The user reaches the OpenShrimp context and
+    adds projects by chat."""
+    code, out = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path, contexts=[]))
+
+    assert code == 0 and out["ok"] is True
+    config = load_config(out["config_path"])
+    assert config.contexts == {}
+    assert config.default_context is None
+
+
+def test_the_sandbox_answer_reaches_the_context(tmp_path, monkeypatch, capsys):
+    """Importing several host contexts in one tap is a large increase in
+    exposure, so the one question the wizard asks has to land in the file."""
+    spec = _spec(tmp_path)
+    spec["contexts"][0]["sandbox"] = "docker"
+    code, out = _write(tmp_path, monkeypatch, capsys, spec)
+
+    assert code == 0
+    sandbox = load_config(out["config_path"]).contexts["default"].sandbox
+    assert sandbox is not None and sandbox.backend == "docker"
+
+
+def test_an_unknown_sandbox_backend_is_refused(tmp_path, monkeypatch, capsys):
+    """Refused by the shared config validator, so the CLI and the running bot
+    cannot disagree about what a backend is."""
+    spec = _spec(tmp_path)
+    spec["contexts"][0]["sandbox"] = "virtualbox"
+    code, out = _write(tmp_path, monkeypatch, capsys, spec)
+
+    assert code == 1
+    assert "sandbox.backend must be one of" in out["error"]
+    assert not (tmp_path / "config.yaml").exists()
+
+
+def test_the_reserved_name_is_refused(tmp_path, monkeypatch, capsys):
+    """The OpenShrimp context is built in code, so a config that names one
+    would not load."""
+    code, out = _write(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        _spec(tmp_path, contexts=[_context(tmp_path, name="openshrimp")]),
+    )
+
+    assert code == 1
+    assert "reserved" in out["error"]
+    assert not (tmp_path / "config.yaml").exists()
+
+
+def test_a_repeated_name_is_refused(tmp_path, monkeypatch, capsys):
+    """A dict would silently keep the last one, and the wizard would report
+    an import of two projects that produced one."""
+    code, out = _write(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        _spec(tmp_path, contexts=[_context(tmp_path), _context(tmp_path)]),
+    )
+
+    assert code == 1
+    assert "both called 'default'" in out["error"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
@@ -144,8 +251,12 @@ def test_model_is_optional(tmp_path, monkeypatch, capsys):
     "spec_overrides, expected",
     [
         ({"user_id": None}, "missing required field"),
-        ({"directory": ""}, "missing required field"),
+        ({"token": ""}, "missing required field"),
         ({"user_id": "abc"}, "user_id must be a number"),
+        ({"contexts": {}}, "contexts must be a list"),
+        ({"contexts": ["/some/path"]}, "context 1 must be an object"),
+        ({"contexts": [{"directory": "/tmp"}]}, "context 1 has no name"),
+        ({"contexts": [{"name": "a"}]}, "context 'a' has no directory"),
     ],
 )
 def test_bad_input_reports_json_not_a_traceback(

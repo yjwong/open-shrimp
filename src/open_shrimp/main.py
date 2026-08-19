@@ -614,6 +614,54 @@ def _run_projects_discover(*, json_output: bool) -> int:
     return 0
 
 
+def _context_from_entry(entry: object, position: int) -> tuple[str, dict[str, Any]]:
+    """Turn one entry of a JSON description into a named context.
+
+    Everything the wire schema decides about a single context is decided
+    here, so the command around it is left with reading stdin, refusing to
+    clobber a config, and writing one.  A ``ValueError`` names the problem
+    in the words the caller will report.
+
+    Only what a first config may fairly settle is read.  A sandbox entry
+    names a backend and nothing else, so a wizard cannot reach
+    ``allow_host_escape`` through the one question it asks about isolation.
+    """
+    from open_shrimp.config import (
+        _validate_context_name,
+        build_context_dict,
+        check_directory,
+    )
+
+    if not isinstance(entry, dict):
+        raise ValueError(f"context {position} must be an object")
+
+    name = str(entry.get("name") or "").strip()
+    if not name:
+        raise ValueError(f"context {position} has no name")
+    # Reserved names and stray punctuation are refused here rather than at the
+    # next boot, while the UI that collected them can still correct it.
+    name_error = _validate_context_name(name)
+    if name_error:
+        raise ValueError(f"context '{name}': {name_error}")
+
+    # The terminal wizard checks this before writing; without it here a setup
+    # UI reports success, the bot boots fine, and every agent turn then fails
+    # on a working directory that does not exist — far from the UI that could
+    # still have corrected it.
+    if not str(entry.get("directory") or "").strip():
+        raise ValueError(f"context '{name}' has no directory")
+    directory = check_directory(str(entry["directory"]))
+    if not directory["exists"]:
+        raise ValueError(f"directory does not exist: {directory['path']}")
+
+    return name, build_context_dict(
+        directory["path"],
+        str(entry.get("description") or name),
+        str(entry.get("model") or "").strip() or None,
+        str(entry.get("sandbox") or "").strip() or None,
+    )
+
+
 def _run_config_write(args: argparse.Namespace) -> int:
     """Write a fresh config from a JSON description.
 
@@ -622,12 +670,16 @@ def _run_config_write(args: argparse.Namespace) -> int:
     config HTTP API needs a bot that is already running.  Keeping the schema
     on this side is what stops a second implementation from drifting.
 
-    Reads ``{token, user_id, context_name, directory, description, model?}``
-    and reports the outcome as JSON so a caller can parse a failure rather
-    than scrape it.
+    Reads ``{token, user_id, contexts: [{name, directory, description?,
+    model?, sandbox?}]}`` and reports the outcome as JSON so a caller can
+    parse a failure rather than scrape it.
+
+    The context list may be empty.  That is what a wizard's "Skip" produces,
+    and it is a config the core starts from: the user reaches the OpenShrimp
+    context and adds projects by chat.
     """
     from open_shrimp.config import _validate_raw, write_config
-    from open_shrimp.setup import build_config_dict, build_context_dict
+    from open_shrimp.setup import build_config_dict
 
     def _fail(message: str) -> int:
         json.dump({"ok": False, "error": message}, sys.stdout)
@@ -651,11 +703,7 @@ def _run_config_write(args: argparse.Namespace) -> int:
     if not isinstance(spec, dict):
         return _fail("the JSON description must be an object")
 
-    missing = [
-        key
-        for key in ("token", "user_id", "context_name", "directory")
-        if not spec.get(key)
-    ]
+    missing = [key for key in ("token", "user_id") if not spec.get(key)]
     if missing:
         return _fail(f"missing required field(s): {', '.join(missing)}")
 
@@ -664,28 +712,27 @@ def _run_config_write(args: argparse.Namespace) -> int:
     except (TypeError, ValueError):
         return _fail("user_id must be a number")
 
-    # The terminal wizard checks this before writing; without it here a setup
-    # UI reports success, the bot boots fine, and every agent turn then fails
-    # on a working directory that does not exist — far from the UI that could
-    # still have corrected it.
-    directory = Path(str(spec["directory"])).expanduser()
-    if not directory.is_dir():
-        return _fail(f"directory does not exist: {directory}")
+    raw_contexts = spec.get("contexts", [])
+    if not isinstance(raw_contexts, list):
+        return _fail("contexts must be a list")
+
+    contexts: dict[str, dict[str, Any]] = {}
+    for position, entry in enumerate(raw_contexts, 1):
+        try:
+            name, context = _context_from_entry(entry, position)
+        except ValueError as exc:
+            return _fail(str(exc))
+        # A dict would keep the last one silently, and the wizard would report
+        # an import of two projects that produced one.
+        if name in contexts:
+            return _fail(f"two contexts are both called '{name}'")
+        contexts[name] = context
 
     config_path = Path(args.config)
     if config_path.exists() and not args.force:
         return _fail(f"{config_path} already exists — pass --force to overwrite")
 
-    config_dict = build_config_dict(
-        str(spec["token"]),
-        user_id,
-        str(spec["context_name"]),
-        build_context_dict(
-            str(spec["directory"]),
-            str(spec.get("description") or "Default context"),
-            spec.get("model") or None,
-        ),
-    )
+    config_dict = build_config_dict(str(spec["token"]), user_id, contexts)
 
     # write_config does not validate, so a bad description would otherwise be
     # written out and only rejected at the next boot.

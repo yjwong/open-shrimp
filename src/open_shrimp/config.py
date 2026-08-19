@@ -1290,11 +1290,17 @@ def build_context_dict(
     directory: str,
     description: str,
     model: str | None = None,
+    sandbox: str | None = None,
 ) -> dict[str, Any]:
     """Assemble one context entry.
 
     Shared by every front end that can create a first config, so the shape
     cannot drift between them.
+
+    *sandbox* names a backend only.  The rest of a sandbox block —
+    ``allow_host_escape``, ``computer_use``, a ``dockerfile`` — is chosen
+    later in the config Mini App, because the question a first config can
+    fairly ask is whether the context is isolated at all.
     """
     context: dict[str, Any] = {
         "directory": str(Path(directory).expanduser().resolve()),
@@ -1303,6 +1309,8 @@ def build_context_dict(
     }
     if model is not None:
         context["model"] = model
+    if sandbox is not None:
+        context["sandbox"] = {"backend": sandbox}
     return context
 
 

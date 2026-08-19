@@ -32,6 +32,7 @@ from open_shrimp.config import (
     RESERVED_CONTEXT_NAME,
     _validate_context_name,
     build_context_dict,
+    check_directory,
 )
 
 
@@ -149,10 +150,10 @@ def _validate_user_id(value: str) -> str | None:
 
 
 def _validate_directory(value: str) -> str | None:
-    """Validate a directory path exists."""
-    p = Path(value).expanduser()
-    if not p.is_dir():
-        return f"Directory does not exist: {p}"
+    """Validate a directory path exists, as every other surface does."""
+    checked = check_directory(value)
+    if not checked["exists"]:
+        return f"Directory does not exist: {checked['path']}"
     return None
 
 
@@ -490,15 +491,23 @@ def _prompt_context() -> tuple[str, dict[str, Any]]:
 def build_config_dict(
     token: str,
     user_id: int,
-    context_name: str,
-    context: dict[str, Any],
+    contexts: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Assemble the full config dictionary for YAML serialization."""
+    """Assemble the full config dictionary for YAML serialization.
+
+    Takes however many contexts setup gathered, including none: a user with
+    nothing to import reaches the end of setup with the OpenShrimp context
+    and adds projects by chat afterwards.
+
+    No ``default_context``.  Setup cannot know which of several imported
+    projects a topic should mean, and guessing binds every unbound scope to
+    that guess on its first message.  Absent, an unbound scope is shown the
+    picker instead.
+    """
     return {
         "telegram": {"token": token},
         "allowed_users": [user_id],
-        "contexts": {context_name: context},
-        "default_context": context_name,
+        "contexts": contexts,
         "review": {
             "port": random.randint(49152, 65535),
             "tunnel": "cloudflared",
@@ -565,7 +574,7 @@ def run_setup_wizard(config_path: Path) -> None:
     enrolled = _prompt_operator(token, identity)
     context_name, context = _prompt_context()
 
-    config_dict = build_config_dict(token, enrolled.user_id, context_name, context)
+    config_dict = build_config_dict(token, enrolled.user_id, {context_name: context})
 
     from open_shrimp.config import write_config
 
