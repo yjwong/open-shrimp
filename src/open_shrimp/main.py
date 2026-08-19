@@ -190,6 +190,23 @@ def _parse_args() -> argparse.Namespace:
         help="Emit machine-readable JSON (for a setup UI)",
     )
 
+    sub_projects = subparsers.add_parser(
+        "projects",
+        parents=[common],
+        help="Find projects a setup UI can offer to import",
+    )
+    projects_subs = sub_projects.add_subparsers(dest="projects_command")
+    sub_projects_discover = projects_subs.add_parser(
+        "discover",
+        parents=[common],
+        help="List the projects already opened in Claude Code",
+    )
+    sub_projects_discover.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON (for a setup UI)",
+    )
+
     sub_config = subparsers.add_parser(
         "config",
         parents=[common],
@@ -564,6 +581,39 @@ def _run_models(*, json_output: bool, config_path: str) -> int:
     return 0
 
 
+def _run_projects_discover(*, json_output: bool) -> int:
+    """List the projects a setup UI can offer to import.
+
+    The filter that decides what counts as a project lives in Python, and the
+    two GUI wizards cannot call Python, so they read it from here.  A machine
+    with no ``~/.claude.json`` reports an empty list and exits zero: "nothing
+    to import" is an answer a wizard renders, not a failure it reports.
+    """
+    from open_shrimp.backend.claude_sdk.projects import discover_claude_projects
+
+    projects = discover_claude_projects()
+
+    if json_output:
+        json.dump(
+            {
+                "projects": [
+                    {
+                        "directory": project.directory,
+                        "name": project.name,
+                        "last_start_time": project.last_start_time,
+                    }
+                    for project in projects
+                ]
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    else:
+        for project in projects:
+            print(f"{project.name:<24} {project.directory}")
+    return 0
+
+
 def _run_config_write(args: argparse.Namespace) -> int:
     """Write a fresh config from a JSON description.
 
@@ -699,6 +749,12 @@ def main() -> None:
 
     if args.subcommand == "models":
         sys.exit(_run_models(json_output=args.json, config_path=args.config))
+
+    if args.subcommand == "projects":
+        if args.projects_command == "discover":
+            sys.exit(_run_projects_discover(json_output=args.json))
+        print("usage: openshrimp projects discover [--json]", file=sys.stderr)
+        sys.exit(2)
 
     if args.subcommand == "config":
         if args.config_command == "write":

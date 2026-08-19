@@ -88,11 +88,31 @@ def _expand_server_args(args: list[str]) -> list[str]:
     return [_expand_env_vars(a) for a in args]
 
 
-def _get_claude_config_path() -> Path:
+def _claude_config_path() -> Path:
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     if config_dir:
         return Path(config_dir) / ".claude.json"
     return Path.home() / ".claude.json"
+
+
+def load_claude_config() -> dict[str, Any]:
+    """Parse ``~/.claude.json``, or report that it has nothing to say.
+
+    The one reader of that file, so absent, unreadable and malformed mean
+    the same thing to everyone who asks — the MCP server lists and the
+    setup import both continue without it rather than failing.  Where the
+    file lives is decided here too, so ``CLAUDE_CONFIG_DIR`` is honoured
+    once and Claude Code inside the desktop app is found by both callers.
+    """
+    config_path = _claude_config_path()
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        logger.warning("Failed to read %s: %s", config_path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _normalise_path_for_config_key(path: str) -> str:
@@ -185,7 +205,13 @@ class ClaudeMcpConfigProvider:
         self._file_cache: tuple[tuple[str, int], dict[str, Any]] | None = None
 
     def _load_claude_config(self) -> dict[str, Any]:
-        config_path = _get_claude_config_path()
+        """The parsed file, re-read only when it has changed on disk.
+
+        All this adds to :func:`load_claude_config` is the cache: an MCP
+        handshake issues several requests in quick succession, and the bot
+        holds this provider for its whole life.
+        """
+        config_path = _claude_config_path()
         try:
             mtime_ns = config_path.stat().st_mtime_ns
         except FileNotFoundError:
@@ -199,14 +225,7 @@ class ClaudeMcpConfigProvider:
         if self._file_cache is not None and self._file_cache[0] == cache_key:
             return self._file_cache[1]
 
-        try:
-            data: dict[str, Any] = json.loads(
-                config_path.read_text(encoding="utf-8")
-            )
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Failed to read %s: %s", config_path, exc)
-            return {}
-
+        data = load_claude_config()
         self._file_cache = (cache_key, data)
         return data
 
@@ -398,4 +417,5 @@ class ClaudeMcpOAuthProvider:
 __all__ = [
     "ClaudeMcpConfigProvider",
     "ClaudeMcpOAuthProvider",
+    "load_claude_config",
 ]
