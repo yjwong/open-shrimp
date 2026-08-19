@@ -48,6 +48,13 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _dispatcher = DispatcherQueue.GetForCurrentThread();
+
+        // The tray outlives every window it opens. XAML otherwise ends the
+        // event loop when the last one closes, which is the setup wizard
+        // closing itself the instant setup succeeds — taking the tray, and the
+        // core start it had just asked for, down with it.
+        DispatcherShutdownMode = DispatcherShutdownMode.OnExplicitShutdown;
+
         _instanceName = ConfigPeek.ReadInstanceName(CorePaths.ConfigFile);
         TrayLog.UseDirectory(CorePaths.LogDirectory(_instanceName));
 
@@ -114,6 +121,8 @@ public partial class App : Application
         {
             TrayLog.Write("Quit failed to stop the core cleanly", ex);
         }
-        Exit();
+        // The counterpart to OnExplicitShutdown: with no window left to close,
+        // ending the event loop is the only thing that ends the process.
+        _dispatcher?.EnqueueEventLoopExit();
     }
 }
