@@ -665,8 +665,16 @@ def create_openshrimp_tools(
             from open_shrimp.db import get_active_context
 
             context_name = await get_active_context(db, _scope)
-            if not context_name:
-                context_name = config.default_context
+            if not context_name or context_name not in config.contexts:
+                # The task would be stored against a context that cannot be
+                # resolved at fire time, so refuse rather than create a
+                # schedule that never runs.
+                return _text_result(
+                    "Error: this conversation is not bound to a project, so "
+                    "there is nothing to schedule the task in. Pick one with "
+                    "/context first.",
+                    is_error=True,
+                )
 
             try:
                 validate_schedule(schedule_type, schedule_expr, runner.timezone)
@@ -1415,13 +1423,14 @@ def create_openshrimp_tools(
             )
             from open_shrimp.port_relay.sessions import PortRelaySessionError
 
-            ctx = context_name or config.default_context
-            label = description or port_forward_label(config, ctx, host_port)
+            label = description or port_forward_label(
+                config, context_name, host_port
+            )
             try:
                 session = await port_relay_registry.create(
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    context_name=ctx,
+                    context_name=context_name,
                     host_port=host_port,
                     label=label,
                     lifetime_seconds=DEFAULT_SESSION_LIFETIME_SECONDS,

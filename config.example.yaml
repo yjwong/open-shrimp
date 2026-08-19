@@ -158,6 +158,10 @@ contexts:
     #                               # context only.  Same values as the top-level key
     #                               # (claude_sdk / opencode).  Omit to inherit.
 
+# Context bound to a chat that has not picked one (optional).  When omitted,
+# a new chat is asked to choose a project instead of being bound to one.  When
+# set it must name a context defined above.  `contexts:` may itself be empty,
+# which is what a fresh install looks like before its first project is added.
 default_context: default
 
 # Agent backend (optional, top-level).  Selects which agent runtime drives
@@ -282,5 +286,5 @@ default_context: default
 # meetings:
 #   chat_id: -1001234567890   # forum chat where the Meetings topic is created
 #   topic: Meetings           # forum topic name (default: Meetings)
-#   notes_context: default    # context whose model/cwd generates the notes;
-#                             # omit for default_context (session is tool-less)
+#   notes_context: default    # required: context whose model/cwd generates
+#                             # the notes (session is tool-less)

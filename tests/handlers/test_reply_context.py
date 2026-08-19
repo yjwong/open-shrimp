@@ -182,7 +182,8 @@ async def test_message_handler_wires_reference_into_dispatch(
     )
     context = SimpleNamespace(
         bot=bot,
-        bot_data={"config": SimpleNamespace(), "db": db},
+        # A context must exist or message_handler refuses the turn outright.
+        bot_data={"config": SimpleNamespace(contexts={"default": object()}), "db": db},
     )
 
     await message_handler(update, context)  # type: ignore[arg-type]

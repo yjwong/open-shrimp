@@ -105,7 +105,12 @@ async def generate_meeting_notes(config: Config, transcript: str) -> str:
     from open_shrimp.client_manager import resolve_backend
 
     assert config.meetings is not None
-    context_name = config.meetings.notes_context or config.default_context
+    context_name = config.meetings.notes_context
+    if context_name is None:
+        raise RuntimeError(
+            "meetings.notes_context is not set, so there is no directory or "
+            "model to generate notes with"
+        )
     ctx_config = config.contexts.get(context_name)
     if ctx_config is None:
         raise RuntimeError(f"meetings notes context {context_name!r} not found")

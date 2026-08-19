@@ -66,8 +66,16 @@ def _get_locked_context(chat_id: int, config: Config) -> str | None:
     return None
 
 
-async def _get_context_name(scope: ChatScope, config: Config, db: aiosqlite.Connection) -> str:
-    """Get the active context name for a scope (persisted in DB)."""
+async def _get_context_name(
+    scope: ChatScope, config: Config, db: aiosqlite.Connection
+) -> str | None:
+    """Get the active context name for a scope (persisted in DB).
+
+    Every branch returns a name that is present in ``config.contexts``, so a
+    caller may subscript with the result.  ``None`` means the scope has no
+    project to bind to: nothing is saved, no chat default applies, and
+    ``default_context`` is unset or names a context that no longer exists.
+    """
     # If locked, always use that context regardless of what's saved
     locked = _get_locked_context(scope.chat_id, config)
     if locked:
@@ -84,14 +92,18 @@ async def _get_context_name(scope: ChatScope, config: Config, db: aiosqlite.Conn
             await set_active_context(db, scope, name)
             return name
 
-    await set_active_context(db, scope, config.default_context)
-    return config.default_context
+    default = config.default_context
+    if default is None or default not in config.contexts:
+        return None
+
+    await set_active_context(db, scope, default)
+    return default
 
 
 async def _get_context(
     scope: ChatScope, config: Config, db: aiosqlite.Connection
-) -> tuple[str, ContextConfig]:
-    """Get context name and config for a scope.
+) -> tuple[str, ContextConfig] | None:
+    """Get context name and config for a scope, or ``None`` if none is bound.
 
     If a per-scope model or effort override is active (via ``/model`` or
     ``/effort``), returns a shallow copy of the context config with the
@@ -101,6 +113,8 @@ async def _get_context(
     from dataclasses import replace
 
     name = await _get_context_name(scope, config, db)
+    if name is None:
+        return None
     ctx = config.contexts[name]
 
     model_override = _model_overrides.get(scope)
@@ -120,6 +134,56 @@ async def _get_context(
         ctx = replace(ctx, **kwargs)
 
     return name, ctx
+
+
+# Said wherever a scope needs a project and has none.  Names the two routes
+# that can actually create one; the picker is deliberately not offered,
+# because with no contexts configured it has nothing to show.
+NO_CONTEXT_TEXT = (
+    "No project is set up yet, so there's nothing for me to work in.\n\n"
+    "Add one with /config, or re-run the setup wizard on the machine I run on."
+)
+
+
+# Telegram caps a callback answer at 200 characters, so the alert carries the
+# first sentence and the remedy only.
+NO_CONTEXT_ANSWER = "No project is set up yet — add one with /config."
+
+
+async def reply_no_context(message: Message) -> None:
+    """Tell the user this scope has no project bound, and how to get one."""
+    await message.reply_text(
+        _escape_mdv2(NO_CONTEXT_TEXT), parse_mode="MarkdownV2"
+    )
+
+
+async def answer_no_context(query: Any) -> None:
+    """The callback-query form of :func:`reply_no_context`."""
+    await query.answer(NO_CONTEXT_ANSWER, show_alert=True)
+
+
+async def send_no_context(bot: Bot, scope: ChatScope) -> None:
+    """The scope-addressed form, for paths with no message to reply to."""
+    await bot.send_message(
+        chat_id=scope.chat_id, text=NO_CONTEXT_TEXT, **_thread_kwargs(scope)
+    )
+
+
+async def require_context(
+    message: Message,
+    scope: ChatScope,
+    config: Config,
+    db: aiosqlite.Connection,
+) -> tuple[str, ContextConfig] | None:
+    """Resolve the scope's context, telling the user when there is none.
+
+    Returns ``None`` after replying, so callers guard with a bare early
+    return and never carry an unbound name into a dict or DB key.
+    """
+    resolved = await _get_context(scope, config, db)
+    if resolved is None:
+        await reply_no_context(message)
+    return resolved
 
 
 async def _get_runtime_dirs(

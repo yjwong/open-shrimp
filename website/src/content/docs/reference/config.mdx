@@ -31,7 +31,7 @@ For a guided walkthrough, see [Configuration](/getting-started/configuration/).
 | `telegram` | object | Yes | — | Telegram bot settings |
 | `allowed_users` | list of int | Yes | — | Telegram user IDs allowed to use the bot |
 | `contexts` | map | Yes | — | Named project contexts |
-| `default_context` | string | Yes | — | Context to use when none is selected |
+| `default_context` | string | No | `null` | Context a chat is bound to when it has not picked one |
 | `backend` | string | No | `claude_sdk` | Agent runtime: `claude_sdk` or `opencode`. Distinct from `sandbox.backend` (the sandbox type). See [Agent Backends](/guides/backends/) |
 | `review` | object | No | — | Mini App HTTP server settings |
 | `instance_name` | string | No | `null` | Display name for this instance (shown in status) |
@@ -230,7 +230,12 @@ See the [Computer Use guide](/guides/computer-use/) for more details.
 
 ## `default_context`
 
-The context used when no context has been selected for a chat. Must match a key in `contexts`.
+The context a chat is bound to when it has not picked one. Optional — when
+omitted, a chat is asked to choose a project instead of being bound to one.
+When set it must match a key in `contexts`.
+
+`contexts` may itself be empty, which is what a fresh install looks like
+before its first project is added.
 
 ```yaml
 default_context: myproject

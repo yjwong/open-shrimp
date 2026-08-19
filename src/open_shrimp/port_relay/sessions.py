@@ -29,7 +29,7 @@ class PortRelaySession:
     id: str
     chat_id: int
     thread_id: int | None
-    context_name: str
+    context_name: str | None
     host_port: int
     label: str
     phone_token: str
@@ -121,7 +121,7 @@ class PortRelaySessionRegistry:
         *,
         chat_id: int,
         thread_id: int | None,
-        context_name: str,
+        context_name: str | None,
         host_port: int,
         label: str,
         lifetime_seconds: int,

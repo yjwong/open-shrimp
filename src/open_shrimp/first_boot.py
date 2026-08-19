@@ -29,6 +29,7 @@ from telegram import Bot
 
 from open_shrimp.config import Config
 from open_shrimp.db import claim_once, release_once
+from open_shrimp.handlers.utils import NO_CONTEXT_TEXT
 from open_shrimp.markdown import TELEGRAM_MAX_LENGTH
 from open_shrimp.readiness import KEYS, Row, State, check_readiness, readiness_text
 
@@ -52,8 +53,44 @@ def orientation_text(config: Config) -> str:
     absolute filesystem path is not an orientation, and it is the second thing
     a new user would otherwise ever see.
     """
-    context = config.contexts.get(config.default_context)
-    project = (context.description if context else None) or config.default_context
+    # Keyed on whether any project exists, not on whether a default is set:
+    # an install with projects but no default still has plenty to work on, and
+    # is asked to choose rather than told it has nothing.
+    if not config.contexts:
+        return "\n".join(
+            [
+                "OpenShrimp is running.",
+                "",
+                NO_CONTEXT_TEXT,
+                "",
+                "Once a project exists, just send me a message — or a voice "
+                "note. There's no command to learn: describe what you want "
+                "and I'll do it, asking first before I change any file or "
+                "run anything.",
+            ]
+        )
+
+    default = config.default_context
+    context = config.contexts.get(default) if default is not None else None
+    project = (context.description if context else None) or default
+
+    if project is None:
+        return "\n".join(
+            [
+                "OpenShrimp is running.",
+                "",
+                "Pick a project with /context and I'll get started.",
+                "",
+                "Just send me a message — or a voice note. There's no command "
+                "to learn: describe what you want and I'll do it, asking "
+                "first before I change any file or run anything.",
+                "",
+                "Worth knowing:",
+                "  /context — choose or switch project",
+                "  /clear — start a fresh conversation",
+                "  /status — see what I'm working on",
+            ]
+        )
 
     return "\n".join(
         [

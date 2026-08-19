@@ -22,7 +22,7 @@ from open_shrimp.meetings.processor import transcript_envelope
 # Config
 # ---------------------------------------------------------------------------
 
-_VALID_MEETINGS = {"chat_id": 21491458}
+_VALID_MEETINGS = {"chat_id": 21491458, "notes_context": "default"}
 
 
 def _base_raw(meetings=None):
@@ -56,12 +56,20 @@ def test_valid_meetings_config_parses_with_defaults():
     assert isinstance(cfg.meetings, MeetingsConfig)
     assert cfg.meetings.chat_id == 21491458
     assert cfg.meetings.topic == "Meetings"
-    assert cfg.meetings.notes_context is None
+    assert cfg.meetings.notes_context == "default"
 
 
 def test_meetings_requires_chat_id():
-    raw = _base_raw({"topic": "Meetings"})
+    raw = _base_raw({"topic": "Meetings", "notes_context": "default"})
     with pytest.raises(ValueError, match="chat_id"):
+        _validate_raw(raw)
+
+
+def test_meetings_requires_notes_context():
+    # Notes are generated in this context's directory and model, and there is
+    # no default_context to fall back to.
+    raw = _base_raw({"chat_id": 1})
+    with pytest.raises(ValueError, match="notes_context is required"):
         _validate_raw(raw)
 
 

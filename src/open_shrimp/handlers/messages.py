@@ -78,6 +78,8 @@ from open_shrimp.handlers.utils import (
     _thread_kwargs,
     _update_pinned_status,
     chat_scope_from_message,
+    reply_no_context,
+    send_no_context,
 )
 from open_shrimp.stream import (
     _DraftState,
@@ -380,6 +382,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if not _is_authorized(update.effective_user and update.effective_user.id, config):
         logger.info("message_handler: unauthorized user %s", update.effective_user)
+        return
+
+    # Refuse before transcribing voice, downloading attachments, or posting a
+    # placeholder that promises work this turn cannot start.  _start_agent_task
+    # guards again for the paths that do not come through here.
+    if not config.contexts:
+        await reply_no_context(message)
         return
 
     scope = chat_scope_from_message(message)
@@ -710,7 +719,9 @@ async def _dispatch_to_agent(
                 # injected turn completes.
                 await notify_agent_status(
                     context.bot_data, config, db, scope, "running",
-                    title=await _get_context_name(scope, config, db),
+                    # A live session implies a bound context; the fallback only
+                    # keeps the notification well-formed if that ever slips.
+                    title=await _get_context_name(scope, config, db) or "",
                     todos=_scope_todos.get(scope),
                 )
             except _DeadTransport:
@@ -871,7 +882,13 @@ async def _start_agent_task(
     """Start a new agent task for *scope*.  Must only be called when no
     task is currently running for this scope."""
 
-    ctx_name, ctx_config = await _get_context(scope, config, db)
+    resolved = await _get_context(scope, config, db)
+    if resolved is None:
+        # No directory to run in and no model to run with, so the turn cannot
+        # start.  Say so rather than failing somewhere deeper.
+        await send_no_context(context.bot, scope)
+        return
+    ctx_name, ctx_config = resolved
     session_id = await get_session_id(db, scope, ctx_name)
 
     # Ensure pinned status message exists (e.g. after a restart)

@@ -69,7 +69,10 @@ _DESCRIPTIONS: dict[str, dict[str, str]] = {
         "telegram": "Telegram bot settings.",
         "allowed_users": "Telegram user IDs allowed to use the bot.",
         "contexts": "Named project contexts.",
-        "default_context": "Context to use when none is selected.",
+        "default_context": (
+            "Context to bind a chat to when it has not picked one. "
+            "Optional; when set it must name a defined context."
+        ),
         "review": "Mini App HTTP server settings.",
         "instance_name": "Display name for this instance.",
     },

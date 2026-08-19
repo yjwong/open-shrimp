@@ -628,7 +628,11 @@ async def handle_approval_callback(
 
     from open_shrimp.db import ChatScope
     from open_shrimp.handlers.state import _edit_approved_sessions
-    from open_shrimp.handlers.utils import _get_context, chat_scope_from_message
+    from open_shrimp.handlers.utils import (
+        _get_context,
+        _get_context_name,
+        chat_scope_from_message,
+    )
     from open_shrimp.stream import _bash_output_store
 
     # Scope the policy lookup to the chat that owns this callback: each
@@ -711,13 +715,17 @@ async def handle_approval_callback(
         if query.message:
             scope = chat_scope_from_message(query.message)
             db: aiosqlite.Connection = context.bot_data["db"]
-            ctx_name, _ = await _get_context(scope, config, db)
-            _edit_approved_sessions.add((scope, ctx_name))
-            logger.info(
-                "Accept-all-edits enabled for scope %s context %s",
-                scope,
-                ctx_name,
-            )
+            # An approval only exists because a turn is running, which needs a
+            # bound context; the guard keeps the session key honest regardless.
+            # Only the name keys the store, so the cheaper resolver is enough.
+            ctx_name = await _get_context_name(scope, config, db)
+            if ctx_name is not None:
+                _edit_approved_sessions.add((scope, ctx_name))
+                logger.info(
+                    "Accept-all-edits enabled for scope %s context %s",
+                    scope,
+                    ctx_name,
+                )
 
         future.set_result(True)
         await query.answer("Approved. All future edits will be auto-approved.")
@@ -760,25 +768,30 @@ async def handle_approval_callback(
 
             scope = chat_scope_from_message(query.message)
             db: aiosqlite.Connection = context.bot_data["db"]
-            ctx_name, ctx_config = await _get_context(scope, config, db)
+            # The rule describes the approval itself, so it is built whatever
+            # the scope is bound to; only remembering it needs a context, whose
+            # name keys the session store and whose directory receives it.
             rule = ApprovalRule(tool_name="Bash", pattern=f"{prefix} *")
-            _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
+            resolved = await _get_context(scope, config, db)
+            if resolved is not None:
+                ctx_name, ctx_config = resolved
+                _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
 
-            try:
-                persisted = await p.persist_session_rule(
-                    rule, directory=ctx_config.directory, scope=scope,
+                try:
+                    persisted = await p.persist_session_rule(
+                        rule, directory=ctx_config.directory, scope=scope,
+                    )
+                except OSError:
+                    logger.exception("Failed to persist rule via backend policy")
+                    persisted = False
+
+                logger.info(
+                    "Saved persistent Bash(%s:*) rule for scope %s context %s (persisted=%s)",
+                    prefix,
+                    scope,
+                    ctx_name,
+                    persisted,
                 )
-            except OSError:
-                logger.exception("Failed to persist rule via backend policy")
-                persisted = False
-
-            logger.info(
-                "Saved persistent Bash(%s:*) rule for scope %s context %s (persisted=%s)",
-                prefix,
-                scope,
-                ctx_name,
-                persisted,
-            )
 
         future.set_result(True)
         escaped_prefix = _escape_mdv2(prefix)
@@ -900,15 +913,19 @@ async def handle_approval_callback(
 
             scope = chat_scope_from_message(query.message)
             db: aiosqlite.Connection = context.bot_data["db"]
-            ctx_name, _ = await _get_context(scope, config, db)
+            # The rule describes the approval itself, so it is built whatever
+            # the scope is bound to; only remembering it needs a context, whose
+            # name keys the session store.
             rule = ApprovalRule(tool_name=accepted_tool_name, pattern=None)
-            _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
-            logger.info(
-                "Accept-all-%s enabled for scope %s context %s",
-                accepted_tool_name,
-                scope,
-                ctx_name,
-            )
+            ctx_name = await _get_context_name(scope, config, db)
+            if ctx_name is not None:
+                _tool_approved_sessions.setdefault((scope, ctx_name), []).append(rule)
+                logger.info(
+                    "Accept-all-%s enabled for scope %s context %s",
+                    accepted_tool_name,
+                    scope,
+                    ctx_name,
+                )
 
         future.set_result(True)
         escaped_tool = _escape_mdv2(accepted_tool_name)

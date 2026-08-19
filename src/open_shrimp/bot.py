@@ -341,7 +341,53 @@ def build_application(
         (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.AUDIO | filters.LOCATION | filters.VOICE | filters.VIDEO_NOTE) & ~filters.COMMAND, message_handler
     ))
 
+    app.add_error_handler(handle_error)
+
     return app
+
+
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log any exception a handler let escape and tell the affected chat.
+
+    Without this, python-telegram-bot logs "No error handlers are registered"
+    and the sender sees nothing at all — a raising handler is indistinguishable
+    from a bot that is ignoring them.  The reply is deliberately vague about
+    the cause and never carries the traceback, which goes to the log.
+    """
+    logger.error(
+        "Unhandled exception while processing an update", exc_info=context.error
+    )
+
+    chat = getattr(update, "effective_chat", None)
+    if chat is None:
+        return
+
+    # An exception can escape before a handler reaches its own authorization
+    # check, so the apology is gated here too: answering a turned-away sender
+    # would confirm a live instance to anyone who can make the bot throw.
+    user = getattr(update, "effective_user", None)
+    config = context.bot_data.get("config")
+    if config is None or not _is_authorized(user.id if user else None, config):
+        return
+
+    try:
+        query = getattr(update, "callback_query", None)
+        if query is not None:
+            # A button press is already showing a spinner; answering it clears
+            # the spinner instead of leaving it and posting a stray message.
+            await query.answer("Something went wrong. I've logged the details.")
+            return
+        message = getattr(update, "effective_message", None)
+        thread_id = getattr(message, "message_thread_id", None) if message else None
+        await context.bot.send_message(
+            chat_id=chat.id,
+            message_thread_id=thread_id,
+            text="Something went wrong handling that. I've logged the details.",
+        )
+    except Exception:
+        # A failure to deliver the apology must not re-enter the error
+        # handler, so it dies here.
+        logger.exception("Failed to report an error to chat %s", chat.id)
 
 
 async def run_bot(

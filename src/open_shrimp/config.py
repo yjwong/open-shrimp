@@ -198,7 +198,10 @@ _EVENT_SOURCE_TYPES = {"telegram", "lark", "whatsapp"}
 class MeetingsConfig:
     chat_id: int  # forum chat where the Meetings topic is created
     topic: str = "Meetings"  # forum topic name for notes/transcripts
-    notes_context: str | None = None  # context whose model/cwd writes the notes
+    # Context whose model/cwd writes the notes.  Optional on the dataclass so
+    # it can be built directly, but the loader requires it whenever a
+    # ``meetings:`` section is present — there is no default to fall back to.
+    notes_context: str | None = None
 
 
 @dataclass
@@ -206,7 +209,9 @@ class Config:
     telegram: TelegramConfig
     allowed_users: list[int]
     contexts: dict[str, ContextConfig]
-    default_context: str
+    # ``None`` when no project is configured, or when the install deliberately
+    # binds each scope explicitly.  Always a key of ``contexts`` when set.
+    default_context: str | None = None
     review: ReviewConfig = field(default_factory=ReviewConfig)
     android_companion: AndroidCompanionConfig = field(default_factory=AndroidCompanionConfig)
     instance_name: str | None = None
@@ -223,8 +228,10 @@ def _validate_raw(raw: dict) -> None:
     if not isinstance(raw, dict):
         raise ValueError("Config must be a YAML mapping")
 
-    # Top-level required fields
-    for key in ("telegram", "allowed_users", "contexts", "default_context"):
+    # Top-level required fields.  ``default_context`` is not among them: a
+    # fresh install may finish setup with no projects, and a default that
+    # names nothing is worse than no default at all.
+    for key in ("telegram", "allowed_users", "contexts"):
         if key not in raw:
             raise ValueError(f"Missing required config field: {key}")
 
@@ -242,9 +249,11 @@ def _validate_raw(raw: dict) -> None:
             raise ValueError(f"allowed_users entries must be integers, got: {u!r}")
 
     # contexts
-    contexts = raw["contexts"]
-    if not isinstance(contexts, dict) or not contexts:
-        raise ValueError("contexts must be a non-empty mapping")
+    # May be empty: a fresh install has no projects until one is added.  A
+    # bare ``contexts:`` parses as None, which means the same thing.
+    contexts = raw["contexts"] or {}
+    if not isinstance(contexts, dict):
+        raise ValueError("contexts must be a mapping")
     for name, ctx in contexts.items():
         if not isinstance(ctx, dict):
             raise ValueError(f"Context '{name}' must be a mapping")
@@ -464,9 +473,10 @@ def _validate_raw(raw: dict) -> None:
                     f"an ARM host (Lima macOS guests are ARM-only)"
                 )
 
-    # default_context references a defined context
-    default = raw["default_context"]
-    if default not in contexts:
+    # Optional, but when present it must name a defined context: a dangling
+    # default binds every new scope to a project that does not exist.
+    default = raw.get("default_context")
+    if default is not None and default not in contexts:
         raise ValueError(
             f"default_context '{default}' not found in contexts: "
             f"{list(contexts.keys())}"
@@ -593,8 +603,14 @@ def _validate_meetings(raw: dict) -> None:
             "(it becomes a forum topic title)"
         )
 
+    # Required, not merely validated when present: notes are generated in this
+    # context's directory and model, and there is no default to fall back to.
     ctx = meetings.get("notes_context")
-    if ctx is not None and (not isinstance(ctx, str) or ctx not in raw["contexts"]):
+    if ctx is None:
+        raise ValueError(
+            "meetings.notes_context is required when meetings are enabled"
+        )
+    if not isinstance(ctx, str) or ctx not in (raw["contexts"] or {}):
         raise ValueError(
             f"meetings.notes_context {ctx!r} is not a defined context"
         )
@@ -648,7 +664,7 @@ def _validate_events(raw: dict) -> None:
 
         ctx = source.get("context")
         if ctx is not None:
-            if not isinstance(ctx, str) or ctx not in raw["contexts"]:
+            if not isinstance(ctx, str) or ctx not in (raw["contexts"] or {}):
                 raise ValueError(
                     f"events source '{name}': context {ctx!r} is not a "
                     f"defined context"
@@ -816,7 +832,7 @@ def _parse(raw: dict) -> Config:
 
     default_backend = str(raw.get("backend") or DEFAULT_BACKEND)
     contexts = {}
-    for name, ctx in raw["contexts"].items():
+    for name, ctx in (raw["contexts"] or {}).items():
         # Parse container config: presence of the key implies enabled.
         container_raw = ctx.get("container")
         container: ContainerConfig | None = None
@@ -970,7 +986,7 @@ def _parse(raw: dict) -> Config:
         telegram=TelegramConfig(token=raw["telegram"]["token"]),
         allowed_users=raw["allowed_users"],
         contexts=contexts,
-        default_context=raw["default_context"],
+        default_context=raw.get("default_context"),
         review=review,
         android_companion=android_companion,
         instance_name=raw.get("instance_name"),
@@ -1103,8 +1119,12 @@ def config_to_dict(config: Config) -> dict[str, Any]:
         "telegram": {"token": config.telegram.token},
         "allowed_users": config.allowed_users,
         "contexts": contexts,
-        "default_context": config.default_context,
     }
+    # Omitted rather than written as null: an install with no projects has no
+    # default, and a key whose only legal value would be a real context name
+    # reads as broken when it says nothing.
+    if config.default_context is not None:
+        result["default_context"] = config.default_context
 
     # Include review config if non-default.
     review_dict: dict[str, Any] = {}

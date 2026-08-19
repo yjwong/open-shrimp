@@ -77,8 +77,14 @@ def _registry(request_or_ws: Request | WebSocket) -> PortRelaySessionRegistry:
     return registry
 
 
-def port_forward_label(config: Config, context_name: str, host_port: int) -> str:
-    return f"{openshrimp_server_label(config)} {context_name} :{host_port}"
+def port_forward_label(config: Config, context_name: str | None, host_port: int) -> str:
+    """Label shown on the phone. The context name is dropped when absent
+    rather than rendered as a placeholder the user cannot act on."""
+    parts = [openshrimp_server_label(config)]
+    if context_name:
+        parts.append(context_name)
+    parts.append(f":{host_port}")
+    return " ".join(parts)
 
 
 def phone_relay_url(config: Config, session: PortRelaySession) -> str:
@@ -157,9 +163,16 @@ async def create_session_endpoint(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "context_name must be a non-empty string"}, status_code=400
         )
-    if context_name not in config.contexts:
+    if context_name is None or context_name not in config.contexts:
         return JSONResponse(
-            {"error": f"Context '{context_name}' not found"}, status_code=404
+            {
+                "error": (
+                    "This conversation is not bound to a project, so there is "
+                    "nothing to forward a port for. Pick one with /context "
+                    "first."
+                )
+            },
+            status_code=404,
         )
 
     try:

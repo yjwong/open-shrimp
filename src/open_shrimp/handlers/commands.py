@@ -60,8 +60,11 @@ from open_shrimp.handlers.utils import (
     _get_locked_context,
     _is_authorized,
     _update_pinned_status,
+    answer_no_context,
     chat_scope_from_message,
     get_backend_for_scope,
+    reply_no_context,
+    require_context,
 )
 from open_shrimp.android_push import get_push_sender
 from open_shrimp.security_key.api import (
@@ -104,14 +107,20 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     scope = chat_scope_from_message(message)
-    ctx_name, ctx = await _get_context(scope, config, db)
+    resolved = await _get_context(scope, config, db)
+
+    if resolved is None:
+        working_in = "*No project set up yet.* Add one with /config."
+    else:
+        ctx_name, ctx = resolved
+        working_in = f"*Working in:* `{ctx_name}` → `{ctx.directory}`"
 
     lines = [
         "👋 *Welcome to OpenShrimp*",
         "",
         "You're connected to Claude. Just send a message (or voice note) — no command needed.",
         "",
-        f"*Working in:* `{ctx_name}` → `{ctx.directory}`",
+        working_in,
         "",
         "*Commands worth knowing:*",
         "• /context — switch working directory",
@@ -130,7 +139,7 @@ _CONTEXT_PAGE_SIZE = 6
 
 
 def _build_context_page(
-    config: Config, current: str, page: int,
+    config: Config, current: str | None, page: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build a page of context buttons with optional pagination."""
     names = list(config.contexts.keys())
@@ -175,6 +184,10 @@ async def handle_context_callback(
         if not query.message:
             await query.answer()
             return True
+        if not config.contexts:
+            # The last context went away while this keyboard was on screen.
+            await answer_no_context(query)
+            return True
         scope = chat_scope_from_message(query.message)
         current = await _get_context_name(scope, config, db)
         text, markup = _build_context_page(config, current, page)
@@ -196,7 +209,7 @@ async def handle_context_callback(
         scope = chat_scope_from_message(query.message)
         ctx_name = await _get_context_name(scope, config, db)
 
-        if target == ctx_name:
+        if ctx_name is not None and target == ctx_name:
             await reset_scope(scope, ctx_name, db)
 
         ctx = config.contexts.get(target)
@@ -238,7 +251,10 @@ async def handle_context_callback(
             await query.answer(f"Already on {target}.")
             return True
 
-        clear_session_approvals(scope, current)
+        # Selecting a context is how a scope leaves the unbound state, so this
+        # path must complete even when there is nothing to clear.
+        if current is not None:
+            clear_session_approvals(scope, current)
         _model_overrides.pop(scope, None)
         _effort_overrides.pop(scope, None)
         await close_session(scope)
@@ -287,6 +303,13 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     scope = chat_scope_from_message(message)
     args = message.text.split() if message.text else []
 
+    # With no projects, every branch below is a dead end: the picker would be
+    # empty, no chat can be locked to a context that does not exist, and no
+    # name can be switched to.
+    if not config.contexts:
+        await reply_no_context(message)
+        return
+
     if len(args) < 2:
         # List contexts as inline keyboard
         current = await _get_context_name(scope, config, db)
@@ -323,7 +346,10 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     old_ctx_name = await _get_context_name(scope, config, db)
-    clear_session_approvals(scope, old_ctx_name)
+    # Switching in is how a scope leaves the unbound state; there is simply
+    # nothing to clear when it was not bound before.
+    if old_ctx_name is not None:
+        clear_session_approvals(scope, old_ctx_name)
     _model_overrides.pop(scope, None)
     _effort_overrides.pop(scope, None)
     await close_session(scope)
@@ -361,7 +387,11 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     scope = chat_scope_from_message(message)
-    ctx_name, ctx = await _get_context(scope, config, db)
+    # Sessions are keyed by context name, so an unbound scope has none.
+    resolved = await require_context(message, scope, config, db)
+    if resolved is None:
+        return
+    ctx_name, ctx = resolved
 
     await reset_scope(scope, ctx_name, db)
 
@@ -397,7 +427,10 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     scope = chat_scope_from_message(message)
-    ctx_name, ctx = await _get_context(scope, config, db)
+    resolved = await require_context(message, scope, config, db)
+    if resolved is None:
+        return
+    ctx_name, ctx = resolved
     session_id = await get_session_id(db, scope, ctx_name)
     running = scope in _running_tasks and not _running_tasks[scope].done()
     injectable = scope in _injectable_sessions
@@ -525,6 +558,9 @@ async def handle_model_callback(
 
     scope = chat_scope_from_message(query.message)
     ctx_name = await _get_context_name(scope, config, db)
+    if ctx_name is None:
+        await answer_no_context(query)
+        return True
     ctx = config.contexts[ctx_name]
     backend = get_backend_by_name(effective_backend(ctx, config))
 
@@ -573,6 +609,12 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     scope = chat_scope_from_message(message)
     ctx_name = await _get_context_name(scope, config, db)
+    if ctx_name is None:
+        await reply_no_context(message)
+        return
+    # The configured default, deliberately read unmerged: _get_context folds
+    # any active /model override into its copy, which is the value this
+    # command exists to show separately from.
     ctx = config.contexts[ctx_name]
     ctx_default_model = ctx.model
     backend = get_backend_by_name(effective_backend(ctx, config))
@@ -655,6 +697,11 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     scope = chat_scope_from_message(message)
     ctx_name = await _get_context_name(scope, config, db)
+    if ctx_name is None:
+        await reply_no_context(message)
+        return
+    # Unmerged for the same reason as /model: _get_context would fold an
+    # active /effort override into the value shown as the context default.
     ctx_default_effort = config.contexts[ctx_name].effort
     current_override = _effort_overrides.get(scope)
     args = message.text.split() if message.text else []
@@ -744,7 +791,10 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     scope = chat_scope_from_message(message)
-    ctx_name, ctx = await _get_context(scope, config, db)
+    resolved = await require_context(message, scope, config, db)
+    if resolved is None:
+        return
+    ctx_name, ctx = resolved
     ctx_dir = config.contexts[ctx_name].directory
 
     # Parse: strip the /add_dir command, then check for "remove" prefix.
@@ -1149,7 +1199,10 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     scope = chat_scope_from_message(message)
-    ctx_name, ctx = await _get_context(scope, config, db)
+    resolved = await require_context(message, scope, config, db)
+    if resolved is None:
+        return
+    ctx_name, ctx = resolved
 
     args = message.text.split() if message.text else []
 
@@ -1232,9 +1285,12 @@ async def handle_resume_callback(
             await query.answer("Cannot determine chat.")
             return True
         scope = chat_scope_from_message(query.message)
-        _, ctx = await _get_context(scope, config, db)
-        # Use the context name from the callback to stay consistent
-        ctx = config.contexts.get(ctx_name_req, ctx)
+        # The keyboard carries the context it was rendered for; if that
+        # context is gone there is no meaningful page to redraw.
+        ctx = config.contexts.get(ctx_name_req)
+        if ctx is None:
+            await query.answer("Context no longer exists.")
+            return True
         text, keyboard = await _build_resume_page(
             ctx_name_req, ctx, db, scope, page,
             sandbox_managers=sandbox_managers,
@@ -1258,7 +1314,12 @@ async def handle_resume_callback(
             await query.answer("Cannot determine chat.")
             return True
         scope = chat_scope_from_message(query.message)
-        ctx_name, _ = await _get_context(scope, config, db)
+        # Only the name is needed, so this skips _get_context's runtime-dirs
+        # lookup and override merge.
+        ctx_name = await _get_context_name(scope, config, db)
+        if ctx_name is None:
+            await answer_no_context(query)
+            return True
         current_session_id = await get_session_id(db, scope, ctx_name)
         text, keyboard = _build_resume_detail(
             session_id, ctx_name, current_session_id,
@@ -1286,7 +1347,11 @@ async def handle_resume_callback(
 
     scope = chat_scope_from_message(query.message)
 
-    ctx_name, ctx = await _get_context(scope, config, db)
+    resolved = await _get_context(scope, config, db)
+    if resolved is None:
+        await answer_no_context(query)
+        return True
+    ctx_name, ctx = resolved
     await close_session(scope)
     await set_session_id(db, scope, ctx_name, session_id)
     await query.answer(f"Resumed session {session_id[:8]}...")
@@ -1330,7 +1395,10 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not _is_authorized(update.effective_user.id, config):
         return
 
-    context_name, ctx = await _get_context(scope, config, db)
+    resolved = await require_context(update.message, scope, config, db)
+    if resolved is None:
+        return
+    context_name, ctx = resolved
 
     escaped_context = _escape_mdv2(context_name)
     dirs = [ctx.directory] + (ctx.additional_directories or [])
@@ -1398,7 +1466,10 @@ async def _open_vnc_viewer(
     if not _is_authorized(update.effective_user.id, config):
         return
 
-    context_name, ctx = await _get_context(scope, config, db)
+    resolved = await require_context(update.message, scope, config, db)
+    if resolved is None:
+        return
+    context_name, ctx = resolved
 
     # The screen the user sees, which is not the capability's name: a
     # phone-use context shows Android inside the same labwc desktop, and the
@@ -1509,7 +1580,10 @@ async def security_key_handler(
     )
 
     scope = chat_scope_from_message(update.message)
-    context_name, ctx = await _get_context(scope, config, db)
+    resolved = await require_context(update.message, scope, config, db)
+    if resolved is None:
+        return
+    context_name, ctx = resolved
     has_computer_use = (
         (ctx.container is not None and ctx.container.computer_use)
         or (ctx.sandbox is not None and ctx.sandbox.computer_use)

@@ -32,7 +32,7 @@ from open_shrimp.db import (
     set_active_context,
     set_inbound_event_pickup_thread,
 )
-from open_shrimp.handlers.utils import _escape_mdv2
+from open_shrimp.handlers.utils import NO_CONTEXT_ANSWER, _escape_mdv2
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,12 @@ def parse_context_directive(
     return None
 
 
-def _default_context_for(source: str, config: Config) -> str:
+def _default_context_for(source: str, config: Config) -> str | None:
+    """The context to star first in the picker, or ``None`` if there is none.
+
+    Only ever compared against context names for ordering, so an absent
+    default costs the star and nothing else.
+    """
     if config.events is not None:
         for s in config.events.sources:
             if s.name == source and s.context is not None:
@@ -174,7 +179,7 @@ def _default_context_for(source: str, config: Config) -> str:
 
 
 def _build_picker(
-    config: Config, event_id: int, default_ctx: str, page: int = 0
+    config: Config, event_id: int, default_ctx: str | None, page: int = 0
 ) -> InlineKeyboardMarkup:
     """Context picker: starred default first, paginated, with a cancel row.
 
@@ -269,6 +274,12 @@ async def _open_picker(
         return
     if row.picked_up:
         await query.answer("Already picked up.")
+        return
+    if not config.contexts:
+        # Swapping in a cancel-only keyboard would read as a broken picker.
+        # Leave the "Pick up" button alone so the event stays claimable once
+        # a project exists.
+        await query.answer(NO_CONTEXT_ANSWER, show_alert=True)
         return
     markup = _build_picker(
         config, event_id, _default_context_for(row.source, config), page
@@ -445,7 +456,12 @@ async def _handle_context_chosen(
         index = int(token)
         ctx_name = names[index]
     except (ValueError, IndexError):
-        # The context list changed since the picker was rendered.
+        # The context list changed since the picker was rendered.  If it
+        # changed to empty there is nothing to re-pick from, so say that
+        # rather than redrawing a picker with only a cancel button.
+        if not names:
+            await query.answer(NO_CONTEXT_ANSWER, show_alert=True)
+            return
         await _edit_markup(
             query,
             _build_picker(config, event_id, _default_context_for(row.source, config)),

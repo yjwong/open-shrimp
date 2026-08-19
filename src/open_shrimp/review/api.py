@@ -119,8 +119,12 @@ async def _resolve_context(
     if context_name is None:
         context_name = config.default_context
 
-    if context_name not in config.contexts:
-        raise AuthError(404, f"Context '{context_name}' not found")
+    if context_name is None or context_name not in config.contexts:
+        raise AuthError(
+            404,
+            "This conversation is not bound to a project, so there is no "
+            "working directory to review. Pick one with /context first.",
+        )
 
     ctx = config.contexts[context_name]
     dirs = _get_directories(ctx)

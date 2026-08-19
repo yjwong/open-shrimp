@@ -20,23 +20,39 @@
       "description": "Named project contexts."
     },
     "default_context": {
-      "type": "string",
-      "description": "Context to use when none is selected."
+      "description": "Context to bind a chat to when it has not picked one. Optional; when set it must name a defined context.",
+      "default": null
     },
     "review": {
       "$ref": "#/$defs/ReviewConfig",
       "description": "Mini App HTTP server settings."
     },
+    "android_companion": {
+      "$ref": "#/$defs/AndroidCompanionConfig"
+    },
     "instance_name": {
       "description": "Display name for this instance.",
+      "default": null
+    },
+    "auto_update": {
+      "type": "boolean",
+      "default": true
+    },
+    "backend": {
+      "type": "string",
+      "default": "claude_sdk"
+    },
+    "events": {
+      "default": null
+    },
+    "meetings": {
       "default": null
     }
   },
   "required": [
     "telegram",
     "allowed_users",
-    "contexts",
-    "default_context"
+    "contexts"
   ],
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "OpenShrimp Configuration",
@@ -66,6 +82,10 @@
           "description": "Enable or disable the sandbox.",
           "default": true
         },
+        "guest_os": {
+          "type": "string",
+          "default": "linux"
+        },
         "docker_in_docker": {
           "type": "boolean",
           "description": "Enable rootless Docker inside the container (Docker backend).",
@@ -79,6 +99,17 @@
           "type": "boolean",
           "description": "Enable GUI interaction with a headless desktop.",
           "default": false
+        },
+        "virgl": {
+          "type": "boolean",
+          "default": false
+        },
+        "phone_use": {
+          "type": "boolean",
+          "default": false
+        },
+        "android": {
+          "default": null
         },
         "memory": {
           "type": "integer",
@@ -102,6 +133,20 @@
         "provision": {
           "description": "Shell script to run on first boot (Libvirt backend).",
           "default": null
+        },
+        "persistent_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "mingw_bin": {
+          "default": null
+        },
+        "allow_host_escape": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
@@ -126,8 +171,24 @@
           },
           "description": "Tools auto-approved without prompting. Glob patterns supported."
         },
+        "disallowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
         "model": {
           "description": "Model override. Short names: sonnet, opus, haiku.",
+          "default": null
+        },
+        "effort": {
+          "oneOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
           "default": null
         },
         "additional_directories": {
@@ -160,6 +221,14 @@
         },
         "sandbox": {
           "description": "Sandbox configuration.",
+          "default": null
+        },
+        "mcp": {
+          "type": "object",
+          "additionalProperties": {},
+          "default": {}
+        },
+        "backend": {
           "default": null
         }
       },
