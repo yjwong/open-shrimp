@@ -20,7 +20,17 @@ from open_shrimp.sandbox import hcs_assets as A
 
 
 class _Body(io.BytesIO):
-    """Minimal stand-in for the object ``urlopen`` yields."""
+    """Minimal stand-in for the object ``urlopen`` yields.
+
+    Carries headers because the fetch reads ``Content-Length`` off them to
+    give progress a denominator; *length* of ``None`` is the server that
+    declined to say.
+    """
+
+    def __init__(self, data: bytes, *, length: int | None = -1):
+        super().__init__(data)
+        size = len(data) if length == -1 else length
+        self.headers = {} if size is None else {"Content-Length": str(size)}
 
     def __enter__(self):
         return self
@@ -163,6 +173,50 @@ def test_progress_goes_to_the_supplied_sink(tmp_path, monkeypatch):
     )
 
     assert any("the control initramfs" in line for line in lines)
+
+
+def test_bytes_are_counted_against_the_published_length(tmp_path, monkeypatch):
+    payload = b"x" * (A._CHUNK * 2 + 11)
+    _serve(monkeypatch, _assets("rootfs.vhdx.zst", payload))
+    seen: list[tuple[int, int | None]] = []
+
+    with pytest.raises(RuntimeError, match="not a valid zstd archive"):
+        # The transfer is what is under test; it has already happened by the
+        # time the unpack complains about what came down the wire.
+        A.ensure_asset(
+            "rootfs.vhdx.zst", tmp_path / "base-rootfs.vhdx",
+            description="the rootfs",
+            progress=lambda done, total: seen.append((done, total)),
+        )
+
+    assert seen == [
+        (A._CHUNK, len(payload)),
+        (A._CHUNK * 2, len(payload)),
+        (len(payload), len(payload)),
+    ]
+
+
+def test_a_server_that_sends_no_length_leaves_the_total_unknown(
+    tmp_path, monkeypatch,
+):
+    """Unknown must reach the caller as ``None``: a zero would render as a
+    progress bar frozen at nothing rather than as an indeterminate one."""
+    payload = b"payload"
+    bodies = _assets("thing.img", payload)
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        return _Body(bodies[url.rsplit("/", 1)[-1]], length=None)
+
+    monkeypatch.setattr(A.urllib.request, "urlopen", fake_urlopen)
+    seen: list[tuple[int, int | None]] = []
+
+    A.ensure_asset(
+        "thing.img", tmp_path / "initrd.img", description="the thing",
+        progress=lambda done, total: seen.append((done, total)),
+    )
+
+    assert seen == [(len(payload), None)]
 
 
 # -- the raw download primitive ----------------------------------------------

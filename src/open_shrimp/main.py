@@ -245,6 +245,31 @@ def _parse_args() -> argparse.Namespace:
         help="Emit machine-readable JSON (for a setup UI)",
     )
 
+    sub_sandbox = subparsers.add_parser(
+        "sandbox",
+        parents=[common],
+        help="Act on a sandbox backend itself, rather than on a context",
+    )
+    sandbox_subs = sub_sandbox.add_subparsers(dest="sandbox_command")
+    sub_prefetch = sandbox_subs.add_parser(
+        "prefetch",
+        parents=[common],
+        help="Download the shared assets a backend needs before its first use",
+    )
+    sub_prefetch.add_argument(
+        "--backend",
+        metavar="NAME",
+        help=(
+            "Backend to fetch for; defaults to the one this host would be "
+            "offered by 'sandboxes'"
+        ),
+    )
+    sub_prefetch.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit one NDJSON progress object per line (for a setup UI)",
+    )
+
     sub_config = subparsers.add_parser(
         "config",
         parents=[common],
@@ -760,6 +785,82 @@ def _run_sandboxes(*, json_output: bool) -> int:
     return 0
 
 
+def _run_sandbox_prefetch(
+    *, backend: str | None, json_output: bool, config_path: str | None = None,
+) -> int:
+    """Download the shared assets a backend needs, reporting as they arrive.
+
+    A sandboxed context's first turn otherwise pays for a multi-gigabyte
+    download with no way to say so — the user sends a message and gets
+    silence.  Running this beforehand moves the wait somewhere it can be
+    shown, which is the whole reason the output streams instead of arriving
+    at the end.
+
+    NDJSON on stdout, one object per line, flushed as each is written: a
+    ``{"asset", "done", "total"}`` per progress tick, an ``{"asset",
+    "state": "ready"}`` as each asset lands, and a closing ``{"state":
+    "finished"}``.  ``total`` is absent — never zero — when the server sent
+    no ``Content-Length``, so a front end renders it as indeterminate.
+    Failure exits non-zero with the reason on stderr, the same contract
+    ``sandboxes --json`` follows.
+    """
+    from open_shrimp.doctor import _load_config, blessed_offer
+    from open_shrimp.sandbox.prefetch import prefetch
+
+    config = _load_config(config_path)
+    # Every asset is cached under the managed data directory, which is only
+    # locatable once the instance name has been read off the config — and it
+    # must be *this* config's, or a named instance's assets land in a tree its
+    # core never looks at and the first turn fetches them all again.
+    init_paths(config.instance_name if config is not None else None)
+
+    if backend is None:
+        blessed = blessed_offer(config)
+        if blessed is None:
+            print(
+                "This host has no sandbox backend, so there is nothing to "
+                "prefetch.",
+                file=sys.stderr,
+            )
+            return 1
+        backend = blessed.backend
+
+    def emit_json(event: dict[str, object]) -> None:
+        json.dump(event, sys.stdout)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    def emit_text(event: dict[str, object]) -> None:
+        name = event.get("asset")
+        if event.get("state") == "ready":
+            # Overwrites the carriage-returned percentage in place, padded so
+            # no tail of the longer line it replaces survives.
+            print(f"\r{name}: ready".ljust(40))
+        elif event.get("state") == "finished":
+            print("All assets ready.")
+        else:
+            done = int(event.get("done", 0))
+            total = event.get("total")
+            if isinstance(total, int) and total > 0:
+                print(f"\r{name}: {done * 100 // total}%", end="", flush=True)
+            else:
+                print(f"\r{name}: {done // (1024 * 1024)} MiB", end="", flush=True)
+
+    try:
+        prefetch(backend, emit=emit_json if json_output else emit_text)
+    except Exception as exc:
+        # Stderr carries the reason and nothing else, because a front end
+        # shows it to a user verbatim — a traceback on top of a full disk is
+        # noise there.  The traceback stays available to an operator who
+        # raises the log level.
+        logger.debug(
+            "Sandbox prefetch failed for backend '%s'", backend, exc_info=True,
+        )
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _context_from_entry(entry: object, position: int) -> tuple[str, dict[str, Any]]:
     """Turn one entry of a JSON description into a named context.
 
@@ -960,6 +1061,21 @@ def main() -> None:
 
     if args.subcommand == "sandboxes":
         sys.exit(_run_sandboxes(json_output=args.json))
+
+    if args.subcommand == "sandbox":
+        if args.sandbox_command == "prefetch":
+            sys.exit(
+                _run_sandbox_prefetch(
+                    backend=args.backend,
+                    json_output=args.json,
+                    config_path=args.config,
+                )
+            )
+        print(
+            "usage: openshrimp sandbox prefetch [--backend NAME] [--json]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if args.subcommand == "config":
         if args.config_command == "write":

@@ -24,6 +24,8 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
+from open_shrimp.sandbox.prefetch import ProgressFn, stream_to_file
+
 logger = logging.getLogger(__name__)
 
 _REPO = "yjwong/open-shrimp"
@@ -46,7 +48,9 @@ def asset_dir() -> Path:
     return user_data_path("openshrimp") / "hcs"
 
 
-def download_release_asset(asset: str, dest: Path) -> None:
+def download_release_asset(
+    asset: str, dest: Path, *, progress: ProgressFn | None = None,
+) -> None:
     """Download *asset* from the latest release to *dest*.
 
     The body lands through a temporary file and one ``os.replace``, so *dest*
@@ -59,7 +63,7 @@ def download_release_asset(asset: str, dest: Path) -> None:
     tmp = dest.with_name(dest.name + ".download")
     logger.info("Downloading %s ...", url)
     try:
-        _fetch(url, tmp)
+        _fetch(url, tmp, progress=progress)
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
@@ -71,6 +75,7 @@ def ensure_asset(
     *,
     description: str,
     log: Callable[[str], None] | None = None,
+    progress: ProgressFn | None = None,
 ) -> Path:
     """*dest*, downloading the released *asset* into it if it is not there.
 
@@ -79,6 +84,11 @@ def ensure_asset(
     checksum published beside the asset is verified before anything is put in
     place, and the unpack lands through its own ``os.replace`` for the same
     reason the download does.
+
+    *progress* counts the bytes of the asset as published — the compressed
+    form for a ``.zst``, since that is what crosses the network.  The
+    checksum and the unpack that follow report through *log* instead: they
+    are the tail of the wait, not part of the transfer.
     """
     if dest.is_file():
         return dest
@@ -87,7 +97,7 @@ def ensure_asset(
     url = release_asset_url(asset)
     download = dest.with_name(dest.name + ".download")
     try:
-        _fetch(url, download)
+        _fetch(url, download, progress=progress)
         _verify_sha256(download, asset)
         if asset.endswith(".zst"):
             _say(log, f"Unpacking {description}...")
@@ -114,17 +124,14 @@ def _say(log: Callable[[str], None] | None, message: str) -> None:
         logger.info("%s", message)
 
 
-def _fetch(url: str, dest: Path) -> None:
-    req = urllib.request.Request(
-        url, headers={"Accept": "application/octet-stream"},
+def _fetch(url: str, dest: Path, *, progress: ProgressFn | None = None) -> None:
+    stream_to_file(
+        url, dest,
+        progress=progress,
+        chunk_size=_CHUNK,
+        headers={"Accept": "application/octet-stream"},
+        timeout=_TIMEOUT,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp, \
-                open(dest, "wb") as f:
-            while chunk := resp.read(_CHUNK):
-                f.write(chunk)
-    except (OSError, urllib.error.URLError) as exc:
-        raise RuntimeError(f"Failed to download {url}: {exc}") from exc
 
 
 def _verify_sha256(path: Path, asset: str) -> None:

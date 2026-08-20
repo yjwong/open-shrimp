@@ -28,6 +28,7 @@ import yaml
 from open_shrimp.config import SandboxConfig
 from open_shrimp.paths import data_dir as _data_dir, get_instance_name as _get_instance_name
 from open_shrimp.sandbox.agent_runtime import GuestMount
+from open_shrimp.sandbox.prefetch import ProgressFn, content_length
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,11 @@ def _read_credentials_json() -> str | None:
 LIMA_VERSION = "2.1.1"
 
 
-def _bin_dir() -> Path:
+def bin_dir() -> Path:
+    """Directory the managed ``limactl`` and its siblings are extracted to.
+
+    Public because a caller sizing up the download has to know which
+    filesystem it will land on."""
     return _data_dir() / "bin"
 
 
@@ -146,7 +151,7 @@ def find_limactl() -> str | None:
     this project downloaded as missing, because nothing puts the managed bin
     directory on ``$PATH``.
     """
-    local_bin = _bin_dir() / "limactl"
+    local_bin = bin_dir() / "limactl"
     if local_bin.is_file() and os.access(local_bin, os.X_OK):
         return str(local_bin)
 
@@ -157,11 +162,15 @@ def find_limactl() -> str | None:
     return None
 
 
-def _download_lima_sync() -> str:
+def _download_lima_sync(*, progress: ProgressFn | None = None) -> str:
     """Download and extract the Lima release tarball (sync).
 
     Lima tarballs contain a ``bin/`` subdirectory with ``limactl``,
-    ``lima``, etc.  All binaries are extracted to ``_bin_dir()``.
+    ``lima``, etc.  All binaries are extracted to ``bin_dir()``.
+
+    *progress* is called per chunk with the bytes transferred so far and the
+    tarball's ``Content-Length``, or ``None`` where the server sent none.  It
+    covers the transfer only: the extraction that follows is local and fast.
 
     Returns the path to the ``limactl`` binary.
     """
@@ -175,8 +184,8 @@ def _download_lima_sync() -> str:
             f"brew install lima"
         )
 
-    bin_dir = _bin_dir()
-    bin_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = bin_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
     url = f"{_download_base()}/{tarball_name}"
     logger.info("Downloading Lima %s from %s ...", LIMA_VERSION, url)
 
@@ -190,20 +199,25 @@ def _download_lima_sync() -> str:
         with httpx.Client(follow_redirects=True, timeout=120.0) as client:
             with client.stream("GET", url) as resp:
                 resp.raise_for_status()
+                total = content_length(resp.headers.get("content-length"))
+                done = 0
                 with open(tmp_path, "wb") as f:
                     for chunk in resp.iter_bytes(chunk_size=65536):
                         f.write(chunk)
+                        done += len(chunk)
+                        if progress is not None:
+                            progress(done, total)
 
         # Lima expects share/lima/ (guest agents, templates) relative to
         # the install prefix.
-        prefix_dir = bin_dir.parent
+        prefix_dir = target_dir.parent
         with tarfile.open(tmp_path, "r:gz") as tar:
             for member in tar.getmembers():
                 name = member.name.lstrip("./")
                 if not member.isfile():
                     continue
                 if name.startswith("bin/"):
-                    dest = bin_dir / os.path.basename(name)
+                    dest = target_dir / os.path.basename(name)
                 elif name.startswith(("share/", "libexec/")):
                     dest = prefix_dir / name
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -223,16 +237,19 @@ def _download_lima_sync() -> str:
     finally:
         os.unlink(tmp_path)
 
-    target = bin_dir / "limactl"
+    target = target_dir / "limactl"
     if not target.is_file():
         raise RuntimeError("limactl not found in downloaded Lima archive")
 
-    logger.info("Lima %s downloaded to %s", LIMA_VERSION, bin_dir)
+    logger.info("Lima %s downloaded to %s", LIMA_VERSION, target_dir)
     return str(target)
 
 
-def ensure_limactl_sync() -> str:
+def ensure_limactl_sync(*, progress: ProgressFn | None = None) -> str:
     """Ensure limactl is available, downloading if necessary (sync).
+
+    *progress* is only ever called when a download actually happens; a
+    limactl already on disk returns without reporting a byte.
 
     Returns the path to the limactl binary.
     """
@@ -242,7 +259,7 @@ def ensure_limactl_sync() -> str:
         return path
 
     logger.info("limactl not found, attempting auto-download...")
-    return _download_lima_sync()
+    return _download_lima_sync(progress=progress)
 
 
 # ---------------------------------------------------------------------------

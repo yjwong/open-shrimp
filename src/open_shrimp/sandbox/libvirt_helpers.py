@@ -26,6 +26,7 @@ from xml.etree import ElementTree as ET
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.paths import data_dir as _data_dir
+from open_shrimp.sandbox.prefetch import ProgressFn, stream_to_file
 from open_shrimp.sandbox.skill_paths import (
     SANDBOX_HOME,
     SANDBOX_UID,
@@ -60,6 +61,20 @@ def _vm_state_dir() -> Path:
 
 def _images_dir() -> Path:
     return _data_dir() / "images"
+
+
+def base_image_path() -> Path:
+    """Where the default cloud image is cached.
+
+    Public because a caller pre-fetching it has to know whether it is already
+    there and which filesystem it would land on.
+    """
+    return _images_dir() / DEFAULT_BASE_IMAGE_NAME
+
+
+def managed_virtiofsd_path() -> Path:
+    """Where the managed virtiofsd binary is downloaded to."""
+    return _data_dir() / "bin" / "virtiofsd"
 
 
 _DOMAIN_PREFIX = "openshrimp"
@@ -125,9 +140,15 @@ def _virtiofsd_has_managed_build(path: str) -> bool:
     return _MANAGED_VIRTIOFSD_BUILD in result.stdout
 
 
-def _find_managed_virtiofsd() -> str | None:
-    """Return the managed patched virtiofsd binary if present and usable."""
-    managed = _data_dir() / "bin" / "virtiofsd"
+def find_managed_virtiofsd() -> str | None:
+    """Return the managed patched virtiofsd binary if present and usable.
+
+    Public because it is exactly what ``ensure_virtiofsd`` accepts without
+    downloading: a caller asking whether a fetch is still owed must ask the
+    same question, and ``find_virtiofsd`` is wider — it also answers with a
+    system binary that ``ensure_virtiofsd`` would replace.
+    """
+    managed = managed_virtiofsd_path()
     if not (managed.is_file() and os.access(str(managed), os.X_OK)):
         return None
 
@@ -182,7 +203,7 @@ def find_virtiofsd() -> str | None:
         Absolute path to virtiofsd, or ``None`` if not found.
     """
     # 1. Managed binary (auto-downloaded, always preferred).
-    managed = _find_managed_virtiofsd()
+    managed = find_managed_virtiofsd()
     if managed is not None:
         return managed
 
@@ -206,7 +227,29 @@ _VIRTIOFSD_BINARY_MAP: dict[str, str] = {
 }
 
 
-def _download_virtiofsd() -> str:
+def _stream_download(
+    url: str,
+    dest: Path,
+    *,
+    progress: ProgressFn | None = None,
+) -> None:
+    """Fetch *url* to *dest* through a temporary file.
+
+    The body lands through a ``.download`` temporary and one ``os.replace``,
+    so *dest* is either absent or complete — a truncated image left at the
+    cached path would be adopted by every later run as if it were whole, and
+    this backend verifies no checksum that would catch it.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".download")
+    try:
+        stream_to_file(url, tmp, progress=progress)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _download_virtiofsd(*, progress: ProgressFn | None = None) -> str:
     """Download the virtiofsd binary for this platform.
 
     Synchronous — called from ``start_reaper()`` which runs before any
@@ -219,7 +262,6 @@ def _download_virtiofsd() -> str:
         RuntimeError: If the platform is unsupported or download fails.
     """
     import platform as _platform
-    import urllib.request
 
     machine = _platform.machine()
     binary_name = _VIRTIOFSD_BINARY_MAP.get(machine)
@@ -230,38 +272,25 @@ def _download_virtiofsd() -> str:
             f"Please install virtiofsd >= {min_version} manually."
         )
 
-    bin_dir = _data_dir() / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    target = bin_dir / "virtiofsd"
+    target = managed_virtiofsd_path()
     url = f"{_VIRTIOFSD_DOWNLOAD_BASE}/{binary_name}"
 
     logger.info("Downloading virtiofsd from %s ...", url)
-
-    tmp = target.with_suffix(".tmp")
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            with open(tmp, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-        tmp.rename(target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    _stream_download(url, target, progress=progress)
 
     target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     logger.info("virtiofsd %s downloaded to %s", binary_name, target)
     return str(target)
 
 
-def ensure_virtiofsd() -> str:
+def ensure_virtiofsd(*, progress: ProgressFn | None = None) -> str:
     """Find or download virtiofsd, returning the binary path.
 
     Called during libvirt sandbox manager startup to guarantee a
     working virtiofsd is available before any VM is started.
+
+    *progress* is called per chunk while a download is in flight; a binary
+    already in place reports nothing.
 
     Returns:
         Absolute path to a virtiofsd binary meeting the minimum version.
@@ -269,7 +298,7 @@ def ensure_virtiofsd() -> str:
     Raises:
         RuntimeError: If virtiofsd cannot be found or downloaded.
     """
-    managed = _find_managed_virtiofsd()
+    managed = find_managed_virtiofsd()
     if managed is not None:
         return managed
 
@@ -279,7 +308,7 @@ def ensure_virtiofsd() -> str:
         ".".join(str(v) for v in _MIN_VIRTIOFSD_VERSION),
     )
     try:
-        return _download_virtiofsd()
+        return _download_virtiofsd(progress=progress)
     except Exception:
         system = _find_system_virtiofsd()
         if system is not None:
@@ -988,13 +1017,22 @@ def extract_persistent_disks_from_xml(domain_xml: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def ensure_base_image(base_image: str | None, *, log_file: Path | None = None) -> Path:
+def ensure_base_image(
+    base_image: str | None,
+    *,
+    log_file: Path | None = None,
+    progress: ProgressFn | None = None,
+) -> Path:
     """Ensure the base cloud image is available locally.
 
     Args:
         base_image: Path to a custom base image, or ``None`` to download
             the default Ubuntu 24.04 cloud image.
         log_file: Optional log file for download progress.
+        progress: Optional per-chunk callback taking the bytes transferred
+            and the image's ``Content-Length``, or ``None`` where the server
+            sent none.  An operator's own *base_image* never calls it —
+            there is nothing to fetch.
 
     Returns:
         Path to the base image on disk.
@@ -1008,27 +1046,14 @@ def ensure_base_image(base_image: str | None, *, log_file: Path | None = None) -
         return path
 
     # Default: download Ubuntu 24.04 cloud image if not cached.
-    images = _images_dir()
-    images.mkdir(parents=True, exist_ok=True)
-    image_path = images / DEFAULT_BASE_IMAGE_NAME
-
+    image_path = base_image_path()
     if image_path.exists():
         return image_path
 
     logger.info("Downloading base cloud image to %s ...", image_path)
     _log(log_file, f"Downloading base cloud image: {DEFAULT_BASE_IMAGE_URL}")
 
-    # Download with wget (available on most Linux systems).
-    proc = subprocess.run(
-        ["wget", "-q", "-O", str(image_path), DEFAULT_BASE_IMAGE_URL],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        image_path.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Failed to download base image: {proc.stderr.strip()}"
-        )
+    _stream_download(DEFAULT_BASE_IMAGE_URL, image_path, progress=progress)
 
     _log(log_file, "Base cloud image downloaded.")
     logger.info("Downloaded base image to %s", image_path)

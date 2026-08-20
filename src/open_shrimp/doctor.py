@@ -323,8 +323,11 @@ def _check_hcs_base_image(config: Config | None) -> tuple[bool, str]:
     reported as a pending download rather than a problem; only an operator who
     named their own image can be missing one.
     """
-    from open_shrimp.sandbox.hcs import BASE_ROOTFS_ASSET, GUI_ROOTFS_ASSET
-    from open_shrimp.sandbox.hcs_assets import asset_dir
+    from open_shrimp.sandbox.hcs import (
+        BASE_ROOTFS_ASSET,
+        GUI_ROOTFS_ASSET,
+        rootfs_cache_path,
+    )
     from open_shrimp.sandbox.hcs_helpers import gui_image_path
 
     sandboxes = _hcs_sandboxes(config)
@@ -337,7 +340,7 @@ def _check_hcs_base_image(config: Config | None) -> tuple[bool, str]:
         if not sandbox.base_image:
             gui = sandbox.computer_use
             asset = GUI_ROOTFS_ASSET if gui else BASE_ROOTFS_ASSET
-            cached = asset_dir() / ("gui-rootfs.vhdx" if gui else "base-rootfs.vhdx")
+            cached = rootfs_cache_path(gui=gui)
             if cached.exists():
                 found.append(f"{name}: {cached} (downloaded)")
             else:

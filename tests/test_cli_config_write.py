@@ -33,6 +33,8 @@ from open_shrimp.main import _parse_args, _run_config_write, _run_models
         ["config", "write", "--config", "/A"],
         ["--config", "/A", "projects", "discover"],
         ["projects", "discover", "--config", "/A"],
+        ["--config", "/A", "sandbox", "prefetch"],
+        ["sandbox", "prefetch", "--config", "/A"],
     ],
 )
 def test_config_flag_is_honoured_on_either_side_of_the_subcommand(argv, monkeypatch):

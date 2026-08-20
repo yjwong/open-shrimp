@@ -304,6 +304,14 @@ def test_neither_source_names_both_remedies(tmp_path, monkeypatch, helper_env):
     assert "no network" in message
 
 
+def _served(data: bytes) -> io.BytesIO:
+    """A stand-in for what ``urlopen`` yields, headers included — the fetch
+    reads ``Content-Length`` off them to give progress a denominator."""
+    body = io.BytesIO(data)
+    body.headers = {"Content-Length": str(len(data))}
+    return body
+
+
 def test_download_unpacks_the_whole_bundle(tmp_path, monkeypatch):
     bundle = tmp_path / "bundle"
     monkeypatch.setattr(hcs_rdp, "shipped_helper_dir", lambda: bundle)
@@ -313,7 +321,7 @@ def test_download_unpacks_the_whole_bundle(tmp_path, monkeypatch):
         zf.writestr("libfreerdp3.dll", "dll")
     monkeypatch.setattr(
         hcs_assets.urllib.request, "urlopen",
-        lambda req, timeout=None: io.BytesIO(payload.getvalue()),
+        lambda req, timeout=None: _served(payload.getvalue()),
     )
     exe = hcs_rdp.download_shipped_helper()
     assert exe == bundle / "hcs_rdp_helper.exe"
@@ -332,7 +340,7 @@ def test_download_of_an_archive_without_the_exe_is_an_error(
         zf.writestr("readme.txt", "nothing useful")
     monkeypatch.setattr(
         hcs_assets.urllib.request, "urlopen",
-        lambda req, timeout=None: io.BytesIO(payload.getvalue()),
+        lambda req, timeout=None: _served(payload.getvalue()),
     )
     with pytest.raises(RuntimeError, match="contains no hcs_rdp_helper.exe"):
         hcs_rdp.download_shipped_helper()

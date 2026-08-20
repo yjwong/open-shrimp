@@ -32,7 +32,7 @@ def asked(monkeypatch):
     """Record every ``ensure_asset`` call instead of performing it."""
     calls: list[tuple[str, str]] = []
 
-    def fake_ensure(asset, dest, *, description, log=None):
+    def fake_ensure(asset, dest, *, description, log=None, progress=None):
         calls.append((asset, str(dest)))
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"")

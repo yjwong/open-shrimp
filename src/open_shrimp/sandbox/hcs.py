@@ -110,7 +110,22 @@ def initrd_path() -> Path:
     return A.asset_dir() / "initrd.img"
 
 
-def ensure_initrd(log: Callable[[str], None] | None = None) -> Path:
+def rootfs_cache_path(*, gui: bool = False) -> Path:
+    """Where the released rootfs template is cached once downloaded.
+
+    One spelling, because three callers must agree on it: the backend that
+    boots the image, the check that reports whether it is present, and the
+    prefetch that puts it there.  Two of them naming the same file by hand is
+    how a prefetch comes to fill a path nothing reads.
+    """
+    return A.asset_dir() / ("gui-rootfs.vhdx" if gui else "base-rootfs.vhdx")
+
+
+def ensure_initrd(
+    log: Callable[[str], None] | None = None,
+    *,
+    progress: A.ProgressFn | None = None,
+) -> Path:
     """The control initramfs, downloading the released asset if none is
     staged.  An ``OPENSHRIMP_HCS_INITRD`` that resolves to nothing is an error
     rather than a silent fall-through to a download the operator did not ask
@@ -127,6 +142,7 @@ def ensure_initrd(log: Callable[[str], None] | None = None) -> Path:
         )
     return A.ensure_asset(
         INITRD_ASSET, path, description="the HCS control initramfs", log=log,
+        progress=progress,
     )
 
 
@@ -573,13 +589,13 @@ class HcsSandbox:
         if self._config.computer_use:
             return A.ensure_asset(
                 GUI_ROOTFS_ASSET,
-                A.asset_dir() / "gui-rootfs.vhdx",
+                rootfs_cache_path(gui=True),
                 description="the HCS computer-use guest rootfs",
                 log=log,
             )
         return A.ensure_asset(
             BASE_ROOTFS_ASSET,
-            A.asset_dir() / "base-rootfs.vhdx",
+            rootfs_cache_path(),
             description="the HCS guest rootfs",
             log=log,
         )
