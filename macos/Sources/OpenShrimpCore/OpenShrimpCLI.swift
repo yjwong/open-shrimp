@@ -54,6 +54,19 @@ struct SandboxOffering: Sendable, Hashable {
     let note: String
 }
 
+/// The failure the core reported, written from the read handler and read once
+/// it has exited.  A box rather than a captured var, for the same reason
+/// `LineBuffer` is a class: a `readabilityHandler` cannot await.
+final class Reported: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String?
+
+    var reason: String? {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); defer { lock.unlock() }; stored = newValue }
+    }
+}
+
 /// Reassembles lines from reads that do not respect line boundaries.
 ///
 /// A pipe read returns whatever bytes had arrived, which for newline-delimited
@@ -147,6 +160,8 @@ enum OpenShrimpCLI {
         case progress(asset: String, done: Int, total: Int?)
         case ready(asset: String)
         case finished
+        /// Why it stopped, in one sentence meant to be shown as it is.
+        case error(reason: String)
     }
 
     private static func prefetchEvent(_ line: String) -> SandboxPrefetchEvent? {
@@ -157,6 +172,9 @@ enum OpenShrimpCLI {
 
         if let state = object["state"] as? String {
             if state == "finished" { return .finished }
+            if state == "error" {
+                return .error(reason: object["reason"] as? String ?? "")
+            }
             guard let asset = object["asset"] as? String else { return nil }
             return state == "ready" ? .ready(asset: asset) : nil
         }
@@ -197,12 +215,17 @@ enum OpenShrimpCLI {
             return "Could not start the core: \(error.localizedDescription)"
         }
 
-        async let stderrData = readToEnd(errPipe)
+        // Drained and discarded: the core's logging handlers write here too,
+        // so this is the reason with an unpredictable number of log lines
+        // around it — never something to show anybody.  It is read only so a
+        // core that fills the pipe does not block on a buffer nobody empties.
+        async let _ = readToEnd(errPipe)
 
         // A read boundary is not a line boundary: one read can carry half an
         // object, or three whole ones and half a fourth.  What is left after
         // the last newline is the start of the next line, not a line.
         let buffer = LineBuffer()
+        let failure = Reported()
         outPipe.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             if chunk.isEmpty {
@@ -210,7 +233,9 @@ enum OpenShrimpCLI {
                 return
             }
             for line in buffer.take(chunk) {
-                if let event = prefetchEvent(line) { onEvent(event) }
+                guard let event = prefetchEvent(line) else { continue }
+                if case .error(let reason) = event { failure.reason = reason }
+                onEvent(event)
             }
         }
 
@@ -223,9 +248,9 @@ enum OpenShrimpCLI {
 
         if Task.isCancelled { return nil }
         guard process.terminationStatus == 0 else {
-            let reason = String(decoding: await stderrData, as: UTF8.self)
+            let reason = (failure.reason ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return reason.isEmpty ? "The download stopped for an unknown reason." : reason
+            return reason.isEmpty ? "The download did not finish." : reason
         }
         return nil
     }

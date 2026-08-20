@@ -630,11 +630,11 @@ _BLESSED_BACKEND: dict[str, str] = {
 # also why they are not repeated as literals here.
 _SANDBOX_DEFAULTS = SandboxConfig(backend="libvirt")
 SANDBOX_SUMMARY = (
-    "Safer: anything you send me in Telegram can reach that project's folder "
-    "and nothing else on this computer. Left off, it can reach everything. "
-    "The price is that each project takes a few minutes to start the first "
-    f"time, and while it runs it uses up to {_SANDBOX_DEFAULTS.memory // 1024} "
-    f"GB of memory and {_SANDBOX_DEFAULTS.disk_size} GB of disk."
+    "Anything you send me in Telegram can reach that project's folder, and "
+    "nothing else on this computer. Turn this off and it can reach "
+    "everything. Projects take a few minutes to start the first time, and "
+    f"use up to {_SANDBOX_DEFAULTS.memory // 1024} GB of memory and "
+    f"{_SANDBOX_DEFAULTS.disk_size} GB of disk."
 )
 
 

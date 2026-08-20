@@ -643,6 +643,8 @@ final class SetupWizardModel: ObservableObject {
             break
         case .finished:
             prefetch = .done
+        case .error(let reason):
+            prefetch = .failed(reason)
         }
     }
 

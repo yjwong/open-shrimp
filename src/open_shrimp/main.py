@@ -846,16 +846,24 @@ def _run_sandbox_prefetch(
             else:
                 print(f"\r{name}: {done // (1024 * 1024)} MiB", end="", flush=True)
 
+    emit = emit_json if json_output else emit_text
     try:
-        prefetch(backend, emit=emit_json if json_output else emit_text)
+        prefetch(backend, emit=emit)
     except Exception as exc:
-        # Stderr carries the reason and nothing else, because a front end
-        # shows it to a user verbatim — a traceback on top of a full disk is
-        # noise there.  The traceback stays available to an operator who
-        # raises the log level.
+        # The reason goes out on stdout as a final event, not on stderr.  A
+        # front end shows it to a user verbatim, and stderr is where the
+        # logging handlers write too — so anything read from there is the
+        # reason with an unpredictable number of log lines around it, which
+        # is how "limactl not found, attempting auto-download" ends up
+        # presented to somebody as the explanation for a failure.
+        #
+        # Stderr still carries it for an operator reading a terminal, where
+        # the surrounding log lines are the point rather than the problem.
         logger.debug(
             "Sandbox prefetch failed for backend '%s'", backend, exc_info=True,
         )
+        if json_output:
+            emit({"state": "error", "reason": str(exc)})
         print(f"{exc}", file=sys.stderr)
         return 1
     return 0
