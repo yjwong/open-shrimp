@@ -81,6 +81,29 @@ internal sealed class TrayIconHost : IDisposable
     }
 
     /// <summary>
+    /// Say where the app went.
+    ///
+    /// Windows 11 files a new notification-area icon into the overflow flyout
+    /// and offers no API to promote it, so a launch that opens no window
+    /// leaves nothing on screen at all. This balloon is the only evidence the
+    /// user gets, which is why it names the arrow rather than just the tray.
+    /// </summary>
+    public void AnnounceLocation()
+    {
+        try
+        {
+            _icon?.ShowNotification(
+                "OpenShrimp is running",
+                "Look for it under the arrow next to the clock.");
+        }
+        catch (Exception ex)
+        {
+            // A notification we cannot raise is not worth failing a launch for.
+            TrayLog.Write("Could not announce the notification-area icon", ex);
+        }
+    }
+
+    /// <summary>
     /// Wrap a menu action so that a failure is reported rather than lost. An
     /// unreported failure here is indistinguishable from a menu item that does
     /// nothing at all, which is the one outcome the user cannot act on.

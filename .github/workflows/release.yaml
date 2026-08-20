@@ -983,8 +983,11 @@ jobs:
       - name: Build the MSI
         run: |
           dotnet tool install --global wix --version 7.*
+          # The UI extension carries ExitDialog and its optional checkbox.  Its
+          # major must match the toolset's, and -acceptEula gates this verb too.
+          wix extension add -g WixToolset.UI.wixext/7.0.0 -acceptEula wix7
           $version = '${{ needs.version.outputs.version }}'
-          wix build -acceptEula wix7 windows/packaging/OpenShrimp.wxs `
+          wix build -acceptEula wix7 -ext WixToolset.UI.wixext windows/packaging/OpenShrimp.wxs `
             -arch x64 `
             -d ProductVersion="$version.0" `
             -d TrayPublishDir="$(Resolve-Path publish)" `

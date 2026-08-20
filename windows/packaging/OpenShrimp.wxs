@@ -12,8 +12,11 @@
   scheduled task the tray registers against a fixed exe path.
 
   Build with the WiX 7 toolset — -acceptEula is not optional there, the build
-  fails WIX7015 without it:
-    wix build -acceptEula wix7 OpenShrimp.wxs -arch x64 \
+  fails WIX7015 without it, and that gate applies to `wix extension add` just
+  as much as to `wix build`:
+    wix extension add -g WixToolset.UI.wixext/7.0.0 -acceptEula wix7
+    wix build -acceptEula wix7 -ext WixToolset.UI.wixext OpenShrimp.wxs \
+      -arch x64 \
       -d ProductVersion=<x.y.z.0> \
       -d TrayPublishDir=<publish dir> \
       -d CoreExe=<path to openshrimp.exe> \
@@ -82,12 +85,93 @@
       <!-- After InstallFiles: the exe it runs does not exist before that. -->
       <Custom Action="WarmRuntime" After="InstallFiles" Condition="NOT Installed" />
     </InstallExecuteSequence>
+
+    <!--
+      Start the tray from the finish page, so an install ends with the product
+      running instead of with a Start Menu shortcut nobody was told about.
+
+      The action launches the exe directly rather than through the Util
+      extension's WixShellExec, which calls ShellExecuteW with a null parameter
+      list and so cannot pass an argument at all.  The first-run flag is what
+      lets the tray tell an installer launch from a logon one, and it has to
+      survive.
+
+      Immediate, and therefore always in the installing user's context: only a
+      deferred action can run outside it, and a perUser package never elevates.
+      That stays true only while nothing wraps this MSI in a bootstrapper
+      manifested requireAdministrator — such a wrapper must be asInvoker.
+
+      asyncNoWait because the installer has nothing left to do: the tray takes
+      seconds to draw its first window and the exit dialog must not sit on it.
+    -->
+    <CustomAction Id="LaunchApplication"
+                  FileRef="TrayExecutable"
+                  ExeCommand="--first-run"
+                  Execute="immediate"
+                  Return="asyncNoWait" />
+
+    <!--
+      A dialog set authored here rather than one of the five shipped ones,
+      because the lightest of those (WixUI_Minimal) *is* a EULA page and no
+      property suppresses it.  This product has no EULA to show and the tray
+      owns onboarding, so the wizard is progress plus a finish page.
+
+      It is this short because PrepareDlg, ProgressDlg and ExitDialog each
+      schedule themselves from their own fragment; naming them is enough.
+      WixUI_Common is not optional — it carries the bitmaps ExitDialog draws.
+
+      Authored fresh rather than trimmed from a WiX 5-era set: WixUI has been
+      custom-action-free since v6, and a copied set still references the
+      deleted WixUIPrintEula.
+    -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch OpenShrimp" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+    <UI>
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ExitDialog" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+
+      <!--
+        Order is unset on the launch and 999 on the end: an unordered Publish
+        lands at 1, so the app starts before the dialog closes.  Raising it
+        would end the dialog first and the launch would never run.
+
+        The shipped checkbox is conditioned on NOT Installed and hidden
+        otherwise, so a silent install (no dialog at all) and a repair both
+        launch nothing without needing a UILevel guard.
+      -->
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+    <UIRef Id="WixUI_Common" />
   </Package>
 
   <Fragment>
-    <!-- The whole self-contained publish output: app, .NET runtime, Windows App SDK. -->
+    <!--
+      The whole self-contained publish output: app, .NET runtime, Windows App
+      SDK.  The tray exe is carved out of the glob and given an explicit Id
+      because Files invents one per harvested file, and the finish-page launch
+      needs a name it can reference.
+    -->
     <ComponentGroup Id="TrayFiles" Directory="INSTALLFOLDER">
-      <Files Include="$(TrayPublishDir)\**" />
+      <Files Include="$(TrayPublishDir)\**">
+        <Exclude Files="$(TrayPublishDir)\OpenShrimp.Tray.exe" />
+      </Files>
+      <Component>
+        <File Id="TrayExecutable" Source="$(TrayPublishDir)\OpenShrimp.Tray.exe" />
+      </Component>
     </ComponentGroup>
 
     <!--

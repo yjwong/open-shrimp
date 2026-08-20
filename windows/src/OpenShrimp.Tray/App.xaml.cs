@@ -84,10 +84,29 @@ public partial class App : Application
         _tray.Show();
 
         if (File.Exists(CorePaths.ConfigFile))
+        {
             _ = _supervisor.StartAsync();
+
+            // The one path that opens no window at all. On a fresh install the
+            // wizard is its own evidence that something launched; an upgrade
+            // has a config already, so without this the installer's launch is
+            // indistinguishable from nothing having happened.
+            if (LaunchedByInstaller()) _tray.AnnounceLocation();
+        }
         else
+        {
             RunSetupWizard();
+        }
     }
+
+    /// <summary>
+    /// The finish page passes --first-run. Nothing else does, which is the
+    /// point: a logon autostart must not announce itself every morning.
+    /// </summary>
+    private static bool LaunchedByInstaller() =>
+        Environment.GetCommandLineArgs()
+            .Skip(1)
+            .Any(a => string.Equals(a, "--first-run", StringComparison.OrdinalIgnoreCase));
 
     private void OnSupervisorChanged()
     {
