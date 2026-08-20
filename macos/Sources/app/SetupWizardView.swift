@@ -334,6 +334,44 @@ struct SetupWizardView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 // Indented to the toggle's label, not to its box.
                 .padding(.leading, 20)
+
+            prefetchRow
+                .padding(.leading, 20)
+        }
+    }
+
+    /// The download the note warned about, while it happens.
+    ///
+    /// Reserves no height when idle: a bar that appears is a bar somebody
+    /// reads, and one that is always there with nothing in it is furniture.
+    @ViewBuilder private var prefetchRow: some View {
+        switch model.prefetch {
+        case .idle:
+            EmptyView()
+        case .running(let fraction):
+            // A nil fraction is a length the server never reported, so the
+            // bar spins rather than sitting at zero pretending to know.
+            if let fraction {
+                ProgressView(value: fraction) { Text("Getting things ready…") }
+                    .font(.caption)
+                    .frame(maxWidth: 260)
+            } else {
+                ProgressView { Text("Getting things ready…") }
+                    .progressViewStyle(.linear)
+                    .font(.caption)
+                    .frame(maxWidth: 260)
+            }
+        case .done:
+            Text("Ready — your first project will start straight away.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        case .failed(let reason):
+            // Not an error tone and not a blocker: the download is the first
+            // turn's wait paid early, and not paying it costs only that wait.
+            Text("\(reason) Your first project will take longer to start.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

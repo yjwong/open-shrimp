@@ -42,6 +42,20 @@ struct ProjectRow: Identifiable, Hashable {
     var chosen: Bool
 }
 
+/// How far the sandbox's shared assets have got.
+///
+/// `failed` is a state the wizard reports and then carries on from: the
+/// download is an optimisation, and a first turn that pays for it is exactly
+/// what happened before this existed.  Nothing here may block Finish.
+enum PrefetchState: Equatable {
+    case idle
+    /// `fraction` is nil while no asset has reported a length to divide by,
+    /// which is a spinner rather than a bar stuck at zero.
+    case running(fraction: Double?)
+    case done
+    case failed(String)
+}
+
 /// Where the enrollment step is.
 ///
 /// Enrollment is an authentication step, so it has more states than a text
@@ -95,7 +109,14 @@ final class SetupWizardModel: ObservableObject {
     /// On by default, and honoured only where `sandbox` says it can be: safe
     /// is the answer somebody who does not read this question should get, and
     /// the one who does read it is one tap from the other.
-    @Published var sandboxEnabled = true
+    @Published var sandboxEnabled = true {
+        didSet { sandboxEnabled ? startPrefetch() : stopPrefetch() }
+    }
+
+    /// How far the sandbox's shared assets have got.
+    @Published private(set) var prefetch: PrefetchState = .idle
+
+    private var prefetchTask: Task<Void, Never>?
 
     /// Whether finishing registers the app as a login item.
     ///
@@ -581,6 +602,61 @@ final class SetupWizardModel: ObservableObject {
         message = nil
     }
 
+    // -- Prefetch -------------------------------------------------------------
+
+    /// Start fetching the sandbox's shared assets, if there are any to fetch.
+    ///
+    /// Started when the box is ticked rather than when Finish is pressed, so
+    /// it runs while the user reads the rest of the step — the common case
+    /// being that it has finished before they click anything.  Finish never
+    /// waits on it.
+    ///
+    /// Only where the sandbox can actually be turned on, and only once: a
+    /// tick, untick and re-tick must not leave two cores downloading into the
+    /// same directory.
+    private func startPrefetch() {
+        guard sandbox?.available == true, prefetchTask == nil else { return }
+        prefetch = .running(fraction: nil)
+        // The handler is built here rather than inside the task, so it holds
+        // its own weak reference instead of reaching through the task's — a
+        // capture nested inside a capture is a reference to a variable from
+        // concurrent code, which Swift 6 rejects outright.
+        let onEvent: @Sendable (OpenShrimpCLI.SandboxPrefetchEvent) -> Void = { [weak self] event in
+            Task { @MainActor in self?.apply(event) }
+        }
+        prefetchTask = Task { [weak self] in
+            let failure = await OpenShrimpCLI.prefetchSandbox(onEvent: onEvent)
+            guard let self, !Task.isCancelled else { return }
+            // A reported failure does not overwrite a finish that already
+            // landed, and cancellation reports nothing at all.
+            if let failure { self.prefetch = .failed(failure) }
+            else if case .running = self.prefetch { self.prefetch = .done }
+        }
+    }
+
+    private func apply(_ event: OpenShrimpCLI.SandboxPrefetchEvent) {
+        switch event {
+        case .progress(_, let done, let total):
+            guard let total, total > 0 else { return }
+            prefetch = .running(fraction: min(1, Double(done) / Double(total)))
+        case .ready:
+            break
+        case .finished:
+            prefetch = .done
+        }
+    }
+
+    /// Stop the download and forget it happened.
+    ///
+    /// Cancelling terminates the core, so unticking does not leave gigabytes
+    /// arriving for a sandbox the config will not ask for.  Whatever landed
+    /// stays on disk: it is exactly what a later first turn would fetch.
+    func stopPrefetch() {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        prefetch = .idle
+    }
+
     private func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
@@ -664,6 +740,11 @@ final class SetupWizardModel: ObservableObject {
         guard validatedContexts() != nil else { return }
         message = nil
         step = 3
+        // Here rather than when the offering lands: this is the first moment
+        // the user has settled on projects and left the sandbox ticked, and
+        // fetching gigabytes for a wizard somebody might abandon on the token
+        // step is not a head start worth taking.
+        if sandboxEnabled { startPrefetch() }
     }
 
     private func finish() async {

@@ -54,6 +54,35 @@ struct SandboxOffering: Sendable, Hashable {
     let note: String
 }
 
+/// Reassembles lines from reads that do not respect line boundaries.
+///
+/// A pipe read returns whatever bytes had arrived, which for newline-delimited
+/// JSON means the tail of a read is usually half an object.  Holding that tail
+/// until its newline arrives is the whole job.
+///
+/// `@unchecked Sendable` with a lock rather than an actor: this is called from
+/// a `readabilityHandler`, which is not an async context and cannot await.
+final class LineBuffer: @unchecked Sendable {
+    private var pending = Data()
+    private let lock = NSLock()
+
+    /// Every complete line *chunk* finishes, keeping any partial tail for the
+    /// read that completes it.
+    func take(_ chunk: Data) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        pending.append(chunk)
+
+        var lines: [String] = []
+        while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
+            let line = pending[pending.startIndex..<newline]
+            pending = pending[pending.index(after: newline)...]
+            if !line.isEmpty { lines.append(String(decoding: line, as: UTF8.self)) }
+        }
+        return lines
+    }
+}
+
 /// Drives the core's non-interactive CLI.
 ///
 /// The wizard has to write config.yaml before any core exists, so it cannot use
@@ -104,6 +133,101 @@ enum OpenShrimpCLI {
             stdout: String(decoding: stdout, as: UTF8.self),
             stderr: String(decoding: stderr, as: UTF8.self)
         )
+    }
+
+    /// One line of the core's prefetch progress.
+    ///
+    /// Three shapes rather than one struct of optionals, because the caller
+    /// does three different things with them and a `done` that is nil where a
+    /// `state` is set would have to be checked for at every use.
+    enum SandboxPrefetchEvent: Sendable {
+        /// `total` is nil where the server sent no `Content-Length` — a
+        /// length nobody reported, which renders as indeterminate rather
+        /// than as a bar stuck at zero.
+        case progress(asset: String, done: Int, total: Int?)
+        case ready(asset: String)
+        case finished
+    }
+
+    private static func prefetchEvent(_ line: String) -> SandboxPrefetchEvent? {
+        guard
+            let data = line.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        if let state = object["state"] as? String {
+            if state == "finished" { return .finished }
+            guard let asset = object["asset"] as? String else { return nil }
+            return state == "ready" ? .ready(asset: asset) : nil
+        }
+        guard
+            let asset = object["asset"] as? String,
+            let done = object["done"] as? Int
+        else { return nil }
+        return .progress(asset: asset, done: done, total: object["total"] as? Int)
+    }
+
+    /// Download the shared assets the sandbox needs, reporting as they land.
+    ///
+    /// Returns nil once every asset is present, or the reason it stopped.
+    /// The reason is the core's own stderr, which is one sentence written to
+    /// be shown to a user — a full disk says how much it needed and how much
+    /// there was.
+    ///
+    /// The only streamed call in this file: everything else asks a question
+    /// and reads the answer to the end, but a download that takes minutes is
+    /// exactly the thing that must not arrive all at once at the end.
+    /// Cancelling the surrounding task terminates the core, so a wizard that
+    /// closes does not leave gigabytes arriving for a config nobody wrote.
+    static func prefetchSandbox(
+        onEvent: @escaping @Sendable (SandboxPrefetchEvent) -> Void
+    ) async -> String? {
+        let process = Process()
+        process.executableURL = CorePaths.coreExecutable
+        process.arguments = ["sandbox", "prefetch", "--json"]
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        do {
+            try process.run()
+        } catch {
+            return "Could not start the core: \(error.localizedDescription)"
+        }
+
+        async let stderrData = readToEnd(errPipe)
+
+        // A read boundary is not a line boundary: one read can carry half an
+        // object, or three whole ones and half a fourth.  What is left after
+        // the last newline is the start of the next line, not a line.
+        let buffer = LineBuffer()
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            for line in buffer.take(chunk) {
+                if let event = prefetchEvent(line) { onEvent(event) }
+            }
+        }
+
+        await withTaskCancellationHandler {
+            await waitForExit(process)
+        } onCancel: {
+            process.terminate()
+        }
+        outPipe.fileHandleForReading.readabilityHandler = nil
+
+        if Task.isCancelled { return nil }
+        guard process.terminationStatus == 0 else {
+            let reason = String(decoding: await stderrData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return reason.isEmpty ? "The download stopped for an unknown reason." : reason
+        }
+        return nil
     }
 
     private static func readToEnd(_ pipe: Pipe) async -> Data {

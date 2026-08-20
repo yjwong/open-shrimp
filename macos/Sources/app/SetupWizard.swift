@@ -133,6 +133,11 @@ final class SetupWizard: NSObject, NSWindowDelegate {
 
     private func report() {
         let completed = wroteConfig
+        // An abandoned wizard wrote no config, so nothing will ever ask for
+        // the assets it was fetching — but a finished one did, and its
+        // download is the first turn's wait being paid early.  Only the first
+        // is stopped.
+        if !completed { model.stopPrefetch() }
         DispatchQueue.main.async { [self] in
             // Back to an accessory now the window is gone, or the app is left
             // holding a Dock tile that opens nothing and a menu bar over a
