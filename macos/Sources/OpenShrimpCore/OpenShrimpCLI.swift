@@ -259,7 +259,8 @@ enum OpenShrimpCLI {
             .compactMap(project)
     }
 
-    /// What one folder the user picked should be called as a context.
+    /// What the folders the user picked should be called as contexts, in the
+    /// order they were asked about.  Empty when the core could not answer.
     ///
     /// Asked rather than derived: what a folder may be called is a rule with
     /// one implementation, in the core, and a folder name is under no
@@ -268,13 +269,21 @@ enum OpenShrimpCLI {
     /// the same folder would be named one way when discovery found it and
     /// another when the picker did.  *taken* is what this list already holds,
     /// because uniqueness is a property of the list and only it knows.
-    static func name(directory: String, taken: [String]) async -> DiscoveredProject? {
-        let rows = await jsonList(
-            ["projects", "name", "--path", directory, "--taken", taken.joined(separator: ","),
-             "--json"],
-            key: "projects"
-        )
-        return rows.first.flatMap(project)
+    ///
+    /// A whole selection in one call, one name per flag: the core settles the
+    /// picked folders' uniqueness against each other as well as against
+    /// *taken*, which a caller looping one folder at a time could only do by
+    /// re-sending what it was just told, at one core spawn each.  Repeated
+    /// flags rather than a joined string because these names come from
+    /// editable fields, so a separator character in one is the user's text and
+    /// not a delimiter.
+    static func names(for directories: [String], taken: [String]) async -> [String] {
+        let arguments = ["projects", "name"]
+            + directories.flatMap { ["--path", $0] }
+            + taken.flatMap { ["--taken", $0] }
+            + ["--json"]
+        return await jsonList(arguments, key: "projects")
+            .compactMap { $0["context_name"] as? String }
     }
 
     /// The sandbox backends this host can actually start a project in.

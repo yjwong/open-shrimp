@@ -271,9 +271,18 @@ def test_an_empty_result_is_still_valid_json(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def _named(capsys, path: str, taken: str = "") -> dict:
-    assert _run_projects_name(path=path, taken=taken, json_output=True) == 0
-    rows = json.loads(capsys.readouterr().out)["projects"]
+def _named_rows(capsys, *paths: str, taken: list[str] | None = None) -> list[dict]:
+    assert (
+        _run_projects_name(
+            paths=list(paths), taken=list(taken or []), json_output=True
+        )
+        == 0
+    )
+    return json.loads(capsys.readouterr().out)["projects"]
+
+
+def _named(capsys, path: str, taken: list[str] | None = None) -> dict:
+    rows = _named_rows(capsys, path, taken=taken)
     assert len(rows) == 1
     return rows[0]
 
@@ -302,7 +311,17 @@ def test_a_hand_picked_folder_is_named_by_the_same_rule(capsys):
 def test_the_names_the_caller_already_used_are_avoided(capsys):
     """Uniqueness is a property of the list being built, and only the caller
     holding that list knows what is in it."""
-    assert _named(capsys, "/home/ada/api", taken="api,api-2")["context_name"] == "api-3"
+    assert (
+        _named(capsys, "/home/ada/api", taken=["api", "api-2"])["context_name"]
+        == "api-3"
+    )
+
+
+def test_a_taken_name_is_one_flag_each(capsys):
+    """Repeated rather than comma-joined: the names come from editable boxes,
+    so a comma in one would otherwise split it into two names and leave the
+    real one unclaimed."""
+    assert _named(capsys, "/home/ada/api", taken=["api,api-2"])["context_name"] == "api"
 
 
 def test_the_reserved_name_is_refused_here_too(capsys):
@@ -318,4 +337,84 @@ def test_a_unicode_folder_name_survives(capsys):
 def test_an_empty_taken_list_names_nothing_taken(capsys):
     """A GUI adding its first row sends no names, which must not read as one
     empty name already spoken for."""
-    assert _named(capsys, "/home/ada/api", taken="")["context_name"] == "api"
+    assert _named(capsys, "/home/ada/api")["context_name"] == "api"
+
+
+def test_one_folder_gets_one_name_however_the_path_is_spelled(
+    tmp_path, monkeypatch, capsys
+):
+    """Otherwise the name a folder is given is decided by how the caller typed
+    the path, and a picker that hands over a relative one names it '.'."""
+    folder = tmp_path / "namecheck"
+    folder.mkdir()
+    monkeypatch.chdir(folder)
+
+    (tmp_path / "other").mkdir()
+    spellings = [
+        str(folder),
+        ".",
+        str(tmp_path / "other" / ".." / "namecheck"),
+    ]
+
+    answers = [_named(capsys, spelling) for spelling in spellings]
+    assert {json.dumps(answer, sort_keys=True) for answer in answers} == {
+        json.dumps(
+            {
+                "directory": str(folder.resolve()),
+                "name": "namecheck",
+                "context_name": "namecheck",
+                "last_start_time": None,
+            },
+            sort_keys=True,
+        )
+    }
+
+
+def test_a_folder_that_is_gone_is_still_named_as_typed(capsys):
+    """Naming is not validation — the config write is where a missing
+    directory is refused — so the answer echoes the path the user can still
+    correct rather than a resolved one they never typed."""
+    assert _named(capsys, "~/nowhere-at-all") == {
+        "directory": str(Path("~/nowhere-at-all").expanduser()),
+        "name": "nowhere-at-all",
+        "context_name": "nowhere-at-all",
+        "last_start_time": None,
+    }
+
+
+def test_a_whole_selection_is_named_in_one_call(capsys):
+    """A picker that allows several folders pays one spawn, and their
+    uniqueness against each other is settled here rather than by the caller
+    looping and re-sending what it was just told."""
+    rows = _named_rows(capsys, "/home/ada/work/api", "/home/ada/play/api")
+    assert [row["context_name"] for row in rows] == ["api", "api-2"]
+
+
+def test_the_text_listing_names_the_folder_as_well_as_the_context(capsys):
+    """The two are different answers: one is what the user will type after
+    /context, the other is what they can match against their filesystem."""
+    assert (
+        _run_projects_name(
+            paths=["/home/ada/work/talenthub.glints.com"], taken=[], json_output=False
+        )
+        == 0
+    )
+    line = capsys.readouterr().out.strip()
+    assert line.split() == [
+        "talenthub-glints-com",
+        "talenthub.glints.com",
+        "/home/ada/work/talenthub.glints.com",
+    ]
+
+
+def test_the_text_listing_of_a_discovery_names_both_too(tmp_path, monkeypatch, capsys):
+    """Same listing, same shape, whichever command produced the rows."""
+    _write_claude_json(
+        tmp_path, monkeypatch, {"/home/ada/work/talenthub.glints.com": _real()}
+    )
+    assert _run_projects_discover(json_output=False) == 0
+    assert capsys.readouterr().out.split() == [
+        "talenthub-glints-com",
+        "talenthub.glints.com",
+        "/home/ada/work/talenthub.glints.com",
+    ]

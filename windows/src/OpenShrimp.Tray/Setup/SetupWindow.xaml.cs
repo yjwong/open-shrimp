@@ -700,9 +700,19 @@ public sealed partial class SetupWindow : Window
     /// None of the three blocks the wizard. A catalog that could not be read
     /// leaves "CLI default"; a discovery that failed reads the same as "none
     /// found", which is a screen this step already has.
+    ///
+    /// This is the first thing in the app that runs the core at all when there
+    /// is no config — a core with no config is never started — so the unpack
+    /// is forced first and waited for. Three spawns launched at a
+    /// self-installing binary that has never run would be three racing
+    /// installs of it, and the directory a lost race leaves behind is one the
+    /// launcher then skips installing into forever.
     /// </summary>
     private async Task LoadCoreFactsAsync()
     {
+        if (await OpenShrimpCli.EnsureRuntimeAsync() is string reason)
+            TrayLog.Write($"The core is not ready to run: {reason}");
+
         // Together, not one after another: none of the three depends on the
         // others, and each is a separate spawn that re-pays interpreter and
         // import startup.
@@ -814,17 +824,29 @@ public sealed partial class SetupWindow : Window
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null) return;
 
-        // The name comes from the core, not from the folder: what a context may
-        // be called is a rule with one implementation, and a folder name is
-        // under no obligation to obey it. Naming it here would be a second
-        // rule, and the same folder would end up called one thing when
-        // discovery found it and another when this picker did. A core that
-        // cannot answer leaves the basename in an editable box, which is the
-        // screen this step already has for a name that needs correcting.
-        var named = await OpenShrimpCli.GetProjectNameAsync(
-            folder.Path, _rows.Select(row => row.NameBox.Text.Trim()));
-        AddProjectRow(named?.ContextName ?? folder.Name, folder.Path, folder.Name);
+        // The row appears now, under the basename. The core is a spawn away —
+        // long enough that adding the row only on its return dismisses the
+        // picker onto a list that does not visibly change — and the basename is
+        // what an unanswerable call would have left anyway, so showing it early
+        // costs nothing that was ever guaranteed.
+        var taken = _rows.Select(row => row.NameBox.Text.Trim()).ToList();
+        AddProjectRow(folder.Name, folder.Path, folder.Name);
         UpdateProjectStep();
+
+        // The name then comes from the core, not from the folder: what a
+        // context may be called is a rule with one implementation, and a folder
+        // name is under no obligation to obey it. Naming it here would be a
+        // second rule, and the same folder would end up called one thing when
+        // discovery found it and another when this picker did. Named against
+        // what the list held before this row joined it, because the placeholder
+        // is not a name anybody chose.
+        var box = _rows[^1].NameBox;
+        var named = await OpenShrimpCli.GetProjectNameAsync(folder.Path, taken);
+
+        // Only if it is still the placeholder: the answer took a spawn to
+        // arrive, and a user who has typed over it in the meantime has said
+        // what they want this project called.
+        if (named is not null && box.Text == folder.Name) box.Text = named;
     }
 
     // -- Finish -------------------------------------------------------------

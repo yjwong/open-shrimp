@@ -406,12 +406,11 @@ struct SetupWizardView: View {
         panel.canCreateDirectories = true
 
         guard panel.runModal() == .OK else { return }
-        // In order, and awaited one at a time: each folder is named against
-        // the names the rows already hold, so two folders picked together must
-        // not be named against the same list and land on the same name.
-        Task {
-            for url in panel.urls { await model.addDirectory(url.path) }
-        }
+        // The whole selection in one call: naming is one core spawn, and the
+        // folders picked together have to be named against each other as well
+        // as against the rows already there — which is the model's job, not a
+        // loop's here.
+        Task { await model.addDirectories(panel.urls.map(\.path)) }
     }
 
     private func telegramLink(_ title: String, domain: String) -> some View {

@@ -160,11 +160,6 @@ final class SetupWizardModel: ObservableObject {
     /// alongside it.
     private var warmup: Task<Void, Never>?
 
-    /// Everything the import step reads off the core.  Separate from the
-    /// warmup, so Finish waits for the bootstrap it races and not for a model
-    /// catalog and a set of sandbox probes it never needed.
-    private var discovery: Task<Void, Never>?
-
     /// Called once the config has been written, with the bot the token belongs
     /// to and, if one was asked for and refused, why the login item could not
     /// be registered.  The window is the caller's to dismiss.
@@ -222,7 +217,7 @@ final class SetupWizardModel: ObservableObject {
         // decides what that step asks — a list to prune, or a folder to pick —
         // and a step that renders empty and then fills itself has already
         // asked the wrong question once.
-        discovery = Task {
+        Task {
             await warmup.value
             async let choices = OpenShrimpCLI.models()
             async let found = OpenShrimpCLI.projects()
@@ -245,24 +240,45 @@ final class SetupWizardModel: ObservableObject {
         }
     }
 
-    /// Append a folder the user picked, ticked, under the name the core says
-    /// that folder should have.
+    /// Append the folders the user picked, ticked, under the names the core
+    /// says those folders should have.
     ///
     /// Asked rather than assumed: the basename is often not a legal context
-    /// name, and it is often already taken by a row discovery added.  Naming it
-    /// here would be a second implementation of a rule the core owns, and the
-    /// same folder would end up called one thing when discovery found it and
-    /// another when the picker did.  A core that cannot answer leaves the
+    /// name, and it is often already taken by a row discovery added.  Naming
+    /// them here would be a second implementation of a rule the core owns, and
+    /// the same folder would end up called one thing when discovery found it
+    /// and another when the picker did.  A core that cannot answer leaves the
     /// basename in an editable field, which is the screen this step already
     /// has for a name that needs correcting.
-    func addDirectory(_ path: String) async {
-        let label = (path as NSString).lastPathComponent
-        let named = await OpenShrimpCLI.name(
-            directory: path, taken: rows.map { trimmed($0.name) })
+    ///
+    /// The rows appear before the answer does, under that same basename.  The
+    /// core is a spawn away — long enough that appending only on its return
+    /// dismisses the panel onto a list that does not change — and the basename
+    /// is what an unanswerable call would have left anyway, so showing it
+    /// early costs nothing that was ever guaranteed.
+    func addDirectories(_ paths: [String]) async {
+        guard !paths.isEmpty else { return }
+        let first = rows.count
         rows.append(
-            ProjectRow(name: named?.contextName ?? label, directory: path,
-                       label: label, chosen: true))
+            contentsOf: paths.map { path in
+                let label = (path as NSString).lastPathComponent
+                return ProjectRow(name: label, directory: path, label: label, chosen: true)
+            })
         message = nil
+
+        // Named against what the list held before these rows joined it: the
+        // placeholders are not names anybody chose, and counting them as taken
+        // would push every real answer onto a "-2".
+        let names = await OpenShrimpCLI.names(
+            for: paths, taken: rows.prefix(first).map { trimmed($0.name) })
+
+        // Only where the placeholder is still standing: the answer took a spawn
+        // to arrive, and a user who typed over it in the meantime has said what
+        // they want that project called.
+        for (offset, name) in names.enumerated() where first + offset < rows.count {
+            let row = rows[first + offset]
+            if row.name == row.label { rows[first + offset].name = name }
+        }
     }
 
     /// The backends worth putting in a picker: the ones this host can start.
@@ -667,9 +683,10 @@ final class SetupWizardModel: ObservableObject {
         // The bootstrap runs the same self-installing binary, and its first run
         // unpacks an interpreter underneath it.  A second launch racing that
         // leaves an installation directory that exists but holds no project,
-        // which the launcher then skips installing into forever.  Only the
-        // bootstrap is waited for: discovery reads a catalog and probes
-        // sandboxes, and this write depends on neither.
+        // which the launcher then skips installing into forever.  This is the
+        // only place that wait is a decision: the reads the import step makes
+        // are already behind it, and this write is the one thing that must not
+        // start before the unpack whether the user visited that step or not.
         await warmup?.value
 
         let failure = await OpenShrimpCLI.writeConfig(

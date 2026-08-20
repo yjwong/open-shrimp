@@ -515,10 +515,14 @@ def sandbox_offers(config: Config | None = None) -> list[SandboxOffer]:
     """
     offers: list[SandboxOffer] = []
     for backend in sorted(_SANDBOX_BACKENDS):
-        if not checks_for_backend(backend):
+        # One expression of the platform filter, not two: the empty list *is*
+        # the "nothing here applies" answer, so asking `checks_for_backend`
+        # separately would be a second reading of it that can disagree.
+        outcomes = prerequisites(backend, config)
+        if not outcomes:
             continue
         label, summary = _SANDBOX_LABELS[backend]
-        failed = [o for o in prerequisites(backend, config) if not o.ok]
+        failed = [o for o in outcomes if not o.ok]
         # The check's own name is dropped where it repeats the backend's, so a
         # single-prerequisite backend reads as "Docker — docker CLI not found"
         # rather than naming Docker twice in one line.

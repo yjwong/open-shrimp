@@ -216,13 +216,17 @@ def _parse_args() -> argparse.Namespace:
     )
     sub_projects_name.add_argument(
         "--path",
+        action="append",
         required=True,
-        help="The folder to name",
+        metavar="PATH",
+        help="A folder to name; repeat to name a whole selection at once",
     )
     sub_projects_name.add_argument(
         "--taken",
-        default="",
-        help="Comma-separated names already spoken for, so the answer is unique",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="A name already spoken for, so the answer is unique; repeat per name",
     )
     sub_projects_name.add_argument(
         "--json",
@@ -622,6 +626,12 @@ def _emit_projects(projects: list[ClaudeProject], *, json_output: bool) -> int:
     of folders, so they answer it in the same shape: a GUI that has a decoder
     for one has a decoder for both, and cannot end up naming a folder it picked
     differently from one the core found.
+
+    The text listing carries both names, because they are different answers to
+    different questions: ``talenthub.glints.com`` is the folder a person
+    recognises and ``talenthub-glints-com`` is what they will type after
+    ``/context``.  A listing with only one of them leaves the reader mapping it
+    onto their own filesystem by eye.
     """
     if json_output:
         json.dump(
@@ -641,7 +651,9 @@ def _emit_projects(projects: list[ClaudeProject], *, json_output: bool) -> int:
         sys.stdout.write("\n")
     else:
         for project in projects:
-            print(f"{project.context_name:<24} {project.directory}")
+            print(
+                f"{project.context_name:<24} {project.name:<24} {project.directory}"
+            )
     return 0
 
 
@@ -658,29 +670,31 @@ def _run_projects_discover(*, json_output: bool) -> int:
     return _emit_projects(discover_claude_projects(), json_output=json_output)
 
 
-def _run_projects_name(*, path: str, taken: str, json_output: bool) -> int:
-    """What one folder the user picked by hand should be called.
+def _run_projects_name(*, paths: list[str], taken: list[str], json_output: bool) -> int:
+    """What the folders the user picked by hand should be called.
 
-    The rule for a legal context name has one implementation, in ``config``,
-    and a folder name is under no obligation to obey it — so a front end with a
-    folder picker asks here rather than offering the basename.  Without this a
-    folder found by discovery and the same folder picked by hand are named
-    differently by the same wizard.
+    The rule for a legal context name has one implementation, and a folder name
+    is under no obligation to obey it — so a front end with a folder picker
+    asks here rather than offering the basename.  Without this a folder found
+    by discovery and the same folder picked by hand are named differently by
+    the same wizard.
 
-    *taken* is what the caller has already used, because uniqueness is a
+    A whole selection is named in one call, so a picker that allows several
+    folders pays one spawn and their uniqueness against each other is settled
+    where uniqueness is already owned, rather than by the caller looping.
+    *taken* is what the caller has already used, because uniqueness is also a
     property of the list being built and only the caller knows it.
     """
-    from open_shrimp.backend.claude_sdk.projects import ClaudeProject
-    from open_shrimp.config import unique_context_name
+    from open_shrimp.backend.claude_sdk.projects import name_directory
 
-    directory = str(Path(path).expanduser())
-    label = Path(directory).name or directory
-    already = {name for name in (part.strip() for part in taken.split(",")) if name}
+    already = set(taken)
+    named = []
+    for path in paths:
+        project = name_directory(path, already)
+        already.add(project.context_name)
+        named.append(project)
 
-    return _emit_projects(
-        [ClaudeProject(directory, label, unique_context_name(label, already), None)],
-        json_output=json_output,
-    )
+    return _emit_projects(named, json_output=json_output)
 
 
 def _run_sandboxes(*, json_output: bool) -> int:
@@ -914,7 +928,7 @@ def main() -> None:
         if args.projects_command == "name":
             sys.exit(
                 _run_projects_name(
-                    path=args.path, taken=args.taken, json_output=args.json
+                    paths=args.path, taken=args.taken, json_output=args.json
                 )
             )
         print(

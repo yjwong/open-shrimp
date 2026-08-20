@@ -61,12 +61,21 @@ internal static class OpenShrimpCli
 {
     private sealed record CliResult(int ExitCode, string Stdout, string Stderr);
 
-    private static async Task<CliResult> RunAsync(string arguments, string? stdin, CancellationToken ct)
+    /// <summary>
+    /// Runs the core once with the given argv.
+    ///
+    /// Argument by argument, never one command line: the arguments carry
+    /// folders the user picked and names they typed, so a quote or a space in
+    /// one would otherwise reshape the argv the core parses. Windows has no
+    /// argv — the OS passes a single string — and letting the runtime do the
+    /// quoting is what keeps a second, hand-rolled quoter out of this file.
+    /// </summary>
+    private static async Task<CliResult> RunAsync(
+        IEnumerable<string> arguments, string? stdin, CancellationToken ct)
     {
         var psi = new ProcessStartInfo
         {
             FileName = CorePaths.CoreExecutable,
-            Arguments = arguments,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardInput = stdin is not null,
@@ -80,6 +89,9 @@ internal static class OpenShrimpCli
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardErrorEncoding = new UTF8Encoding(false),
         };
+
+        foreach (var argument in arguments)
+            psi.ArgumentList.Add(argument);
 
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException($"Could not start {psi.FileName}");
@@ -109,10 +121,50 @@ internal static class OpenShrimpCli
     /// installation directory that exists but holds no project, and the
     /// launcher skips installing whenever that directory is present, so it
     /// never heals on its own.
+    ///
+    /// Serialised across callers, because there is more than one: the
+    /// supervisor warms the runtime as it starts, and the wizard warms it
+    /// before reading the model catalog. Two bootstraps against the same
+    /// installation directory are what leave it in the half-written state
+    /// above. A call made after one finishes starts its own, because what it
+    /// checks may since have changed.
+    ///
+    /// <paramref name="ct"/> ends this caller's wait and nothing else: the
+    /// install runs to completion unsupervised, which is the only thing that
+    /// keeps its directory from being left half-written, and a caller that
+    /// stopped waiting is told so rather than thrown at.
     /// </summary>
     public static async Task<string?> EnsureRuntimeAsync(CancellationToken ct = default)
     {
-        var reason = await ProbeAsync(ct).ConfigureAwait(false);
+        Task<string?> bootstrap;
+        lock (BootstrapLock)
+        {
+            if (_bootstrap is not { IsCompleted: false })
+                _bootstrap = BootstrapAsync();
+            bootstrap = _bootstrap;
+        }
+
+        try
+        {
+            return await bootstrap.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return "Stopped waiting for the runtime install";
+        }
+    }
+
+    private static readonly object BootstrapLock = new();
+    private static Task<string?>? _bootstrap;
+
+    /// <summary>
+    /// The install itself, run on no caller's token: whoever started it may
+    /// walk away, and an install abandoned partway is the state that never
+    /// heals.
+    /// </summary>
+    private static async Task<string?> BootstrapAsync()
+    {
+        var reason = await ProbeAsync().ConfigureAwait(false);
         if (reason is null) return null;
 
         // Rebuilding the installation is the only way out of the half-written
@@ -120,28 +172,30 @@ internal static class OpenShrimpCli
         // because the probe already failed.
         try
         {
-            var restore = await RunAsync("self restore", null, ct).ConfigureAwait(false);
+            var restore = await RunAsync(
+                new[] { "self", "restore" }, null, CancellationToken.None).ConfigureAwait(false);
             if (restore.ExitCode != 0) return reason;
         }
         catch (Exception)
         {
-            // Could not be run at all, or the caller stopped waiting. Either
-            // way the probe failure is the more useful of the two to report.
-            // A build with no management command needs no special case: it
-            // rejects the arguments and fails the exit-code check above.
+            // Could not be run at all. The probe failure is the more useful of
+            // the two to report. A build with no management command needs no
+            // special case: it rejects the arguments and fails the exit-code
+            // check above.
             return reason;
         }
 
-        return await ProbeAsync(ct).ConfigureAwait(false);
+        return await ProbeAsync().ConfigureAwait(false);
     }
 
     /// <summary>Runs the one core command that reads no config and touches no state.</summary>
-    private static async Task<string?> ProbeAsync(CancellationToken ct)
+    private static async Task<string?> ProbeAsync()
     {
         CliResult result;
         try
         {
-            result = await RunAsync("--version", null, ct).ConfigureAwait(false);
+            result = await RunAsync(
+                new[] { "--version" }, null, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -172,7 +226,7 @@ internal static class OpenShrimpCli
     /// screen each caller already has.
     /// </summary>
     private static async Task<IReadOnlyList<T>> ListAsync<T>(
-        string arguments, string key, CancellationToken ct)
+        IEnumerable<string> arguments, string key, CancellationToken ct)
     {
         try
         {
@@ -194,7 +248,7 @@ internal static class OpenShrimpCli
     /// blocking the wizard on a catalog it can only offer as a convenience.
     /// </summary>
     public static Task<IReadOnlyList<ModelChoice>> GetModelsAsync(CancellationToken ct = default) =>
-        ListAsync<ModelChoice>("models --json", "models", ct);
+        ListAsync<ModelChoice>(new[] { "models", "--json" }, "models", ct);
 
     /// <summary>
     /// The projects the core found worth offering to import.
@@ -207,7 +261,8 @@ internal static class OpenShrimpCli
     /// </summary>
     public static Task<IReadOnlyList<DiscoveredProject>> GetProjectsAsync(
         CancellationToken ct = default) =>
-        ListAsync<DiscoveredProject>("projects discover --json", "projects", ct);
+        ListAsync<DiscoveredProject>(
+            new[] { "projects", "discover", "--json" }, "projects", ct);
 
     /// <summary>
     /// What one folder the user picked should be called as a context.
@@ -219,16 +274,27 @@ internal static class OpenShrimpCli
     /// rule, and the same folder would be named one way when discovery found
     /// it and another when the picker did. <paramref name="taken"/> is what
     /// the list already holds, because uniqueness is a property of that list
-    /// and only the caller knows what is in it.
+    /// and only the caller knows what is in it — one flag per name, because
+    /// those names come from editable fields, so a separator character in one
+    /// is the user's text and not a delimiter.
+    ///
+    /// Null when the core could not answer, which the caller renders as the
+    /// basename in an editable box.
     /// </summary>
-    public static async Task<DiscoveredProject?> GetProjectNameAsync(
+    public static async Task<string?> GetProjectNameAsync(
         string directory, IEnumerable<string> taken, CancellationToken ct = default)
     {
-        var rows = await ListAsync<DiscoveredProject>(
-            $"projects name --path \"{directory}\" --taken \"{string.Join(",", taken)}\" --json",
-            "projects",
-            ct).ConfigureAwait(false);
-        return rows.Count == 0 ? null : rows[0];
+        var arguments = new List<string> { "projects", "name", "--path", directory };
+        foreach (var name in taken)
+        {
+            arguments.Add("--taken");
+            arguments.Add(name);
+        }
+        arguments.Add("--json");
+
+        var rows = await ListAsync<DiscoveredProject>(arguments, "projects", ct)
+            .ConfigureAwait(false);
+        return rows.Count == 0 ? null : rows[0].ContextName;
     }
 
     /// <summary>
@@ -240,7 +306,7 @@ internal static class OpenShrimpCli
     /// </summary>
     public static Task<IReadOnlyList<SandboxChoice>> GetSandboxesAsync(
         CancellationToken ct = default) =>
-        ListAsync<SandboxChoice>("sandboxes --json", "sandboxes", ct);
+        ListAsync<SandboxChoice>(new[] { "sandboxes", "--json" }, "sandboxes", ct);
 
     /// <summary>Writes config.yaml. Returns null on success, else the reason.</summary>
     public static async Task<string?> WriteConfigAsync(ConfigWriteRequest request, CancellationToken ct = default)
@@ -250,7 +316,8 @@ internal static class OpenShrimpCli
         {
             var payload = JsonSerializer.Serialize(request, ControlJson.Options);
             result = await RunAsync(
-                $"config write --config \"{CorePaths.ConfigFile}\" --json -", payload, ct).ConfigureAwait(false);
+                new[] { "config", "write", "--config", CorePaths.ConfigFile, "--json", "-" },
+                payload, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

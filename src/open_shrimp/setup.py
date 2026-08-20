@@ -28,12 +28,12 @@ except ImportError:
     readline = None  # type: ignore[assignment]
 
 from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
+from open_shrimp.backend.claude_sdk.projects import name_directory
 from open_shrimp.config import (
     RESERVED_CONTEXT_NAME,
     _validate_context_name,
     build_context_dict,
     check_directory,
-    unique_context_name,
 )
 
 
@@ -185,13 +185,12 @@ def _prompt_choice(label: str, count: int, *, default: str | None = None) -> int
     """
 
     def _check(value: str) -> str | None:
+        problem = f"Enter a number between 1 and {count}."
         try:
             choice = int(value)
         except ValueError:
-            return f"Enter a number between 1 and {count}."
-        if not 1 <= choice <= count:
-            return f"Enter a number between 1 and {count}."
-        return None
+            return problem
+        return None if 1 <= choice <= count else problem
 
     return int(_prompt(label, default=default, validator=_check))
 
@@ -515,7 +514,9 @@ def _prompt_manual_project(taken: set[str]) -> _Project:
             f"Folder (absolute path{hint})",
             validator=_validate_directory,
         )
-    label = Path(directory).expanduser().name or directory
+    # Named by the same code that names a discovered folder, so a folder typed
+    # here and the same folder found by discovery cannot come out differently.
+    named = name_directory(directory, taken)
 
     def _check(value: str) -> str | None:
         error = _validate_context_name(value)
@@ -530,10 +531,10 @@ def _prompt_manual_project(taken: set[str]) -> _Project:
     # make them invent one.
     name = _prompt(
         "Call it (this is the name you'll type after /context)",
-        default=unique_context_name(label, taken),
+        default=named.context_name,
         validator=_check,
     )
-    return _Project(name, directory, label, True)
+    return _Project(name, named.directory, named.name, True)
 
 
 def _prompt_sandbox(count: int) -> str | None:
