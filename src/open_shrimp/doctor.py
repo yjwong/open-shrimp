@@ -583,13 +583,29 @@ _BLESSED_BACKEND: dict[str, str] = {
 
 # What "Enable sandbox" promises, in the words of somebody who has never heard
 # of a hypervisor.  Beside the backends rather than in the three wizards, so
-# the promise is the same sentence on every platform — which it can be,
-# because every blessed backend is a virtual machine.  A blessed backend that
-# is not one would make this sentence a lie, which is why the pin test reads
-# it against the labels rather than taking it on trust.
+# the promise is the same sentence on every platform.
+#
+# Outcome only, no mechanism.  "Virtual machine" is the same category of word
+# as libvirt and Hyper-V — the category this question exists to stop showing
+# people — and explaining "sandbox" with it explains one unfamiliar word using
+# another.  What the mechanism was really carrying is the *cost*, so that is
+# said directly: a first turn that quietly downloads an image reads as a hang
+# unless something warned it would take a while.
+#
+# The off state and the price are named here rather than left to each wizard,
+# because a caption that sells only the upside is not the choice being made.
+# Both figures are ceilings a context may raise, not amounts taken up front:
+# the memory ceiling returns unused pages to the host through free-page
+# reporting, and the disk is a sparse overlay.  "Up to" is what makes them
+# true — the numbers themselves come from SandboxConfig's defaults, which is
+# also why they are not repeated as literals here.
+_SANDBOX_DEFAULTS = SandboxConfig(backend="libvirt")
 SANDBOX_SUMMARY = (
-    "Each project runs in its own virtual machine, so anything you send me in "
-    "Telegram reaches that project's folder and nothing else on this computer."
+    "Safer: anything you send me in Telegram can reach that project's folder "
+    "and nothing else on this computer. Left off, it can reach everything. "
+    "The price is that each project takes a few minutes to start the first "
+    f"time, and while it runs it uses up to {_SANDBOX_DEFAULTS.memory // 1024} "
+    f"GB of memory and {_SANDBOX_DEFAULTS.disk_size} GB of disk."
 )
 
 

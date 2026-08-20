@@ -145,25 +145,25 @@ def test_a_platform_with_no_blessed_backend_offers_nothing(
     assert doctor.blessed_offer(None) is None
 
 
-def test_the_shared_promise_holds_for_every_blessed_backend(
+def test_the_shared_promise_names_no_mechanism(
     monkeypatch: pytest.MonkeyPatch, all_pass: None
 ) -> None:
-    """``SANDBOX_SUMMARY`` says "its own virtual machine" to every platform at
-    once, which is only true while every blessed backend is one.
+    """One sentence goes to every platform, so it may only claim what is true
+    on all of them — and the safest way to hold that is to claim no mechanism.
 
-    Blessing a container backend would turn the one sentence the wizards
-    share into a lie, silently and on one platform only — nothing else in the
-    code reads the summary against the backend it describes.
+    Naming one also explains "sandbox" with a word no less technical, which
+    is the failure this question was reshaped to avoid.  Pinned rather than
+    left to review because a mechanism reads as helpful detail while it is
+    being written.
     """
     for system in ("Linux", "Darwin", "Windows"):
         _on(monkeypatch, system)
-        backend = doctor.blessed_backend()
-        assert backend is not None
-        _, summary = doctor._SANDBOX_LABELS[backend]
-        assert "virtual machine" in summary, (
-            f"{backend} is blessed on {system} but is not a virtual machine, "
-            f"so SANDBOX_SUMMARY does not describe it"
-        )
+        assert doctor.blessed_backend() is not None
+
+    lowered = doctor.SANDBOX_SUMMARY.lower()
+    for word in ("virtual machine", "vm", "container", "hypervisor", "lima",
+                 "libvirt", "docker", "hyper-v", "linux"):
+        assert word not in lowered, f"the shared note names a mechanism: {word!r}"
 
 
 def test_every_case_of_the_sandbox_note_says_something(

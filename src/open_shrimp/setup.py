@@ -574,11 +574,10 @@ def _prompt_sandbox() -> str | None:
             print("in Telegram.")
         return None
 
+    # What "off" costs is in the note, so it is not said twice here: the three
+    # wizards share one sentence precisely so the terminal cannot make a
+    # promise the GUIs do not.
     print()
-    print("Left off, your projects run directly on this computer —")
-    print("and so does anything you send me in Telegram.")
-    print()
-
     return offer.backend if _prompt_yes_no("Enable sandbox") else None
 
 
