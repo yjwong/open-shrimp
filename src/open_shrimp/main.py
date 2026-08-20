@@ -801,8 +801,10 @@ def _run_sandbox_prefetch(
     "state": "ready"}`` as each asset lands, and a closing ``{"state":
     "finished"}``.  ``total`` is absent — never zero — when the server sent
     no ``Content-Length``, so a front end renders it as indeterminate.
-    Failure exits non-zero with the reason on stderr, the same contract
-    ``sandboxes --json`` follows.
+    Failure adds a closing ``{"state": "error", "reason": …}`` and exits
+    non-zero; the reason a front end shows comes from there and not from
+    stderr, which carries it surrounded by whatever the logging handlers
+    wrote.
     """
     from open_shrimp.doctor import _load_config, blessed_offer
     from open_shrimp.sandbox.prefetch import prefetch

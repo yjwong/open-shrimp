@@ -50,6 +50,29 @@ internal sealed record ProjectRow(
     CheckBox Tick, TextBox NameBox, string Directory, string Label);
 
 /// <summary>
+/// How far the sandbox's shared assets have got.
+///
+/// <c>Failed</c> is a state the wizard reports and then carries on from: the
+/// download is an optimisation, and a first turn that pays for it is exactly
+/// what happens without one. Nothing here may block Finish.
+/// </summary>
+internal abstract record PrefetchState
+{
+    /// <summary>Nothing to fetch, or nothing being fetched. Draws no row.</summary>
+    internal sealed record Idle : PrefetchState;
+
+    /// <summary>
+    /// <c>Fraction</c> is null while no asset has reported a length to divide
+    /// by, which is a spinner rather than a bar stuck at zero.
+    /// </summary>
+    internal sealed record Running(double? Fraction) : PrefetchState;
+
+    internal sealed record Done : PrefetchState;
+
+    internal sealed record Failed(string Reason) : PrefetchState;
+}
+
+/// <summary>
 /// First-run wizard: bot token, enrollment, projects.
 ///
 /// The reason the core grew a non-interactive "config write": the terminal
@@ -70,6 +93,17 @@ public sealed partial class SetupWindow : Window
     private SandboxOffering? _sandbox;
     private readonly List<ProjectRow> _rows = new();
 
+    // The sandbox's shared assets, while they are still this window's to stop.
+    // Released rather than cancelled once the config is written, because a
+    // config that asks for a sandbox wants the download to outlive the wizard.
+    private CancellationTokenSource? _prefetch;
+    private PrefetchState _prefetchState = new PrefetchState.Idle();
+    // Held rather than reached for through the window: a DispatcherQueue is
+    // agile and may be used from any thread, but the window that hands one out
+    // is a XAML object and answering from a thread pool thread is what raises
+    // RPC_E_WRONG_THREAD. Read once, here, where the UI thread is the caller.
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher;
+
     private EnrollStage _stage = EnrollStage.Waiting;
     private EnrollmentWindow? _window;
     private EnrollmentCandidate? _candidate;
@@ -82,6 +116,7 @@ public sealed partial class SetupWindow : Window
     public SetupWindow()
     {
         InitializeComponent();
+        _dispatcher = DispatcherQueue;
         ApplySystemAppearance();
         BuildDots();
         // Started here rather than when the import step is reached: the answer
@@ -94,7 +129,19 @@ public sealed partial class SetupWindow : Window
         // Ends any open enrollment window with the wizard. A poll left running
         // behind a window nobody is looking at is exactly the case the window's
         // expiry exists for; this closes it the moment it stops being watched.
-        Closed += (_, _) => StopPolling();
+        //
+        // An abandoned wizard wrote no config, so nothing will ever ask for the
+        // assets it was fetching — but a finished one did, and its download is
+        // the first turn's wait being paid early. Only the first is stopped.
+        Closed += (_, _) =>
+        {
+            StopPolling();
+            // Unconditional, because what a finished wizard leaves behind is a
+            // null reference: writing the config hands the download on, so
+            // there is nothing here left to cancel. A window that has gone also
+            // draws nothing, which taking the state to Idle is what says.
+            StopPrefetch();
+        };
     }
 
     // -- Appearance ---------------------------------------------------------
@@ -274,6 +321,11 @@ public sealed partial class SetupWindow : Window
         {
             ShowStep(_step + 1);
             if (_step == 1) await StartEnrollmentAsync();
+            // Here rather than when the offering lands: this is the first
+            // moment the user has settled on projects and left the sandbox
+            // ticked, and fetching gigabytes for a wizard somebody might
+            // abandon on the token step is not a head start worth taking.
+            if (_step == StepCount - 1) StartPrefetch();
             return;
         }
         await FinishAsync();
@@ -793,6 +845,164 @@ public sealed partial class SetupWindow : Window
         SandboxNote.Text = _sandbox.Note;
     }
 
+    // -- The sandbox download -----------------------------------------------
+
+    private void SandboxTicked(object sender, RoutedEventArgs e) => StartPrefetch();
+
+    /// <summary>
+    /// Unticking gives up on the assets: the config about to be written asks
+    /// for no sandbox, so nothing will ever open them.
+    /// </summary>
+    private void SandboxUnticked(object sender, RoutedEventArgs e)
+    {
+        StopPrefetch();
+        ShowPrefetch(new PrefetchState.Idle());
+    }
+
+    /// <summary>
+    /// Start fetching the sandbox's shared assets, if there are any to fetch.
+    ///
+    /// Started on the way into the last step rather than when Finish is
+    /// pressed, so it runs while the user reads the autostart row — the common
+    /// case being that it has finished before they click anything. Finish never
+    /// waits on it and never fails for it: the download is the first turn's
+    /// wait paid early, and not paying it costs only that wait.
+    ///
+    /// Only where the sandbox can actually be turned on, and only once: a tick,
+    /// untick and re-tick must not leave two cores downloading into the same
+    /// directory.
+    /// </summary>
+    private void StartPrefetch()
+    {
+        if (_sandbox?.Available != true || SandboxBox.IsChecked != true) return;
+        if (_prefetch is not null) return;
+
+        var cancellation = new CancellationTokenSource();
+        _prefetch = cancellation;
+        // No length reported yet, so the bar spins rather than sitting at zero
+        // pretending to know how far along it is.
+        ShowPrefetch(new PrefetchState.Running(null));
+
+        // Weakly, because the reporting outlives this window whenever Finish is
+        // pressed — the download is deliberately not cancelled there — and a
+        // strong capture would hold a closed wizard's whole visual tree, and its
+        // native peers, until the last byte of a multi-gigabyte image lands.
+        var target = new WeakReference<SetupWindow>(this);
+        var dispatcher = _dispatcher;
+
+        void Report(SandboxPrefetchEvent evt)
+        {
+            // A window that has gone, or a row already settled, is not worth
+            // waking the UI thread for. Read from the reader's thread and
+            // re-checked on the UI thread by the handler itself, which is what
+            // makes a stale read here harmless.
+            if (!target.TryGetTarget(out var window)) return;
+            if (window._prefetchState is not PrefetchState.Running) return;
+            dispatcher.TryEnqueue(() => window.ApplyPrefetchEvent(evt));
+        }
+
+        // Off the UI thread: everything before the first await in the reader
+        // runs on the caller, and that includes starting the core — a
+        // CreateProcess plus an on-access scan of a large binary, which is a
+        // visible hitch on a step transition that is otherwise instant.
+        _ = Task.Run(() => RunPrefetchAsync(Report, cancellation.Token));
+    }
+
+    /// <summary>
+    /// Static, and reporting only through <paramref name="report"/>: a member
+    /// method here would capture the window in the task that outlives it.
+    /// </summary>
+    private static async Task RunPrefetchAsync(
+        Action<SandboxPrefetchEvent> report, CancellationToken ct)
+    {
+        var failure = await OpenShrimpCli.PrefetchSandboxAsync(report, ct)
+            .ConfigureAwait(false);
+
+        if (ct.IsCancellationRequested) return;
+        // How the process ended is the stream's last word, delivered the way
+        // the rest of it was, so one handler settles the row on every path.
+        report(failure is null
+            ? new SandboxPrefetchEvent.Finished()
+            : new SandboxPrefetchEvent.Failed(failure));
+    }
+
+    /// <summary>
+    /// Draw one event. Every callback arrives on a thread pool thread, so this
+    /// runs only through the dispatcher — a XAML property set off the UI thread
+    /// throws rather than repaints.
+    /// </summary>
+    private void ApplyPrefetchEvent(SandboxPrefetchEvent evt)
+    {
+        // Cancelled, or already settled: an event still in flight when the box
+        // was unticked must not put the row back on screen, and the exit that
+        // follows a finish does not overrule it.
+        if (_prefetchState is not PrefetchState.Running) return;
+
+        PrefetchState? next = evt switch
+        {
+            SandboxPrefetchEvent.Progress { Total: > 0 } progress =>
+                new PrefetchState.Running(
+                    Math.Min(1, (double)progress.Done / progress.Total.Value)),
+            SandboxPrefetchEvent.Finished => new PrefetchState.Done(),
+            SandboxPrefetchEvent.Failed failed => new PrefetchState.Failed(failed.Reason),
+            // A tick carrying no total is a length the server never reported,
+            // and the spinner already running is the honest answer to it.
+            _ => null,
+        };
+        if (next is not null) ShowPrefetch(next);
+    }
+
+    /// <summary>
+    /// The row, drawn from the one value that decides it.
+    ///
+    /// Every property on every path, as <see cref="ShowStage"/> does for
+    /// enrollment: a renderer that touches only the properties its own case
+    /// cares about leaves the others saying what the last case set.
+    /// </summary>
+    private void ShowPrefetch(PrefetchState state)
+    {
+        _prefetchState = state;
+        var running = state as PrefetchState.Running;
+
+        // Reserves no height when idle: a bar that appears is a bar somebody
+        // reads, and one that is always there with nothing in it is furniture.
+        PrefetchRow.Visibility =
+            state is PrefetchState.Idle ? Visibility.Collapsed : Visibility.Visible;
+        // The bar goes once there is a sentence instead: one beside it invites
+        // a wait that is over.
+        PrefetchBar.Visibility = running is null ? Visibility.Collapsed : Visibility.Visible;
+        // Cleared on every path, not only the ones that show it: an
+        // indeterminate bar keeps animating while collapsed.
+        PrefetchBar.IsIndeterminate = running is { Fraction: null };
+        PrefetchBar.Value = running?.Fraction ?? 0;
+        PrefetchCaption.Text = state switch
+        {
+            PrefetchState.Running => "Getting things ready…",
+            PrefetchState.Done => "Ready — your first project will start straight away.",
+            // The core's own words, plus what they cost. Never an error tone
+            // and never a blocker: setup succeeded, and all that is missing is
+            // a head start.
+            PrefetchState.Failed failed =>
+                $"{failed.Reason} Your first project will take longer to start.",
+            _ => "",
+        };
+    }
+
+    /// <summary>
+    /// Stop the download. Whatever landed stays on disk: it is exactly what a
+    /// later first turn would fetch.
+    ///
+    /// Touches no element, so the close handler can call it on a tree that is
+    /// being torn down.
+    /// </summary>
+    private void StopPrefetch()
+    {
+        _prefetchState = new PrefetchState.Idle();
+        _prefetch?.Cancel();
+        _prefetch?.Dispose();
+        _prefetch = null;
+    }
+
     /// <summary>Append one row, ticked, to the import list.</summary>
     private void AddProjectRow(string name, string directory, string label)
     {
@@ -893,6 +1103,11 @@ public sealed partial class SetupWindow : Window
                 await ShowDialogAsync("Could not write the config", error);
                 return;
             }
+
+            // A written config asks for the assets being fetched, so the
+            // download stops being this window's to cancel: dropping the
+            // reference is what lets it outlive the wizard closing.
+            _prefetch = null;
 
             var complete = $"OpenShrimp will start now. Say hello to @{_verifiedUsername} on Telegram.";
 

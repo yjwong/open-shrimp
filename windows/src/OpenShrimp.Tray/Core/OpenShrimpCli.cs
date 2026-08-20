@@ -63,6 +63,41 @@ internal sealed record SandboxReport(
     [property: JsonPropertyName("sandbox")] SandboxOffering Sandbox);
 
 /// <summary>
+/// One line of the core's prefetch NDJSON, as it arrives.
+///
+/// Every field is nullable because the stream carries three shapes down one
+/// pipe; <see cref="SandboxPrefetchEvent"/> is what a caller reads, and this
+/// exists only to be deserialized into.
+/// </summary>
+internal sealed record PrefetchLine(
+    [property: JsonPropertyName("asset")] string? Asset,
+    [property: JsonPropertyName("state")] string? State,
+    // Set on the error line and nowhere else.
+    [property: JsonPropertyName("reason")] string? Reason,
+    [property: JsonPropertyName("done")] long? Done,
+    // Absent, never zero, where the server sent no Content-Length. Nullable is
+    // what keeps that distinction: a length nobody reported renders as
+    // indeterminate, and a zero denominator is a bar that never moves.
+    [property: JsonPropertyName("total")] long? Total);
+
+/// <summary>
+/// One event of the core's prefetch progress.
+///
+/// Three shapes rather than one record of nullables, because the caller does
+/// something different with each and a <c>Done</c> that is null wherever a
+/// state is set would have to be checked for at every use.
+/// </summary>
+internal abstract record SandboxPrefetchEvent
+{
+    internal sealed record Progress(string Asset, long Done, long? Total) : SandboxPrefetchEvent;
+
+    internal sealed record Finished : SandboxPrefetchEvent;
+
+    /// <summary>Why it stopped, in one sentence meant to be shown as it is.</summary>
+    internal sealed record Failed(string Reason) : SandboxPrefetchEvent;
+}
+
+/// <summary>
 /// Drives the core's non-interactive CLI.
 ///
 /// The wizard has to write config.yaml before any core exists, so it cannot
@@ -75,7 +110,8 @@ internal static class OpenShrimpCli
     private sealed record CliResult(int ExitCode, string Stdout, string Stderr);
 
     /// <summary>
-    /// Runs the core once with the given argv.
+    /// How every core spawn in this file is described, whether its output is
+    /// read to the end or streamed.
     ///
     /// Argument by argument, never one command line: the arguments carry
     /// folders the user picked and names they typed, so a quote or a space in
@@ -83,28 +119,37 @@ internal static class OpenShrimpCli
     /// argv — the OS passes a single string — and letting the runtime do the
     /// quoting is what keeps a second, hand-rolled quoter out of this file.
     /// </summary>
-    private static async Task<CliResult> RunAsync(
-        IEnumerable<string> arguments, string? stdin, CancellationToken ct)
+    private static ProcessStartInfo CoreStartInfo(
+        IEnumerable<string> arguments, bool redirectStdin = false)
     {
         var psi = new ProcessStartInfo
         {
             FileName = CorePaths.CoreExecutable,
             UseShellExecute = false,
             CreateNoWindow = true,
-            RedirectStandardInput = stdin is not null,
+            RedirectStandardInput = redirectStdin,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             // All three, not just the output pair: the config payload carries
             // the folder the user picked, so a non-ASCII username or path would
             // otherwise be written in the console codepage and reach the core
             // as mojibake — or kill it outright with a decode error.
-            StandardInputEncoding = stdin is null ? null : new UTF8Encoding(false),
+            StandardInputEncoding = redirectStdin ? new UTF8Encoding(false) : null,
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardErrorEncoding = new UTF8Encoding(false),
         };
 
         foreach (var argument in arguments)
             psi.ArgumentList.Add(argument);
+
+        return psi;
+    }
+
+    /// <summary>Runs the core once with the given argv, reading its output to the end.</summary>
+    private static async Task<CliResult> RunAsync(
+        IEnumerable<string> arguments, string? stdin, CancellationToken ct)
+    {
+        var psi = CoreStartInfo(arguments, redirectStdin: stdin is not null);
 
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException($"Could not start {psi.FileName}");
@@ -363,6 +408,120 @@ internal static class OpenShrimpCli
         CancellationToken ct = default) =>
         (await JsonAsync<SandboxReport>(new[] { "sandboxes", "--json" }, ct)
             .ConfigureAwait(false))?.Sandbox;
+
+    /// <summary>
+    /// Download the shared assets the sandbox needs, reporting as they land.
+    ///
+    /// Returns null once every asset is present — and on cancellation, which
+    /// is not a failure anybody asked to be told about — else the reason it
+    /// stopped. That reason is read off the stream's own error event and never
+    /// off stderr: the core's logging handlers write there too, so what stderr
+    /// carries is the reason with an unpredictable number of log lines around
+    /// it, which is how "limactl not found, attempting auto-download" comes to
+    /// be shown to somebody as the explanation for a failure. Stderr is still
+    /// drained, because a core with plenty to say would otherwise block on a
+    /// pipe nobody is emptying.
+    ///
+    /// The only streamed call in this file: everything else asks a question and
+    /// reads the answer to the end, but a download that takes minutes is
+    /// exactly the thing that must not arrive all at once at the end.
+    /// </summary>
+    public static async Task<string?> PrefetchSandboxAsync(
+        Action<SandboxPrefetchEvent> onEvent, CancellationToken ct = default)
+    {
+        var psi = CoreStartInfo(new[] { "sandbox", "prefetch", "--json" });
+
+        Process process;
+        try
+        {
+            process = Process.Start(psi)
+                ?? throw new InvalidOperationException($"Could not start {psi.FileName}");
+        }
+        catch (Exception ex)
+        {
+            return $"Could not start the core: {ex.Message}";
+        }
+
+        using (process)
+        {
+            string? failure = null;
+
+            // One callback per line, because BeginOutputReadLine splits the
+            // pipe on newlines itself: a read boundary that falls inside a JSON
+            // object is reassembled by the runtime, so nothing here holds a
+            // partial tail. Null Data is end of stream, not a line.
+            process.OutputDataReceived += (_, e) =>
+            {
+                if (e.Data is null) return;
+                if (ParsePrefetchEvent(e.Data) is not { } evt) return;
+                if (evt is SandboxPrefetchEvent.Failed failed) failure = failed.Reason;
+                onEvent(evt);
+            };
+            // Drained and thrown away, for the reason in the summary above.
+            process.ErrorDataReceived += (_, _) => { };
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            try
+            {
+                await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Killed, not merely stopped listening to: a caller that
+                // cancels a multi-gigabyte download means the bytes to stop
+                // arriving. The whole tree, because the core is a launcher and
+                // the interpreter it spawns is what holds the socket.
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (Exception)
+                {
+                    // Exited between the cancel and the kill.
+                }
+                return null;
+            }
+
+            if (process.ExitCode == 0) return null;
+
+            // Written from the reader thread and read here: WaitForExitAsync
+            // does not return until the redirected streams have reached end of
+            // stream, so every callback has already run.
+            var reason = failure?.Trim();
+            return string.IsNullOrEmpty(reason) ? "The download did not finish." : reason;
+        }
+    }
+
+    /// <summary>
+    /// One line as something to act on, or null for one there is nothing to do
+    /// about — a malformed line, or the per-asset <c>ready</c> the wizard has
+    /// no use for.
+    /// </summary>
+    private static SandboxPrefetchEvent? ParsePrefetchEvent(string line)
+    {
+        PrefetchLine? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<PrefetchLine>(line, ControlJson.Options);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        if (parsed is null) return null;
+
+        return parsed.State switch
+        {
+            "finished" => new SandboxPrefetchEvent.Finished(),
+            // The reason is read here and never off stderr; an error event that
+            // arrived without one still ends the stream.
+            "error" => new SandboxPrefetchEvent.Failed(parsed.Reason ?? ""),
+            null when parsed.Asset is { } asset && parsed.Done is { } done =>
+                new SandboxPrefetchEvent.Progress(asset, done, parsed.Total),
+            _ => null,
+        };
+    }
 
     /// <summary>Writes config.yaml. Returns null on success, else the reason.</summary>
     public static async Task<string?> WriteConfigAsync(ConfigWriteRequest request, CancellationToken ct = default)

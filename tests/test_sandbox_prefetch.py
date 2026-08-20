@@ -333,6 +333,57 @@ def test_a_host_with_no_sandbox_at_all_says_so(monkeypatch, capsys):
     assert "nothing to prefetch" in capsys.readouterr().err
 
 
+# -- the asset a wizard's own config boots ------------------------------------
+
+
+def _wizard_sandbox(backend: str):
+    """The sandbox block a setup UI writes, parsed the way the core parses it.
+
+    Through both real functions rather than a hand-written dict: what a wizard
+    enables is exactly the question this file is pinning, so a literal here
+    would pin the assumption instead of the fact.
+    """
+    from open_shrimp.config import _parse_sandbox_config, build_context_dict
+
+    context = build_context_dict("/tmp", "a project", sandbox=backend)
+    return _parse_sandbox_config(context["sandbox"])
+
+
+def _recorded_downloads(monkeypatch) -> list[tuple[str, Path]]:
+    """Every ``(asset, destination)`` the HCS fetchers would have downloaded."""
+    from open_shrimp.sandbox import hcs_assets
+
+    seen: list[tuple[str, Path]] = []
+
+    def record(asset, dest, *, description, log=None, progress=None):
+        seen.append((asset, Path(dest)))
+        return Path(dest)
+
+    monkeypatch.setattr(hcs_assets, "ensure_asset", record)
+    return seen
+
+
+def test_the_hcs_prefetch_fetches_the_rootfs_that_config_will_boot(monkeypatch):
+    """Prefetching an image the first turn does not read is worse than not
+    prefetching at all: it spends the download twice, once on a file nothing
+    opens and once on the one it needed.
+
+    So the image is not named here.  It is asked of the backend, for the
+    sandbox block a setup UI actually writes — a claim in the prefetch about
+    what a wizard enables is the kind that cannot fail on its own.
+    """
+    from open_shrimp.sandbox import hcs
+
+    wanted = _wizard_sandbox("hcs")
+    asset, cache, _ = hcs.managed_rootfs_asset(computer_use=wanted.computer_use)
+
+    downloads = _recorded_downloads(monkeypatch)
+    for shared in P.shared_assets("hcs"):
+        shared.fetch(lambda done, total: None)
+
+    assert (asset, cache) in downloads
+
+
 # -- the fetchers -------------------------------------------------------------
 
 

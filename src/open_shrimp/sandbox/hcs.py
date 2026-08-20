@@ -121,6 +121,28 @@ def rootfs_cache_path(*, gui: bool = False) -> Path:
     return A.asset_dir() / ("gui-rootfs.vhdx" if gui else "base-rootfs.vhdx")
 
 
+def managed_rootfs_asset(*, computer_use: bool) -> tuple[str, Path, str]:
+    """The released rootfs template a context boots: asset, cache path, name.
+
+    The three together, for the same reason :func:`rootfs_cache_path` is one
+    spelling: what drifts is not the path alone but *which published asset
+    fills it*, and the backend, the presence check and the prefetch each have
+    to answer that identically.  A prefetch that pairs them by hand fills a
+    path nothing reads and leaves the first turn paying for the image it does.
+
+    A computer-use context takes the ``-gui`` image, which is built from the
+    published base and already carries the guest userland — so a desktop costs
+    one multi-gigabyte download, not two.
+    """
+    if computer_use:
+        return (
+            GUI_ROOTFS_ASSET,
+            rootfs_cache_path(gui=True),
+            "the HCS computer-use guest rootfs",
+        )
+    return BASE_ROOTFS_ASSET, rootfs_cache_path(), "the HCS guest rootfs"
+
+
 def ensure_initrd(
     log: Callable[[str], None] | None = None,
     *,
@@ -576,28 +598,15 @@ class HcsSandbox:
         return gui_path
 
     def _managed_rootfs(self, *, log_file: Path | None) -> Path:
-        """The released rootfs template, downloading it if it is not cached.
-
-        A computer-use context fetches the desktop image directly rather than
-        the base plus a bake: the published ``-gui`` asset is built *from* the
-        published base, so it already carries the guest userland and only one
-        multi-gigabyte download is ever needed.
-        """
-        def log(msg: str) -> None:
-            self._log(log_file, msg)
-
-        if self._config.computer_use:
-            return A.ensure_asset(
-                GUI_ROOTFS_ASSET,
-                rootfs_cache_path(gui=True),
-                description="the HCS computer-use guest rootfs",
-                log=log,
-            )
+        """The released rootfs template, downloading it if it is not cached."""
+        asset, cache, description = managed_rootfs_asset(
+            computer_use=self._config.computer_use,
+        )
         return A.ensure_asset(
-            BASE_ROOTFS_ASSET,
-            rootfs_cache_path(),
-            description="the HCS guest rootfs",
-            log=log,
+            asset,
+            cache,
+            description=description,
+            log=lambda msg: self._log(log_file, msg),
         )
 
     def _ensure_rootfs(self, *, log_file: Path | None) -> None:

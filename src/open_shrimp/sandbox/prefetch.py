@@ -214,10 +214,13 @@ def _hcs_assets() -> list[SharedAsset]:
     from open_shrimp.sandbox import hcs
     from open_shrimp.sandbox import hcs_assets
 
-    base_rootfs = hcs.rootfs_cache_path()
-    # The computer-use template is a different, larger asset, and a config a
-    # setup UI writes never enables computer use — a context that does fetches
-    # its own template on its first turn, as it would have anyway.
+    # A computer-use template, because a sandboxed context carries a desktop:
+    # :func:`open_shrimp.config.build_context_dict` sets ``computer_use`` on
+    # every sandbox block a setup UI writes.  Which asset that implies is the
+    # backend's answer, not one restated here — fetching the wrong one spends
+    # gigabytes on a file nothing reads and still leaves the first turn paying
+    # for the image it does read, which is worse than not prefetching at all.
+    rootfs_asset, rootfs, description = hcs.managed_rootfs_asset(computer_use=True)
     return [
         SharedAsset(
             name="initrd.img",
@@ -227,14 +230,19 @@ def _hcs_assets() -> list[SharedAsset]:
             fetch=lambda progress: hcs.ensure_initrd(progress=progress),
         ),
         SharedAsset(
-            name=base_rootfs.name,
-            directory=base_rootfs.parent,
-            needs_bytes=3 * 1024 * 1024 * 1024,
-            present=base_rootfs.is_file,
+            name=rootfs.name,
+            directory=rootfs.parent,
+            # Twice the base rootfs's allowance, which is what the desktop
+            # image measures: it is built on an ext4 filesystem twice the size
+            # and fills much of the difference with a desktop.  The compressed
+            # download and the image unpacked out of it are both on disk at
+            # once, so the room has to hold the pair.
+            needs_bytes=6 * 1024 * 1024 * 1024,
+            present=rootfs.is_file,
             fetch=lambda progress: hcs_assets.ensure_asset(
-                hcs.BASE_ROOTFS_ASSET,
-                base_rootfs,
-                description="the HCS guest rootfs",
+                rootfs_asset,
+                rootfs,
+                description=description,
                 progress=progress,
             ),
         ),

@@ -188,9 +188,10 @@ enum OpenShrimpCLI {
     /// Download the shared assets the sandbox needs, reporting as they land.
     ///
     /// Returns nil once every asset is present, or the reason it stopped.
-    /// The reason is the core's own stderr, which is one sentence written to
-    /// be shown to a user — a full disk says how much it needed and how much
-    /// there was.
+    /// The reason comes off the stream's own error event, which is one
+    /// sentence written to be shown to a user — a full disk says how much it
+    /// needed and how much there was — and never off stderr, where the core's
+    /// logging handlers write too.
     ///
     /// The only streamed call in this file: everything else asks a question
     /// and reads the answer to the end, but a download that takes minutes is

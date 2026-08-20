@@ -177,13 +177,36 @@
                     <StackPanel x:Name="SandboxSection" Spacing="2" Visibility="Collapsed">
                         <CheckBox x:Name="SandboxBox"
                                   Content="Enable sandbox"
-                                  IsChecked="True" />
+                                  IsChecked="True"
+                                  Checked="SandboxTicked"
+                                  Unchecked="SandboxUnticked" />
                         <!-- Indented to the checkbox's label, not to its box. -->
                         <TextBlock x:Name="SandboxNote"
                                    Margin="28,0,0,0"
                                    TextWrapping="Wrap"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                        <!--
+                            The download the note warned about, while it
+                            happens.  Reserves no height until there is
+                            something to say: a bar that appears is a bar
+                            somebody reads, and one that is always there with
+                            nothing in it is furniture.
+                        -->
+                        <StackPanel x:Name="PrefetchRow"
+                                    Margin="28,6,0,0"
+                                    Spacing="4"
+                                    Visibility="Collapsed">
+                            <ProgressBar x:Name="PrefetchBar"
+                                         Width="260"
+                                         Maximum="1"
+                                         HorizontalAlignment="Left" />
+                            <TextBlock x:Name="PrefetchCaption"
+                                       TextWrapping="Wrap"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
                     </StackPanel>
 
                     <StackPanel Spacing="2">
