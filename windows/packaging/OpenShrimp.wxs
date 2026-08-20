@@ -11,8 +11,9 @@
   WindowsApps path that changes on every update, which would break the logon
   scheduled task the tray registers against a fixed exe path.
 
-  Build with:
-    wix build OpenShrimp.wxs -arch x64 \
+  Build with the WiX 7 toolset — -acceptEula is not optional there, the build
+  fails WIX7015 without it:
+    wix build -acceptEula wix7 OpenShrimp.wxs -arch x64 \
       -d ProductVersion=<x.y.z.0> \
       -d TrayPublishDir=<publish dir> \
       -d CoreExe=<path to openshrimp.exe> \

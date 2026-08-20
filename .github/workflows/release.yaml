@@ -982,9 +982,9 @@ jobs:
 
       - name: Build the MSI
         run: |
-          dotnet tool install --global wix --version 5.*
+          dotnet tool install --global wix --version 7.*
           $version = '${{ needs.version.outputs.version }}'
-          wix build windows/packaging/OpenShrimp.wxs `
+          wix build -acceptEula wix7 windows/packaging/OpenShrimp.wxs `
             -arch x64 `
             -d ProductVersion="$version.0" `
             -d TrayPublishDir="$(Resolve-Path publish)" `
