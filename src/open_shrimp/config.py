@@ -108,7 +108,9 @@ class SandboxConfig:
 
     # HCS-specific: the MSYS2 mingw64 bin directory that supplies the FreeRDP
     # DLLs and the gcc/pkgconf toolchain the computer-use RDP helper is built
-    # with.  Required when computer_use is enabled on the hcs backend.
+    # with.  Optional even with computer_use — the helper ships prebuilt, and
+    # a toolchain is only the source-install fallback, which is what the
+    # validator enforces.
     mingw_bin: str | None = None
 
     # Sudo mode — when true, exposes an MCP tool that runs shell commands on
@@ -1344,10 +1346,20 @@ def build_context_dict(
     Shared by every front end that can create a first config, so the shape
     cannot drift between them.
 
-    *sandbox* names a backend only.  The rest of a sandbox block —
-    ``allow_host_escape``, ``computer_use``, a ``dockerfile`` — is chosen
-    later in the config Mini App, because the question a first config can
-    fairly ask is whether the context is isolated at all.
+    *sandbox* names a backend, and a sandboxed context gets a desktop.  The
+    rest of a sandbox block — ``allow_host_escape``, a ``dockerfile`` — is
+    chosen later in the config Mini App, because the question a first config
+    can fairly ask is whether the context is isolated at all.
+
+    ``computer_use`` is not among the things left for later, and is not asked
+    about either.  It widens no boundary — the desktop runs inside the
+    sandbox the user just agreed to — so there is no tradeoff to put to
+    somebody, and "computer use" is a term whoever needs it explained cannot
+    weigh.  What settles it is that the decision is only cheap here: the flag
+    is an input to the cloud-init fingerprint on libvirt and the config
+    fingerprint on Lima, so turning it on afterwards rebuilds the guest from
+    scratch, and on hcs it swaps the rootfs asset for a larger one that has
+    to be downloaded again.
     """
     context: dict[str, Any] = {
         "directory": str(Path(directory).expanduser().resolve()),
@@ -1357,7 +1369,7 @@ def build_context_dict(
     if model is not None:
         context["model"] = model
     if sandbox is not None:
-        context["sandbox"] = {"backend": sandbox}
+        context["sandbox"] = {"backend": sandbox, "computer_use": True}
     return context
 
 

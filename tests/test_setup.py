@@ -632,10 +632,35 @@ class TestProjectImport:
         ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
+        # computer_use rides along unasked: it widens no boundary the sandbox
+        # question did not already settle, and it is an input to the guest's
+        # fingerprint, so turning it on later rebuilds the guest from scratch.
+        # The wizard is the only moment the decision is cheap.
         assert [ctx["sandbox"] for ctx in raw["contexts"].values()] == [
-            {"backend": "libvirt"},
-            {"backend": "libvirt"},
+            {"backend": "libvirt", "computer_use": True},
+            {"backend": "libvirt", "computer_use": True},
         ]
+
+    def test_the_wizard_grants_no_host_escape(self, tmp_path: Path) -> None:
+        """The one thing a sandboxed context must never get from setup.
+
+        `computer_use` defaulting to true makes the sandbox block something
+        the wizard populates rather than merely names, so the boundary that
+        matters is pinned here: `allow_host_escape` exposes host_bash, and no
+        question the wizard asks may reach it.
+        """
+        config_path = tmp_path / "config.yaml"
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            discovered=self._projects(tmp_path)[:1],
+            projects=("", "1"),
+            sandbox="y",
+        ).run(config_path)
+
+        sandbox = yaml.safe_load(config_path.read_text())["contexts"]["api"]["sandbox"]
+        assert "allow_host_escape" not in sandbox
+        assert sandbox == {"backend": "libvirt", "computer_use": True}
 
     def test_the_sandbox_question_never_names_a_backend(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
