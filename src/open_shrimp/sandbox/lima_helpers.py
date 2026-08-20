@@ -128,8 +128,24 @@ _CLOUD_IMAGES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _find_limactl() -> str | None:
-    """Find limactl: check managed bin dir first, then ``$PATH``."""
+def limactl_downloadable() -> bool:
+    """Whether ``ensure_limactl_sync`` has a build to fetch for this platform.
+
+    False is the only state a missing ``limactl`` cannot be recovered from,
+    which is what lets a prerequisite check pass on the strength of the
+    download without ever fetching anything itself.
+    """
+    return (platform.system(), platform.machine()) in _DOWNLOAD_MAP
+
+
+def find_limactl() -> str | None:
+    """Find limactl: check managed bin dir first, then ``$PATH``.
+
+    Public because a prerequisite check has to ask the same question this
+    package answers for itself — ``shutil.which`` alone reports a limactl
+    this project downloaded as missing, because nothing puts the managed bin
+    directory on ``$PATH``.
+    """
     local_bin = _bin_dir() / "limactl"
     if local_bin.is_file() and os.access(local_bin, os.X_OK):
         return str(local_bin)
@@ -220,7 +236,7 @@ def ensure_limactl_sync() -> str:
 
     Returns the path to the limactl binary.
     """
-    path = _find_limactl()
+    path = find_limactl()
     if path:
         logger.info("Found limactl at %s", path)
         return path

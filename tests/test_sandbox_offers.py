@@ -205,6 +205,66 @@ def test_the_blessed_offer_carries_the_remedy_it_cannot_honour(
     assert "install virtiofsd" in offer.detail
 
 
+class TestPendingDownloadsAreNotFailures:
+    """A prerequisite the backend fetches itself must not deny the sandbox.
+
+    The wizard's toggle is gated on ``available``, so a check that reports a
+    missing-but-downloadable component as a failure sends a user to install
+    by hand what the product installs for them — and on macOS, where Lima is
+    on almost no machine by default, that is every user.
+    """
+
+    def test_a_downloadable_limactl_still_offers_the_sandbox(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _on(monkeypatch, "Darwin")
+        monkeypatch.setattr(doctor.platform, "machine", lambda: "arm64")
+        monkeypatch.setattr(
+            "open_shrimp.sandbox.lima_helpers.find_limactl", lambda: None
+        )
+
+        outcome = doctor.prerequisites("lima", None)[0]
+        assert outcome.ok, "a limactl that will be downloaded is not a failure"
+        assert "downloaded on first use" in outcome.detail
+
+        offer = doctor.blessed_offer(None)
+        assert offer is not None and offer.available
+        # The note is what the wizard shows, so it must not send anybody to
+        # Homebrew for something about to be fetched for them.
+        assert "brew" not in doctor.sandbox_note(offer)
+
+    def test_a_platform_lima_publishes_nothing_for_still_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """There the download has nothing to fetch, so Homebrew is the only
+        route left and naming it is the whole point of the remedy."""
+        _on(monkeypatch, "Darwin")
+        monkeypatch.setattr(doctor.platform, "machine", lambda: "ppc64")
+        monkeypatch.setattr(
+            "open_shrimp.sandbox.lima_helpers.find_limactl", lambda: None
+        )
+
+        offer = doctor.blessed_offer(None)
+        assert offer is not None and not offer.available
+        assert "brew install lima" in doctor.sandbox_note(offer)
+
+    def test_a_limactl_in_the_managed_bin_dir_counts_as_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing puts the managed bin directory on ``$PATH``, so a check
+        that only consulted ``$PATH`` would report a downloaded limactl as
+        missing and re-download it forever."""
+        _on(monkeypatch, "Darwin")
+        monkeypatch.setattr(
+            "open_shrimp.sandbox.lima_helpers.find_limactl",
+            lambda: "/managed/bin/limactl",
+        )
+
+        outcome = doctor.prerequisites("lima", None)[0]
+        assert outcome.ok
+        assert "/managed/bin/limactl" in outcome.detail
+
+
 def test_the_json_form_is_parsable(
     monkeypatch: pytest.MonkeyPatch, all_pass: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
