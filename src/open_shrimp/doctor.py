@@ -41,17 +41,43 @@ logger = logging.getLogger(__name__)
 
 
 def _check_moonshine_stt(config: Config | None) -> tuple[bool, str]:
+    """The speech-to-text binary, fetched on first transcription.
+
+    A check must not fetch anything, so an absent binary passes on the
+    strength of that download — the same rule the sandbox assets follow.
+    Only a platform no build is published for fails, because there the
+    download has nothing to fetch.
+    """
+    from open_shrimp.stt import moonshine_stt_downloadable
+
     path = managed_binary("moonshine-stt")
     if path:
         return True, f"found at {path}"
-    return False, "not downloaded yet (fetched on first transcription)"
+    if not moonshine_stt_downloadable():
+        return False, (
+            f"no {platform.system()} {platform.machine()} build is published "
+            "— build it from the moonshine-stt/ directory in the repository"
+        )
+    return True, "not downloaded yet — fetched on first transcription"
 
 
 def _check_cloudflared(config: Config | None) -> tuple[bool, str]:
+    """The tunnel binary, fetched on first tunnel start.
+
+    Passes when absent for the same reason ``_check_moonshine_stt`` does: the
+    download that will supply it is the answer, and a check may not run it.
+    """
+    from open_shrimp.tunnel import cloudflared_downloadable
+
     path = managed_binary("cloudflared")
     if path:
         return True, f"found at {path}"
-    return False, "not downloaded yet (fetched on first tunnel start)"
+    if not cloudflared_downloadable():
+        return False, (
+            f"no {platform.system()} {platform.machine()} build is published "
+            "— install cloudflared yourself and put it on $PATH"
+        )
+    return True, "not downloaded yet — fetched on first tunnel start"
 
 
 def _check_docker(config: Config | None) -> tuple[bool, str]:

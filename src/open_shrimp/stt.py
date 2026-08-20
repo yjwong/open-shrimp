@@ -45,6 +45,16 @@ def managed_moonshine_stt() -> Path:
     return managed_binary_path("moonshine-stt")
 
 
+def moonshine_stt_downloadable() -> bool:
+    """Whether this platform has a moonshine-stt build to fetch.
+
+    False is the only state a missing binary cannot be recovered from, which
+    is what lets a prerequisite check pass on the strength of the download
+    without fetching anything itself.
+    """
+    return (platform.system(), platform.machine()) in _BINARY_MAP
+
+
 async def _download_moonshine_stt() -> str:
     """Download the moonshine-stt binary for this platform.
 

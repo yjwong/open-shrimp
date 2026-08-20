@@ -46,6 +46,16 @@ def _get_binary_name() -> str | None:
     return _BINARY_MAP.get((system, machine))
 
 
+def cloudflared_downloadable() -> bool:
+    """Whether this platform has a cloudflared build to fetch.
+
+    False is the only state a missing binary cannot be recovered from, which
+    is what lets a prerequisite check pass on the strength of the download
+    without fetching anything itself.
+    """
+    return _get_binary_name() is not None
+
+
 # The config cloudflared is pointed at.  Not instance-scoped, for the same
 # reason the binary is not: its contents never vary.
 CONFIG_PATH = BIN_DIR.parent / "cloudflared.yml"
