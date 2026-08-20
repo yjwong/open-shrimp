@@ -65,8 +65,18 @@ struct SetupWizardView: View {
         case 2:
             return "The folders you already work in. Untick anything you'd "
                 + "rather not reach from Telegram."
-        default: return "OpenShrimp runs only while this app is open."
+        default: return lastStepSubtitle
         }
+    }
+
+    /// Says what the step is about, which depends on what it is showing: the
+    /// sandbox row is absent when nothing was imported, and naming it anyway
+    /// would promise a question the step does not ask.
+    private var lastStepSubtitle: String {
+        model.showsSandboxRow
+            ? "How much of this Mac your projects reach, and whether OpenShrimp "
+                + "keeps running."
+            : "OpenShrimp runs only while this app is open."
     }
 
     /// Reserves its height whether or not there is anything to say, so the
@@ -127,7 +137,7 @@ struct SetupWizardView: View {
         case 0: tokenStep
         case 1: enrollStep
         case 2: contextStep
-        default: autostartStep
+        default: lastStep
         }
     }
 
@@ -241,7 +251,7 @@ struct SetupWizardView: View {
             }
 
             // Asked only where it has consequences.  With nothing ticked there
-            // is nothing to isolate, and a question with no consequence teaches
+            // is nothing to run, and a question with no consequence teaches
             // the user to answer without reading.
             if model.chosenRows.isEmpty {
                 Text("Nothing ticked — you'll finish with no projects, and can "
@@ -251,7 +261,6 @@ struct SetupWizardView: View {
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                sandboxQuestion
                 modelPicker
             }
         }
@@ -299,32 +308,32 @@ struct SetupWizardView: View {
         }
     }
 
-    /// The one question of this step.  Importing several folders in a click is
-    /// a large increase in what a Telegram message can reach, and this is the
-    /// moment the user is least likely to think about it.
-    private var sandboxQuestion: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            field("Runs in") {
-                Picker("", selection: $model.sandbox) {
-                    Text("Choose…").tag(SandboxSelection.unanswered)
-                    ForEach(model.availableSandboxes, id: \.backend) { choice in
-                        Text("\(choice.label) — \(choice.summary)")
-                            .tag(SandboxSelection.backend(choice.backend))
-                    }
-                    Text("No sandbox — directly on this Mac")
-                        .tag(SandboxSelection.host)
-                }
-                .labelsHidden()
-            }
+    /// Whether the imported projects are isolated — one toggle, never a choice
+    /// of hypervisor.  Importing several folders in a click is a large increase
+    /// in what a Telegram message can reach, and this is the moment the user is
+    /// least likely to think about it, so the safe answer is the pre-filled one.
+    ///
+    /// A prerequisite this Mac is missing turns the toggle off and unchangeable
+    /// with the remedy beside it, rather than hiding it: a row that is simply
+    /// absent reads as a missing feature instead of a missing prerequisite.
+    /// Takes the offering rather than reaching for the optional: the caller has
+    /// already established there is one, and an optional unwrapped twice is a
+    /// second place for the two answers to differ.
+    ///
+    /// `note` is the core's sentence for whichever case holds — what the
+    /// sandbox gets you, or why you cannot have it — so the promise made here
+    /// is word for word the promise the terminal wizard makes.
+    private func sandboxQuestion(_ offering: SandboxOffering) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("Enable sandbox", isOn: $model.sandboxEnabled)
+                .disabled(!offering.available)
 
-            // Named rather than hidden: a choice that is simply absent reads as
-            // a missing feature instead of a missing prerequisite.
-            ForEach(model.unavailableSandboxes, id: \.backend) { choice in
-                Text("\(choice.label) is unavailable: \(choice.detail)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(offering.note)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                // Indented to the toggle's label, not to its box.
+                .padding(.leading, 20)
         }
     }
 
@@ -354,21 +363,33 @@ struct SetupWizardView: View {
         }
     }
 
-    /// A step of its own rather than a fourth field on the context form: this
-    /// asks about the app, not about the context, and it is the only place the
+    /// The last step: what the setup is, once the projects are settled, rather
+    /// than one question.  Each row appears only where it has something to
+    /// settle — nothing imported means nothing to sandbox — and the step itself
+    /// always renders, because it is also where Finish lives.
+    ///
+    /// Both rows ask about this machine rather than about a context, which is
+    /// why neither is a field on the project form: one decides how much of the
+    /// Mac a Telegram message reaches, and the other is the only place the
     /// wizard mentions that a bot it is about to call running stops at the next
     /// logout.
-    private var autostartStep: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Toggle("Keep OpenShrimp running after you sign in", isOn: $model.autostart)
-                .disabled(model.autostartConflicted)
+    private var lastStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if model.showsSandboxRow, let offering = model.sandbox {
+                sandboxQuestion(offering)
+            }
 
-            Text(autostartNote)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                // Indented to the toggle's label, not to its box.
-                .padding(.leading, 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle("Keep OpenShrimp running after you sign in", isOn: $model.autostart)
+                    .disabled(model.autostartConflicted)
+
+                Text(autostartNote)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // Indented to the toggle's label, not to its box.
+                    .padding(.leading, 20)
+            }
         }
     }
 

@@ -64,6 +64,10 @@ public sealed partial class SetupWindow : Window
     private string? _verifiedToken;
     private string? _verifiedUsername;
     private IReadOnlyList<ModelChoice> _models = Array.Empty<ModelChoice>();
+    // What enabling the sandbox would mean on this PC, once the core has said.
+    // Null while the answer is in flight, and where the core could not give one
+    // — which the last step renders the same way, as no sandbox row at all.
+    private SandboxOffering? _sandbox;
     private readonly List<ProjectRow> _rows = new();
 
     private EnrollStage _stage = EnrollStage.Waiting;
@@ -202,7 +206,14 @@ public sealed partial class SetupWindow : Window
             2 => ("Your projects",
                   "The folders you already work in. Untick anything you'd rather "
                   + "not reach from Telegram."),
-            _ => ("One last thing", "OpenShrimp runs only while this app is open."),
+            // Says what the step is about, which depends on what it is showing:
+            // the sandbox row is absent when nothing was imported, and naming
+            // it anyway would promise a question the step does not ask.
+            _ => ("One last thing",
+                  ShowsSandboxRow
+                      ? "How much of this PC your projects reach, and whether "
+                        + "OpenShrimp keeps running."
+                      : "OpenShrimp runs only while this app is open."),
         };
 
         // "Skip" on the import step with nothing ticked, because that is what
@@ -654,13 +665,6 @@ public sealed partial class SetupWindow : Window
             }
         }
 
-        if (SandboxBox.SelectedItem is not ComboBoxItem sandboxItem)
-        {
-            SetMessage(ContextMessage, "Choose how these projects run.", error: true);
-            return null;
-        }
-        var sandbox = sandboxItem.Tag as string;
-
         var model = (ModelBox.SelectedItem as ComboBoxItem)?.Tag as string;
 
         SetMessage(ContextMessage, "", error: false);
@@ -670,9 +674,33 @@ public sealed partial class SetupWindow : Window
                 Directory: row.Directory,
                 Description: row.Label,
                 Model: model,
-                Sandbox: sandbox))
+                Sandbox: ChosenBackend()))
             .ToList();
     }
+
+    /// <summary>
+    /// The backend the sandbox toggle would write, or null for the host.
+    ///
+    /// Availability is not re-tested here: an unavailable offering has already
+    /// unticked and disabled the box, and asking twice is how the two answers
+    /// come to disagree.
+    /// </summary>
+    private string? ChosenBackend() =>
+        SandboxBox.IsChecked == true ? _sandbox?.Backend : null;
+
+    /// <summary>
+    /// Whether the last step has a sandbox row to show at all. Nothing ticked
+    /// means nothing to isolate, and a question with no consequence teaches the
+    /// user to answer without reading. A PC with no sandbox to offer still
+    /// shows the row, saying so — a row that is simply absent reads as a
+    /// missing feature.
+    ///
+    /// <c>Any</c> rather than <c>ChosenRows().Count</c>: one tick already
+    /// redraws three things, and a list built to be measured and dropped is an
+    /// allocation each time.
+    /// </summary>
+    private bool ShowsSandboxRow =>
+        _rows.Any(row => row.Tick.IsChecked == true) && _sandbox is not null;
 
     private List<ProjectRow> ChosenRows() =>
         _rows.Where(row => row.Tick.IsChecked == true).ToList();
@@ -718,8 +746,8 @@ public sealed partial class SetupWindow : Window
         // import startup.
         var models = OpenShrimpCli.GetModelsAsync();
         var projects = OpenShrimpCli.GetProjectsAsync();
-        var sandboxes = OpenShrimpCli.GetSandboxesAsync();
-        await Task.WhenAll(models, projects, sandboxes);
+        var sandbox = OpenShrimpCli.GetSandboxOfferingAsync();
+        await Task.WhenAll(models, projects, sandbox);
         _models = await models;
 
         ModelBox.Items.Clear();
@@ -731,7 +759,7 @@ public sealed partial class SetupWindow : Window
         foreach (var project in await projects)
             AddProjectRow(project.ContextName, project.Directory, project.Name);
 
-        BuildSandboxChoices(await sandboxes);
+        _sandbox = await sandbox;
 
         DiscoverySpinner.IsActive = false;
         DiscoveryLabel.Visibility = Visibility.Collapsed;
@@ -739,39 +767,30 @@ public sealed partial class SetupWindow : Window
     }
 
     /// <summary>
-    /// The one question of this step. Importing several folders in a click is a
-    /// large increase in what a Telegram message can reach, and this is the
-    /// moment the user is least likely to think about it.
+    /// Whether the imported projects are isolated — one checkbox, never a
+    /// choice of hypervisor. Importing several folders in a click is a large
+    /// increase in what a Telegram message can reach, and this is the moment
+    /// the user is least likely to think about it, so the safe answer is the
+    /// pre-ticked one.
     ///
-    /// Nothing is pre-selected: an isolation setting nobody chose is the one
-    /// thing this question exists to prevent.
+    /// Every property of the row is set here, from the two things that decide
+    /// it: what the core offered, and what is ticked. Splitting visibility from
+    /// content left the row's state owned by two methods on two triggers, one
+    /// of which returned early and left the other's work standing.
+    ///
+    /// A sandbox this PC cannot start unticks the box and disables it, with the
+    /// core's sentence beside it rather than in place of it: a row that is
+    /// simply absent reads as a missing feature instead of a missing
+    /// prerequisite.
     /// </summary>
-    private void BuildSandboxChoices(IReadOnlyList<SandboxChoice> choices)
+    private void RenderSandboxRow()
     {
-        SandboxBox.Items.Clear();
-        foreach (var choice in choices.Where(c => c.Available))
-        {
-            SandboxBox.Items.Add(new ComboBoxItem
-            {
-                Content = $"{choice.Label} — {choice.Summary}",
-                Tag = choice.Backend,
-            });
-        }
-        SandboxBox.Items.Add(new ComboBoxItem
-        {
-            Content = "No sandbox — directly on this PC",
-            Tag = null,
-        });
+        SandboxSection.Visibility = ShowsSandboxRow ? Visibility.Visible : Visibility.Collapsed;
+        if (_sandbox is null) return;
 
-        // Named rather than hidden: a choice that is simply absent reads as a
-        // missing feature instead of a missing prerequisite.
-        var missing = choices
-            .Where(c => !c.Available)
-            .Select(c => $"{c.Label} is unavailable: {c.Detail}")
-            .ToList();
-        SandboxUnavailable.Text = string.Join("\n", missing);
-        SandboxUnavailable.Visibility =
-            missing.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        SandboxBox.IsEnabled = _sandbox.Available;
+        if (!_sandbox.Available) SandboxBox.IsChecked = false;
+        SandboxNote.Text = _sandbox.Note;
     }
 
     /// <summary>Append one row, ticked, to the import list.</summary>
@@ -804,8 +823,12 @@ public sealed partial class SetupWindow : Window
     private void UpdateProjectStep()
     {
         var chosen = ChosenRows().Count > 0;
-        SandboxSection.Visibility = chosen ? Visibility.Visible : Visibility.Collapsed;
+        ModelSection.Visibility = chosen ? Visibility.Visible : Visibility.Collapsed;
         SkipNote.Visibility = chosen ? Visibility.Collapsed : Visibility.Visible;
+        // The last step is a step away, and its sandbox row is decided by the
+        // ticks made here — drawn now so it cannot be a step that fills itself
+        // in after the user is looking at it.
+        RenderSandboxRow();
         ProjectListEmpty.Visibility =
             _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         UpdateChrome();

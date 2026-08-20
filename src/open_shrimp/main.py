@@ -705,8 +705,19 @@ def _run_sandboxes(*, json_output: bool) -> int:
     ``doctor`` in Python, and the two GUI wizards cannot call Python.  A
     wizard offering a backend this host cannot start would write a config
     that fails on its first turn.
+
+    ``sandbox`` is the answer to setup's one question, already resolved:
+    which backend to write, whether it can be turned on, and the sentence to
+    say either way.  A GUI renders it and branches on nothing — deciding any
+    part of it per front end is how three wizards came to disagree about a
+    host that can offer no sandbox at all.
     """
-    from open_shrimp.doctor import _load_config, sandbox_offers
+    from open_shrimp.doctor import (
+        _load_config,
+        blessed_offer,
+        sandbox_note,
+        sandbox_offers,
+    )
 
     config = _load_config(None)
     # Several checks look under the managed data directory, which is only
@@ -714,10 +725,19 @@ def _run_sandboxes(*, json_output: bool) -> int:
     # settled as the unscoped one, when there is no config to read.
     init_paths(config.instance_name if config is not None else None)
     offers = sandbox_offers(config)
+    blessed = blessed_offer(config)
 
     if json_output:
         json.dump(
             {
+                "sandbox": {
+                    # Null where this platform has no sandbox at all, which is
+                    # why it is not the empty string: a backend nobody can
+                    # name is not a backend called "".
+                    "backend": blessed.backend if blessed is not None else None,
+                    "available": blessed is not None and blessed.available,
+                    "note": sandbox_note(blessed),
+                },
                 "sandboxes": [
                     {
                         "backend": offer.backend,
@@ -727,7 +747,7 @@ def _run_sandboxes(*, json_output: bool) -> int:
                         "detail": offer.detail,
                     }
                     for offer in offers
-                ]
+                ],
             },
             sys.stdout,
         )
@@ -735,7 +755,8 @@ def _run_sandboxes(*, json_output: bool) -> int:
     else:
         for offer in offers:
             state = "ready" if offer.available else offer.detail
-            print(f"{offer.backend:<10} {offer.label:<10} {state}")
+            mark = "*" if blessed is not None and offer.backend == blessed.backend else " "
+            print(f"{mark} {offer.backend:<10} {offer.label:<10} {state}")
     return 0
 
 

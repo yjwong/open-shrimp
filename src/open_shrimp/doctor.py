@@ -503,42 +503,114 @@ _SANDBOX_LABELS: dict[str, tuple[str, str]] = {
 }
 
 
+def _offer(backend: str, config: Config | None) -> SandboxOffer | None:
+    """What *backend* would give a context here, or ``None`` if it cannot run.
+
+    A backend with no prerequisite that applies here cannot run here at all —
+    ``checks_for_backend`` already filters by platform — so it answers
+    ``None`` rather than being offered and then refused at the first turn.
+    One that does apply is probed, because a backend whose daemon is not
+    running would otherwise be written into the config and fail every turn
+    from then on, far from the wizard that could still have said so.
+    """
+    # One expression of the platform filter, not two: the empty list *is* the
+    # "nothing here applies" answer, so asking `checks_for_backend` separately
+    # would be a second reading of it that can disagree.
+    outcomes = prerequisites(backend, config)
+    if not outcomes:
+        return None
+    label, summary = _SANDBOX_LABELS[backend]
+    failed = [o for o in outcomes if not o.ok]
+    # The check's own name is dropped where it repeats the backend's, so a
+    # single-prerequisite backend reads as "Docker — docker CLI not found"
+    # rather than naming Docker twice in one line.
+    return SandboxOffer(
+        backend=backend,
+        label=label,
+        summary=summary,
+        available=not failed,
+        detail="; ".join(
+            o.detail if o.label == label else f"{o.label}: {o.detail}"
+            for o in failed
+        ),
+    )
+
+
 def sandbox_offers(config: Config | None = None) -> list[SandboxOffer]:
     """Every sandbox backend a context on this host could be given.
 
-    A backend with no prerequisite that applies here cannot run here at all —
-    ``checks_for_backend`` already filters by platform — so it is left out
-    entirely rather than offered and then refused at the first turn.  The
-    ones that do apply are probed, because a backend whose daemon is not
-    running would otherwise be written into the config and fail every turn
-    from then on, far from the wizard that could still have picked another.
+    The whole catalog, for somebody choosing between its entries — which is
+    the ``sandboxes`` table and nothing else today.  Setup does not use it:
+    see ``blessed_offer``, because a first config asks whether a project is
+    isolated, not which hypervisor isolates it.
     """
-    offers: list[SandboxOffer] = []
-    for backend in sorted(_SANDBOX_BACKENDS):
-        # One expression of the platform filter, not two: the empty list *is*
-        # the "nothing here applies" answer, so asking `checks_for_backend`
-        # separately would be a second reading of it that can disagree.
-        outcomes = prerequisites(backend, config)
-        if not outcomes:
-            continue
-        label, summary = _SANDBOX_LABELS[backend]
-        failed = [o for o in outcomes if not o.ok]
-        # The check's own name is dropped where it repeats the backend's, so a
-        # single-prerequisite backend reads as "Docker — docker CLI not found"
-        # rather than naming Docker twice in one line.
-        offers.append(
-            SandboxOffer(
-                backend=backend,
-                label=label,
-                summary=summary,
-                available=not failed,
-                detail="; ".join(
-                    o.detail if o.label == label else f"{o.label}: {o.detail}"
-                    for o in failed
-                ),
-            )
+    offers = (_offer(backend, config) for backend in sorted(_SANDBOX_BACKENDS))
+    return [offer for offer in offers if offer is not None]
+
+
+# One backend per platform, and setup names no other.  Somebody who has to be
+# told what libvirt is cannot weigh it against Docker, so offering the choice
+# buys nothing and costs the one question of the step its answer; the pick
+# here is the best-trodden path on each platform, and the config Mini App can
+# still move a context to any backend afterwards.
+_BLESSED_BACKEND: dict[str, str] = {
+    "Linux": "libvirt",
+    "Darwin": "lima",
+    "Windows": "hcs",
+}
+
+# What "Enable sandbox" promises, in the words of somebody who has never heard
+# of a hypervisor.  Beside the backends rather than in the three wizards, so
+# the promise is the same sentence on every platform — which it can be,
+# because every blessed backend is a virtual machine.  A blessed backend that
+# is not one would make this sentence a lie, which is why the pin test reads
+# it against the labels rather than taking it on trust.
+SANDBOX_SUMMARY = (
+    "Each project runs in its own virtual machine, so anything you send me in "
+    "Telegram reaches that project's folder and nothing else on this computer."
+)
+
+
+def blessed_backend() -> str | None:
+    """The one sandbox backend setup offers on this platform."""
+    return _BLESSED_BACKEND.get(platform.system())
+
+
+def blessed_offer(config: Config | None = None) -> SandboxOffer | None:
+    """What enabling the sandbox would mean here, and whether it can be honoured.
+
+    ``None`` where this platform has no blessed backend at all; an offer with
+    ``available`` false where it has one whose prerequisites are missing.
+    ``sandbox_note`` is what a front end should say about either.
+    """
+    backend = blessed_backend()
+    return _offer(backend, config) if backend is not None else None
+
+
+def sandbox_note(offer: SandboxOffer | None) -> str:
+    """The sentence beside the toggle: what it gets you, or why you cannot have it.
+
+    All three cases answered here rather than in each of the three wizards.
+    Composing this per front end is how they came to disagree about the one
+    that matters — a host with nothing to offer said nothing at all in two of
+    them, which is the "reads as a missing feature" failure the remedy exists
+    to prevent.
+
+    "This computer" on every platform, rather than Mac and PC and computer.
+    The word costs nothing to a reader and is the last thing that would have
+    to be said three times.
+    """
+    if offer is None:
+        return (
+            "There is no sandbox I can set up on this computer, so your "
+            "projects will run directly on it."
         )
-    return offers
+    if not offer.available:
+        return (
+            f"{offer.label} is unavailable: {offer.detail}. Your projects will "
+            "run directly on this computer."
+        )
+    return SANDBOX_SUMMARY
 
 
 def _load_config(path: str | None) -> Config | None:

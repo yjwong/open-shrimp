@@ -42,20 +42,6 @@ struct ProjectRow: Identifiable, Hashable {
     var chosen: Bool
 }
 
-/// The isolation answer, including not having given one.
-///
-/// Three states, not an optional string with a sentinel in it: "unanswered"
-/// and "runs on the host" are different answers, and the wire spells the
-/// second of them as the absence the first would also have to be.
-enum SandboxSelection: Hashable {
-    /// Deliberate: importing several folders in one tap is a large increase in
-    /// what a Telegram message can reach, and a pre-filled answer is one
-    /// nobody reads.
-    case unanswered
-    case host
-    case backend(String)
-}
-
 /// Where the enrollment step is.
 ///
 /// Enrollment is an authentication step, so it has more states than a text
@@ -97,14 +83,19 @@ final class SetupWizardModel: ObservableObject {
     @Published var rows: [ProjectRow] = []
     @Published private(set) var discoveryFinished = false
 
-    /// What this Mac can isolate a project with.  Only the ones whose
-    /// prerequisites are met are offered; the rest are named with their
-    /// remedy, so a missing choice reads as a missing prerequisite rather
-    /// than as a missing feature.
-    @Published private(set) var sandboxes: [SandboxChoice] = []
+    /// What enabling the sandbox would mean on this Mac, once the core has
+    /// said — nil where this platform has no sandbox at all.  An offering
+    /// whose prerequisites are unmet still arrives, carrying the remedy: a
+    /// toggle that is simply absent reads as a missing feature rather than a
+    /// missing prerequisite.
+    @Published private(set) var sandbox: SandboxOffering?
 
-    /// How the imported projects run, once the user has said.
-    @Published var sandbox: SandboxSelection = .unanswered
+    /// Whether the imported projects are isolated.
+    ///
+    /// On by default, and honoured only where `sandbox` says it can be: safe
+    /// is the answer somebody who does not read this question should get, and
+    /// the one who does read it is one tap from the other.
+    @Published var sandboxEnabled = true
 
     /// Whether finishing registers the app as a login item.
     ///
@@ -221,7 +212,7 @@ final class SetupWizardModel: ObservableObject {
             await warmup.value
             async let choices = OpenShrimpCLI.models()
             async let found = OpenShrimpCLI.projects()
-            async let isolation = OpenShrimpCLI.sandboxes()
+            async let isolation = OpenShrimpCLI.blessedSandbox()
 
             // A catalog that could not be read is a convenience the wizard does
             // without.  Blocking setup on it would make a core that cannot run
@@ -235,7 +226,11 @@ final class SetupWizardModel: ObservableObject {
                 ProjectRow(name: $0.contextName, directory: $0.directory,
                            label: $0.name, chosen: true)
             }
-            sandboxes = await isolation
+            sandbox = await isolation
+            // Off as well as unchangeable where it cannot be honoured: a
+            // switch drawn in the on position promises isolation the config
+            // about to be written will not carry.
+            if sandbox?.available != true { sandboxEnabled = false }
             discoveryFinished = true
         }
     }
@@ -281,11 +276,24 @@ final class SetupWizardModel: ObservableObject {
         }
     }
 
-    /// The backends worth putting in a picker: the ones this host can start.
-    var availableSandboxes: [SandboxChoice] { sandboxes.filter(\.available) }
+    /// Whether the last step has a sandbox row to show at all.
+    ///
+    /// Nothing ticked means nothing to isolate, and a question with no
+    /// consequence teaches the user to answer without reading.  A host with
+    /// no sandbox to offer still shows the row, saying so — a row that is
+    /// simply absent reads as a missing feature.
+    ///
+    /// `contains(where:)` rather than `!chosenRows.isEmpty`: the header reads
+    /// this on every body pass, and an array built to be measured and dropped
+    /// is one allocation per keystroke.
+    var showsSandboxRow: Bool { rows.contains(where: \.chosen) && sandbox != nil }
 
-    /// The ones it cannot, with the remedy each needs.
-    var unavailableSandboxes: [SandboxChoice] { sandboxes.filter { !$0.available } }
+    /// The backend the toggle would write, or nil for the host.
+    ///
+    /// Availability is not re-tested here: an unavailable offering has already
+    /// forced the toggle off, and asking twice is how the two answers come to
+    /// disagree.
+    var chosenBackend: String? { sandboxEnabled ? sandbox?.backend : nil }
 
     // -- Navigation -----------------------------------------------------------
 
@@ -618,19 +626,7 @@ final class SetupWizardModel: ObservableObject {
             }
         }
 
-        let backend: String?
-        switch sandbox {
-        case .unanswered:
-            message = WizardMessage(
-                tone: .failure,
-                text: "Choose how these projects run."
-            )
-            return nil
-        case .host:
-            backend = nil
-        case .backend(let name):
-            backend = name
-        }
+        let backend = chosenBackend
 
         let model: String?
         switch selection {

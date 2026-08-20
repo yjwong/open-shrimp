@@ -145,17 +145,10 @@
 
                     <!--
                         Asked only where it has consequences: with nothing
-                        ticked there is nothing to isolate, and a question with
-                        no consequence teaches the user to answer without
-                        reading.
+                        ticked there is nothing to run, and a question with no
+                        consequence teaches the user to answer without reading.
                     -->
-                    <StackPanel x:Name="SandboxSection" Spacing="8">
-                        <ComboBox x:Name="SandboxBox" Header="Runs in" Width="360" />
-                        <TextBlock x:Name="SandboxUnavailable"
-                                   TextWrapping="Wrap"
-                                   Visibility="Collapsed"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <StackPanel x:Name="ModelSection" Spacing="8">
                         <ComboBox x:Name="ModelBox" Header="Model" Width="360" />
                     </StackPanel>
 
@@ -170,12 +163,29 @@
                 </StackPanel>
 
                 <!--
-                    Step 3: autostart.  A step of its own rather than a fourth
-                    field on the context form, because it asks about the app and
-                    not about the context.  Ticked by default, with the
-                    consequence in words rather than a bare label.
+                    Step 3: the last one.  Two questions rather than a fourth
+                    and fifth field on the context form, because both ask about
+                    this PC and not about a context: one decides how much of it
+                    a Telegram message reaches, and the other that a bot the
+                    wizard is about to call running stops at the next sign-out.
+                    Each row appears only where it has something to settle, and
+                    the step itself always renders — Finish lives here.  Both
+                    ticked by default, with the consequence in words rather
+                    than a bare label.
                 -->
-                <StackPanel x:Name="StepFinish" Spacing="10" Visibility="Collapsed">
+                <StackPanel x:Name="StepFinish" Spacing="14" Visibility="Collapsed">
+                    <StackPanel x:Name="SandboxSection" Spacing="2" Visibility="Collapsed">
+                        <CheckBox x:Name="SandboxBox"
+                                  Content="Enable sandbox"
+                                  IsChecked="True" />
+                        <!-- Indented to the checkbox's label, not to its box. -->
+                        <TextBlock x:Name="SandboxNote"
+                                   Margin="28,0,0,0"
+                                   TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
                     <StackPanel Spacing="2">
                         <CheckBox x:Name="AutostartBox"
                                   Content="Keep OpenShrimp running after you sign in"

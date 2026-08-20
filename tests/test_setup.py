@@ -8,6 +8,7 @@ up in it rather than about the YAML that comes out.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,34 +35,29 @@ _PROJECT_PROMPTS = (
     "Projects",
     "Folder ",
     "Call it",
-    "Sandbox",
     "Model",
     "Custom model name",
 )
 
 # The project step answered end to end: add a folder by path, keep the name it
-# suggests, continue, no sandbox, the CLI's own model.
-PROJECT_ANSWERS = ("a", "/tmp", "", "", "2", "1")
+# suggests, continue, the CLI's own model.
+PROJECT_ANSWERS = ("a", "/tmp", "", "", "1")
 
-# What this host can isolate a context with, decided by the test rather than by
-# the machine it runs on.  Docker ready and libvirt not is the shape the step
-# has to render: a list to choose from, and a remedy for what is missing.
-_OFFERS = [
-    SandboxOffer(
-        backend="docker",
-        label="Docker",
-        summary="each project runs in a container on this computer",
-        available=True,
-        detail="",
-    ),
-    SandboxOffer(
-        backend="libvirt",
-        label="libvirt",
-        summary="each project runs in its own virtual machine",
-        available=False,
-        detail="libvirt: libvirt-python not installed",
-    ),
-]
+# What enabling the sandbox would mean on this host, decided by the test rather
+# than by the machine it runs on.  Setup names one backend per platform, so
+# this is one offer and not a list — a test that wants the other shape passes
+# an unavailable offer, or none at all.
+_OFFER = SandboxOffer(
+    backend="libvirt",
+    label="libvirt",
+    summary="each project runs in its own virtual machine",
+    available=True,
+    detail="",
+)
+
+_UNAVAILABLE = replace(
+    _OFFER, available=False, detail="libvirt-python not installed"
+)
 
 
 def _code_for(user_id: int, *, after: int = 1) -> Callable[[_Wizard], str]:
@@ -91,19 +87,19 @@ def _typed(text: str, *, after: int = 1) -> Callable[[_Wizard], str]:
 class _Wizard:
     """Drives ``run_setup_wizard`` against a fake Telegram.
 
-    ``answers`` are consumed in order for every prompt except four: the
+    ``answers`` are consumed in order for every prompt except five: the
     token, which comes from ``tokens``; the code, which comes from ``codes``;
-    the autostart offer, which comes from ``autostart``; and the project step,
-    which comes from ``projects`` — so that a test saying nothing about any of
-    them is not made to.  ``codes`` defaults to answering every prompt with
-    the code the operator actually received — the handshake is exercised, not
-    stubbed.
+    the sandbox and autostart offers of the last step, which come from
+    ``sandbox`` and ``autostart``; and the project step, which comes from
+    ``projects`` — so that a test saying nothing about any of them is not made
+    to.  ``codes`` defaults to answering every prompt with the code the
+    operator actually received — the handshake is exercised, not stubbed.
 
-    What the project step discovers, and what the host can isolate with, are
-    both decided here.  Neither may come from the machine the tests run on:
-    the developer's own ``~/.claude.json`` would otherwise change what the
-    wizard offers, and whether Docker happens to be installed would change
-    which number means "no sandbox".
+    What the project step discovers, and what enabling the sandbox would mean
+    here, are both decided here.  Neither may come from the machine the tests
+    run on: the developer's own ``~/.claude.json`` would otherwise change what
+    the wizard imports, and whether libvirt happens to be installed would
+    change whether the sandbox is asked about at all.
     """
 
     def __init__(
@@ -114,11 +110,12 @@ class _Wizard:
         tokens: tuple[str, ...] = ("111:AAA-bbb",),
         codes: tuple[Answer, ...] = (),
         clients: tuple[Callable[[], object], ...] = (),
+        sandbox: str = "n",
         autostart: str = "n",
         installed: bool = False,
         projects: tuple[str, ...] = PROJECT_ANSWERS,
         discovered: tuple[ClaudeProject, ...] = (),
-        offers: list[SandboxOffer] | None = None,
+        offer: SandboxOffer | None = _OFFER,
     ):
         self.fake = fake
         self.operator = operator
@@ -128,16 +125,19 @@ class _Wizard:
         self._tokens = list(tokens)
         self._codes = list(codes)
         self._clients = list(clients)
+        self._sandbox = sandbox
         self._autostart = autostart
         self._installed = installed
         self._projects = list(projects)
         self._discovered = list(discovered)
-        self._offers = _OFFERS if offers is None else offers
+        self._offer = offer
 
     def __call__(self, prompt: str = "") -> str:
         self.prompts.append(prompt)
         if prompt.startswith("Telegram bot token") and self._tokens:
             return self._tokens.pop(0)
+        if prompt.startswith("Enable sandbox"):
+            return self._sandbox
         if prompt.startswith("Keep OpenShrimp running"):
             return self._autostart
         if prompt.startswith("Setup code"):
@@ -167,8 +167,8 @@ class _Wizard:
                         lambda: list(self._discovered),
                     ):
                         with patch(
-                            "open_shrimp.doctor.sandbox_offers",
-                            lambda config=None: list(self._offers),
+                            "open_shrimp.doctor.blessed_offer",
+                            lambda config=None: self._offer,
                         ):
                             run_setup_wizard(config_path)
 
@@ -397,7 +397,7 @@ class TestRunSetupWizard:
         wizard = _Wizard(
             _fake_with_operator(),
             "y",
-            projects=("a", "/tmp", "myproject", "", "2", "4"),
+            projects=("a", "/tmp", "myproject", "", "4"),
         )
         wizard.run(config_path)
 
@@ -429,7 +429,7 @@ class TestRunSetupWizard:
         _Wizard(
             _fake_with_operator(),
             "y",
-            projects=("a", "/tmp", "", "", "2", "6", "claude-custom-model"),
+            projects=("a", "/tmp", "", "", "6", "claude-custom-model"),
         ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
@@ -477,7 +477,6 @@ class TestRunSetupWizard:
                 "/tmp",
                 "",
                 "",
-                "2",
                 "1",
             ),
         ).run(config_path)
@@ -493,7 +492,7 @@ class TestRunSetupWizard:
     def test_tilde_directory_accepted(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"
         _Wizard(
-            _fake_with_operator(), "y", projects=("a", "~", "home", "", "2", "1")
+            _fake_with_operator(), "y", projects=("a", "~", "home", "", "1")
         ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
@@ -547,7 +546,7 @@ class TestProjectImport:
             _fake_with_operator(),
             "y",
             discovered=self._projects(tmp_path),
-            projects=("", "2", "1"),
+            projects=("", "1"),
         ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
@@ -565,7 +564,7 @@ class TestProjectImport:
             _fake_with_operator(),
             "y",
             discovered=self._projects(tmp_path),
-            projects=("", "2", "1"),
+            projects=("", "1"),
         ).run(config_path)
 
         config = load_config(str(config_path))
@@ -579,7 +578,7 @@ class TestProjectImport:
             _fake_with_operator(),
             "y",
             discovered=self._projects(tmp_path),
-            projects=("2", "", "2", "1"),
+            projects=("2", "", "1"),
         ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
@@ -617,7 +616,7 @@ class TestProjectImport:
         )
         wizard.run(tmp_path / "config.yaml")
 
-        assert not [p for p in wizard.prompts if p.startswith("Sandbox")]
+        assert not [p for p in wizard.prompts if p.startswith("Enable sandbox")]
 
     def test_the_sandbox_answer_is_written_to_every_imported_project(
         self, tmp_path: Path
@@ -628,47 +627,86 @@ class TestProjectImport:
             _fake_with_operator(),
             "y",
             discovered=self._projects(tmp_path),
-            projects=("", "1", "1"),
+            projects=("", "1"),
+            sandbox="y",
         ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
         assert [ctx["sandbox"] for ctx in raw["contexts"].values()] == [
-            {"backend": "docker"},
-            {"backend": "docker"},
+            {"backend": "libvirt"},
+            {"backend": "libvirt"},
         ]
 
-    def test_no_sandbox_is_offered_and_writes_no_sandbox_block(
+    def test_the_sandbox_question_never_names_a_backend(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Setup asks whether a project is isolated, not which hypervisor
+        isolates it — a user who needs the difference explained cannot weigh
+        it, and the config Mini App can still move a context afterwards."""
+        wizard = _Wizard(
+            _fake_with_operator(),
+            "y",
+            discovered=self._projects(tmp_path)[:1],
+            projects=("", "1"),
+            sandbox="y",
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        asked = [p for p in wizard.prompts if p.startswith("Enable sandbox")]
+        assert asked == ["Enable sandbox [Y/n]: "]
+        assert "libvirt" not in capsys.readouterr().out
+
+    def test_declining_the_sandbox_writes_no_sandbox_block(
         self, tmp_path: Path
     ) -> None:
-        """Offered honestly rather than hidden: a machine that cannot run any
-        of the backends must still be able to finish setup."""
+        """Refusing is a supported answer, not a failed step: the context is
+        written without a sandbox rather than not written at all."""
         config_path = tmp_path / "config.yaml"
         _Wizard(
             _fake_with_operator(),
             "y",
             discovered=self._projects(tmp_path)[:1],
-            projects=("", "2", "1"),
+            projects=("", "1"),
+            sandbox="n",
         ).run(config_path)
 
         assert "sandbox" not in yaml.safe_load(config_path.read_text())["contexts"]["api"]
 
-    def test_a_backend_this_host_cannot_run_is_named_with_its_remedy(
+    def test_a_host_that_cannot_sandbox_is_told_why_and_asked_nothing(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Left off the list, but not left unexplained — a missing choice
-        otherwise reads as a missing feature."""
+        """The only honest answer to a question whose yes cannot be honoured
+        is not to ask it — but silence would read as a missing feature, so the
+        remedy is shown where the question would have been."""
+        config_path = tmp_path / "config.yaml"
+        wizard = _Wizard(
+            _fake_with_operator(),
+            "y",
+            discovered=self._projects(tmp_path)[:1],
+            projects=("", "1"),
+            offer=_UNAVAILABLE,
+        )
+        wizard.run(config_path)
+
+        assert not [p for p in wizard.prompts if p.startswith("Enable sandbox")]
+        assert "libvirt-python not installed" in capsys.readouterr().out
+        assert "sandbox" not in yaml.safe_load(config_path.read_text())["contexts"]["api"]
+
+    def test_a_platform_with_no_blessed_backend_still_finishes(
+        self, tmp_path: Path
+    ) -> None:
+        """No backend at all is the same outcome as one that will not start:
+        setup completes, unsandboxed, rather than stranding the user."""
+        config_path = tmp_path / "config.yaml"
         _Wizard(
             _fake_with_operator(),
             "y",
             discovered=self._projects(tmp_path)[:1],
-            projects=("", "2", "1"),
-        ).run(tmp_path / "config.yaml")
+            projects=("", "1"),
+            offer=None,
+        ).run(config_path)
 
-        out = capsys.readouterr().out
-        assert "libvirt-python not installed" in out
-        # One choice plus "no sandbox": the unavailable one takes no number.
-        assert "1. Docker" in out
-        assert "2. No sandbox" in out
+        assert "sandbox" not in yaml.safe_load(config_path.read_text())["contexts"]["api"]
 
     def test_a_hand_typed_name_that_collides_is_refused_before_the_write(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -681,7 +719,7 @@ class TestProjectImport:
             _fake_with_operator(),
             "y",
             discovered=self._projects(tmp_path),
-            projects=("a", str(tmp_path / "elsewhere"), "api", "other", "", "2", "1"),
+            projects=("a", str(tmp_path / "elsewhere"), "api", "other", "", "1"),
         ).run(config_path)
 
         assert "already called 'api'" in capsys.readouterr().out

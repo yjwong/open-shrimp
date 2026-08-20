@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import sys
+import textwrap
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -537,48 +538,48 @@ def _prompt_manual_project(taken: set[str]) -> _Project:
     return _Project(name, named.directory, named.name, True)
 
 
-def _prompt_sandbox(count: int) -> str | None:
-    """Ask, once for the whole import, how much of this computer to expose.
+def _prompt_sandbox() -> str | None:
+    """Ask, once for the whole import, whether to keep projects off this computer.
 
-    The one question of this step.  Importing several folders in a keystroke
-    is a large increase in what a Telegram message can reach, and it is the
-    moment the user is least likely to think about it.  Only backends this
-    host can actually start are offered; the rest are named with their
-    remedy, so a missing choice reads as a missing prerequisite rather than
-    as a missing feature.
+    One yes-or-no about isolation, never a choice of hypervisor: which backend
+    provides it is ``doctor.blessed_backend``'s answer, and a user who needs
+    the difference explained is not the user who should be picking.
+
+    A host that cannot start the blessed backend is told so with the remedy
+    and asked nothing, because the only honest answer to a question whose yes
+    cannot be honoured is not to ask it.
     """
-    from open_shrimp.doctor import sandbox_offers
+    from open_shrimp.doctor import blessed_offer, sandbox_note
     from open_shrimp.paths import init_paths
-
-    subject = "these projects" if count > 1 else "this project"
-    print()
-    print(f"How should {subject} run?")
-    print(f"Anything you send me in Telegram can reach {'them' if count > 1 else 'it'},")
-    print("so this decides how much of this computer that reaches.")
-    print()
-    print("  Checking what this machine can run…")
 
     # The wizard writes no instance name, so the unscoped install is the one
     # these prerequisites belong to.
     init_paths(None)
-    offers = sandbox_offers(None)
-    ready = [offer for offer in offers if offer.available]
-    missing = [offer for offer in offers if not offer.available]
+    print()
+    print("Now, the sandbox.")
+    print("  Checking what this machine can run…")
+    offer = blessed_offer(None)
 
     print()
-    for index, offer in enumerate(ready, 1):
-        print(f"  {index}. {offer.label} — {offer.summary}")
-    print(f"  {len(ready) + 1}. No sandbox — the agent works directly on this computer")
-    if missing:
-        print()
-        print("  Not available on this machine:")
-        for offer in missing:
-            print(f"    {offer.label} — {offer.detail}")
+    print(textwrap.fill(sandbox_note(offer), width=68))
 
-    # No default: an isolation setting nobody chose is the one thing this
-    # question exists to prevent.
-    choice = _prompt_choice("Sandbox", len(ready) + 1)
-    return ready[choice - 1].backend if choice <= len(ready) else None
+    # Not asked where the yes cannot be honoured.  The note above has already
+    # said why, which is the whole reason it is printed before this returns
+    # rather than instead of a question nobody was going to be asked.
+    if offer is None or not offer.available:
+        # Only where there is something to install.  A platform with no
+        # backend at all has nothing to come back and turn on.
+        if offer is not None:
+            print("Install that, then turn the sandbox on from /context")
+            print("in Telegram.")
+        return None
+
+    print()
+    print("Left off, your projects run directly on this computer —")
+    print("and so does anything you send me in Telegram.")
+    print()
+
+    return offer.backend if _prompt_yes_no("Enable sandbox") else None
 
 
 def _prompt_model() -> str | None:
@@ -596,14 +597,18 @@ def _prompt_model() -> str | None:
     return _prompt("Custom model name")
 
 
-def _prompt_projects() -> dict[str, dict[str, Any]]:
-    """Import the projects the user already works in.
+def _prompt_projects() -> tuple[list[_Project], str | None]:
+    """Import the projects the user already works in, and the model they run on.
 
     Discovery runs before anything is drawn, because what this step asks
     depends on what it found: a machine with candidates is shown a list to
     prune, and a machine with none is shown a path prompt.  Finishing with
     nothing is a supported outcome, not a failed step — the user reaches the
     OpenShrimp context and adds projects by chat.
+
+    The chosen projects come back unbuilt rather than as config entries: the
+    sandbox belongs to the last step, and a context that has been written
+    down already cannot be given one there.
     """
     from open_shrimp.backend.claude_sdk.projects import discover_claude_projects
 
@@ -648,16 +653,9 @@ def _prompt_projects() -> dict[str, dict[str, Any]]:
         print()
         print("  No projects, then. Open /context in Telegram, pick OpenShrimp,")
         print("  and tell it which folder to add whenever you're ready.")
-        return {}
+        return [], None
 
-    sandbox = _prompt_sandbox(len(chosen))
-    model = _prompt_model()
-    return {
-        project.name: build_context_dict(
-            project.directory, project.label, model, sandbox
-        )
-        for project in chosen
-    }
+    return chosen, _prompt_model()
 
 
 def build_config_dict(
@@ -744,7 +742,19 @@ def run_setup_wizard(config_path: Path) -> None:
 
     token, identity = _prompt_token()
     enrolled = _prompt_operator(token, identity)
-    contexts = _prompt_projects()
+    chosen, model = _prompt_projects()
+
+    # The last step, and it is two questions rather than one — each asked only
+    # where it has something to settle.  Nothing was imported means nothing to
+    # sandbox, and the autostart question skips itself where a supervisor
+    # already owns restarting the core.
+    sandbox = _prompt_sandbox() if chosen else None
+    contexts = {
+        project.name: build_context_dict(
+            project.directory, project.label, model, sandbox
+        )
+        for project in chosen
+    }
 
     config_dict = build_config_dict(token, enrolled.user_id, contexts)
 

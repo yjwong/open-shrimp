@@ -40,14 +40,27 @@ internal sealed record DiscoveredProject(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("context_name")] string ContextName);
 
-/// <summary>One isolation choice this host could run a project in.</summary>
-internal sealed record SandboxChoice(
-    [property: JsonPropertyName("backend")] string Backend,
-    [property: JsonPropertyName("label")] string Label,
-    [property: JsonPropertyName("summary")] string Summary,
+/// <summary>
+/// The core's resolved answer to setup's one question about isolation.
+///
+/// Everything already decided: setup asks whether a project is isolated,
+/// never which hypervisor isolates it, so this carries the backend to write
+/// rather than a list to choose from. <c>Note</c> is the sentence for
+/// whichever case holds — offered, missing a prerequisite, or unavailable on
+/// this platform at all — because composing it here is how the three wizards
+/// came to say different things about the same host.
+/// </summary>
+internal sealed record SandboxOffering(
+    // Null where this platform has no sandbox at all, which Available false
+    // does not distinguish and does not need to: both are a box that cannot
+    // be ticked, and Note says which.
+    [property: JsonPropertyName("backend")] string? Backend,
     [property: JsonPropertyName("available")] bool Available,
-    // Why it is unavailable, and what to install. Empty when it is ready.
-    [property: JsonPropertyName("detail")] string Detail);
+    [property: JsonPropertyName("note")] string Note);
+
+/// <summary>The <c>sandboxes --json</c> payload.</summary>
+internal sealed record SandboxReport(
+    [property: JsonPropertyName("sandbox")] SandboxOffering Sandbox);
 
 /// <summary>
 /// Drives the core's non-interactive CLI.
@@ -225,15 +238,54 @@ internal static class OpenShrimpCli
     /// be parsed or exited non-zero all come back as "nothing", which is a
     /// screen each caller already has.
     /// </summary>
-    private static async Task<IReadOnlyList<T>> ListAsync<T>(
-        IEnumerable<string> arguments, string key, CancellationToken ct)
+    /// <summary>
+    /// What the CLI printed, or null if it would not answer.
+    ///
+    /// The single statement of "a core that could not answer is nothing, not
+    /// an error" — a wizard that must run before any core exists cannot treat
+    /// a missing answer as a failure, and saying so once per decoder is how
+    /// the two spellings drift apart.
+    /// </summary>
+    private static async Task<string?> OutputAsync(
+        IEnumerable<string> arguments, CancellationToken ct)
     {
         try
         {
             var result = await RunAsync(arguments, null, ct).ConfigureAwait(false);
-            if (result.ExitCode != 0) return Array.Empty<T>();
+            return result.ExitCode == 0 ? result.Stdout : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
-            using var document = JsonDocument.Parse(result.Stdout);
+    private static async Task<T?> JsonAsync<T>(
+        IEnumerable<string> arguments, CancellationToken ct)
+    {
+        var stdout = await OutputAsync(arguments, ct).ConfigureAwait(false);
+        if (stdout is null) return default;
+        try
+        {
+            return JsonSerializer.Deserialize<T>(stdout, ControlJson.Options);
+        }
+        catch (JsonException)
+        {
+            return default;
+        }
+    }
+
+    private static async Task<IReadOnlyList<T>> ListAsync<T>(
+        IEnumerable<string> arguments, string key, CancellationToken ct)
+    {
+        var stdout = await OutputAsync(arguments, ct).ConfigureAwait(false);
+        if (stdout is null) return Array.Empty<T>();
+        try
+        {
+            // By key rather than into a dictionary: these payloads carry
+            // sibling keys of other shapes, which a whole-object decode would
+            // fail on and report as an empty list.
+            using var document = JsonDocument.Parse(stdout);
             return document.RootElement.GetProperty(key)
                 .Deserialize<List<T>>(ControlJson.Options) ?? (IReadOnlyList<T>)Array.Empty<T>();
         }
@@ -298,15 +350,19 @@ internal static class OpenShrimpCli
     }
 
     /// <summary>
-    /// The sandbox backends this host can actually start a project in.
+    /// What enabling the sandbox would mean here, or null if the core could not
+    /// say.
     ///
-    /// Which ones apply to this platform, and whether their prerequisites are
-    /// met, is <c>doctor</c>'s answer. Offering one this PC cannot run would
-    /// write a config that fails on every turn from then on.
+    /// Read, not derived. Which backend this platform is given, whether its
+    /// prerequisites are met, and what to say about either is <c>doctor</c>'s
+    /// answer; recomputing any of it here would be a second answer to a
+    /// question the core already answers for the terminal wizard, free to
+    /// drift from it.
     /// </summary>
-    public static Task<IReadOnlyList<SandboxChoice>> GetSandboxesAsync(
+    public static async Task<SandboxOffering?> GetSandboxOfferingAsync(
         CancellationToken ct = default) =>
-        ListAsync<SandboxChoice>(new[] { "sandboxes", "--json" }, "sandboxes", ct);
+        (await JsonAsync<SandboxReport>(new[] { "sandboxes", "--json" }, ct)
+            .ConfigureAwait(false))?.Sandbox;
 
     /// <summary>Writes config.yaml. Returns null on success, else the reason.</summary>
     public static async Task<string?> WriteConfigAsync(ConfigWriteRequest request, CancellationToken ct = default)

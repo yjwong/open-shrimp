@@ -37,14 +37,21 @@ struct DiscoveredProject: Sendable, Hashable {
     let contextName: String
 }
 
-/// One isolation choice this host could run a project in.
-struct SandboxChoice: Sendable, Hashable {
-    let backend: String
-    let label: String
-    let summary: String
+/// The core's resolved answer to setup's one question about isolation.
+///
+/// Everything already decided: setup asks whether a project is isolated,
+/// never which hypervisor isolates it, so this carries the backend to write
+/// rather than a list to choose from.  `note` is the sentence for whichever
+/// case holds — offered, missing a prerequisite, or unavailable on this
+/// platform at all — because composing it here is how the three wizards came
+/// to say different things about the same host.
+struct SandboxOffering: Sendable, Hashable {
+    /// Nil where this platform has no sandbox at all, which `available`
+    /// false does not distinguish and does not need to: both are a toggle
+    /// that cannot be turned on, and `note` says which.
+    let backend: String?
     let available: Bool
-    /// Why it is unavailable, and what to install.  Empty when it is ready.
-    let detail: String
+    let note: String
 }
 
 /// Drives the core's non-interactive CLI.
@@ -206,20 +213,20 @@ enum OpenShrimpCLI {
     /// array under a named key — so a command that cannot be read, cannot be
     /// parsed or exited non-zero all come back as "nothing", which is a screen
     /// each caller already has.
-    private static func jsonList(_ arguments: [String], key: String) async -> [[String: Any]] {
+    private static func jsonObject(_ arguments: [String]) async -> [String: Any]? {
         do {
             let result = try await run(arguments)
-            if result.exitCode != 0 { return [] }
-
-            guard
-                let parsed = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
-                    as? [String: Any],
-                let rows = parsed[key] as? [[String: Any]]
-            else { return [] }
-            return rows
+            if result.exitCode != 0 { return nil }
+            return try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
+                as? [String: Any]
         } catch {
-            return []
+            return nil
         }
+    }
+
+    private static func jsonList(_ arguments: [String], key: String) async -> [[String: Any]] {
+        let parsed = await jsonObject(arguments)
+        return parsed?[key] as? [[String: Any]] ?? []
     }
 
     /// The picker falls back to "CLI default" rather than blocking the wizard
@@ -286,22 +293,25 @@ enum OpenShrimpCLI {
             .compactMap { $0["context_name"] as? String }
     }
 
-    /// The sandbox backends this host can actually start a project in.
+    /// What enabling the sandbox would mean here, or nil if the core could not
+    /// say.
     ///
-    /// Which ones apply to this platform, and whether their prerequisites are
-    /// met, is `doctor`'s answer.  Offering one this Mac cannot run would
-    /// write a config that fails on every turn from then on.
-    static func sandboxes() async -> [SandboxChoice] {
-        await jsonList(["sandboxes", "--json"], key: "sandboxes").compactMap { entry in
-            guard let backend = entry["backend"] as? String else { return nil }
-            return SandboxChoice(
-                backend: backend,
-                label: entry["label"] as? String ?? backend,
-                summary: entry["summary"] as? String ?? "",
-                available: entry["available"] as? Bool ?? false,
-                detail: entry["detail"] as? String ?? ""
-            )
-        }
+    /// Read, not derived.  Which backend this platform is given, whether its
+    /// prerequisites are met, and what to say about either is `doctor`'s
+    /// answer; recomputing any of it here would be a second answer to a
+    /// question the core already answers for the terminal wizard, free to
+    /// drift from it.
+    static func blessedSandbox() async -> SandboxOffering? {
+        guard
+            let parsed = await jsonObject(["sandboxes", "--json"]),
+            let entry = parsed["sandbox"] as? [String: Any],
+            let note = entry["note"] as? String
+        else { return nil }
+        return SandboxOffering(
+            backend: entry["backend"] as? String,
+            available: entry["available"] as? Bool ?? false,
+            note: note
+        )
     }
 
     /// Writes config.yaml.  Returns nil on success, else the reason.
