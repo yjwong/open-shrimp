@@ -932,11 +932,36 @@ jobs:
           codesign --force --timestamp --sign "$IDENTITY" "$DMG"
           macos/Tools/notarize.sh "$DMG"
 
-      - name: Upload DMG
+      - name: Generate the Sparkle appcast
+        # After the DMG is signed, notarized and stapled, and before it is
+        # uploaded: the feed carries the DMG's length and a signature over its
+        # bytes, so it has to describe the file that ships and not an earlier
+        # state of it.
+        #
+        # `make app-universal` already fetched `vendor/bin` beside the
+        # framework under one checksum, so the tool that signs the feed and the
+        # framework that verifies it cannot be different Sparkle versions.
+        #
+        # The script verifies what it produced and fails the job rather than
+        # let the release publish a feed nobody can install from.
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          macos/Tools/make-appcast.sh \
+            macos/build/OpenShrimp.app \
+            "macos/build/OpenShrimp-${{ needs.version.outputs.version }}.dmg" \
+            "${{ needs.version.outputs.tag }}" \
+            macos/build/appcast.xml
+
+      - name: Upload DMG and appcast
         uses: actions/upload-artifact@v7
         with:
           name: OpenShrimp-macos-app
-          path: macos/build/OpenShrimp-*.dmg
+          # Both paths are under macos/build, so that is the archive's root and
+          # the two arrive beside each other.
+          path: |
+            macos/build/OpenShrimp-*.dmg
+            macos/build/appcast.xml
 
   build-windows-app:
     # The WinUI 3 tray app, wrapped with the core into a per-user MSI.
@@ -1041,10 +1066,17 @@ jobs:
           # with a bare "Not Found" once it lands badly.  `openshrimp-*`
           # already covers the security-key helper, the HCS initrd, both
           # rootfs images and the RDP helper, so none of those get a line.
+          #
+          # The appcast is named here because it matches none of the others.
+          # Its name has to stay exactly this: the macOS app checks
+          # `releases/latest/download/appcast.xml`, and GitHub serves that from
+          # the newest non-prerelease's asset of that name.  Rename it, or mark
+          # a release prerelease, and every install stops finding updates.
           files: |
             artifacts/openshrimp-*
             artifacts/moonshine-stt-*
             artifacts/virtiofsd-*
             artifacts/OpenShrimp-*.dmg
             artifacts/OpenShrimp-*.msi
+            artifacts/appcast.xml
             artifacts/*.tar.gz
