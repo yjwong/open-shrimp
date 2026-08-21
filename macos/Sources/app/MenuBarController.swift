@@ -3,10 +3,11 @@ import AppKit
 /// The status item and its menu.
 ///
 /// Status, start/stop, open config, open logs, start at login, quit — the same
-/// six the Windows tray offers, so the two front ends stay one design.  A
-/// seventh shows only while a headless service is configured to start at login
-/// too: nothing on Windows registers that second autostart by itself, so the
-/// tray has nothing to say about it.
+/// six the Windows tray offers, so the two front ends stay one design.  Check
+/// for Updates is the one item that does not pair: the tray has no feed and no
+/// bundle it could replace.  A further item shows only while a headless service
+/// is configured to start at login too: nothing on Windows registers that
+/// second autostart by itself, so the tray has nothing to say about it.
 ///
 /// An `NSStatusItem` rather than a `MenuBarExtra`: the latter hands out no
 /// status item to give a template image to, and behaves awkwardly for an app
@@ -50,6 +51,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     var onQuit: (() -> Void)?
     var onRunSetup: (() -> Void)?
+    /// A closure rather than a reference to the updater, so that the menu keeps
+    /// knowing nothing about Sparkle.
+    var onCheckForUpdates: (() -> Void)?
 
     init(supervisor: CoreSupervisor) {
         self.supervisor = supervisor
@@ -110,6 +114,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(conflictEntry)
         menu.addItem(autostartEntry)
         menu.addItem(.separator())
+        menu.addItem(entry("Check for Updates…", #selector(checkForUpdates)))
         menu.addItem(entry("Quit", #selector(quit), key: "q"))
 
         statusItem.menu = menu
@@ -364,8 +369,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 This app is version \(app). The part of it that does the work has \
                 updated itself to version \(core ?? "unknown").
 
-                Install the newest OpenShrimp to catch up. The app will not put an \
-                older core back over a newer one.
+                Choose Check for Updates to bring this app up to the same version. \
+                It will not put an older core back over a newer one.
                 """
             alert.addButton(withTitle: "OK")
             alert.runModal()
@@ -473,6 +478,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 autostartEntry.state = .on
             }
         }
+    }
+
+    @objc private func checkForUpdates() {
+        attempt("Check for Updates") { self.onCheckForUpdates?() }
     }
 
     @objc private func quit() {

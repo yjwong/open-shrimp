@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var supervisor: CoreSupervisor?
     private var menu: MenuBarController?
     private var wizard: SetupWizard?
+    /// A property rather than a local: Sparkle holds its delegate weakly, so an
+    /// updater nobody keeps stops checking the moment launch returns.
+    private var updates: UpdateController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         instanceName = ConfigPeek.readInstanceName(at: CorePaths.configFile.path)
@@ -38,10 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Notifier.post(reason)
         }
 
+        let updates = UpdateController()
+        self.updates = updates
+
         let supervisor = CoreSupervisor()
         let menu = MenuBarController(supervisor: supervisor)
         menu.onQuit = { NSApp.terminate(nil) }
         menu.onRunSetup = { [weak self] in self?.runSetup() }
+        menu.onCheckForUpdates = { [weak updates] in updates?.checkForUpdates(nil) }
         menu.show()
         self.supervisor = supervisor
         self.menu = menu

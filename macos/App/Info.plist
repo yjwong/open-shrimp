@@ -33,5 +33,35 @@
 	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- Sparkle.  Stated here rather than set on the updater in code, which is
+	     both what Sparkle's own documentation asks for and what lets the feed
+	     be pointed somewhere else for a test build without touching Swift.
+
+	     The feed URL is the `latest` redirect rather than a per-release one:
+	     GitHub resolves it to the newest non-prerelease's asset of that name,
+	     so the URL a shipped app carries forever does not have to name a tag
+	     that did not exist when it was built.
+
+	     No SUAutomaticallyUpdate: an update is offered, not taken. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/yjwong/open-shrimp/releases/latest/download/appcast.xml</string>
+	<!-- The public half of the EdDSA pair the release workflow signs the
+	     appcast with.  Sparkle installs nothing that does not verify against
+	     it, so a feed served over a hijacked connection is inert.
+
+	     Literal, not a build argument: it is not a secret, and a build that
+	     was passed none would still build, still ship, and then silently
+	     refuse every check.  Rotating it is a commit regardless — an install
+	     carries its own copy and rejects whatever the new key signs. -->
+	<key>SUPublicEDKey</key>
+	<string>ScMHGKZGfRmQfhf0dYsKXSnzxW9lw9kzIrtUtr06xek=</string>
+	<!-- Checked on a schedule and never on launch: the launch check is the
+	     user-initiated path, which puts an "up to date" dialog on the screen
+	     at every login.  Six hours matches what the core polls the releases
+	     API at, so the two front ends notice a release at the same rate. -->
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>21600</integer>
 </dict>
 </plist>

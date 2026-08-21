@@ -3,11 +3,17 @@
 <!-- Deliberately empty, and deliberately not the core's entitlements.plist.
 
      The app claims no hardened-runtime exception because it needs none: it
-     embeds no interpreter, loads no code but Apple's own frameworks, and is
-     not sandboxed, so its network access and the directories the user picks
-     need nothing declared.  The core it spawns is a separate process signed
-     separately, and the three exceptions CPython needs are on that binary's
-     own signature, where they apply.
+     embeds no interpreter, and is not sandboxed, so its network access and the
+     directories the user picks need nothing declared.  The core it spawns is a
+     separate process signed separately, and the three exceptions CPython needs
+     are on that binary's own signature, where they apply.
+
+     It does load code that is not Apple's — the embedded Sparkle framework and
+     the helpers it launches — and still needs nothing here.  Library
+     validation is satisfied by a matching Team ID, which is what signing the
+     nested code with the app's own identity buys; a disable-library-validation
+     entitlement is what a bundle reaches for when its nested code was signed
+     by somebody else.
 
      An empty claim stated in a file of its own is what keeps the two apart.
      Reusing entitlements.plist here would hand a Swift app the right to map

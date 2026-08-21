@@ -866,26 +866,47 @@ jobs:
         run: |
           set -e
           APP="macos/build/OpenShrimp.app"
-          # One signature over the whole bundle.  It holds a single executable
-          # and two seeds that arrive already signed and notarized, so sealing
-          # the enclosure records their hashes and leaves their own signatures
-          # untouched; there is no nested bundle and nothing to walk.  This
-          # replaces the ad-hoc signature the Makefile applies, which exists so
-          # that a local build has a stable identity for the login item to
-          # attribute itself to.
+          # The same script the Makefile runs, with the Developer ID identity
+          # in place of the ad-hoc one — so the walk over Sparkle's nested
+          # helpers is exercised on every local build rather than first
+          # attempted here.  Signed with the app's identity and no exception
+          # entitlement, which is what satisfies library validation under the
+          # hardened runtime: matching Team IDs.
+          #
+          # The two core seeds arrive already signed and notarized; sealing the
+          # enclosure records their hashes and leaves their signatures alone.
           #
           # The app's own entitlements, not the core's: it embeds no
           # interpreter, and the exceptions CPython needs belong on the
           # signature of the binary that embeds it.
-          codesign --force --timestamp --options runtime \
-            --entitlements macos/App/OpenShrimp.entitlements \
-            --sign "$IDENTITY" "$APP"
-          codesign --verify --strict --deep --verbose=2 "$APP"
+          macos/Tools/sign-bundle.sh "$IDENTITY" "$APP" \
+            macos/App/OpenShrimp.entitlements
           # Both arches on the executable, and both seeds still carrying the
           # signatures they were notarized under.
           lipo -info "$APP/Contents/MacOS/OpenShrimp"
           codesign -dv "$APP/Contents/Resources/openshrimp-arm64"
           codesign -dv "$APP/Contents/Resources/openshrimp-x86_64"
+
+      - name: Notarize and staple the .app
+        # Before the DMG is built, so the DMG carries a stapled app.  Sparkle
+        # extracts the .app out of an update and validates it by itself, and a
+        # ticket that only exists on the enclosing DMG is not one it can find:
+        # the install then works only while Apple is reachable.
+        #
+        # The notary service takes an archive, not a bundle, so the app is
+        # zipped to be submitted — and the ticket is stapled to the bundle the
+        # zip was made from, not to the zip, which is thrown away.
+        env:
+          API_KEY_B64: ${{ secrets.MACOS_NOTARY_API_KEY_P8_BASE64 }}
+          API_KEY_ID: ${{ secrets.MACOS_NOTARY_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.MACOS_NOTARY_API_ISSUER_ID }}
+        run: |
+          set -e
+          APP="macos/build/OpenShrimp.app"
+          ZIP="$RUNNER_TEMP/OpenShrimp.zip"
+          ditto -c -k --keepParent "$APP" "$ZIP"
+          macos/Tools/notarize.sh "$ZIP" "$APP"
+          rm "$ZIP"
 
       - name: Create DMG
         run: |
@@ -909,28 +930,7 @@ jobs:
           set -e
           DMG="macos/build/OpenShrimp-${{ needs.version.outputs.version }}.dmg"
           codesign --force --timestamp --sign "$IDENTITY" "$DMG"
-          KEY="$RUNNER_TEMP/notary_key.p8"
-          echo -n "$API_KEY_B64" | base64 --decode -o "$KEY"
-          set +e
-          SUBMIT_OUT=$(xcrun notarytool submit "$DMG" \
-            --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
-            --wait --timeout 30m 2>&1)
-          SUBMIT_RC=$?
-          echo "$SUBMIT_OUT"
-          SUBMIT_ID=$(printf '%s\n' "$SUBMIT_OUT" | awk '/^[[:space:]]*id:/ {print $2; exit}')
-          if [ "$SUBMIT_RC" -ne 0 ] || ! printf '%s\n' "$SUBMIT_OUT" | grep -q 'status: Accepted'; then
-            if [ -n "$SUBMIT_ID" ]; then
-              echo "::group::Notary log for $SUBMIT_ID"
-              xcrun notarytool log "$SUBMIT_ID" \
-                --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
-              echo "::endgroup::"
-            fi
-            rm -f "$KEY"
-            exit 1
-          fi
-          rm "$KEY"
-          xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
+          macos/Tools/notarize.sh "$DMG"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v7
