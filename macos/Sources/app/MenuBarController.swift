@@ -28,10 +28,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         action: nil,
         keyEquivalent: ""
     )
+    /// Named for the fault rather than the fix, because whether there is a fix
+    /// depends on which half is stale — and that takes more words than a title
+    /// read at a glance can hold.  The dialog is where it gets said.
+    private let versionEntry = NSMenuItem(
+        title: "Version Mismatch…",
+        action: nil,
+        keyEquivalent: ""
+    )
 
     private var state: CoreState = .stopped
     private var detail: String?
     private var botUsername: String?
+    private var versionAgreement: VersionAgreement = .agreed
 
     /// Whether a headless core is configured to start at login too.  Re-read on
     /// every menu open rather than answered once at launch: `openshrimp install`
@@ -63,12 +72,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         autostartEntry.action = #selector(toggleAutostart)
         conflictEntry.target = self
         conflictEntry.action = #selector(showLoginConflict)
-        // The one item in the menu that reports a fault rather than offering a
-        // choice, and the only thing that distinguishes it at a glance.
-        conflictEntry.image = NSImage(
+        versionEntry.target = self
+        versionEntry.action = #selector(showVersionMismatch)
+        // The two items in the menu that report a fault rather than offering a
+        // choice, and the only thing that distinguishes them at a glance.
+        let warning = NSImage(
             systemSymbolName: "exclamationmark.triangle.fill",
-            accessibilityDescription: "Conflict"
+            accessibilityDescription: "Warning"
         )
+        conflictEntry.image = warning
+        versionEntry.image = warning
+        // Hidden until something has actually looked.  Both conditions are read
+        // asynchronously, and an item announcing a fault before then sends the
+        // user looking for one that is not there.
+        conflictEntry.isHidden = true
+        versionEntry.isHidden = true
 
         let menu = NSMenu()
         menu.delegate = self
@@ -79,6 +97,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(statusEntry)
         menu.addItem(.separator())
+        // Directly above the item that starts and stops the core, inside the
+        // same separators, so hiding it leaves no gap to explain.
+        menu.addItem(versionEntry)
         menu.addItem(startStopEntry)
         menu.addItem(.separator())
         menu.addItem(entry("Open Config…", #selector(openConfig)))
@@ -173,6 +194,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         state = snapshot.state
         detail = snapshot.detail
         botUsername = snapshot.botUsername
+        versionAgreement = snapshot.version
+        // Only shown here.  The supervisor logs each change as it decides it,
+        // which is why this needs no equivalent of the conflict item's notice.
+        versionEntry.isHidden = versionAgreement == .agreed
 
         let description = describeState()
         startStopEntry.title = state.isUp ? "Stop" : "Start"
@@ -298,6 +323,74 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func showLoginConflict() {
         resolveLoginConflict(thenEnableAutostart: false)
+    }
+
+    /// State the version disagreement and offer the one action that ends it.
+    ///
+    /// That action exists only while the core is the stale half: the app
+    /// carries a core it can install, not a copy of itself.
+    ///
+    /// The repair is a stop and a start rather than a seed done from here, so
+    /// it goes through the one place that decides which core survives.
+    @objc private func showVersionMismatch() {
+        // An accessory app is never the active one, so its alert would
+        // otherwise open behind whatever is in front.
+        NSApp.activate(ignoringOtherApps: true)
+
+        let app = CoreVersion.bundled
+        let core = versionAgreement.coreVersion
+
+        // Said without naming a seed, a bundle or a control channel.  What the
+        // user can act on is which half is behind and whether this app can move
+        // it; the log keeps the rest.
+        let alert = NSAlert()
+        alert.messageText = "OpenShrimp and its core are different versions."
+        switch versionAgreement {
+        case .behind:
+            alert.informativeText = """
+                This app is version \(app). The part of it that does the work is still \
+                version \(core ?? "unknown").
+
+                Restarting the core replaces it with the one this app came with. \
+                OpenShrimp will be offline for a moment while it does.
+                """
+            alert.addButton(withTitle: "Restart Core")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            repairCoreVersion()
+
+        case .ahead:
+            alert.informativeText = """
+                This app is version \(app). The part of it that does the work has \
+                updated itself to version \(core ?? "unknown").
+
+                Install the newest OpenShrimp to catch up. The app will not put an \
+                older core back over a newer one.
+                """
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+
+        case .unordered, .agreed:
+            alert.informativeText = """
+                This app is version \(app). The part of it that does the work reports \
+                version \(core ?? "nothing at all").
+
+                Nothing here can tell which of the two is behind, so neither will be \
+                replaced. Installing the newest OpenShrimp is what settles it.
+                """
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
+
+    /// Left to run on its own after the first suspension, like every other
+    /// action that outlives the click.  Success is not announced: the status
+    /// line already shows the stop and the start as they happen.
+    private func repairCoreVersion() {
+        Task { [supervisor] in
+            await supervisor.stop()
+            await supervisor.start()
+        }
     }
 
     /// State the conflict and offer the one action that ends it.

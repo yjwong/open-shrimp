@@ -6,6 +6,11 @@ import Foundation
 /// failure that is not written here is a failure that cannot be diagnosed at
 /// all.  It sits beside the core's log so that "Open Logs" reveals both.
 ///
+/// Beside the supervisor rather than in the app's own sources, because the
+/// supervisor is where the decisions worth recording get made: which core to
+/// adopt, which to replace, which to leave alone.  None of them can be read
+/// back off the state the menu shows afterwards.
+///
 /// State changes are recorded as well as faults, because the menu is the only
 /// place they are shown and it exists only while it is open — a transition that
 /// happened while nobody had the menu open is otherwise unrecoverable.

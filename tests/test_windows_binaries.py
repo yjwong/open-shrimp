@@ -278,3 +278,38 @@ class TestDownloadAndReplace:
         assert target.read_bytes() == b"new"
         assert (tmp_path / "openshrimp.exe.old").read_bytes() == b"old"
         assert not (tmp_path / ".openshrimp.exe.update.tmp").exists()
+
+    @pytest.mark.asyncio
+    async def test_the_installed_version_is_recorded_beside_the_binary(
+        self, tmp_path: Path
+    ) -> None:
+        """A host app carrying its own copy of the core reads this stamp to
+        decide whether the one on disk is already newer than the one it would
+        install.  Left unwritten, a self-update looks like the version that
+        seeded the file and the next app install rolls it back."""
+        from open_shrimp import updater
+
+        target = tmp_path / "openshrimp"
+        target.write_bytes(b"old")
+        (tmp_path / ".core-version").write_text("0.40.0")
+
+        async def fake_stream_into(_info: object, dest: Path) -> None:
+            dest.write_bytes(b"new")
+
+        info = UpdateInfo(
+            version="0.41.0",
+            download_url="https://example.invalid/openshrimp-macos-arm64",
+            release_url="https://example.invalid/release",
+            release_notes="",
+            asset_name="openshrimp-macos-arm64",
+        )
+
+        with (
+            patch("open_shrimp.updater.pyapp_binary_path", return_value=target),
+            patch("open_shrimp.updater.sys.platform", "darwin"),
+            patch.object(updater, "_stream_to_file", fake_stream_into),
+        ):
+            await updater.download_and_replace(info)
+
+        assert target.read_bytes() == b"new"
+        assert (tmp_path / ".core-version").read_text() == "0.41.0"

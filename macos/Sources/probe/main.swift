@@ -128,7 +128,7 @@ func requestRestart() async {
         stamp("no core listening at \(client.endpoint)")
         exit(1)
     }
-    stamp(await client.restart() ? "restart accepted" : "restart was not accepted")
+    stamp("restart: \(await client.restart())")
     await client.dispose()
 }
 

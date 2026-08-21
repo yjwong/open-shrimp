@@ -260,11 +260,30 @@ async def download_and_replace(update_info: UpdateInfo) -> None:
     try:
         await _stream_to_file(update_info, tmp)
         _install_binary(tmp, target)
+        _stamp_version(target, update_info.version)
         logger.info("Binary updated successfully to %s", update_info.version)
 
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _stamp_version(target: Path, version: str) -> None:
+    """Record which version the binary at *target* now is.
+
+    A host app that carries a copy of the core needs to know whether the one
+    already on disk is newer than the one it would install, and reading that
+    out of the binary means launching it.  The stamp is the cheap answer, and
+    it is only true if everyone who replaces the binary writes it — which is
+    why this is here and not only in whatever put the file there first.
+    """
+    stamp = target.with_name(".core-version")
+    try:
+        stamp.write_text(version, encoding="utf-8")
+    except OSError as exc:
+        # A stale stamp costs a redundant re-seed, never a lost update, so this
+        # is not worth failing an installed binary over.
+        logger.warning("Could not record the installed version at %s: %s", stamp, exc)
 
 
 # ── Telegram notification and confirmation ──

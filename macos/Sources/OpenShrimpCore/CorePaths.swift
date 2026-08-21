@@ -118,18 +118,22 @@ enum CorePaths {
         return Bundle.main.url(forResource: name, withExtension: nil)
     }
 
-    /// Records which app build seeded the copied-out core, so the comparison
+    /// Records which version the core binary beside it is, so the comparison
     /// costs a file read rather than a process launch.
-    private static var seedStamp: URL {
-        coreExecutable.deletingLastPathComponent().appendingPathComponent(".seeded-from")
+    ///
+    /// Written by everything that replaces that binary, this app included —
+    /// `updater.py` stamps it after a self-update.  A stamp only this app wrote
+    /// would go stale the first time the core replaced itself, and the guard
+    /// below would then read a self-updated core as an old one and roll it back.
+    private static var versionStamp: URL {
+        coreExecutable.deletingLastPathComponent().appendingPathComponent(".core-version")
     }
 
-    /// Copy the bundled core out when the destination is missing or was seeded
-    /// by an older app.  Returns the reason it could not, or nil on success.
+    /// Copy the bundled core out when the destination is missing or older than
+    /// the seed.  Returns the reason it could not, or nil on success.
     ///
-    /// Never overwrites a destination seeded by this same build: that file may
-    /// since have replaced itself with a newer core, and re-seeding would
-    /// silently roll the user back.
+    /// Never overwrites a core at this version or above: it may have replaced
+    /// itself since, and re-seeding would silently roll the user back.
     @discardableResult
     static func seedCoreIfNeeded() -> String? {
         guard let seed = seedExecutable else {
@@ -138,11 +142,12 @@ enum CorePaths {
             return nil
         }
 
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        let stamped = try? String(contentsOf: seedStamp, encoding: .utf8)
+        let build = CoreVersion.bundled
+        let stamped = (try? String(contentsOf: versionStamp, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let manager = FileManager.default
         if manager.isExecutableFile(atPath: coreExecutable.path),
-           stamped?.trimmingCharacters(in: .whitespacesAndNewlines) == build {
+           !seedSupersedes(stamped, build) {
             return nil
         }
 
@@ -158,10 +163,25 @@ enum CorePaths {
             try manager.copyItem(at: seed, to: staged)
             try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staged.path)
             _ = try manager.replaceItemAt(coreExecutable, withItemAt: staged)
-            try build.write(to: seedStamp, atomically: true, encoding: .utf8)
+            try build.write(to: versionStamp, atomically: true, encoding: .utf8)
         } catch {
             return "Could not install the core binary: \(error.localizedDescription)"
         }
         return nil
+    }
+
+    /// Whether the bundled seed is strictly newer than the core already there.
+    ///
+    /// An ordering, not an inequality: an inequality makes installing an older
+    /// app over a self-updated core a silent rollback.  Versions that will not
+    /// order are left alone for the same reason — the direction is unknown, and
+    /// a wrong guess costs a version.
+    ///
+    /// A missing stamp seeds regardless.  Nothing wrote one, so nothing can say
+    /// what that binary is without launching it, and a core this app is about
+    /// to supervise is worth more than one it cannot identify.
+    private static func seedSupersedes(_ stamped: String?, _ build: String) -> Bool {
+        guard let stamped, !stamped.isEmpty else { return true }
+        return CoreVersion.compare(build, stamped) == .orderedDescending
     }
 }

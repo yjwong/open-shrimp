@@ -19,6 +19,7 @@ import pytest_asyncio
 from open_shrimp.control import ControlServer, CoreStatus, build_methods, endpoint_address
 from open_shrimp.control import protocol
 from open_shrimp.control import server as server_module
+from open_shrimp.updater import get_current_version
 
 
 # -- Framing -----------------------------------------------------------------
@@ -149,7 +150,10 @@ async def test_status_reports_the_core(client, status):
     assert result["contexts"] == ["default", "work"]
     assert result["bot_username"] == "testbot"
     assert result["pid"] == os.getpid()
+    # Both halves of what a front end needs to tell whether it can drive this
+    # core at all: the channel it speaks, and which version it is.
     assert result["protocol"] == protocol.PROTOCOL_VERSION
+    assert result["version"] == get_current_version()
 
 
 @pytest.mark.asyncio

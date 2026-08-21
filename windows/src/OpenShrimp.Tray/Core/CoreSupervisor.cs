@@ -39,12 +39,28 @@ internal sealed class CoreSupervisor : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan InstallAnnounceDelay = TimeSpan.FromSeconds(3);
 
+    /// <summary>
+    /// Said when a core claims a channel this build does not know. It names the
+    /// tray, because the tray is the half that can be fixed from here.
+    /// </summary>
+    private const string UnknownProtocolDetail = "This core is newer than the tray — update OpenShrimp";
+
     private readonly string? _instanceName;
     private Process? _process;
     private ControlClient? _client;
     private CancellationTokenSource? _watchdog;
     private CancellationTokenSource? _bootstrap;
     private bool _stopRequested;
+
+    /// <summary>
+    /// True once a core has claimed a protocol this build does not know. Every
+    /// method on the channel is a guess from then on, including shutdown, so
+    /// none are sent.
+    /// </summary>
+    private bool _unknownProtocol;
+
+    /// <summary>The core's version as last reported, for logging drift.</summary>
+    private string? _coreVersion;
 
     public CoreState State { get; private set; } = CoreState.Stopped;
     public string? StatusDetail { get; private set; }
@@ -72,6 +88,10 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         }
 
         _stopRequested = false;
+        // Describes the core that was attached last time, and there is none
+        // attached now. Left standing, it would make StopAsync walk away from a
+        // core this start is about to spawn.
+        _unknownProtocol = false;
         Set(CoreState.Starting);
 
         // Adopt a core that is already running — started from a terminal, or
@@ -252,6 +272,35 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         if (status is null) return;
 
         LastStatus = status;
+
+        // Checked before the state below is mapped: a core speaking a channel
+        // this build does not know may mean something else by every field in the
+        // reply, and by every method the tray could call back on. Saying so is
+        // the last thing the tray can still do correctly.
+        if (status.Protocol > ControlProtocol.Expected)
+        {
+            if (!_unknownProtocol)
+                TrayLog.Write($"Core speaks control protocol {status.Protocol}; " +
+                              $"this build knows {ControlProtocol.Expected}");
+            _unknownProtocol = true;
+            _coreVersion = null;
+            Set(CoreState.Error, UnknownProtocolDetail);
+            return;
+        }
+        _unknownProtocol = false;
+
+        // Recorded, not shown. The core self-replacing past the version the MSI
+        // installed is how Windows updates at all, so a tray that called that a
+        // fault would be flagging the normal case forever — but which version
+        // is actually running is still the first thing anyone diagnosing this
+        // needs, and it is nowhere else.
+        if (status.Version != _coreVersion)
+        {
+            _coreVersion = status.Version;
+            TrayLog.Write($"Core is version {_coreVersion ?? "unreported"}; " +
+                          $"this build is {TrayVersion.Current}");
+        }
+
         Set(status.State switch
         {
             "running" => CoreState.Running,
@@ -285,6 +334,20 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         // outlives the wait and finishes on its own, which is what keeps its
         // installation directory from being left half-written.
         _bootstrap?.Cancel();
+
+        // A core speaking a channel this build does not know is left running.
+        // Shutdown may not mean that any more, and the only fallback here is
+        // TerminateProcess — which is how an HCS guest gets stranded. Walking
+        // away strands nothing: the core is still supervising itself, and the
+        // next front end to meet it will be one that can speak to it.
+        if (_unknownProtocol)
+        {
+            TrayLog.Write("Leaving a core that speaks an unknown control protocol running");
+            await TeardownAsync().ConfigureAwait(false);
+            Set(CoreState.Stopped);
+            return;
+        }
+
         Set(CoreState.Stopping);
 
         var client = _client;
@@ -297,28 +360,48 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         TrayLog.Write($"Stopping the core: control channel {(connected ? "up" : "gone")}, " +
                       $"process {(_process is null ? "not ours" : _process.HasExited ? "already exited" : "running")}");
 
+        // A core that answered and declined. There is no drain to wait for and
+        // no second way to ask, and the only rung left here is TerminateProcess
+        // — which on a core holding an HCS compute system strands the guest, so
+        // it is not taken. Left running, like Stop.cs leaves one it cannot
+        // drain.
+        var refused = false;
+
         if (connected)
         {
-            await client!.ShutdownAsync().ConfigureAwait(false);
+            // The reply is read rather than merely awaited, because an error
+            // frame is still a frame: a core that no longer implements the
+            // method answers unknown_method. Silence is a different matter and
+            // is not read as a refusal — a core wedged in its teardown answers
+            // nothing, and it is the one that most needs the grace period.
+            var reply = await client!.ShutdownAsync().ConfigureAwait(false);
+            if (reply?.Error is not null)
+            {
+                TrayLog.Write($"Core refused the stop request ({reply.Error.Code}: " +
+                              $"{reply.Error.Message}); leaving it running");
+                refused = true;
+            }
+            else
+            {
+                // Shutdown has no internal timeout on the Python side — a wedged
+                // sandbox teardown can hang it — so bound the wait here.
+                //
+                // The control channel is what says the core is down, and the
+                // spawned handle says nothing: the image the tray launches is
+                // PyApp's, and it is a different process from the interpreter that
+                // actually holds the sandbox. That distinction is load-bearing at
+                // the end of a session, where the interpreter defers itself to the
+                // back of the shutdown order and the launcher does not — so the
+                // launcher exits first, every time, while the guest is still
+                // unwinding. Breaking on it would report a stopped core and let go
+                // of the session the drain is holding open.
+                var deadline = DateTime.UtcNow + GracefulStopTimeout;
+                while (DateTime.UtcNow < deadline && client.IsConnected)
+                    await Task.Delay(250).ConfigureAwait(false);
 
-            // Shutdown has no internal timeout on the Python side — a wedged
-            // sandbox teardown can hang it — so bound the wait here.
-            //
-            // The control channel is what says the core is down, and the
-            // spawned handle says nothing: the image the tray launches is
-            // PyApp's, and it is a different process from the interpreter that
-            // actually holds the sandbox. That distinction is load-bearing at
-            // the end of a session, where the interpreter defers itself to the
-            // back of the shutdown order and the launcher does not — so the
-            // launcher exits first, every time, while the guest is still
-            // unwinding. Breaking on it would report a stopped core and let go
-            // of the session the drain is holding open.
-            var deadline = DateTime.UtcNow + GracefulStopTimeout;
-            while (DateTime.UtcNow < deadline && client.IsConnected)
-                await Task.Delay(250).ConfigureAwait(false);
-
-            if (client.IsConnected)
-                TrayLog.Write("Core did not answer the stop within its grace period");
+                if (client.IsConnected)
+                    TrayLog.Write("Core did not answer the stop within its grace period");
+            }
         }
 
         // Said out loud because the kill below cannot reach it. Killing the
@@ -328,7 +411,7 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         if (_process is null or { HasExited: true } && _client is { IsConnected: true })
             TrayLog.Write("Core is still up with no handle to stop it by");
 
-        if (_process is { HasExited: false })
+        if (_process is { HasExited: false } && !refused)
         {
             // The outcome this whole class is arranged to avoid: a core killed
             // while it holds an HCS compute system strands the guest.
@@ -353,6 +436,11 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         }
         _process?.Dispose();
         _process = null;
+        // Everything read off a core describes the one that was attached, so it
+        // goes when the attachment does.
+        LastStatus = null;
+        _coreVersion = null;
+        _unknownProtocol = false;
     }
 
     public async ValueTask DisposeAsync()

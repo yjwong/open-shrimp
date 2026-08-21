@@ -23,10 +23,10 @@ import sys
 import types
 from pathlib import Path
 
-VERSION = "0.0.0-stand-in"
+DEFAULT_VERSION = "0.0.0-stand-in"
 
 
-def _install_stubs(src: Path) -> None:
+def _install_stubs(src: Path, version: str) -> None:
     """Put ``src/`` on the path with the two modules the handlers reach for.
 
     ``control/methods.py`` imports them lazily from inside its handlers, so
@@ -40,7 +40,7 @@ def _install_stubs(src: Path) -> None:
     sys.modules["open_shrimp.main"] = main
 
     updater = types.ModuleType("open_shrimp.updater")
-    updater.get_current_version = lambda: VERSION  # type: ignore[attr-defined]
+    updater.get_current_version = lambda: version  # type: ignore[attr-defined]
     sys.modules["open_shrimp.updater"] = updater
 
 
@@ -61,7 +61,7 @@ def _request_restart() -> None:
 async def _serve(args: argparse.Namespace) -> None:
     global _stop_event
 
-    from open_shrimp.control import ControlServer, CoreStatus, build_methods
+    from open_shrimp.control import ControlServer, CoreStatus, build_methods, protocol
 
     _stop_event = asyncio.Event()
 
@@ -71,7 +71,20 @@ async def _serve(args: argparse.Namespace) -> None:
         instance_name=args.instance,
         contexts=["default"],
     )
-    control = ControlServer(build_methods(status), instance_name=args.instance)
+    methods = build_methods(status)
+
+    # Stand in for a core built against a channel the front end does not know.
+    # Patched on the module rather than passed in, because the real handler
+    # reads the constant at call time and the real handler is the point.
+    protocol.PROTOCOL_VERSION = args.protocol
+
+    # Stand in for a core that no longer implements a method the front end
+    # calls.  The server answers ``unknown_method`` — an error frame, which a
+    # caller that only counts replies reads as success.
+    for name in args.drop_method:
+        methods.pop(name, None)
+
+    control = ControlServer(methods, instance_name=args.instance)
     await control.start()
     print(f"[stand-in {os.getpid()}] listening on {control.address}", flush=True)
 
@@ -109,10 +122,36 @@ def main() -> None:
     parser.add_argument("--bot-username", default="standinbot")
     parser.add_argument("--boot-delay", type=float, default=0.0)
     parser.add_argument("--teardown-delay", type=float, default=0.0)
+    parser.add_argument(
+        "--version",
+        default=DEFAULT_VERSION,
+        help="version to report on the status reply, to drive a front end's "
+        "version comparison in either direction",
+    )
+    parser.add_argument(
+        "--protocol",
+        type=int,
+        default=None,
+        help="control protocol version to report; above what the front end "
+        "knows, it must refuse to drive this core at all",
+    )
+    parser.add_argument(
+        "--drop-method",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="serve the channel without this method, so a front end that calls "
+        "it gets an error frame instead of a reply",
+    )
     args = parser.parse_args()
 
     src = Path(args.src) if args.src else Path(__file__).resolve().parents[2] / "src"
-    _install_stubs(src)
+    _install_stubs(src, args.version)
+
+    if args.protocol is None:
+        from open_shrimp.control import protocol
+
+        args.protocol = protocol.PROTOCOL_VERSION
 
     asyncio.run(_serve(args))
 

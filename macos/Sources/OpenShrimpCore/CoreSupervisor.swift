@@ -64,9 +64,28 @@ actor CoreSupervisor {
     private var bootstrap: Task<String?, Never>?
     private var stopRequested = false
 
+    /// Bumped by every stop.  The actor is re-entrant and `stop()` suspends for
+    /// up to a minute, so a stop this class issues itself needs a way to tell
+    /// whether another one — the Quit menu, or the app terminating — arrived
+    /// while it was waiting.
+    private var stopGeneration = 0
+
+    /// Said when a core claims a channel this build does not know.  It names
+    /// the app, because the app is the half that can be fixed from here.
+    static let unknownProtocolDetail = "This core is newer than the app — update OpenShrimp"
+
     private(set) var state: CoreState = .stopped
     private(set) var statusDetail: String?
     private(set) var lastStatus: CoreStatus?
+
+    /// How the core answering the channel stands against this build, decided
+    /// from the version it reports rather than from what the app spawned.
+    private(set) var versionAgreement: VersionAgreement = .agreed
+
+    /// True once a core has claimed a protocol this build does not know.  Every
+    /// method on the channel is a guess from then on, including `shutdown`, so
+    /// none are sent.
+    private var unknownProtocol = false
 
     /// Everything a caller outside the actor renders, read in a single hop.
     /// Three separate reads can interleave with a watchdog poll and produce a
@@ -75,10 +94,16 @@ actor CoreSupervisor {
         let state: CoreState
         let detail: String?
         let botUsername: String?
+        let version: VersionAgreement
     }
 
     func snapshot() -> Snapshot {
-        Snapshot(state: state, detail: statusDetail, botUsername: lastStatus?.botUsername)
+        Snapshot(
+            state: state,
+            detail: statusDetail,
+            botUsername: lastStatus?.botUsername,
+            version: versionAgreement
+        )
     }
 
     private var onChange: (@Sendable (CoreState, String?) -> Void)?
@@ -118,6 +143,11 @@ actor CoreSupervisor {
             ?? ConfigPeek.readInstanceName(at: CorePaths.configFile.path)
 
         stopRequested = false
+        // Both describe the core that was attached last time, and there is none
+        // attached now.  Left standing, they would make this start act on a
+        // reading taken from a process that has since gone.
+        unknownProtocol = false
+        versionAgreement = .agreed
         set(.starting)
 
         // Adopt a core that is already running — started from a terminal, or
@@ -134,10 +164,24 @@ actor CoreSupervisor {
         if await adopted.connect() {
             await attach(adopted)
             await refreshStatus()
-            startWatchdog()
-            return
+
+            // Seeding is decided from the version the core just reported, not
+            // from having spawned it.  Adopting first is what keeps two cores
+            // off one endpoint, but the seed below sits on the spawn path only
+            // — so without this an adopted core would keep whatever version it
+            // had, forever.
+            switch await replaceOutdatedCore() {
+            case .keep:
+                startWatchdog()
+                return
+            case .abandoned:
+                return
+            case .replaced:
+                break
+            }
+        } else {
+            await adopted.dispose()
         }
-        await adopted.dispose()
 
         if let reason = CorePaths.seedCoreIfNeeded() {
             set(.error, reason)
@@ -222,6 +266,48 @@ actor CoreSupervisor {
         set(.installing)
     }
 
+    enum Replacement {
+        /// The adopted core stays; carry on supervising it.
+        case keep
+        /// It has been stopped, and the caller should spawn its replacement.
+        case replaced
+        /// Someone asked for a stop while this one was running.  Their request
+        /// outranks ours, and nothing should be started.
+        case abandoned
+    }
+
+    /// Stop an adopted core that is behind this build, so the spawn path can
+    /// replace it.
+    ///
+    /// Only ever forwards.  A core ahead of this build is left alone, because
+    /// the app is the stale half there, and so is one whose version will not
+    /// order at all.  Both are shown in the menu instead; neither is something
+    /// the app can repair.
+    ///
+    /// This is also what makes "leave the wedged core running, the new app will
+    /// adopt it" a real recovery instead of a way of pinning the old version.
+    private func replaceOutdatedCore() async -> Replacement {
+        guard case .behind(let running) = versionAgreement else { return .keep }
+
+        AppLog.write("replacing the adopted core: \(running) -> \(CoreVersion.bundled)")
+        // `stop()` already escalates shutdown -> SIGTERM -> SIGKILL, so a core
+        // wedged in its teardown is bounded here without anything new.
+        let generation = stopGeneration
+        await stop()
+
+        // A stop that arrived while ours was running was somebody else asking —
+        // the Quit menu, or the app terminating.  Clearing `stopRequested` past
+        // that point would spawn a core into an app that is on its way out.
+        guard stopGeneration == generation + 1 else {
+            AppLog.write("a stop arrived during the replacement; not spawning")
+            return .abandoned
+        }
+
+        stopRequested = false
+        set(.starting)
+        return .replaced
+    }
+
     private func attach(_ client: ControlClient) async {
         self.client = client
         await client.setHandlers(
@@ -252,12 +338,15 @@ actor CoreSupervisor {
             return
         }
 
+        // Nothing to report a loss about.  `teardown()` is the only thing that
+        // clears the client, and it clears the handlers with it, so reaching
+        // here with none means this notification was already in flight when the
+        // client it came from was let go of.  The core now being started or
+        // supervised is not that client's to overwrite.
+        guard let client else { return }
+
         // The core may simply be re-execing.  Give the endpoint a chance to
         // come back before calling it dead.
-        guard let client else {
-            set(.error, "Core stopped unexpectedly")
-            return
-        }
 
         if await client.awaitConnection(within: Self.reexecGrace) {
             reconcileProcessHandle()
@@ -321,6 +410,33 @@ actor CoreSupervisor {
         guard let status = await client.status() else { return }
 
         lastStatus = status
+
+        // Checked before the state below is mapped: a core speaking a channel
+        // this build does not know may mean something else by every field in
+        // the reply, and by every method the app could call back on.  Saying so
+        // is the last thing the app can still do correctly.
+        if status.protocolVersion > ControlProtocol.expected {
+            if !unknownProtocol {
+                AppLog.write(
+                    "core speaks control protocol \(status.protocolVersion); "
+                        + "this build knows \(ControlProtocol.expected)"
+                )
+            }
+            unknownProtocol = true
+            // The error line already says the app is the one to update, so the
+            // version banner would only repeat it.
+            versionAgreement = .agreed
+            set(.error, Self.unknownProtocolDetail)
+            return
+        }
+        unknownProtocol = false
+
+        let agreement = VersionAgreement.judge(coreVersion: status.version)
+        if agreement != versionAgreement {
+            AppLog.write("core version \(agreement)")
+            versionAgreement = agreement
+        }
+
         let mapped: CoreState
         switch status.state {
         case "running": mapped = .running
@@ -347,6 +463,7 @@ actor CoreSupervisor {
 
     func stop() async {
         stopRequested = true
+        stopGeneration += 1
         watchdog?.cancel()
         watchdog = nil
         // Stop waiting on a runtime install; never interrupt one.  The command
@@ -354,11 +471,37 @@ actor CoreSupervisor {
         // installation directory from being left half-written.
         bootstrap?.cancel()
         bootstrap = nil
+
+        // A core speaking a channel this build does not know is left running.
+        // `shutdown` may not mean that any more, and the escalation below ends
+        // in SIGKILL on a fixed budget — which is how a sandbox guest gets
+        // stranded.  Walking away strands nothing: the core is still
+        // supervising itself, and the next front end to meet it will be one
+        // that can speak to it.
+        if unknownProtocol {
+            AppLog.write("leaving a core that speaks an unknown control protocol running")
+            await teardown()
+            set(.stopped)
+            return
+        }
+
         set(.stopping)
 
         if let client, await client.isConnected {
-            _ = await client.shutdown()
-            await waitForStop(deadline: Date().addingTimeInterval(Self.gracefulStopTimeout))
+            switch await client.shutdown() {
+            case .accepted:
+                await waitForStop(deadline: Date().addingTimeInterval(Self.gracefulStopTimeout))
+            case .refused(let code):
+                // Answered and declined, so there is no unwind to wait out.
+                // The escalation below is what stops it.
+                AppLog.write("the core refused the shutdown request (\(code))")
+            case .unanswered:
+                // Silence is not a refusal.  A core with its event loop blocked
+                // in a sandbox teardown answers nothing, and it is the one that
+                // most needs the full budget before anything signals it.
+                AppLog.write("no answer to the shutdown request; waiting it out")
+                await waitForStop(deadline: Date().addingTimeInterval(Self.gracefulStopTimeout))
+            }
         }
 
         if let target = await escalationTarget() {
@@ -424,6 +567,12 @@ actor CoreSupervisor {
         }
         client = nil
         process = nil
+        // Everything read off a core describes the one that was attached, so it
+        // goes when the attachment does.  A version banner left standing over a
+        // stopped core offers a repair for a process that is not there.
+        lastStatus = nil
+        versionAgreement = .agreed
+        unknownProtocol = false
     }
 
     func dispose() async {

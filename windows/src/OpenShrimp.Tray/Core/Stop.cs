@@ -116,7 +116,17 @@ internal static class Stop
         client.Disconnected += () => gone.TrySetResult();
 
         TrayLog.Write("Stop: draining an unsupervised core");
-        await client.ShutdownAsync().ConfigureAwait(false);
+        // The reply is read rather than merely awaited, because an error frame
+        // is still a frame. A core that no longer implements the method answers
+        // unknown_method, and the wait below would spend its whole budget on an
+        // unwind that never started.
+        var reply = await client.ShutdownAsync().ConfigureAwait(false);
+        if (reply?.Error is not null)
+        {
+            TrayLog.Write($"Stop: the core refused the request ({reply.Error.Code}); " +
+                          "leaving it to the installer");
+            return;
+        }
 
         try
         {

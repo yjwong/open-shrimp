@@ -169,14 +169,33 @@ actor ControlClient {
         await call("status")?.status
     }
 
-    /// True when the core accepted the request, not when it has finished
-    /// acting on it — the reply is written before the core unwinds.
-    func shutdown() async -> Bool {
-        await call("shutdown") != nil
+    /// How a request came back.  Acceptance means the core took the request,
+    /// not that it has finished acting on it — the reply is written before the
+    /// core unwinds.
+    ///
+    /// Three cases and not two, because the caller does different things with
+    /// each.  An error frame is still a frame, so a core that no longer
+    /// implements the method answers `unknown_method` and there is no unwind to
+    /// wait for.  Silence is the opposite: a core wedged in its own teardown
+    /// answers nothing, and it is exactly the one that needs the full budget.
+    enum Acceptance: Sendable, Equatable {
+        case accepted
+        case refused(String)
+        case unanswered
     }
 
-    func restart() async -> Bool {
-        await call("restart") != nil
+    func shutdown() async -> Acceptance {
+        await acceptance(of: "shutdown")
+    }
+
+    func restart() async -> Acceptance {
+        await acceptance(of: "restart")
+    }
+
+    private func acceptance(of method: String) async -> Acceptance {
+        guard let frame = await call(method) else { return .unanswered }
+        guard let error = frame.error else { return .accepted }
+        return .refused(error.code)
     }
 
     /// Never throws: every failure path answers nil, and the supervisor's state
