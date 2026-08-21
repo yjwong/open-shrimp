@@ -288,9 +288,18 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         Set(CoreState.Stopping);
 
         var client = _client;
-        if (client is not null && client.IsConnected)
+        var connected = client is not null && client.IsConnected;
+
+        // How the core went is the difference between a sandbox guest that
+        // unwound and one that was stranded, and this is the only account of it
+        // anyone gets. It matters most at the end of a session, where the core
+        // can already be gone before the tray is asked to stop it.
+        TrayLog.Write($"Stopping the core: control channel {(connected ? "up" : "gone")}, " +
+                      $"process {(_process is null ? "not ours" : _process.HasExited ? "already exited" : "running")}");
+
+        if (connected)
         {
-            await client.ShutdownAsync().ConfigureAwait(false);
+            await client!.ShutdownAsync().ConfigureAwait(false);
 
             // Shutdown has no internal timeout on the Python side — a wedged
             // sandbox teardown can hang it — so bound the wait here.
@@ -305,6 +314,9 @@ internal sealed class CoreSupervisor : IAsyncDisposable
 
         if (_process is { HasExited: false })
         {
+            // The outcome this whole class is arranged to avoid: a core killed
+            // while it holds an HCS compute system strands the guest.
+            TrayLog.Write("Core did not stop in time; killing it");
             try { _process.Kill(entireProcessTree: true); }
             catch (Exception) { /* already gone */ }
         }

@@ -230,11 +230,21 @@ internal sealed class ControlClient : IAsyncDisposable
             }
             cts?.Dispose();
 
-            _reader?.Dispose();
+            // Letting go of a pipe whose other end has died must not throw:
+            // disposing the writer flushes it, and flushing a broken pipe
+            // raises. That happens on the ordinary path at the end of a
+            // session, where the core is gone before the tray is asked to stop
+            // it, and the exception would otherwise surface as a failed stop.
+            try
+            {
+                _reader?.Dispose();
+                _writer?.Dispose();
+                if (_pipe is not null) await _pipe.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (IOException) { /* the far end is already gone */ }
+            catch (ObjectDisposedException) { }
             _reader = null;
-            _writer?.Dispose();
             _writer = null;
-            if (_pipe is not null) await _pipe.DisposeAsync().ConfigureAwait(false);
             _pipe = null;
         }
         finally

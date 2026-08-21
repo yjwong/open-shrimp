@@ -24,6 +24,13 @@ public partial class App : Application
     private SingleInstance? _instance;
 
     /// <summary>
+    /// The window that answers a logoff or a shutdown. Held for the same reason
+    /// the guard above is: it is the process's only top-level window, and the
+    /// end of the session is delivered to it or to nothing.
+    /// </summary>
+    private SessionEnd? _sessionEnd;
+
+    /// <summary>
     /// The wizard while one is open. The tray owns no other window, so this is
     /// what "show yourself" raises for a user who launched a second copy
     /// before finishing setup.
@@ -106,19 +113,31 @@ public partial class App : Application
             TrayLog.Write("Could not subscribe to theme changes", ex);
         }
 
-        _supervisor = new CoreSupervisor(_instanceName);
-        _supervisor.Changed += OnSupervisorChanged;
+        var supervisor = new CoreSupervisor(_instanceName);
+        _supervisor = supervisor;
+        supervisor.Changed += OnSupervisorChanged;
 
-        _tray = new TrayIconHost(_supervisor, _instanceName)
+        _tray = new TrayIconHost(supervisor, _instanceName)
         {
             OnQuit = QuitAsync,
             OnRunSetup = RunSetupWizard,
         };
         _tray.Show();
 
+        // An installer is not the only thing that ends the product. A logoff or
+        // a shutdown ends it with no MSI involved, and reaches the same drain
+        // the stop errand does — one drain, whoever asks.
+        _sessionEnd = SessionEnd.Listen();
+        if (_sessionEnd is not null)
+        {
+            _sessionEnd.Drain = supervisor.StopAsync;
+            _sessionEnd.Ended = FinishQuit;
+            _sessionEnd.Cancelled = () => _ = supervisor.StartAsync();
+        }
+
         if (File.Exists(CorePaths.ConfigFile))
         {
-            _ = _supervisor.StartAsync();
+            _ = supervisor.StartAsync();
 
             // The one path that opens no window at all. On a fresh install the
             // wizard is its own evidence that something launched; an upgrade
@@ -188,12 +207,26 @@ public partial class App : Application
             // Stop the core before the tray goes away, or it is left running
             // with nothing to control it.
             if (_supervisor is not null) await _supervisor.StopAsync();
-            _tray?.Dispose();
         }
         catch (Exception ex)
         {
             TrayLog.Write("Quit failed to stop the core cleanly", ex);
         }
+        FinishQuit();
+    }
+
+    /// <summary>
+    /// Everything a quit does once the core is down. Split out because the end
+    /// of a session arrives here having already drained the core itself — it
+    /// had to, to hold the shutdown open while it happened.
+    /// </summary>
+    private void FinishQuit()
+    {
+        // Before the event loop ends, so the block reason cannot outlive the
+        // window it hangs off.
+        _sessionEnd?.Dispose();
+        _tray?.Dispose();
+
         // The counterpart to OnExplicitShutdown: with no window left to close,
         // ending the event loop is the only thing that ends the process.
         _dispatcher?.EnqueueEventLoopExit();
