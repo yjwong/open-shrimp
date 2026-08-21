@@ -129,17 +129,32 @@ enum CorePaths {
         coreExecutable.deletingLastPathComponent().appendingPathComponent(".core-version")
     }
 
+    /// What a seed did.  More than success or failure, because a core replaced
+    /// by a newer one is a version change only the core about to be spawned can
+    /// tell the operator about.
+    enum SeedOutcome {
+        /// The core already there is at this version or newer, or there is no
+        /// bundle to seed from.
+        case unchanged
+        /// Nothing identifiable was there to replace.
+        case installed
+        /// A core at an older version was replaced by the bundled seed.
+        case replaced
+        /// Why the seed could not be written.
+        case failed(String)
+    }
+
     /// Copy the bundled core out when the destination is missing or older than
-    /// the seed.  Returns the reason it could not, or nil on success.
+    /// the seed.
     ///
     /// Never overwrites a core at this version or above: it may have replaced
     /// itself since, and re-seeding would silently roll the user back.
     @discardableResult
-    static func seedCoreIfNeeded() -> String? {
+    static func seedCoreIfNeeded() -> SeedOutcome {
         guard let seed = seedExecutable else {
             // No bundle to seed from — a core installed by other means is the
             // caller's to find, and reporting its absence is the spawn's job.
-            return nil
+            return .unchanged
         }
 
         let build = CoreVersion.bundled
@@ -148,8 +163,13 @@ enum CorePaths {
         let manager = FileManager.default
         if manager.isExecutableFile(atPath: coreExecutable.path),
            !seedSupersedes(stamped, build) {
-            return nil
+            return .unchanged
         }
+
+        // A binary with no stamp beside it may be any version, this one
+        // included — it is seeded because nothing can say which — so replacing
+        // it is not something to report as an update.
+        let replacing = manager.isExecutableFile(atPath: coreExecutable.path) && stamped != nil
 
         do {
             try manager.createDirectory(
@@ -165,9 +185,9 @@ enum CorePaths {
             _ = try manager.replaceItemAt(coreExecutable, withItemAt: staged)
             try build.write(to: versionStamp, atomically: true, encoding: .utf8)
         } catch {
-            return "Could not install the core binary: \(error.localizedDescription)"
+            return .failed("Could not install the core binary: \(error.localizedDescription)")
         }
-        return nil
+        return replacing ? .replaced : .installed
     }
 
     /// Whether the bundled seed is strictly newer than the core already there.

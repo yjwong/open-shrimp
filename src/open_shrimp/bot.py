@@ -602,7 +602,9 @@ async def run_bot(
         except Exception:
             logger.warning("Failed to send restart confirmation", exc_info=True)
 
-    # Notify all allowed users about a successful auto-update.
+    # Whoever installed it: this process replacing itself, or a supervisor that
+    # seeded a newer binary and spawned it.  An install nobody approved is one
+    # the operator finds out about here or not at all.
     if update_version is not None:
         from open_shrimp.updater import _escape_md
 

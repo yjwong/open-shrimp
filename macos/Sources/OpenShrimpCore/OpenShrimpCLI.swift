@@ -26,6 +26,13 @@ struct ConfigWriteRequest: Sendable {
     let contexts: [ConfigContext]
 }
 
+/// The settings the core's config holds that this app acts on.
+struct CoreSettings: Sendable {
+    /// Whether this install accepts updates it did not ask for.  The core's
+    /// own checker is off under this app, so what it now governs is Sparkle.
+    let autoUpdate: Bool
+}
+
 /// One project the user has already worked in, as the core found it.
 struct DiscoveredProject: Sendable, Hashable {
     let directory: String
@@ -462,6 +469,25 @@ enum OpenShrimpCLI {
             available: entry["available"] as? Bool ?? false,
             note: note
         )
+    }
+
+    /// What the core's config says about the settings this app acts on, or nil
+    /// if it could not be read.
+    ///
+    /// Asked of the core rather than parsed here, and asked over the CLI rather
+    /// than the control channel: the answer is needed while the core is
+    /// stopped, which is exactly when the channel has nobody to answer on.  The
+    /// caller decides what an unreadable config means; this only reports that
+    /// it was.
+    static func settings() async -> CoreSettings? {
+        guard
+            let parsed = await jsonObject([
+                "config", "show", "--config", CorePaths.configFile.path, "--json",
+            ]),
+            let entry = parsed["config"] as? [String: Any],
+            let autoUpdate = entry["auto_update"] as? Bool
+        else { return nil }
+        return CoreSettings(autoUpdate: autoUpdate)
     }
 
     /// Writes config.yaml.  Returns nil on success, else the reason.

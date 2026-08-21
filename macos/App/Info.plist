@@ -40,9 +40,7 @@
 	     The feed URL is the `latest` redirect rather than a per-release one:
 	     GitHub resolves it to the newest non-prerelease's asset of that name,
 	     so the URL a shipped app carries forever does not have to name a tag
-	     that did not exist when it was built.
-
-	     No SUAutomaticallyUpdate: an update is offered, not taken. -->
+	     that did not exist when it was built. -->
 	<key>SUFeedURL</key>
 	<string>https://github.com/yjwong/open-shrimp/releases/latest/download/appcast.xml</string>
 	<!-- The public half of the EdDSA pair the release workflow signs the
@@ -63,5 +61,15 @@
 	<true/>
 	<key>SUScheduledCheckInterval</key>
 	<integer>21600</integer>
+	<!-- Downloaded and installed without asking, because the person who would
+	     be asked is on Telegram rather than at this Mac.  A panel waiting for
+	     a click is a machine that stops updating.  UpdateController takes the
+	     install rather than letting it wait for a quit a menu bar app never
+	     gets, and the core it seeds says which version it came back at.
+
+	     The shipped default.  This and the scheduled check are re-applied at
+	     every launch from the core's `auto_update`. -->
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
 </dict>
 </plist>

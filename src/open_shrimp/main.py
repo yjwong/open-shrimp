@@ -332,6 +332,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overwrite an existing config file",
     )
+    sub_config_show = config_subs.add_parser(
+        "show",
+        parents=[common],
+        help="Report the settings a front end acts on (no secrets)",
+    )
+    sub_config_show.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON (for a front end)",
+    )
 
     return parser.parse_args()
 
@@ -1052,6 +1062,43 @@ def _run_config_write(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_config_show(args: argparse.Namespace) -> int:
+    """Report the settings a front end outside Python acts on.
+
+    The control channel answers only while the core runs, and the caller this
+    is for is a supervisor deciding whether to install a version over a core
+    that is stopped.
+
+    Only those settings, and never the file: it holds the bot token, and
+    printing it leaves a copy wherever the caller sent stdout.  Read through
+    the loader, so the defaults are the ones the running core would apply.
+    """
+    from open_shrimp.config import load_config
+
+    try:
+        config = load_config(args.config)
+    except (OSError, ValueError) as exc:
+        if args.json:
+            json.dump({"ok": False, "error": str(exc)}, sys.stdout)
+            sys.stdout.write("\n")
+        else:
+            print(exc, file=sys.stderr)
+        return 1
+
+    settings = {
+        "instance_name": config.instance_name,
+        "auto_update": config.auto_update,
+    }
+
+    if args.json:
+        json.dump({"ok": True, "config": settings}, sys.stdout)
+        sys.stdout.write("\n")
+    else:
+        for key, value in settings.items():
+            print(f"{key}: {'null' if value is None else value}")
+    return 0
+
+
 async def _async_main(config_path: str) -> None:
     await run_bot_async(config_path)
 
@@ -1134,7 +1181,13 @@ def main() -> None:
     if args.subcommand == "config":
         if args.config_command == "write":
             sys.exit(_run_config_write(args))
-        print("usage: openshrimp config write [--json PATH] [--force]", file=sys.stderr)
+        if args.config_command == "show":
+            sys.exit(_run_config_show(args))
+        print(
+            "usage: openshrimp config write [--json PATH] [--force]\n"
+            "       openshrimp config show [--json]",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     # Offer guided setup when config is missing and running interactively.

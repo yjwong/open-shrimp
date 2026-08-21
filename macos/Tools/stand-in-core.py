@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A core that serves the control channel and nothing else.
+"""A core that serves the control channel, and answers the CLI a front end
+runs against the binary while nothing is serving it.
 
 Exists so the supervisor can be driven through every state it has without a
 Telegram token.  A real core needs one, and a second consumer of the same token
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import signal
 import sys
@@ -24,6 +26,10 @@ import types
 from pathlib import Path
 
 DEFAULT_VERSION = "0.0.0-stand-in"
+
+#: ``--version`` with nothing after it, which is the front end's probe rather
+#: than a version to report.
+PROBE = object()
 
 
 def _install_stubs(src: Path, version: str) -> None:
@@ -56,6 +62,24 @@ def _request_shutdown() -> None:
 def _request_restart() -> None:
     global _restart_requested
     _restart_requested = True
+
+
+def _auto_update(config: str | None) -> bool:
+    """What ``auto_update`` is set to in *config*, defaulting to on.
+
+    Scanned for one top-level key rather than parsed: the real command loads
+    the whole config to answer the same question, and importing that here would
+    drag in the config schema this tool exists to do without.
+    """
+    try:
+        text = Path(config).read_text("utf-8") if config else ""
+    except OSError:
+        return True
+    for line in text.splitlines():
+        if line[:1].isspace() or not line.startswith("auto_update:"):
+            continue
+        return line.split(":", 1)[1].strip().lower() not in {"false", "no", "off"}
+    return True
 
 
 async def _serve(args: argparse.Namespace) -> None:
@@ -124,10 +148,19 @@ def main() -> None:
     parser.add_argument("--teardown-delay", type=float, default=0.0)
     parser.add_argument(
         "--version",
+        nargs="?",
+        const=PROBE,
         default=DEFAULT_VERSION,
         help="version to report on the status reply, to drive a front end's "
-        "version comparison in either direction",
+        "version comparison in either direction; with no value, print it and "
+        "exit, which is the front end's probe that the binary runs at all",
     )
+    parser.add_argument(
+        "command",
+        nargs="*",
+        help="a CLI subcommand to answer instead of serving: 'config show'",
+    )
+    parser.add_argument("--json", action="store_true", help="for 'config show'")
     parser.add_argument(
         "--protocol",
         type=int,
@@ -144,6 +177,30 @@ def main() -> None:
         "it gets an error frame instead of a reply",
     )
     args = parser.parse_args()
+
+    if args.version is PROBE:
+        print(DEFAULT_VERSION)
+        return
+
+    if args.command[:2] == ["config", "show"]:
+        # Read while the core is stopped, so the front end asks the binary
+        # rather than the channel.  The macOS app reads `auto_update` here to
+        # decide whether it may install a version over this core.
+        json.dump(
+            {
+                "ok": True,
+                "config": {
+                    "instance_name": args.instance,
+                    "auto_update": _auto_update(args.config),
+                },
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+        return
+
+    if args.command:
+        parser.error(f"not a command this stands in for: {' '.join(args.command)}")
 
     src = Path(args.src) if args.src else Path(__file__).resolve().parents[2] / "src"
     _install_stubs(src, args.version)

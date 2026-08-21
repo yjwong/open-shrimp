@@ -37,7 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Before anything tries to run the core: what gets spawned is the copy
         // outside the bundle, because self-update replaces the binary in place
         // and a rewritten bundle resource would break this app's signature.
-        if let reason = CorePaths.seedCoreIfNeeded() {
+        //
+        // This is also the seed that runs after the app updates itself, so its
+        // outcome is what tells the core it woke up at a new version.
+        let seeded = CorePaths.seedCoreIfNeeded()
+        if case .failed(let reason) = seeded {
             Notifier.post(reason)
         }
 
@@ -58,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 AppLog.write("state -> \(state.rawValue)\(detail.map { " (\($0))" } ?? "")")
                 Task { @MainActor in menu.refresh() }
             }
+            if case .replaced = seeded { await supervisor.noteCoreReplaced() }
             // Start unconditionally: a missing config is the supervisor's own
             // answer, and reaching it here is what puts "No config" on the menu
             // instead of leaving it reading "Stopped" — including while the

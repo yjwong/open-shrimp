@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from open_shrimp.config import load_config
-from open_shrimp.main import _parse_args, _run_config_write, _run_models
+from open_shrimp.main import _parse_args, _run_config_show, _run_config_write, _run_models
 
 
 # -- Argument placement ------------------------------------------------------
@@ -31,6 +31,8 @@ from open_shrimp.main import _parse_args, _run_config_write, _run_models
         ["--config", "/A", "update"],
         ["--config", "/A", "config", "write"],
         ["config", "write", "--config", "/A"],
+        ["--config", "/A", "config", "show"],
+        ["config", "show", "--config", "/A"],
         ["--config", "/A", "projects", "discover"],
         ["projects", "discover", "--config", "/A"],
         ["--config", "/A", "sandbox", "prefetch"],
@@ -315,3 +317,64 @@ def test_reads_from_a_file_not_only_stdin(tmp_path, capsys):
 
     assert code == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+# -- config show -------------------------------------------------------------
+
+
+class _ShowArgs:
+    def __init__(self, config: Path, json: bool = True):
+        self.config = str(config)
+        self.json = json
+
+
+def _show(config: Path, capsys, **kwargs) -> tuple[int, dict]:
+    code = _run_config_show(_ShowArgs(config, **kwargs))
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_show_reports_the_settings_a_front_end_acts_on(tmp_path, monkeypatch, capsys):
+    """The macOS app reads auto_update to decide whether it may install a new
+    version over a core that is stopped — which is when the control channel
+    has nobody to answer on."""
+    code, written = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path))
+    assert code == 0
+
+    code, out = _show(Path(written["config_path"]), capsys)
+
+    assert code == 0 and out["ok"] is True
+    assert out["config"] == {"instance_name": None, "auto_update": True}
+
+
+def test_show_carries_auto_update_false(tmp_path, monkeypatch, capsys):
+    code, written = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path))
+    assert code == 0
+    config_path = Path(written["config_path"])
+    config_path.write_text(config_path.read_text() + "auto_update: false\n")
+
+    _, out = _show(config_path, capsys)
+
+    assert out["config"]["auto_update"] is False
+
+
+def test_show_never_prints_the_token(tmp_path, monkeypatch, capsys):
+    """stdout goes wherever the caller put it.  A command that printed the
+    token would be a copy of the token in every one of those places."""
+    code, written = _write(tmp_path, monkeypatch, capsys, _spec(tmp_path))
+    assert code == 0
+
+    _run_config_show(_ShowArgs(Path(written["config_path"])))
+    printed = capsys.readouterr().out
+
+    assert "123456:ABCdefGHIjklMNOpqrs" not in printed
+
+
+def test_show_reports_an_unreadable_config_as_json(tmp_path, capsys):
+    """The caller has to be able to tell "no config" from "auto_update is
+    false" — the two mean opposite things to a supervisor deciding whether to
+    install."""
+    code, out = _show(tmp_path / "nothing.yaml", capsys)
+
+    assert code == 1
+    assert out["ok"] is False
+    assert "not found" in out["error"]

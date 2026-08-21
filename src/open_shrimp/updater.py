@@ -534,6 +534,8 @@ def register_update_checker(app: "Application") -> None:  # noqa: F821
     """Register the periodic update check job on the application's JobQueue.
 
     Silently skips registration if:
+    - ``auto_update`` is off
+    - A host app installs versions here (``OPENSHRIMP_UPDATES_MANAGED``)
     - Not running as a PyApp binary
     - Platform has no matching asset
     - JobQueue is not available
@@ -541,6 +543,18 @@ def register_update_checker(app: "Application") -> None:  # noqa: F821
     config = app.bot_data["config"]
     if not config.auto_update:
         logger.info("Auto-update disabled via config")
+        return
+
+    # Set by a front end that ships the core in its own release and installs
+    # the new one itself.  Polling as well would offer a second Update button
+    # for the same release and download over a binary the front end is about to
+    # replace.
+    #
+    # A flag of its own, because OPENSHRIMP_SUPERVISED is set by the Windows
+    # tray too, and Windows ships no replacement mechanism — gating on it
+    # leaves every Windows install at its MSI version forever.
+    if os.environ.get("OPENSHRIMP_UPDATES_MANAGED") == "1":
+        logger.info("Updates are managed by the host app — not registering the checker")
         return
 
     if pyapp_binary_path() is None:

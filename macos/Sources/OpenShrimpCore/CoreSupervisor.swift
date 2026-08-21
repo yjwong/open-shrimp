@@ -58,6 +58,12 @@ actor CoreSupervisor {
     /// file in between.
     private var instanceName: String?
 
+    /// The version to tell the next core it woke up at, set once a seed has
+    /// replaced an older binary.  The core sends "Updated to X. Back online."
+    /// to every allowed user, which is all an operator who is not at this Mac
+    /// ever hears about an update that installed itself.
+    private var announceUpdate: String?
+
     private var process: Process?
     private var client: ControlClient?
     private var watchdog: Task<Void, Never>?
@@ -115,6 +121,14 @@ actor CoreSupervisor {
 
     func setOnChange(_ handler: (@Sendable (CoreState, String?) -> Void)?) {
         onChange = handler
+    }
+
+    /// Record that the core binary was replaced by a newer one, so the next
+    /// spawn tells it to say so.  Called from the app's launch seed as well as
+    /// this one: after an update the new bundle seeds before this supervisor
+    /// exists, and `start()` then finds nothing left to replace.
+    func noteCoreReplaced() {
+        announceUpdate = CoreVersion.bundled
     }
 
     /// Announces only what changed.  The watchdog re-reads status on a timer,
@@ -183,9 +197,14 @@ actor CoreSupervisor {
             await adopted.dispose()
         }
 
-        if let reason = CorePaths.seedCoreIfNeeded() {
+        switch CorePaths.seedCoreIfNeeded() {
+        case .failed(let reason):
             set(.error, reason)
             return
+        case .replaced:
+            noteCoreReplaced()
+        case .installed, .unchanged:
+            break
         }
 
         let executable = CorePaths.coreExecutable
@@ -233,6 +252,14 @@ actor CoreSupervisor {
         // the core must not ask the operator to install a service of its own.
         var environment = ProcessInfo.processInfo.environment
         environment["OPENSHRIMP_SUPERVISED"] = "1"
+        // This app installs both halves of a release: the DMG carries the core
+        // seed, and the app replaces itself from a signed feed.  A core polling
+        // GitHub as well would offer a second Update button for the same
+        // release and download over the binary the next seed overwrites.
+        environment["OPENSHRIMP_UPDATES_MANAGED"] = "1"
+        if let announceUpdate {
+            environment["OPENSHRIMP_UPDATE_VERSION"] = announceUpdate
+        }
         process.environment = environment
         // The core owns its own rotating log file, so its output streams are
         // left alone rather than pumped into a second one.
@@ -242,6 +269,9 @@ actor CoreSupervisor {
             set(.error, error.localizedDescription)
             return
         }
+        // Cleared once handed over, so a later restart in this session does not
+        // announce the same install again.
+        announceUpdate = nil
         self.process = process
 
         let client = ControlClient(instanceName: instanceName)

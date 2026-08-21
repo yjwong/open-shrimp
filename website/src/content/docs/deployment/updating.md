@@ -36,18 +36,44 @@ To turn off the periodic check, add this to `config.yaml`:
 auto_update: false
 ```
 
-You can still update manually with `./openshrimp update`.
+You can still update manually with `./openshrimp update`. On macOS this flag governs the menu bar app as well — see below.
 
 ## macOS menu bar app
 
-The `.app` bundle doesn't auto-update. To upgrade:
+The `.app` updates itself, unattended. Every 6 hours it checks a signed appcast published with each release; when there is a new version it downloads the DMG, verifies the EdDSA signature and Apple's notarization, installs it, and relaunches. No panel, no click — the person who would click is on Telegram, and an update waiting for somebody standing at the Mac is an update that never happens.
 
-1. Download the latest `.dmg` from [Releases](https://github.com/yjwong/open-shrimp/releases)
+You still hear about it. When the core comes back it messages every allowed user with the version it came back at.
+
+One release carries both halves. The DMG holds the core binaries, and the app installs the new core at `~/Library/Application Support/openshrimp/bin/openshrimp` as it relaunches. Because the app installs it, the core's own six-hourly check is switched off while the app supervises it, so one release produces one message rather than two. Config and sessions live outside the bundle and survive the upgrade.
+
+### Checking now
+
+**Check for Updates…** in the OpenShrimp menu. Unlike the scheduled check, it tells you when there is nothing to install.
+
+### Turning it off
+
+```yaml
+auto_update: false
+```
+
+The app reads that flag at launch and stops both the scheduled check and the automatic install. **Check for Updates…** keeps working — that one you asked for. If `config.yaml` cannot be read at all, updates stay on.
+
+### Quitting the app stops the core
+
+The app stops the core it supervises when it quits, including a core you started yourself in a terminal — it adopts that one at launch rather than starting a second bot on the same token.
+
+Installing an update is a quit. It stops that core too, and the relaunched app starts the version it just seeded in its place.
+
+### Installing by hand
+
+Still supported, and the way to move backwards:
+
+1. Download the `.dmg` from [Releases](https://github.com/yjwong/open-shrimp/releases)
 2. Quit OpenShrimp from the menu bar
-3. Drag the new `OpenShrimp.app` into `/Applications`, replacing the old one
+3. Drag `OpenShrimp.app` into `/Applications`, replacing the old one
 4. Launch it again
 
-Your config and sessions are stored outside the app bundle (`~/Library/Application Support/openshrimp/`), so they survive the upgrade.
+Installing an *older* app leaves a newer core alone: the seed only ever moves forwards, so a downgrade of the app is not a silent downgrade of the bot.
 
 ## Source builds
 
