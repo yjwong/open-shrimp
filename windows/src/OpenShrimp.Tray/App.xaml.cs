@@ -17,6 +17,20 @@ public partial class App : Application
     private DispatcherQueue? _dispatcher;
 
     /// <summary>
+    /// The session guard, held for the process's lifetime rather than
+    /// disposed: an installer waiting for this tray to let go of its files
+    /// reads the guard going away as the process going away.
+    /// </summary>
+    private SingleInstance? _instance;
+
+    /// <summary>
+    /// The wizard while one is open. The tray owns no other window, so this is
+    /// what "show yourself" raises for a user who launched a second copy
+    /// before finishing setup.
+    /// </summary>
+    private SetupWindow? _setup;
+
+    /// <summary>
     /// Read from config.yaml once it exists, so a second instance addresses
     /// its own control endpoint and its own scheduled task.
     /// </summary>
@@ -57,6 +71,25 @@ public partial class App : Application
 
         _instanceName = ConfigPeek.ReadInstanceName(CorePaths.ConfigFile);
         TrayLog.UseDirectory(CorePaths.LogDirectory(_instanceName));
+
+        // One tray to a session. A second launch — the Start Menu shortcut
+        // clicked while the icon is already sitting by the clock — raises the
+        // running one rather than adding a duplicate icon that supervises
+        // nothing and a second supervisor that would adopt the same core.
+        _instance = SingleInstance.Acquire();
+        if (_instance is null)
+        {
+            TrayLog.Write("A tray is already running; raising it instead of starting a second");
+            SingleInstance.RequestShow();
+            _dispatcher?.EnqueueEventLoopExit();
+            return;
+        }
+
+        // The stop signal is how an installer reaches an application Restart
+        // Manager can only ask, and never tell, to close; see SingleInstance.
+        // Both arrive on a thread-pool thread, and both end in UI work.
+        _instance.OnStopRequested(() => _dispatcher?.TryEnqueue(QuitAsync));
+        _instance.OnShowRequested(() => _dispatcher?.TryEnqueue(ShowSelf));
 
         // Before the icon exists, so the first menu the user opens is already
         // themed. Re-applied on change because the preference is read when the
@@ -115,9 +148,30 @@ public partial class App : Application
         _dispatcher?.TryEnqueue(() => _tray?.Refresh());
     }
 
+    /// <summary>
+    /// Answer a second launch. There is nothing to raise once setup is done —
+    /// the tray has no window at all — so the icon is what gets pointed at.
+    /// </summary>
+    private void ShowSelf()
+    {
+        if (_setup is not null) _setup.Activate();
+        else _tray?.AnnounceLocation();
+    }
+
     private void RunSetupWizard()
     {
+        // A second wizard would write the same config from two sets of
+        // answers. Both callers can arrive while one is open: the tray menu's
+        // Run Setup, and a second launch asking to be shown.
+        if (_setup is not null)
+        {
+            _setup.Activate();
+            return;
+        }
+
         var window = new SetupWindow();
+        _setup = window;
+        window.Closed += (_, _) => _setup = null;
         window.Completed += () =>
         {
             _instanceName = ConfigPeek.ReadInstanceName(CorePaths.ConfigFile);

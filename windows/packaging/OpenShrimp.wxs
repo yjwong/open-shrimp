@@ -58,6 +58,59 @@
     </Feature>
 
     <!--
+      Bring a running product to a stop before the transaction enumerates the
+      files it is about to replace.  Without this an upgrade over a running
+      tray does not complete at all: Restart Manager finds the tray and the
+      core, offers to close them, reports success and is contradicted by MSI
+      with 1611 — because closing a windowless app is something it can ask for
+      and never enforce.  The dialog it fails into offers a retry that fails
+      identically, so the only way past is to quit the tray from its own menu.
+
+      Where this can go is not obvious.  A deferred action cannot do it: the
+      execution script does not exist until InstallInitialize (1500), which is
+      after the RemoveExistingProducts (1401) it would have to precede — which
+      is also why the Util extension's CloseApplication is no use here.  It
+      must run before InstallValidate (1400), because that is where the
+      enumeration happens, and no earlier than CostFinalize (1000), which is
+      where [INSTALLFOLDER] starts resolving.
+
+      Return="ignore" rather than asyncNoWait: the action has to wait, both so
+      that the product is gone before the enumeration and so that this errand's
+      own process — which runs out of the directory being replaced — is not
+      itself what Restart Manager then finds.  Ignore, because an upgrade must
+      not stop over a product that was not running.
+
+      Immediate, and therefore in the installing user's context, which is where
+      the tray and its control endpoint live; a perUser package never elevates.
+      Directory rather than FileRef for the same reason RemoveUserFootprint
+      uses one: the file this names is one the transaction replaces.
+
+      The FilesInUse and MsiRMFilesInUse dialogs below stay.  They stop being
+      the path every upgrade takes and become the fallback for what this cannot
+      reach — another user's session, or a tray too wedged to answer.
+    -->
+    <CustomAction Id="StopRunningApp"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]OpenShrimp.Tray.exe&quot; --stop"
+                  Execute="immediate"
+                  Return="ignore" />
+
+    <!--
+      Whether the installation being replaced has an errand to run at all.  The
+      exe StopRunningApp invokes is the one already on disk, not this package's,
+      and a tray that does not know the flag takes it for an ordinary launch —
+      leaving the installer waiting, without a bound, on a tray it started
+      itself.  That is worse than the failure it is there to prevent, so the
+      errand runs only where the installation recorded that it has one.  The
+      marker is written by the same component as the rest of this package's
+      HKCU footprint and goes away with it.
+    -->
+    <Property Id="STOPERRAND">
+      <RegistrySearch Id="StopErrandSearch" Root="HKCU" Key="Software\OpenShrimp"
+                      Name="stop-errand" Type="raw" />
+    </Property>
+
+    <!--
       Unpack the core's runtime here rather than leaving every bit of it to the
       first launch.  The core is a self-installing binary: it carries an
       interpreter and a wheel, and the first command run against it spends
@@ -118,6 +171,12 @@
                   Return="ignore" />
 
     <InstallExecuteSequence>
+      <!-- WIX_UPGRADE_DETECTED is what MajorUpgrade publishes, and covers the
+           upgrade; Installed covers uninstall, which is blocked by the same
+           files and needs the same errand.  A fresh install has neither, and
+           nothing to stop. -->
+      <Custom Action="StopRunningApp" After="CostFinalize"
+              Condition="(Installed OR WIX_UPGRADE_DETECTED) AND STOPERRAND" />
       <!-- After InstallFiles: the exe it runs does not exist before that. -->
       <Custom Action="WarmRuntime" After="InstallFiles" Condition="NOT Installed" />
       <Custom Action="RemoveUserFootprint" Before="RemoveFiles"
@@ -172,7 +231,10 @@
       <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
 
       <!-- Removing a runtime is minutes of unpacked files going away, and a
-           progress bar that names nothing is what makes it look hung. -->
+           progress bar that names nothing is what makes it look hung.  The
+           same goes for waiting out a core's shutdown, which unwinds a sandbox
+           guest before it returns. -->
+      <ProgressText Action="StopRunningApp" Message="Stopping OpenShrimp" />
       <ProgressText Action="RemoveUserFootprint" Message="Removing the OpenShrimp runtime" />
 
       <DialogRef Id="PrepareDlg" />
@@ -243,6 +305,11 @@
         <RemoveFolder Id="RemoveShortcutFolder" Directory="ShortcutFolder" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\OpenShrimp" Name="installed"
                        Type="integer" Value="1" KeyPath="yes" />
+        <!-- What STOPERRAND searches for: this installation's exe answers the
+             stop flag, so the next transaction over it may use that instead of
+             asking Restart Manager to close a window there is none of. -->
+        <RegistryValue Root="HKCU" Key="Software\OpenShrimp" Name="stop-errand"
+                       Type="integer" Value="1" />
       </Component>
     </ComponentGroup>
   </Fragment>
