@@ -13,6 +13,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWinUI>true</UseWinUI>
 
+    <!-- Program.cs is the entry point instead; it says why. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+
     <!--
       Unpackaged: the app installs per-user from an MSI to a stable path, so a
       logon scheduled task keeps pointing at the same exe across updates. An

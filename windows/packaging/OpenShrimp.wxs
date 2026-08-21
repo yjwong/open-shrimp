@@ -81,9 +81,47 @@
                   Impersonate="yes"
                   Return="ignore" />
 
+    <!--
+      Uninstall the two things this package installs without owning: the logon
+      task the tray registers when the user asks for autostart, and the runtime
+      WarmRuntime above unpacks.  Neither is a component — one is not a file at
+      all, and the other lands under a distribution hash and a version nothing
+      here can name.  Left behind, the first fires at every logon against a
+      deleted exe and the second is hundreds of MB per installed version.
+
+      The tray is asked rather than the core, because the core would unpack the
+      runtime in order to be told to delete it; Uninstall.cs carries the whole
+      argument.
+
+      Directory rather than FileRef: this action's own binary is being removed
+      by the transaction that runs it, and a deferred action referencing such a
+      file resolves its path unreliably.  The command line is formatted when
+      the execution script is written, which is why [INSTALLFOLDER] is readable
+      here at all.
+
+      Deferred and impersonated, matching WarmRuntime: both the runtime and the
+      task belong to the invoking user, and the task in particular can only be
+      deleted by the identity that registered it — the unelevated user the tray
+      runs as.  Before RemoveFiles, while the exe still exists.
+      Return="ignore" — an uninstall that cannot tidy up must still uninstall.
+
+      NOT UPGRADINGPRODUCTCODE is load-bearing.  A major upgrade removes the
+      old product from inside the new one's transaction with REMOVE=ALL set,
+      so without the guard every upgrade would delete the runtime it is about
+      to need and silently switch the user's autostart off.
+    -->
+    <CustomAction Id="RemoveUserFootprint"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]OpenShrimp.Tray.exe&quot; --uninstall"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
     <InstallExecuteSequence>
       <!-- After InstallFiles: the exe it runs does not exist before that. -->
       <Custom Action="WarmRuntime" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="RemoveUserFootprint" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
     <!--
@@ -132,6 +170,10 @@
       <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
       <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
       <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <!-- Removing a runtime is minutes of unpacked files going away, and a
+           progress bar that names nothing is what makes it look hung. -->
+      <ProgressText Action="RemoveUserFootprint" Message="Removing the OpenShrimp runtime" />
 
       <DialogRef Id="PrepareDlg" />
       <DialogRef Id="ProgressDlg" />
@@ -187,6 +229,8 @@
     <!--
       No autostart entry here on purpose: the tray owns that toggle so the menu
       always reflects reality, and an installer-created task would drift from it.
+      Owning it is not the same as being able to leave it behind, which is what
+      RemoveUserFootprint is for.
     -->
     <ComponentGroup Id="Shortcuts" Directory="ShortcutFolder">
       <Component Id="StartMenuShortcut" Guid="*">

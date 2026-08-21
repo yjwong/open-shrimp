@@ -26,6 +26,24 @@ internal static class CorePaths
             : Path.Combine(LocalAppData, "openshrimp", "openshrimp", "Logs", "instances", instanceName);
 
     /// <summary>
+    /// Where PyApp unpacks the core's Python runtime, hundreds of MB of it:
+    /// data_local_dir() / "pyapp" / "data" / project / distribution-hash /
+    /// version. Only the project level is nameable from outside — the hash
+    /// moves with the embedded Python distribution and the version with every
+    /// release — so uninstall removes that level whole.
+    /// </summary>
+    public static string PyAppDataDirectory =>
+        Path.Combine(LocalAppData, "pyapp", "data", "open-shrimp");
+
+    /// <summary>
+    /// The unpacked interpreters and pip cache PyApp shares across every
+    /// binary built with it, ours and moonshine-stt's alike. Shared is why
+    /// removing it is conditional; see <see cref="Uninstall"/>.
+    /// </summary>
+    public static string PyAppCacheDirectory =>
+        Path.Combine(LocalAppData, "pyapp", "cache");
+
+    /// <summary>
     /// The core binary. Sits beside the tray in a per-user install, so
     /// self-update can rewrite it without elevation.
     /// </summary>
