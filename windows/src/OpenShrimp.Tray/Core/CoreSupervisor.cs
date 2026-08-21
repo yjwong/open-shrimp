@@ -303,14 +303,30 @@ internal sealed class CoreSupervisor : IAsyncDisposable
 
             // Shutdown has no internal timeout on the Python side — a wedged
             // sandbox teardown can hang it — so bound the wait here.
+            //
+            // The control channel is what says the core is down, and the
+            // spawned handle says nothing: the image the tray launches is
+            // PyApp's, and it is a different process from the interpreter that
+            // actually holds the sandbox. That distinction is load-bearing at
+            // the end of a session, where the interpreter defers itself to the
+            // back of the shutdown order and the launcher does not — so the
+            // launcher exits first, every time, while the guest is still
+            // unwinding. Breaking on it would report a stopped core and let go
+            // of the session the drain is holding open.
             var deadline = DateTime.UtcNow + GracefulStopTimeout;
-            while (DateTime.UtcNow < deadline)
-            {
-                if (_process is { HasExited: true }) break;
-                if (_process is null && !client.IsConnected) break;
+            while (DateTime.UtcNow < deadline && client.IsConnected)
                 await Task.Delay(250).ConfigureAwait(false);
-            }
+
+            if (client.IsConnected)
+                TrayLog.Write("Core did not answer the stop within its grace period");
         }
+
+        // Said out loud because the kill below cannot reach it. Killing the
+        // launcher's tree is no use once the launcher has gone, which at the
+        // end of a session it has, so a core still holding a guest here is
+        // one nothing is going to unwind.
+        if (_process is null or { HasExited: true } && _client is { IsConnected: true })
+            TrayLog.Write("Core is still up with no handle to stop it by");
 
         if (_process is { HasExited: false })
         {

@@ -131,6 +131,46 @@ def _install_signal_handlers(
             )
 
 
+def _defer_windows_shutdown() -> None:
+    """Ask Windows to close this process late in a session end.
+
+    A session end closes every process, and it does so in order of shutdown
+    level, highest first.  Everything starts at ``0x280``, and this process has
+    no window of its own — so on a shutdown it is closed in the same early pass
+    as the rest, *before* the tray is asked whether the session may end.  The
+    tray then answers, holds the shutdown open, and drains a core that is
+    already gone: measured, its stop reports the process exited and writes into
+    a broken pipe.
+
+    ``0x100`` is the bottom of the range reserved for applications, which puts
+    this process after every ordinary one — including the tray, left at the
+    default so that it is still asked first.  That ordering is the whole point:
+    it is what buys the sandbox guest the drain the tray is holding the session
+    open for.
+
+    Best effort.  Failing to reorder costs a stranded guest on shutdown, which
+    is what happens today; it must never cost a start.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # SHUTDOWN_NORETRY is deliberately not set: without it Windows will
+        # offer to wait on this process rather than assuming it is hung, which
+        # is the same bargain the tray's block reason strikes with the user.
+        if not ctypes.WinDLL("kernel32", use_last_error=True).SetProcessShutdownParameters(
+            0x100, 0
+        ):
+            logger.warning(
+                "Could not defer this process in the shutdown order (error %d); "
+                "a system shutdown may close it before the sandbox is stopped",
+                ctypes.get_last_error(),
+            )
+    except Exception:
+        logger.exception("Could not defer this process in the shutdown order")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OpenShrimp - Telegram bot for remote Claude access")
     _add_config_arg(parser, default=str(DEFAULT_CONFIG_PATH))
@@ -349,6 +389,10 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     and the macOS menu-bar app.  When *stop_event* is ``None`` (the CLI
     path), SIGTERM/SIGINT handlers are installed automatically.
     """
+    # Before anything that could hold a sandbox guest, because the ordering it
+    # asks for only applies to a session end that starts after it.
+    _defer_windows_shutdown()
+
     config = load_config(config_path)
     logger.info("Config loaded from %s", config_path)
     logger.info("Contexts: %s", ", ".join(config.contexts.keys()))

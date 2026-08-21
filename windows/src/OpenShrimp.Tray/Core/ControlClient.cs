@@ -42,7 +42,16 @@ internal sealed class ControlClient : IAsyncDisposable
 
     public event Action? Disconnected;
 
-    public bool IsConnected => _pipe?.IsConnected == true;
+    /// <summary>
+    /// Set once the read loop has ended, which is the first moment the far end
+    /// going away is observable. <see cref="PipeStream.IsConnected"/> alone is
+    /// a cached flag that a peer's death does not clear — it reported a live
+    /// channel to a core that had already exited — so liveness is the two
+    /// together.
+    /// </summary>
+    private volatile bool _closed;
+
+    public bool IsConnected => !_closed && _pipe?.IsConnected == true;
 
     public ControlClient(string? instanceName)
     {
@@ -66,6 +75,7 @@ internal sealed class ControlClient : IAsyncDisposable
         }
 
         _pipe = pipe;
+        _closed = false;
         _reader = new StreamReader(pipe, new UTF8Encoding(false), false, 8192, leaveOpen: true);
         _writer = new StreamWriter(pipe, new UTF8Encoding(false), 8192, leaveOpen: true) { AutoFlush = false };
         _cts = new CancellationTokenSource();
@@ -198,6 +208,7 @@ internal sealed class ControlClient : IAsyncDisposable
         }
         finally
         {
+            _closed = true;
             FailPending();
             Disconnected?.Invoke();
         }
