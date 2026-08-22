@@ -348,10 +348,10 @@ struct SetupWizardView: View {
         switch model.prefetch {
         case .idle:
             EmptyView()
-        case .running(let fraction):
+        case .running:
             // A nil fraction is a length the server never reported, so the
             // bar spins rather than sitting at zero pretending to know.
-            if let fraction {
+            if let fraction = model.prefetch.fraction {
                 ProgressView(value: fraction) { Text("Getting things ready…") }
                     .font(.caption)
                     .frame(maxWidth: 260)

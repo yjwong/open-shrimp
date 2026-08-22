@@ -32,6 +32,7 @@ from open_shrimp.sandbox.agent_runtime import (
     terminate_served_proc,
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
+from open_shrimp.sandbox.prefetch import ProgressFn, logged
 from open_shrimp.sandbox.port_forward import (
     SSH_TUNNEL_OPTS,
     PortForwardRegistry,
@@ -261,7 +262,12 @@ class LibvirtSandbox:
             and (sdir / "ssh_key").exists()
         )
 
-    def ensure_environment(self, *, log_file: Path | None = None) -> None:
+    def ensure_environment(
+        self,
+        *,
+        log_file: Path | None = None,
+        progress: ProgressFn | None = None,
+    ) -> None:
         """Build the VM environment: base image, overlay, cloud-init, SSH key.
 
         Idempotent — only does real work on first call.
@@ -298,7 +304,13 @@ class LibvirtSandbox:
         # 1. Base image.
         _log(log_file, "Ensuring base image...")
         base_image = ensure_base_image(
-            self._config.base_image, log_file=log_file,
+            self._config.base_image,
+            log_file=log_file,
+            progress=logged(
+                "Downloading the base cloud image",
+                lambda msg: _log(log_file, msg),
+                progress,
+            ),
         )
 
         # 2. SSH key.

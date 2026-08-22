@@ -49,9 +49,11 @@ from open_shrimp.hooks import (
     HostBashApprovalCallback,
     QuestionCallback,
 )
+from open_shrimp.markdown import escape as escape_markdown
 from open_shrimp.sandbox import Sandbox, SandboxManager
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox.launch import start_sandboxed_agent
+from open_shrimp.sandbox.prefetch import ProgressFn, describe_bytes, throttled
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     AgentRuntime,
@@ -167,8 +169,73 @@ _IDLE_TIMEOUT: float = 30 * 60  # 30 minutes
 _idle_sweep_task: asyncio.Task[None] | None = None
 
 # Per-context lock: serialises sandbox creation so two scopes sharing
-# the same libvirt context don't race on VM boot / virtiofsd / ports.
+# the same libvirt context don't race on VM boot / virtiofsd / ports.  It is
+# keyed by context name while the assets a cold boot downloads are cached per
+# user, so it is not what stands between two contexts — or a front end's
+# prefetch — reaching for the same file; ``sandbox.prefetch.exclusive`` is.
 _context_locks: dict[str, asyncio.Lock] = {}
+
+# How often a first-turn download re-writes its chat message.  Telegram
+# rate-limits edits to a single message, and a bot editing every few seconds
+# for the length of a multi-gigabyte transfer is throttled by the API rather
+# than by us — at which point the message stops moving at all.  The build log
+# carries the fine-grained version for anyone who wants it.
+_CHAT_PROGRESS_INTERVAL: float = 20.0
+
+
+def _first_turn_progress_text(done: int, total: int | None) -> str:
+    """What the chat says while a cold context downloads what it boots from."""
+    return (
+        "Starting your project for the first time — "
+        f"{describe_bytes(done, total)}. This only happens once."
+    )
+
+
+def _chat_progress_sink(
+    bot: Bot,
+    message: Any,
+    keyboard: InlineKeyboardMarkup | None,
+) -> ProgressFn:
+    """A progress sink keeping *message* current with a first-turn download.
+
+    Edited in place rather than re-sent: a transfer that reports itself in
+    twenty new messages is worse company than one that reports itself in
+    none.  *keyboard* rides on every edit because an edit replaces the markup
+    with whatever it carries, and a "View build log" button that disappears
+    partway through a ten-minute wait takes the only detailed view with it.
+
+    It is called from the worker thread the sandbox lifecycle runs on, so
+    each edit is handed back to the loop that owns *bot*.  Nothing waits on
+    the result: a rejected edit costs this message one update, and a download
+    is not the place to raise about it.
+    """
+    loop = asyncio.get_running_loop()
+
+    async def edit(text: str) -> None:
+        try:
+            await bot.edit_message_text(
+                chat_id=message.chat_id,
+                message_id=message.message_id,
+                text=text,
+                parse_mode="MarkdownV2",
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.debug(
+                "Could not update the sandbox progress message", exc_info=True,
+            )
+
+    def report(done: int, total: int | None) -> None:
+        text = escape_markdown(_first_turn_progress_text(done, total))
+        try:
+            asyncio.run_coroutine_threadsafe(edit(text), loop)
+        except RuntimeError:
+            # A loop that has closed under a shutdown takes the message with
+            # it.  The download is not the thing that went wrong and must not
+            # be the thing that fails.
+            logger.debug("No loop left to report sandbox progress to")
+
+    return throttled(report, interval=_CHAT_PROGRESS_INTERVAL)
 
 # Scopes that have already been warned about degraded (proxy-less) tool
 # availability, so the warning fires at most once per scope per process.
@@ -568,16 +635,21 @@ async def get_or_create_session(
             # slow operations.
             needs_build = not sandbox.environment_ready()
             needs_start = not needs_build and not sandbox.running()
+            boot_progress: ProgressFn | None = None
             if (needs_build or needs_start) and bot is not None:
                 log_file = sandbox_manager.register_build(context_name)
 
                 if needs_build:
-                    progress_text = (
-                        "Building container image for the first time, "
-                        "this may take a few minutes\\.\\.\\."
+                    # Two of the four backends build no container, and the wait
+                    # is mostly a download, so the opening text names neither;
+                    # the size arrives when the first bytes land and the
+                    # message is edited.
+                    progress_text = escape_markdown(
+                        "Starting your project for the first time. "
+                        "This only happens once."
                     )
                 else:
-                    progress_text = "Starting sandbox\\.\\.\\."
+                    progress_text = escape_markdown("Starting sandbox...")
 
                 build_log_button = (
                     make_web_app_button(
@@ -597,13 +669,17 @@ async def get_or_create_session(
                     if build_log_button
                     else None
                 )
-                await bot.send_message(
+                message = await bot.send_message(
                     chat_id=scope.chat_id,
                     message_thread_id=scope.thread_id,
                     text=progress_text,
                     parse_mode="MarkdownV2",
                     reply_markup=keyboard,
                 )
+                # Only a cold environment downloads anything; a warm one that
+                # merely needs starting has nothing to count.
+                if needs_build:
+                    boot_progress = _chat_progress_sink(bot, message, keyboard)
             else:
                 log_file = None
 
@@ -614,6 +690,7 @@ async def get_or_create_session(
                 backend=sandbox_backend(context),
                 manager=sandbox_manager,
                 log_file=log_file,
+                progress=boot_progress,
             )
             # WrappedCLI → cli_path; ServedEndpoint → endpoint.
             cli_path = handle.cli_path

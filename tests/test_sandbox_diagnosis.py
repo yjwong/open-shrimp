@@ -433,7 +433,7 @@ class _RefusingSandbox:
     def running(self) -> bool:
         return True
 
-    def ensure_environment(self, *, log_file=None) -> None:
+    def ensure_environment(self, *, log_file=None, progress=None) -> None:
         self.attempted = True
         raise RuntimeError(self._message)
 

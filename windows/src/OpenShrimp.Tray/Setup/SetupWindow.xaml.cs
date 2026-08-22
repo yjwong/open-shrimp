@@ -62,10 +62,18 @@ internal abstract record PrefetchState
     internal sealed record Idle : PrefetchState;
 
     /// <summary>
-    /// <c>Fraction</c> is null while no asset has reported a length to divide
-    /// by, which is a spinner rather than a bar stuck at zero.
+    /// <c>Total</c> is null wherever the server reported no length, which is a
+    /// spinner rather than a bar stuck at zero.
+    ///
+    /// The bytes travel rather than the fraction they reduce to, because Finish
+    /// prints sizes and a fraction cannot be turned back into them.
     /// </summary>
-    internal sealed record Running(double? Fraction) : PrefetchState;
+    internal sealed record Running(long Downloaded, long? Total) : PrefetchState
+    {
+        /// <summary>How far along, or null where there is nothing to divide by.</summary>
+        internal double? Fraction =>
+            Total is { } total && total > 0 ? Math.Min(1, (double)Downloaded / total) : null;
+    }
 
     internal sealed record Done : PrefetchState;
 
@@ -879,9 +887,9 @@ public sealed partial class SetupWindow : Window
 
         var cancellation = new CancellationTokenSource();
         _prefetch = cancellation;
-        // No length reported yet, so the bar spins rather than sitting at zero
-        // pretending to know how far along it is.
-        ShowPrefetch(new PrefetchState.Running(null));
+        // No bytes and no length reported yet, so the bar spins rather than
+        // sitting at zero pretending to know how far along it is.
+        ShowPrefetch(new PrefetchState.Running(0, null));
 
         // Weakly, because the reporting outlives this window whenever Finish is
         // pressed — the download is deliberately not cancelled there — and a
@@ -940,13 +948,15 @@ public sealed partial class SetupWindow : Window
 
         PrefetchState? next = evt switch
         {
-            SandboxPrefetchEvent.Progress { Total: > 0 } progress =>
-                new PrefetchState.Running(
-                    Math.Min(1, (double)progress.Done / progress.Total.Value)),
+            // Every tick, including one carrying no total: a length the server
+            // never reported leaves the spinner running, and the bytes behind
+            // it are still what Finish has to print.
+            SandboxPrefetchEvent.Progress progress =>
+                new PrefetchState.Running(progress.Done, progress.Total),
             SandboxPrefetchEvent.Finished => new PrefetchState.Done(),
             SandboxPrefetchEvent.Failed failed => new PrefetchState.Failed(failed.Reason),
-            // A tick carrying no total is a length the server never reported,
-            // and the spinner already running is the honest answer to it.
+            // No fourth shape reaches here; the arm is what keeps the switch
+            // exhaustive over a hierarchy the compiler cannot close.
             _ => null,
         };
         if (next is not null) ShowPrefetch(next);
@@ -1084,6 +1094,32 @@ public sealed partial class SetupWindow : Window
 
     // -- Finish -------------------------------------------------------------
 
+    /// <summary>
+    /// What the completion dialog says about a download that has not landed, or
+    /// null where there is nothing to say.
+    /// </summary>
+    private string? PrefetchNote()
+    {
+        if (_prefetchState is not PrefetchState.Running running) return null;
+
+        // A total nobody reported cannot be written as "of 6.0 GB", so the
+        // parenthetical shrinks to what has actually arrived.
+        var size = running.Total is { } total
+            ? $"{Gigabytes(running.Downloaded)} of {Gigabytes(total)} GB"
+            : $"{Gigabytes(running.Downloaded)} GB so far";
+        // No second "you're all set": the sentence this is appended to already
+        // says setup succeeded, and it names the bot the token belongs to.
+        return $"Still downloading ({size}) — your first project will take a few"
+            + " minutes to start. You can close this window; the download keeps"
+            + " going.";
+    }
+
+    /// <summary>
+    /// Bytes as decimal GB, to one place. Never GiB: nothing else the wizard
+    /// says is in binary units.
+    /// </summary>
+    private static string Gigabytes(long bytes) => $"{bytes / 1_000_000_000d:0.0}";
+
     private async Task FinishAsync()
     {
         var contexts = ValidateContexts();
@@ -1110,6 +1146,10 @@ public sealed partial class SetupWindow : Window
             _prefetch = null;
 
             var complete = $"OpenShrimp will start now. Say hello to @{_verifiedUsername} on Telegram.";
+
+            // Read after the write rather than before it: the config write is a
+            // spawn, and the bytes that moved while it ran belong in the count.
+            if (PrefetchNote() is { } note) complete += $"\n\n{note}";
 
             // The tray supervises the core and is its own logon task, so
             // autostart here is the tray registering itself — never a service:

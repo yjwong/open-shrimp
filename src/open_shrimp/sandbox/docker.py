@@ -23,6 +23,7 @@ from open_shrimp.sandbox.agent_runtime import (
     terminate_served_proc,
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
+from open_shrimp.sandbox.prefetch import ProgressFn
 
 import open_shrimp.sandbox.docker_helpers as _dh
 
@@ -128,7 +129,15 @@ class DockerSandbox:
         )
         return result.returncode == 0
 
-    def ensure_environment(self, *, log_file: Path | None = None) -> None:
+    def ensure_environment(
+        self,
+        *,
+        log_file: Path | None = None,
+        progress: ProgressFn | None = None,
+    ) -> None:
+        # No *progress*: the shared artifact here is built rather than
+        # fetched, and ``docker build`` resolves and reports its own layers
+        # into *log_file*.
         if self._computer_use and self._custom_dockerfile:
             _ensure_layered_computer_use_image(
                 self._bundle, log_file=log_file,

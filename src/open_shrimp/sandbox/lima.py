@@ -41,6 +41,7 @@ from open_shrimp.sandbox.base import (
     PortForward,
     VncQuirk,
 )
+from open_shrimp.sandbox.prefetch import ProgressFn
 from open_shrimp.sandbox.port_forward import (
     SSH_TUNNEL_OPTS,
     PortForwardRegistry,
@@ -183,11 +184,19 @@ class LimaSandbox:
         """Check if the Lima instance exists (any status)."""
         return limactl_instance_status(self._limactl, self._inst_name) is not None
 
-    def ensure_environment(self, *, log_file: Path | None = None) -> None:
+    def ensure_environment(
+        self,
+        *,
+        log_file: Path | None = None,
+        progress: ProgressFn | None = None,
+    ) -> None:
         """Create the Lima instance from a generated YAML template.
 
         Idempotent — only creates if the instance doesn't exist.
         Detects config drift and rebuilds if necessary.
+
+        No *progress*: ``limactl`` owns the image download on this path and
+        reports it into *log_file* itself.
         """
         sdir = self._sdir
         sdir.mkdir(parents=True, mode=0o700, exist_ok=True)

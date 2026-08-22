@@ -18,21 +18,24 @@ yet — it is a download and a filesystem, nothing more.
 
 Every fetch reached from here is idempotent and lands through a temporary
 file, so an interrupted prefetch never leaves a partial artifact at the path
-the sandbox boots from; the next attempt writes the same temporary again and
-removes it, so nothing accumulates either.  That is what makes this safe to
-abandon: a front end may stop waiting whenever it likes.
+the sandbox boots from.  That is what makes this safe to abandon: a front end
+may stop waiting whenever it likes, and the process that picks the asset up
+next serialises against whatever is still running through :func:`exclusive`.
 """
 
 from __future__ import annotations
 
+import errno
 import http.client
 import logging
 import os
 import shutil
+import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +53,16 @@ ProgressFn = Callable[[int, "int | None"], None]
 #: fires the callback thousands of times a second, and a consumer parsing
 #: every one of those spends longer reading than the transfer spends moving.
 _MIN_INTERVAL = 0.25
+
+#: How often a transfer writes a line to a build log.  Slower than the wire
+#: by three orders of magnitude, fast enough that a reader watching the log
+#: sees it move.
+LOG_INTERVAL = 3.0
+
+#: Decimal units.  Nothing a setup UI or a chat message says is in GiB, and
+#: two places quoting one download in different units read as two downloads.
+_GB = 1_000_000_000
+_MB = 1_000_000
 
 
 def content_length(raw: str | None) -> int | None:
@@ -109,25 +122,259 @@ def stream_to_file(
         )
 
 
-def throttled(report: ProgressFn, *, clock: Callable[[], float] = time.monotonic) -> ProgressFn:
-    """Wrap *report* so it fires at most :data:`_MIN_INTERVAL` apart.
+def throttled(
+    report: ProgressFn,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    interval: float = _MIN_INTERVAL,
+) -> ProgressFn:
+    """Wrap *report* so it fires at most *interval* apart.
 
     The throttle belongs to the emitter, not to the fetchers: the byte
     counter stays exact and every chunk still advances it, only the reporting
     is coarse.  Putting it at the call site instead would mean each fetcher
     carrying its own timer and disagreeing about the rate.
+
+    Emitters differ in what they can afford by orders of magnitude, hence the
+    *interval*: a line appended to a build log costs a write, while an edit to
+    a Telegram message is rate-limited by the API and starts failing long
+    before a fast link would stop producing chunks.
     """
     last: float | None = None
 
     def emit(done: int, total: int | None) -> None:
         nonlocal last
         now = clock()
-        if last is not None and now - last < _MIN_INTERVAL:
+        if last is not None and now - last < interval:
             return
         last = now
         report(done, total)
 
     return emit
+
+
+def describe_bytes(done: int, total: int | None) -> str:
+    """How far a transfer has got, phrased for someone waiting on it.
+
+    A server that declined to declare a length leaves the percentage out
+    altogether: one pinned at 0% for ten minutes is a worse lie than a count
+    of bytes with nothing to measure it against.  Both figures take the unit
+    the larger one calls for, so a reader is never asked to compare
+    megabytes against gigabytes inside one parenthesis.
+    """
+    if total is None or total <= 0:
+        return f"{_amount(done, done)} downloaded"
+    percent = min(100, done * 100 // total)
+    return (
+        f"{percent}% ({_amount(done, total, unit=False)} of "
+        f"{_amount(total, total)})"
+    )
+
+
+def _amount(size: int, scale: int, *, unit: bool = True) -> str:
+    """*size* rendered in whichever unit *scale* is large enough to want."""
+    if scale >= _GB:
+        text = f"{size / _GB:.1f}"
+        return f"{text} GB" if unit else text
+    text = f"{size / _MB:.0f}"
+    return f"{text} MB" if unit else text
+
+
+def logged(
+    label: str,
+    log: Callable[[str], None],
+    downstream: ProgressFn | None = None,
+    *,
+    interval: float = LOG_INTERVAL,
+) -> ProgressFn:
+    """A progress sink writing *label* and the transfer's state to *log*.
+
+    The build log is where a first-turn download is legible at byte level, so
+    the line is written whether or not a front end supplied *downstream*;
+    without it, a multi-gigabyte transfer is two lines, one before and one
+    after.  *downstream* rides along untouched, at whatever rate it throttles
+    itself to — its reader is a chat message, not a log, and the two cannot
+    share a rate.
+    """
+    to_log = throttled(
+        lambda done, total: log(f"{label}: {describe_bytes(done, total)}"),
+        interval=interval,
+    )
+
+    def report(done: int, total: int | None) -> None:
+        to_log(done, total)
+        if downstream is not None:
+            downstream(done, total)
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# One fetcher per cached asset
+# ---------------------------------------------------------------------------
+
+
+def staging_path(dest: Path) -> Path:
+    """The temporary a fetch of *dest* writes into before renaming it.
+
+    Named for the process rather than for the destination, so that two
+    fetchers reaching one asset on a filesystem where :func:`exclusive`
+    cannot be honoured waste a download each instead of interleaving their
+    bytes into a single file that passes every length check both of them
+    make.
+    """
+    return dest.with_name(f"{dest.name}.{os.getpid()}.download")
+
+
+def sweep_staging(dest: Path) -> None:
+    """Delete staging files left beside *dest* by fetchers that died.
+
+    A per-pid temporary is not self-cleaning: the next run writes a different
+    path instead of truncating the one an earlier run abandoned.
+    Call this from inside :func:`exclusive`, where holding the lock is what
+    makes every sibling stale — outside it, a sibling may be a live download.
+    """
+    mine = staging_path(dest).name
+    prefix, suffix = f"{dest.name}.", ".download"
+    try:
+        siblings = list(dest.parent.iterdir())
+    except OSError:
+        logger.debug("Could not list %s", dest.parent, exc_info=True)
+        return
+    for stale in siblings:
+        name = stale.name
+        if name == mine or not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        # The middle segment must be a pid and nothing else.  Without that,
+        # the staging file of an asset whose name merely starts with this
+        # one's — ``rootfs.vhdx`` against ``rootfs.vhdx.gui`` — matches, and
+        # that asset is guarded by a different lock, so it may be live.
+        if not name[len(prefix):-len(suffix)].isdigit():
+            continue
+        try:
+            stale.unlink()
+        except OSError:
+            logger.debug("Could not remove %s", stale, exc_info=True)
+
+
+@contextmanager
+def exclusive(
+    dest: Path, *, on_wait: Callable[[], None] | None = None,
+) -> Iterator[bool]:
+    """Serialise every fetcher of *dest*, yielding whether the wait was real.
+
+    Cached sandbox assets are keyed per user and shared by every context, so
+    the fetchers that collide on one are not in one program: a front end's
+    prefetch, orphaned when its window closed, and the core downloading on a
+    first turn reach the same path with nothing between them.  No in-process
+    lock can see that pair, which is why this is a lock on a file.
+
+    A caller must re-check for *dest* inside the block: the loser blocks,
+    wakes once the winner has landed the file, sees it there, and downloads
+    nothing.
+
+    The lock file is created once and never removed.  Unlinking it would let
+    two processes hold locks on two different inodes reached by one name,
+    which is the race it exists to close.
+
+    *on_wait* fires before the blocking acquire and only when the
+    non-blocking one failed, so a caller can say it is waiting on somebody
+    else rather than appear to have hung.  The yielded bool reports the same
+    fact afterwards, for a caller deciding what to say about who fetched.
+    """
+    lock_path = dest.with_name(dest.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        waited = False
+        try:
+            waited = not _acquire(fd, blocking=False)
+            if waited:
+                if on_wait is not None:
+                    on_wait()
+                _acquire(fd, blocking=True)
+        except Unlockable:
+            logger.warning(
+                "Cannot lock %s, so a concurrent fetch of this asset is not "
+                "excluded; the per-process staging name is what keeps the two "
+                "downloads from writing one file.", lock_path, exc_info=True,
+            )
+            locked = False
+        else:
+            locked = True
+        try:
+            yield waited
+        finally:
+            if locked:
+                _release(fd)
+    finally:
+        os.close(fd)
+
+
+class Unlockable(OSError):
+    """The filesystem under a lock file refuses to lock it at all.
+
+    Distinct from contention, which is the answer this whole mechanism wants.
+    A share that does not implement locks would otherwise turn a download
+    that used to work into a failure, and :func:`staging_path` already keeps
+    two unsynchronised fetchers out of each other's files.
+    """
+
+
+#: Errnos meaning "somebody else holds it", as opposed to "this filesystem
+#: does not do locks".  ``EACCES`` is what Windows answers a refused
+#: ``LK_NBLCK`` with; POSIX answers ``EWOULDBLOCK``.
+_CONTENDED = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK})
+
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _acquire(fd: int, *, blocking: bool) -> bool:
+        """Take the byte-zero lock on *fd*, or report that it is held.
+
+        ``msvcrt.locking`` locks a range from the file position, so every
+        call seeks first: a shared position would have the second lock cover
+        a different byte and grant immediately.
+        """
+        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        while True:
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, mode, 1)
+                return True
+            except OSError as exc:
+                if not blocking:
+                    if exc.errno in _CONTENDED:
+                        return False
+                    raise Unlockable(exc.errno, str(exc)) from exc
+                # ``LK_LOCK`` retries internally for about ten seconds and
+                # then raises ``EDEADLOCK``.  A multi-gigabyte download
+                # outlasts that many times over, so the give-up is retried.
+                # Anything else is a lock that will never be granted, and
+                # retrying it would spin.
+                if exc.errno != errno.EDEADLOCK:
+                    raise Unlockable(exc.errno, str(exc)) from exc
+
+    def _release(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _acquire(fd: int, *, blocking: bool) -> bool:
+        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+        try:
+            fcntl.flock(fd, flags)
+        except OSError as exc:
+            if exc.errno in _CONTENDED and not blocking:
+                return False
+            raise Unlockable(exc.errno, str(exc)) from exc
+        return True
+
+    def _release(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)

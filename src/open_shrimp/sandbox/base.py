@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
+from open_shrimp.sandbox.prefetch import ProgressFn
+
 if TYPE_CHECKING:
     from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime
 
@@ -122,7 +124,12 @@ class Sandbox(Protocol):
         """
         ...
 
-    def ensure_environment(self, *, log_file: Path | None = None) -> None:
+    def ensure_environment(
+        self,
+        *,
+        log_file: Path | None = None,
+        progress: ProgressFn | None = None,
+    ) -> None:
         """Build image, provision VM, or similar one-time setup.
 
         Idempotent — safe to call on every invocation.  Only does real work
@@ -132,6 +139,14 @@ class Sandbox(Protocol):
         Args:
             log_file: Optional path where build output is streamed
                 line-by-line (for the terminal mini app).
+            progress: Optional per-chunk callback taking the bytes
+                transferred and the artifact's declared length, or ``None``
+                where the server declared none.  Only the backends that
+                download a multi-gigabyte artifact on this path call it; one
+                that builds its own environment reports through *log_file*
+                alone.  It is called from the worker thread this method runs
+                on, so a consumer that touches an event loop has to hand the
+                work back to it.
         """
         ...
 

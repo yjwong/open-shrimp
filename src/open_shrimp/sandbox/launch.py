@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from open_shrimp.sandbox.base import Sandbox, SandboxStartupError
+from open_shrimp.sandbox.prefetch import ProgressFn
 
 if TYPE_CHECKING:
     from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime
@@ -30,6 +31,7 @@ async def start_sandboxed_agent(
     backend: str,
     manager: "SandboxManager | None" = None,
     log_file: Path | None = None,
+    progress: ProgressFn | None = None,
 ) -> "AgentHandle":
     """Bring *sandbox* up and launch *runtime* inside it.
 
@@ -42,11 +44,16 @@ async def start_sandboxed_agent(
     Mini App; it is unregistered as soon as provisioning ends, whether or not
     provisioning succeeded, because a log nobody is writing to is a Mini App
     that never stops loading.  Passing one requires the *manager* that owns it.
+
+    *progress* reports the bytes of a first-turn asset download, for a caller
+    with somewhere better than a build log to put them.  It is called on the
+    worker thread, so anything it touches on the event loop it has to hand
+    back there itself.
     """
 
     def _start() -> "AgentHandle":
         try:
-            sandbox.ensure_environment(log_file=log_file)
+            sandbox.ensure_environment(log_file=log_file, progress=progress)
             sandbox.ensure_running(log_file=log_file)
             sandbox.provision_workspace(log_file=log_file)
         finally:

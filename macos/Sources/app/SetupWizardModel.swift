@@ -49,11 +49,45 @@ struct ProjectRow: Identifiable, Hashable {
 /// what happened before this existed.  Nothing here may block Finish.
 enum PrefetchState: Equatable {
     case idle
-    /// `fraction` is nil while no asset has reported a length to divide by,
-    /// which is a spinner rather than a bar stuck at zero.
-    case running(fraction: Double?)
+    /// `total` is nil while no asset has reported a length, which is a spinner
+    /// rather than a bar stuck at zero.  Bytes rather than a ready-made
+    /// fraction, because Finish has to print them and a fraction cannot be
+    /// turned back into a size.
+    case running(done: Int, total: Int?)
     case done
     case failed(String)
+
+    /// How full the bar is, or nil where no length has been reported to divide
+    /// by.
+    var fraction: Double? {
+        guard case .running(let done, let total) = self, let total, total > 0 else { return nil }
+        return min(1, Double(done) / Double(total))
+    }
+
+    /// What Finish has to say about a download that is still running, or nil
+    /// when nothing is left for the first project to wait on.
+    ///
+    /// It says nothing about setup having succeeded: the sentence this is
+    /// appended to already does, and names the bot the token belongs to.
+    var completionNote: String? {
+        guard case .running(let done, let total) = self else { return nil }
+        let size: String
+        if let total, total > 0 {
+            size = "\(Self.gigabytes(done)) of \(Self.gigabytes(total)) GB"
+        } else {
+            // A total nobody reported cannot be written as "of 6.0 GB", so the
+            // parenthetical shrinks to what has actually arrived.
+            size = "\(Self.gigabytes(done)) GB so far"
+        }
+        return "Still downloading (\(size)) — your first project will take a few "
+            + "minutes to start. You can close this window; the download keeps going."
+    }
+
+    /// Decimal GB, one place.  Never GiB: nothing else the wizard says is in
+    /// binary units.
+    private static func gigabytes(_ bytes: Int) -> String {
+        String(format: "%.1f", Double(bytes) / 1_000_000_000)
+    }
 }
 
 /// Where the enrollment step is.
@@ -173,9 +207,10 @@ final class SetupWizardModel: ObservableObject {
     private var warmup: Task<Void, Never>?
 
     /// Called once the config has been written, with the bot the token belongs
-    /// to and, if one was asked for and refused, why the login item could not
-    /// be registered.  The window is the caller's to dismiss.
-    var onCompleted: ((String?, String?) -> Void)?
+    /// to; if one was asked for and refused, why the login item could not be
+    /// registered; and, where the assets are still arriving, what that leaves
+    /// the first project waiting for.  The window is the caller's to dismiss.
+    var onCompleted: ((String?, String?, String?) -> Void)?
 
     var isLastStep: Bool { step == Self.stepCount - 1 }
 
@@ -616,7 +651,7 @@ final class SetupWizardModel: ObservableObject {
     /// same directory.
     private func startPrefetch() {
         guard sandbox?.available == true, prefetchTask == nil else { return }
-        prefetch = .running(fraction: nil)
+        prefetch = .running(done: 0, total: nil)
         // The handler is built here rather than inside the task, so it holds
         // its own weak reference instead of reaching through the task's — a
         // capture nested inside a capture is a reference to a variable from
@@ -637,8 +672,10 @@ final class SetupWizardModel: ObservableObject {
     private func apply(_ event: OpenShrimpCLI.SandboxPrefetchEvent) {
         switch event {
         case .progress(_, let done, let total):
-            guard let total, total > 0 else { return }
-            prefetch = .running(fraction: min(1, Double(done) / Double(total)))
+            // Every tick, including one carrying no total: a length the server
+            // never reported leaves the spinner running, and the bytes behind
+            // it are still what Finish has to print.
+            prefetch = .running(done: done, total: total)
         case .ready:
             break
         case .finished:
@@ -814,7 +851,9 @@ final class SetupWizardModel: ObservableObject {
         }
 
         message = WizardMessage(tone: .success, text: "Config written.")
-        onCompleted?(verifiedUsername, autostartFailure)
+        // The state is read, never awaited: the download outlives this window,
+        // and Finish reports where it got to rather than joining it.
+        onCompleted?(verifiedUsername, autostartFailure, prefetch.completionNote)
     }
 
     private func trimmed(_ text: String) -> String {

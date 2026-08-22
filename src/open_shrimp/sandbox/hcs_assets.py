@@ -24,7 +24,13 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
-from open_shrimp.sandbox.prefetch import ProgressFn, stream_to_file
+from open_shrimp.sandbox.prefetch import (
+    ProgressFn,
+    exclusive,
+    staging_path,
+    stream_to_file,
+    sweep_staging,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,20 +59,28 @@ def download_release_asset(
 ) -> None:
     """Download *asset* from the latest release to *dest*.
 
-    The body lands through a temporary file and one ``os.replace``, so *dest*
+    The body lands through a staging file and one ``os.replace``, so *dest*
     either does not exist or is complete: a truncated artifact that looks
     staged would be adopted on the next boot and fail as a corrupt guest
-    rather than as a failed download.
+    rather than as a failed download.  One fetcher at a time holds *dest*, so
+    two processes reaching this path write one body after the other rather
+    than interleaving two into one file.
+
+    An existing *dest* is overwritten.  Whether the copy already there is good
+    enough to keep is the caller's to decide, since only it knows what the
+    asset is for.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = release_asset_url(asset)
-    tmp = dest.with_name(dest.name + ".download")
     logger.info("Downloading %s ...", url)
-    try:
-        _fetch(url, tmp, progress=progress)
-        os.replace(tmp, dest)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with exclusive(dest):
+        sweep_staging(dest)
+        tmp = staging_path(dest)
+        try:
+            _fetch(url, tmp, progress=progress)
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def ensure_asset(
@@ -89,28 +103,47 @@ def ensure_asset(
     form for a ``.zst``, since that is what crosses the network.  The
     checksum and the unpack that follow report through *log* instead: they
     are the tail of the wait, not part of the transfer.
+
+    The cache is shared by every context and by every process on the host, so
+    the presence check is repeated under :func:`exclusive`.  A caller that
+    lost the race blocks, wakes once the winner has landed the file, and
+    returns it without fetching a byte.
     """
     if dest.is_file():
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _say(log, f"Downloading {description} ({asset}) — this happens once...")
-    url = release_asset_url(asset)
-    download = dest.with_name(dest.name + ".download")
-    try:
-        _fetch(url, download, progress=progress)
-        _verify_sha256(download, asset)
-        if asset.endswith(".zst"):
-            _say(log, f"Unpacking {description}...")
-            unpacked = dest.with_name(dest.name + ".unpack")
-            try:
-                _decompress_zstd(download, unpacked)
-                os.replace(unpacked, dest)
-            finally:
-                unpacked.unlink(missing_ok=True)
-        else:
-            os.replace(download, dest)
-    finally:
-        download.unlink(missing_ok=True)
+    with exclusive(
+        dest,
+        on_wait=lambda: _say(
+            log,
+            "Another download of this asset is already running — waiting "
+            "for it.",
+        ),
+    ) as waited:
+        if dest.is_file():
+            if waited:
+                _say(log, f"The other download finished; {description} is ready.")
+            _say(log, f"{description} ready at {dest}.")
+            return dest
+        _say(log, f"Downloading {description} ({asset}) — this happens once...")
+        url = release_asset_url(asset)
+        sweep_staging(dest)
+        download = staging_path(dest)
+        try:
+            _fetch(url, download, progress=progress)
+            _verify_sha256(download, asset)
+            if asset.endswith(".zst"):
+                _say(log, f"Unpacking {description}...")
+                unpacked = dest.with_name(dest.name + ".unpack")
+                try:
+                    _decompress_zstd(download, unpacked)
+                    os.replace(unpacked, dest)
+                finally:
+                    unpacked.unlink(missing_ok=True)
+            else:
+                os.replace(download, dest)
+        finally:
+            download.unlink(missing_ok=True)
     _say(log, f"{description} ready at {dest}.")
     return dest
 

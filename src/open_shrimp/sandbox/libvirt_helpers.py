@@ -21,12 +21,21 @@ import stat
 import subprocess
 import tempfile
 import textwrap
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree as ET
 
 from open_shrimp.config import SandboxConfig
 from open_shrimp.paths import data_dir as _data_dir
-from open_shrimp.sandbox.prefetch import ProgressFn, stream_to_file
+from open_shrimp.sandbox.prefetch import (
+    ProgressFn,
+    exclusive,
+    staging_path,
+    stream_to_file,
+    sweep_staging,
+)
 from open_shrimp.sandbox.skill_paths import (
     SANDBOX_HOME,
     SANDBOX_UID,
@@ -54,6 +63,13 @@ DEFAULT_BASE_IMAGE_URL = (
     "noble-server-cloudimg-amd64.img"
 )
 DEFAULT_BASE_IMAGE_NAME = "ubuntu-24.04-cloud.img"
+
+#: Ubuntu publishes one ``sha256sum`` listing covering every artifact in the
+#: image directory.  Derived from the image URL rather than written out again,
+#: so the listing consulted is always the one beside the file fetched.
+DEFAULT_BASE_IMAGE_SUMS_URL = (
+    DEFAULT_BASE_IMAGE_URL.rsplit("/", 1)[0] + "/SHA256SUMS"
+)
 
 def _vm_state_dir() -> Path:
     return _data_dir() / "vms"
@@ -227,26 +243,93 @@ _VIRTIOFSD_BINARY_MAP: dict[str, str] = {
 }
 
 
+#: Read size for the checksum, which covers a multi-gigabyte image end to end.
+_CHUNK = 8 * 1024 * 1024
+
+#: Room for a slow link on the checksum listing, which is small.
+_SUMS_TIMEOUT = 60
+
+
 def _stream_download(
     url: str,
     dest: Path,
     *,
     progress: ProgressFn | None = None,
+    verify: Callable[[Path], None] | None = None,
 ) -> None:
-    """Fetch *url* to *dest* through a temporary file.
+    """Fetch *url* to *dest* through a per-process temporary file.
 
-    The body lands through a ``.download`` temporary and one ``os.replace``,
-    so *dest* is either absent or complete — a truncated image left at the
-    cached path would be adopted by every later run as if it were whole, and
-    this backend verifies no checksum that would catch it.
+    The body lands through a staging file and one ``os.replace``, so *dest*
+    is either absent or complete — a truncated image left at the cached path
+    would be adopted by every later run as if it were whole.  *verify* runs
+    against the staging file before the rename, so an artifact that fails its
+    checksum is a failed download rather than a cached corruption.
+
+    Callers hold :func:`exclusive` over *dest* around this, which is what
+    makes the sweep of abandoned staging files safe.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".download")
+    sweep_staging(dest)
+    tmp = staging_path(dest)
     try:
         stream_to_file(url, tmp, progress=progress)
+        if verify is not None:
+            verify(tmp)
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_sha256(path: Path, *, sums_url: str, filename: str) -> None:
+    """Check *path* against the digest published for *filename* at *sums_url*.
+
+    A listing that carries no line for the artifact is an error rather than
+    an unverified install: the artifact and its digest are published
+    together, so a missing line means the file fetched is not the one this
+    code expects.
+
+    This is trust-on-first-use over TLS.  It catches a truncated download and
+    two fetchers interleaved into one file; it does not catch a release
+    replaced at the source, which would carry a matching digest.
+    """
+    try:
+        with urllib.request.urlopen(sums_url, timeout=_SUMS_TIMEOUT) as resp:
+            listing = resp.read().decode("ascii", "replace")
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError(
+            f"Downloaded {filename} but could not fetch its checksum from "
+            f"{sums_url}: {exc}"
+        ) from exc
+
+    expected = None
+    for line in listing.splitlines():
+        fields = line.split()
+        # ``sha256sum`` writes "<hex>  <name>", and marks a binary-mode digest
+        # with a "*" against the name.
+        if len(fields) == 2 and fields[1].lstrip("*") == filename:
+            expected = fields[0]
+            break
+    if expected is None:
+        raise RuntimeError(
+            f"Downloaded {filename} but {sums_url} publishes no checksum for "
+            "it. The artifact is not the one this release expects; report it."
+        )
+
+    actual = _file_sha256(path)
+    if actual != expected:
+        raise RuntimeError(
+            f"Checksum mismatch on {filename}: expected {expected}, got "
+            f"{actual}. The download is corrupt or the artifact was replaced "
+            "mid-fetch; retry, and if it persists report it."
+        )
 
 
 def _download_virtiofsd(*, progress: ProgressFn | None = None) -> str:
@@ -276,7 +359,14 @@ def _download_virtiofsd(*, progress: ProgressFn | None = None) -> str:
     url = f"{_VIRTIOFSD_DOWNLOAD_BASE}/{binary_name}"
 
     logger.info("Downloading virtiofsd from %s ...", url)
-    _stream_download(url, target, progress=progress)
+    _stream_download(
+        url,
+        target,
+        progress=progress,
+        verify=lambda staged: _verify_sha256(
+            staged, sums_url=f"{url}.sha256", filename=binary_name,
+        ),
+    )
 
     target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     logger.info("virtiofsd %s downloaded to %s", binary_name, target)
@@ -308,7 +398,19 @@ def ensure_virtiofsd(*, progress: ProgressFn | None = None) -> str:
         ".".join(str(v) for v in _MIN_VIRTIOFSD_VERSION),
     )
     try:
-        return _download_virtiofsd(progress=progress)
+        with exclusive(
+            managed_virtiofsd_path(),
+            on_wait=lambda: logger.info(
+                "Another download of virtiofsd is already running — waiting "
+                "for it.",
+            ),
+        ):
+            # Re-checked under the lock: a fetcher we blocked on may have
+            # landed the binary while we waited.
+            managed = find_managed_virtiofsd()
+            if managed is not None:
+                return managed
+            return _download_virtiofsd(progress=progress)
     except Exception:
         system = _find_system_virtiofsd()
         if system is not None:
@@ -1050,13 +1152,41 @@ def ensure_base_image(
     if image_path.exists():
         return image_path
 
-    logger.info("Downloading base cloud image to %s ...", image_path)
-    _log(log_file, f"Downloading base cloud image: {DEFAULT_BASE_IMAGE_URL}")
+    with exclusive(
+        image_path,
+        on_wait=lambda: _log(
+            log_file,
+            "Another download of this asset is already running — waiting "
+            "for it.",
+        ),
+    ) as waited:
+        # Re-checked under the lock: a fetcher we blocked on may have landed
+        # the image while we waited, leaving nothing to fetch.
+        if image_path.exists():
+            _log(
+                log_file,
+                "The other download finished; the base cloud image is ready."
+                if waited
+                else "Base cloud image downloaded.",
+            )
+            return image_path
 
-    _stream_download(DEFAULT_BASE_IMAGE_URL, image_path, progress=progress)
+        logger.info("Downloading base cloud image to %s ...", image_path)
+        _log(log_file, f"Downloading base cloud image: {DEFAULT_BASE_IMAGE_URL}")
 
-    _log(log_file, "Base cloud image downloaded.")
-    logger.info("Downloaded base image to %s", image_path)
+        _stream_download(
+            DEFAULT_BASE_IMAGE_URL,
+            image_path,
+            progress=progress,
+            verify=lambda staged: _verify_sha256(
+                staged,
+                sums_url=DEFAULT_BASE_IMAGE_SUMS_URL,
+                filename=DEFAULT_BASE_IMAGE_URL.rsplit("/", 1)[-1],
+            ),
+        )
+
+        _log(log_file, "Base cloud image downloaded.")
+        logger.info("Downloaded base image to %s", image_path)
     return image_path
 
 

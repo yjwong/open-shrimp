@@ -105,7 +105,7 @@ def test_checksum_mismatch_leaves_nothing_behind(tmp_path, monkeypatch):
         A.ensure_asset("thing.img", dest, description="the thing")
 
     assert not dest.exists()
-    assert list(tmp_path.iterdir()) == []
+    assert _leftovers(tmp_path) == []
 
 
 def test_missing_checksum_is_an_error(tmp_path, monkeypatch):
@@ -126,7 +126,18 @@ def test_failed_download_leaves_nothing_behind(tmp_path, monkeypatch):
         A.ensure_asset("thing.img", dest, description="the thing")
 
     assert not dest.exists()
-    assert list(tmp_path.iterdir()) == []
+    assert _leftovers(tmp_path) == []
+
+
+def _leftovers(directory: Path) -> list[Path]:
+    """What a fetch left in *directory*, excluding the lock files it keeps.
+
+    A lock file is created once and never removed: unlinking one would let
+    two processes hold locks on two different inodes reached by one name,
+    which is the race it exists to close.  Everything else here is either the
+    artifact or a staging file that should have been swept.
+    """
+    return sorted(p for p in directory.iterdir() if p.suffix != ".lock")
 
 
 # -- compressed assets --------------------------------------------------------
@@ -143,7 +154,7 @@ def test_zst_asset_is_unpacked(tmp_path, monkeypatch):
     A.ensure_asset("rootfs.vhdx.zst", dest, description="the rootfs")
 
     assert dest.read_bytes() == raw
-    assert list(tmp_path.iterdir()) == [dest]
+    assert _leftovers(tmp_path) == [dest]
 
 
 def test_corrupt_zst_leaves_nothing_behind(tmp_path, monkeypatch):
@@ -157,7 +168,7 @@ def test_corrupt_zst_leaves_nothing_behind(tmp_path, monkeypatch):
         A.ensure_asset("rootfs.vhdx.zst", dest, description="the rootfs")
 
     assert not dest.exists()
-    assert list(tmp_path.iterdir()) == []
+    assert _leftovers(tmp_path) == []
 
 
 # -- progress reporting -------------------------------------------------------
@@ -232,7 +243,7 @@ def test_download_release_asset_is_atomic(tmp_path, monkeypatch):
         A.download_release_asset("bundle.zip", dest)
 
     assert not dest.exists()
-    assert list(tmp_path.iterdir()) == []
+    assert _leftovers(tmp_path) == []
 
 
 def test_release_asset_url_points_at_the_latest_release():

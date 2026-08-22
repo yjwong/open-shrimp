@@ -64,6 +64,7 @@ from open_shrimp.sandbox.agent_runtime import (
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox import hcs_assets as A
+from open_shrimp.sandbox import prefetch as P
 from open_shrimp.sandbox import hcs_helpers as H
 from open_shrimp.sandbox.hcs_rdp import HcsRdpSession, ensure_rdp_helper
 from open_shrimp.sandbox.port_forward import allocate_host_port, new_forward_id
@@ -523,7 +524,12 @@ class HcsSandbox:
             computer_use=self._config.computer_use,
         )
 
-    def ensure_environment(self, *, log_file: Path | None = None) -> None:
+    def ensure_environment(
+        self,
+        *,
+        log_file: Path | None = None,
+        progress: A.ProgressFn | None = None,
+    ) -> None:
         from open_shrimp.sandbox import hcs_win as W
 
         _require_hyperv_rights(W)
@@ -541,7 +547,14 @@ class HcsSandbox:
                 "(the kernel ships with it) or set OPENSHRIMP_HCS_KERNEL."
             )
         self._check_processor_topology()
-        ensure_initrd(lambda msg: self._log(log_file, msg))
+        ensure_initrd(
+            lambda msg: self._log(log_file, msg),
+            progress=P.logged(
+                "Downloading the control initramfs",
+                lambda msg: self._log(log_file, msg),
+                progress,
+            ),
+        )
 
         desired_fp = self._fingerprint()
         saved_fp = self._load_fingerprint()
@@ -552,7 +565,7 @@ class HcsSandbox:
 
         # Seed the per-context rootfs from the base image (once, or when the
         # base image drifts).
-        self._ensure_rootfs(log_file=log_file)
+        self._ensure_rootfs(log_file=log_file, progress=progress)
 
         # Create any missing persistent-volume VHDX (never re-create existing;
         # data survives rebuilds).
@@ -571,7 +584,12 @@ class HcsSandbox:
         self._save_fingerprint(desired_fp)
         self._log(log_file, "HCS sandbox environment ready.")
 
-    def _rootfs_template(self, *, log_file: Path | None = None) -> Path:
+    def _rootfs_template(
+        self,
+        *,
+        log_file: Path | None = None,
+        progress: A.ProgressFn | None = None,
+    ) -> Path:
         """The template VHDX this context's rootfs is seeded from.
 
         An operator's own ``base_image`` wins, and a computer-use context
@@ -582,7 +600,7 @@ class HcsSandbox:
         """
         base = self._config.base_image
         if not base:
-            return self._managed_rootfs(log_file=log_file)
+            return self._managed_rootfs(log_file=log_file, progress=progress)
         base_path = Path(base)
         if not base_path.exists():
             raise RuntimeError(f"HCS base_image not found: {base_path}")
@@ -597,7 +615,9 @@ class HcsSandbox:
             )
         return gui_path
 
-    def _managed_rootfs(self, *, log_file: Path | None) -> Path:
+    def _managed_rootfs(
+        self, *, log_file: Path | None, progress: A.ProgressFn | None = None,
+    ) -> Path:
         """The released rootfs template, downloading it if it is not cached."""
         asset, cache, description = managed_rootfs_asset(
             computer_use=self._config.computer_use,
@@ -607,10 +627,17 @@ class HcsSandbox:
             cache,
             description=description,
             log=lambda msg: self._log(log_file, msg),
+            progress=P.logged(
+                f"Downloading {description}",
+                lambda msg: self._log(log_file, msg),
+                progress,
+            ),
         )
 
-    def _ensure_rootfs(self, *, log_file: Path | None) -> None:
-        template = self._rootfs_template(log_file=log_file)
+    def _ensure_rootfs(
+        self, *, log_file: Path | None, progress: A.ProgressFn | None = None,
+    ) -> None:
+        template = self._rootfs_template(log_file=log_file, progress=progress)
 
         want = H.rootfs_fingerprint(
             str(template), gui=self._config.computer_use,
