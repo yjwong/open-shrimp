@@ -53,6 +53,17 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.*" />
     <!-- WinUI 3 ships no tray-icon API of its own. -->
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.2.0" />
+    <!--
+      The update check: the Sparkle-format appcast the release publishes, the
+      Ed25519 verification of what it points at, and the script that waits for
+      this process to exit before running msiexec over the tray's executable.
+      Its presentation packages are for WinForms, WPF and Avalonia; none are
+      taken, because nothing here shows a dialog.
+
+      The appcast generator the release workflow installs is a separate tool on
+      its own version line, pinned separately there.
+    -->
+    <PackageReference Include="NetSparkleUpdater.SparkleUpdater" Version="3.1.0" />
   </ItemGroup>
 
   <ItemGroup>

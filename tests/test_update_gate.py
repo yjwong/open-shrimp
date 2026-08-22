@@ -63,10 +63,10 @@ def test_a_host_app_that_installs_versions_switches_the_checker_off(updatable, m
 
 
 def test_being_supervised_is_not_being_updated(updatable, monkeypatch):
-    """OPENSHRIMP_SUPERVISED means "restarting it is somebody's job", and the
-    Windows tray sets it while shipping no replacement mechanism at all.  A
-    checker gated on it would freeze every Windows install at its MSI
-    version."""
+    """OPENSHRIMP_SUPERVISED means "restarting it is somebody's job", which
+    says nothing about who installs versions.  A checker gated on it would go
+    quiet under a supervisor that only restarts the core, pinning that install
+    at the version it was first given."""
     monkeypatch.setenv("OPENSHRIMP_SUPERVISED", "1")
 
     app = _App(_Config())

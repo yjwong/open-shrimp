@@ -7,7 +7,8 @@ namespace OpenShrimp.Tray;
 /// <summary>
 /// The notification-area icon and its menu.
 ///
-/// Status, start/stop, open config, open logs, start at login, quit.
+/// Status, start/stop, open config, open logs, check for updates, start at
+/// login, quit.
 ///
 /// The menu is rendered as a native Win32 popup menu built from this flyout as
 /// a template. Two consequences shape everything below: an item is invoked
@@ -19,19 +20,22 @@ namespace OpenShrimp.Tray;
 internal sealed class TrayIconHost : IDisposable
 {
     private readonly CoreSupervisor _supervisor;
+    private readonly Updates _updates;
     private readonly string? _instanceName;
 
     private TaskbarIcon? _icon;
     private MenuFlyoutItem? _statusItem;
     private MenuFlyoutItem? _startStopItem;
+    private MenuFlyoutItem? _updateItem;
     private ToggleMenuFlyoutItem? _autostartItem;
 
     public Action? OnQuit;
     public Action? OnRunSetup;
 
-    public TrayIconHost(CoreSupervisor supervisor, string? instanceName)
+    public TrayIconHost(CoreSupervisor supervisor, Updates updates, string? instanceName)
     {
         _supervisor = supervisor;
+        _updates = updates;
         _instanceName = instanceName;
     }
 
@@ -46,6 +50,9 @@ internal sealed class TrayIconHost : IDisposable
 
         var openLogs = new MenuFlyoutItem { Text = "Open Logs…" };
         openLogs.Command = Command("Open Logs", () => CorePaths.Reveal(CorePaths.LogDirectory(_instanceName)));
+
+        _updateItem = new MenuFlyoutItem { Text = _updates.MenuText };
+        _updateItem.Command = Command("Check for Updates", _updates.CheckNow);
 
         _autostartItem = new ToggleMenuFlyoutItem
         {
@@ -65,6 +72,7 @@ internal sealed class TrayIconHost : IDisposable
         menu.Items.Add(openConfig);
         menu.Items.Add(openLogs);
         menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(_updateItem);
         menu.Items.Add(_autostartItem);
         menu.Items.Add(new MenuFlyoutSeparator());
         menu.Items.Add(quit);
@@ -100,6 +108,23 @@ internal sealed class TrayIconHost : IDisposable
         {
             // A notification we cannot raise is not worth failing a launch for.
             TrayLog.Write("Could not announce the notification-area icon", ex);
+        }
+    }
+
+    /// <summary>
+    /// Say something the user should see without being made to answer it. The
+    /// tray opens no window of its own, so a balloon is the only place an
+    /// update, or an install that did not take, can be reported.
+    /// </summary>
+    public void Announce(string message)
+    {
+        try
+        {
+            _icon?.ShowNotification("OpenShrimp", message);
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write($"Could not show a notification: {message}", ex);
         }
     }
 
@@ -144,6 +169,14 @@ internal sealed class TrayIconHost : IDisposable
         if (_icon is not null) _icon.ToolTipText = $"OpenShrimp — {DescribeState()}";
         if (_autostartItem is not null)
             _autostartItem.IsChecked = Autostart.IsEnabled(_instanceName);
+        if (_updateItem is not null)
+        {
+            _updateItem.Text = _updates.MenuText;
+            // A check already in flight is a disabled item rather than a
+            // command that declines: the native menu drops an invocation whose
+            // CanExecute is false and tells nobody. See RelayCommand.
+            _updateItem.IsEnabled = _updates.CanCheck;
+        }
     }
 
     private string DescribeState() => _supervisor.State switch

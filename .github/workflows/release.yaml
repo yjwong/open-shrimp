@@ -1019,11 +1019,53 @@ jobs:
             -d CoreExe="$(Resolve-Path core/openshrimp-windows-x86_64.exe)" `
             -o "OpenShrimp-$version-x64.msi"
 
-      - name: Upload the MSI
+      - name: Generate the Sparkle appcast
+        # After the MSI is built and before it is uploaded: the feed carries
+        # the MSI's length and a signature over its bytes, so it has to
+        # describe the file that ships and not an earlier state of it.
+        #
+        # The generator releases on its own schedule, apart from the NetSparkle
+        # library the tray links against, so each carries its own pin: 2.* here
+        # and 3.1.0 in the csproj.  A flag the tool renames cannot then arrive
+        # in the middle of a release.
+        #
+        # The private key is the one macOS already signs with, renamed at the
+        # step boundary because the generator reads fixed variable names.  One
+        # keypair rather than two: both jobs run in this workflow off the same
+        # secret store, so a second key would sit where the first one does and
+        # be readable by whatever read it.
+        #
+        # The public half is a literal because it is not a secret: it is in the
+        # tree at macos/App/Info.plist and compiled into the tray as
+        # UpdateSigning.PublicKey.  It still has to be set here — the generator
+        # signs nothing without both halves, and it checks the feed's own
+        # detached signature against this one before writing it.
+        #
+        # The script verifies what it produced and fails the job rather than
+        # let the release publish a feed nobody can install from.
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          SPARKLE_PUBLIC_KEY: ScMHGKZGfRmQfhf0dYsKXSnzxW9lw9kzIrtUtr06xek=
+        run: |
+          dotnet tool install --global NetSparkleUpdater.Tools.AppCastGenerator --version 2.*
+          $version = '${{ needs.version.outputs.version }}'
+          & windows/packaging/make-appcast.ps1 `
+            -Msi "OpenShrimp-$version-x64.msi" `
+            -Version $version `
+            -BaseUrl "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.version.outputs.tag }}/" `
+            -OutputDirectory .
+
+      - name: Upload the MSI and appcast
         uses: actions/upload-artifact@v7
         with:
           name: OpenShrimp-windows-msi
-          path: OpenShrimp-*.msi
+          # All three are written to the workspace root, so that is the
+          # archive's root and they arrive beside each other.  Both feed files
+          # are required: strict mode fetches `<feed>.signature` separately.
+          path: |
+            OpenShrimp-*.msi
+            appcast-windows.xml
+            appcast-windows.xml.signature
 
   release:
     name: Create GitHub Release
@@ -1067,11 +1109,13 @@ jobs:
           # already covers the security-key helper, the HCS initrd, both
           # rootfs images and the RDP helper, so none of those get a line.
           #
-          # The appcast is named here because it matches none of the others.
-          # Its name has to stay exactly this: the macOS app checks
-          # `releases/latest/download/appcast.xml`, and GitHub serves that from
-          # the newest non-prerelease's asset of that name.  Rename it, or mark
-          # a release prerelease, and every install stops finding updates.
+          # The three feed files match none of the patterns above and none of
+          # each other: every one of them is an exact name.  Each has to stay
+          # spelled exactly as it is, because each app checks
+          # `releases/latest/download/<its feed>` and GitHub serves that from
+          # the newest non-prerelease's asset of that name.  Rename one, and
+          # every install on that platform stops finding updates; mark a
+          # release prerelease, and both do.
           files: |
             artifacts/openshrimp-*
             artifacts/moonshine-stt-*
@@ -1079,4 +1123,6 @@ jobs:
             artifacts/OpenShrimp-*.dmg
             artifacts/OpenShrimp-*.msi
             artifacts/appcast.xml
+            artifacts/appcast-windows.xml
+            artifacts/appcast-windows.xml.signature
             artifacts/*.tar.gz

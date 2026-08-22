@@ -63,6 +63,22 @@ internal sealed record SandboxReport(
     [property: JsonPropertyName("sandbox")] SandboxOffering Sandbox);
 
 /// <summary>
+/// The settings a front end acts on, as the core resolves them.
+///
+/// No secrets. The config file holds the bot token; this is the part of it the
+/// core will print. <c>AutoUpdate</c> is the one the tray reads — it says
+/// whether this machine may replace itself unattended.
+/// </summary>
+internal sealed record CoreSettings(
+    [property: JsonPropertyName("instance_name")] string? InstanceName,
+    [property: JsonPropertyName("auto_update")] bool AutoUpdate);
+
+/// <summary>The <c>config show --json</c> payload.</summary>
+internal sealed record CoreSettingsReport(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("config")] CoreSettings? Config);
+
+/// <summary>
 /// One line of the core's prefetch NDJSON, as it arrives.
 ///
 /// Every field is nullable because the stream carries three shapes down one
@@ -408,6 +424,28 @@ internal static class OpenShrimpCli
         CancellationToken ct = default) =>
         (await JsonAsync<SandboxReport>(new[] { "sandboxes", "--json" }, ct)
             .ConfigureAwait(false))?.Sandbox;
+
+    /// <summary>
+    /// What the core's config says about the settings a front end acts on, or
+    /// null if it could not answer.
+    ///
+    /// Asked rather than parsed. What a key means, and what a missing one
+    /// defaults to, has one implementation, and it is in Python.
+    /// <see cref="ConfigPeek"/> is the one exception, and it reads a single
+    /// top-level scalar because the tray needs the instance name before there
+    /// is a core to ask.
+    ///
+    /// This runs the core binary, which unpacks a Python runtime on a cold
+    /// machine, so it belongs behind a core that is already up rather than on
+    /// the startup path.
+    /// </summary>
+    public static async Task<CoreSettings?> GetSettingsAsync(CancellationToken ct = default)
+    {
+        var report = await JsonAsync<CoreSettingsReport>(
+            new[] { "config", "show", "--config", CorePaths.ConfigFile, "--json" }, ct)
+            .ConfigureAwait(false);
+        return report is { Ok: true } ? report.Config : null;
+    }
 
     /// <summary>
     /// Download the shared assets the sandbox needs, reporting as they land.

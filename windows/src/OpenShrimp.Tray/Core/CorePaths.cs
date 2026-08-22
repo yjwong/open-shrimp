@@ -13,8 +13,10 @@ internal static class CorePaths
     /// platformdirs user_config_path("openshrimp"). The appauthor defaults to
     /// the appname, which is why "openshrimp" appears twice.
     /// </summary>
-    public static string ConfigFile =>
-        Path.Combine(LocalAppData, "openshrimp", "openshrimp", "config.yaml");
+    public static string StateDirectory =>
+        Path.Combine(LocalAppData, "openshrimp", "openshrimp");
+
+    public static string ConfigFile => Path.Combine(StateDirectory, "config.yaml");
 
     /// <summary>
     /// platformdirs user_log_path("openshrimp"), instance-scoped to match
@@ -22,8 +24,8 @@ internal static class CorePaths
     /// </summary>
     public static string LogDirectory(string? instanceName) =>
         string.IsNullOrEmpty(instanceName)
-            ? Path.Combine(LocalAppData, "openshrimp", "openshrimp", "Logs")
-            : Path.Combine(LocalAppData, "openshrimp", "openshrimp", "Logs", "instances", instanceName);
+            ? Path.Combine(StateDirectory, "Logs")
+            : Path.Combine(StateDirectory, "Logs", "instances", instanceName);
 
     /// <summary>
     /// Where PyApp unpacks the core's Python runtime, hundreds of MB of it:

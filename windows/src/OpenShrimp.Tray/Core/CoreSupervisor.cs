@@ -5,6 +5,41 @@ namespace OpenShrimp.Tray.Core;
 internal enum CoreState { Stopped, Installing, Starting, Running, Stopping, Error, NoConfig }
 
 /// <summary>
+/// What a stop established about the core it was asked to stop.
+///
+/// Separate from <see cref="CoreState"/> because that cannot carry it: a stop
+/// ends at <see cref="CoreState.Stopped"/> however the core went, so anything
+/// that has to know whether the core is really down — an update about to
+/// overwrite its binary — must be told rather than read the state.
+/// </summary>
+internal enum StopOutcome
+{
+    /// <summary>
+    /// The control endpoint is not answering: it either went quiet inside the
+    /// grace period or was already gone when the stop was asked for. The only
+    /// outcome that says nothing is still unwinding a sandbox guest, because
+    /// the endpoint is held by the interpreter and the handle the tray spawned
+    /// is PyApp's launcher.
+    /// </summary>
+    Quiet,
+
+    /// <summary>
+    /// The grace period lapsed with the endpoint still up. The core took the
+    /// request and is still working through it.
+    /// </summary>
+    Lapsed,
+
+    /// <summary>The core answered with an error and was left running.</summary>
+    Refused,
+
+    /// <summary>
+    /// A core speaking a control protocol this build does not know. Nothing was
+    /// sent to it and it is still running.
+    /// </summary>
+    UnknownProtocol,
+}
+
+/// <summary>
 /// Owns the core process: starts it, watches it, stops it gracefully.
 ///
 /// Two things drive the design.
@@ -156,6 +191,12 @@ internal sealed class CoreSupervisor : IAsyncDisposable
             // while the tray runs, and its logon task across sign-ins — so the
             // core must not ask the operator to register one of its own.
             startInfo.Environment["OPENSHRIMP_SUPERVISED"] = "1";
+            // This tray installs both halves of a release: one MSI carries the
+            // tray and the core, and the tray hands it to msiexec off a signed
+            // feed. A core polling GitHub as well would offer a second Update
+            // button for the same release and write over the binary the MSI
+            // replaces.
+            startInfo.Environment["OPENSHRIMP_UPDATES_MANAGED"] = "1";
             _process = Process.Start(startInfo);
         }
         catch (Exception ex)
@@ -326,7 +367,12 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         }, ct);
     }
 
-    public async Task StopAsync()
+    /// <summary>
+    /// Stop the core, and say what that established. The answer is the caller's
+    /// only evidence: <see cref="State"/> ends at <see cref="CoreState.Stopped"/>
+    /// on every path below, including the ones that leave a core running.
+    /// </summary>
+    public async Task<StopOutcome> StopAsync()
     {
         _stopRequested = true;
         _watchdog?.Cancel();
@@ -345,7 +391,7 @@ internal sealed class CoreSupervisor : IAsyncDisposable
             TrayLog.Write("Leaving a core that speaks an unknown control protocol running");
             await TeardownAsync().ConfigureAwait(false);
             Set(CoreState.Stopped);
-            return;
+            return StopOutcome.UnknownProtocol;
         }
 
         Set(CoreState.Stopping);
@@ -360,12 +406,11 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         TrayLog.Write($"Stopping the core: control channel {(connected ? "up" : "gone")}, " +
                       $"process {(_process is null ? "not ours" : _process.HasExited ? "already exited" : "running")}");
 
-        // A core that answered and declined. There is no drain to wait for and
-        // no second way to ask, and the only rung left here is TerminateProcess
-        // — which on a core holding an HCS compute system strands the guest, so
-        // it is not taken. Left running, like Stop.cs leaves one it cannot
-        // drain.
-        var refused = false;
+        // Quiet until something says otherwise: a stop asked of a core that was
+        // already gone, or of one that was never attached, has established
+        // exactly what a successful stop establishes. The endpoint not
+        // answering is the whole of the claim.
+        var outcome = StopOutcome.Quiet;
 
         if (connected)
         {
@@ -377,9 +422,14 @@ internal sealed class CoreSupervisor : IAsyncDisposable
             var reply = await client!.ShutdownAsync().ConfigureAwait(false);
             if (reply?.Error is not null)
             {
+                // It answered and declined. There is no drain to wait for and
+                // no second way to ask, and the only rung left here is
+                // TerminateProcess — which on a core holding an HCS compute
+                // system strands the guest, so it is not taken. Left running,
+                // like Stop.cs leaves one it cannot drain.
                 TrayLog.Write($"Core refused the stop request ({reply.Error.Code}: " +
                               $"{reply.Error.Message}); leaving it running");
-                refused = true;
+                outcome = StopOutcome.Refused;
             }
             else
             {
@@ -400,7 +450,10 @@ internal sealed class CoreSupervisor : IAsyncDisposable
                     await Task.Delay(250).ConfigureAwait(false);
 
                 if (client.IsConnected)
+                {
                     TrayLog.Write("Core did not answer the stop within its grace period");
+                    outcome = StopOutcome.Lapsed;
+                }
             }
         }
 
@@ -411,7 +464,7 @@ internal sealed class CoreSupervisor : IAsyncDisposable
         if (_process is null or { HasExited: true } && _client is { IsConnected: true })
             TrayLog.Write("Core is still up with no handle to stop it by");
 
-        if (_process is { HasExited: false } && !refused)
+        if (_process is { HasExited: false } && outcome != StopOutcome.Refused)
         {
             // The outcome this whole class is arranged to avoid: a core killed
             // while it holds an HCS compute system strands the guest.
@@ -422,6 +475,7 @@ internal sealed class CoreSupervisor : IAsyncDisposable
 
         await TeardownAsync().ConfigureAwait(false);
         Set(CoreState.Stopped);
+        return outcome;
     }
 
     private async Task TeardownAsync()

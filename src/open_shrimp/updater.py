@@ -550,9 +550,11 @@ def register_update_checker(app: "Application") -> None:  # noqa: F821
     # for the same release and download over a binary the front end is about to
     # replace.
     #
-    # A flag of its own, because OPENSHRIMP_SUPERVISED is set by the Windows
-    # tray too, and Windows ships no replacement mechanism — gating on it
-    # leaves every Windows install at its MSI version forever.
+    # A flag of its own, because OPENSHRIMP_SUPERVISED says only that
+    # restarting this process is somebody's job.  A supervisor that restarts
+    # the core without ever replacing its binary would, if the gate read that
+    # flag, leave the install pinned at the version it was first given, with
+    # nothing to show for it but a checker that never runs.
     if os.environ.get("OPENSHRIMP_UPDATES_MANAGED") == "1":
         logger.info("Updates are managed by the host app — not registering the checker")
         return

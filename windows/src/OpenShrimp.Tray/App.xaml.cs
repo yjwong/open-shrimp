@@ -14,6 +14,7 @@ public partial class App : Application
 {
     private TrayIconHost? _tray;
     private CoreSupervisor? _supervisor;
+    private Updates? _updates;
     private DispatcherQueue? _dispatcher;
 
     /// <summary>
@@ -117,12 +118,23 @@ public partial class App : Application
         _supervisor = supervisor;
         supervisor.Changed += OnSupervisorChanged;
 
-        _tray = new TrayIconHost(supervisor, _instanceName)
+        var updates = new Updates(supervisor);
+        _updates = updates;
+        updates.Changed += OnUpdatesChanged;
+
+        _tray = new TrayIconHost(supervisor, updates, _instanceName)
         {
             OnQuit = QuitAsync,
             OnRunSetup = RunSetupWizard,
         };
         _tray.Show();
+
+        // Both arrive on whatever thread the check is running on, and both end
+        // in UI work — the same marshalling the supervisor's events get.
+        updates.Announce = message => _dispatcher?.TryEnqueue(() => _tray?.Announce(message));
+        // FinishQuit rather than QuitAsync: by the time the update asks, it has
+        // already stopped the core and refused to proceed until it had.
+        updates.OnQuit = () => _dispatcher?.TryEnqueue(FinishQuit);
 
         // An installer is not the only thing that ends the product. A logoff or
         // a shutdown ends it with no MSI involved, and reaches the same drain
@@ -139,11 +151,22 @@ public partial class App : Application
         {
             _ = supervisor.StartAsync();
 
-            // The one path that opens no window at all. On a fresh install the
-            // wizard is its own evidence that something launched; an upgrade
-            // has a config already, so without this the installer's launch is
-            // indistinguishable from nothing having happened.
-            if (LaunchedByInstaller()) _tray.AnnounceLocation();
+            // No branch below opens a window, so a balloon is the only evidence
+            // any of them leaves. An update replaces the tray while nobody is
+            // watching, and names the version that came back. An upgrade run by
+            // hand has a config already, so without a balloon the installer's
+            // launch is indistinguishable from nothing having happened. A fresh
+            // install says nothing here, because the wizard is its own evidence.
+            //
+            // The failed install is settled first because it is the one that
+            // looks like the others: the script that ran msiexec relaunches this
+            // tray whether or not it worked and keeps the exit code to itself,
+            // so coming back at the version that was meant to be replaced is the
+            // whole of the evidence that anything went wrong.
+            var failed = UpdateAttempts.Settle(TrayVersion.Current);
+            if (failed is not null) _tray.Announce(UpdateAttempts.Describe(failed));
+            else if (LaunchedByUpdate()) _tray.Announce($"OpenShrimp updated to {TrayVersion.Current}.");
+            else if (LaunchedByInstaller()) _tray.AnnounceLocation();
         }
         else
         {
@@ -155,15 +178,42 @@ public partial class App : Application
     /// The finish page passes --first-run. Nothing else does, which is the
     /// point: a logon autostart must not announce itself every morning.
     /// </summary>
-    private static bool LaunchedByInstaller() =>
+    private static bool LaunchedByInstaller() => LaunchedWith("--first-run");
+
+    /// <summary>
+    /// The relaunch after an update passes this, through the script that runs
+    /// msiexec. Parsed here rather than in Program.cs, where the installer's
+    /// errands run: those deliberately avoid starting XAML, and this one is
+    /// nothing but a message on screen.
+    /// </summary>
+    private static bool LaunchedByUpdate() => LaunchedWith(Updates.UpdatedFlag);
+
+    private static bool LaunchedWith(string flag) =>
         Environment.GetCommandLineArgs()
             .Skip(1)
-            .Any(a => string.Equals(a, "--first-run", StringComparison.OrdinalIgnoreCase));
+            .Any(a => string.Equals(a, flag, StringComparison.OrdinalIgnoreCase));
 
     private void OnSupervisorChanged()
     {
         // Supervisor state changes arrive on background threads; the tray
         // icon and its menu are UI objects.
+        _dispatcher?.TryEnqueue(() => _tray?.Refresh());
+
+        // Checking for updates begins by reading the core's config, which means
+        // running the core binary — minutes of runtime bootstrap on a cold
+        // machine. A core that has reached Running has already paid for that,
+        // so the first check waits for it rather than sitting on the launch
+        // path. Start is idempotent; this fires on every state change.
+        if (_supervisor?.State is CoreState.Running) _updates?.Start();
+    }
+
+    /// <summary>
+    /// The update's menu item renames itself as a check runs, and the check
+    /// runs on a pool thread. The item is a UI object, so this hops threads
+    /// exactly as the supervisor's changes do.
+    /// </summary>
+    private void OnUpdatesChanged()
+    {
         _dispatcher?.TryEnqueue(() => _tray?.Refresh());
     }
 
