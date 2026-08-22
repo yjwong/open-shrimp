@@ -211,11 +211,13 @@
       A dialog set authored here rather than one of the five shipped ones,
       because the lightest of those (WixUI_Minimal) *is* a EULA page and no
       property suppresses it.  This product has no EULA to show and the tray
-      owns onboarding, so the wizard is progress plus a finish page.
+      owns onboarding, so the wizard is a welcome page, progress, and a finish
+      page.
 
-      It is this short because PrepareDlg, ProgressDlg and ExitDialog each
-      schedule themselves from their own fragment; naming them is enough.
-      WixUI_Common is not optional — it carries the bitmaps ExitDialog draws.
+      It is this short because PrepareDlg, WelcomeDlg, ProgressDlg and
+      ExitDialog each schedule themselves from their own fragment; naming them
+      is enough.  WixUI_Common is not optional — it carries the bitmaps
+      WelcomeDlg and ExitDialog draw.
 
       Authored fresh rather than trimmed from a WiX 5-era set: WixUI has been
       custom-action-free since v6, and a copied set still references the
@@ -223,6 +225,25 @@
     -->
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch OpenShrimp" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+    <!--
+      The artwork WelcomeDlg, ExitDialog and ProgressDlg draw.  Left unset, the
+      UI extension supplies its own placeholder, which is a stand-in for a
+      product's branding rather than branding of any kind.
+
+      Generated from the same logo the tray icon comes from.  The sizes are
+      fixed by the dialogs: the Bitmap control is 370x234 dialog units and the
+      banner 370x44, which at this set's 8pt Tahoma is 493x312 and 493x58
+      pixels.  A dialog bitmap is only visible in its left 164 pixels — the
+      text controls start at 135 units and cover the rest, which is why the
+      logo sits in that band and the remainder is flat white.
+
+      SOURCEFILEDIR rather than a bare filename: relative source paths resolve
+      against the working directory of the build, not against this file, and
+      the release job builds from the repository root.
+    -->
+    <WixVariable Id="WixUIDialogBmp" Value="$(sys.SOURCEFILEDIR)dialog.bmp" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(sys.SOURCEFILEDIR)banner.bmp" />
 
     <UI>
       <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
@@ -238,6 +259,7 @@
       <ProgressText Action="RemoveUserFootprint" Message="Removing the OpenShrimp runtime" />
 
       <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="WelcomeDlg" />
       <DialogRef Id="ProgressDlg" />
       <DialogRef Id="ExitDialog" />
       <DialogRef Id="ErrorDlg" />
@@ -245,6 +267,23 @@
       <DialogRef Id="UserExit" />
       <DialogRef Id="FilesInUse" />
       <DialogRef Id="MsiRMFilesInUse" />
+
+      <!--
+        Give the user something to click before the transaction starts.  Without
+        this the first dialog is ProgressDlg and opening the package is the same
+        gesture as consenting to the install.
+
+        EndDialog rather than the NewDialog the shipped sets publish here: those
+        chain forward to a EULA or a VerifyReadyDlg, and with nothing to chain to
+        the sequence itself is the next step.  WelcomeDlg's own fragment already
+        schedules it before ProgressDlg, so returning is enough to get there.
+
+        The Next button is left alone.  Its shipped caption and description say
+        "click Next to continue", which is true, and the strings are shared with
+        the disabled buttons ProgressDlg draws — retargeting them to "Install"
+        would relabel those too.
+      -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="EndDialog" Value="Return" />
 
       <!--
         Order is unset on the launch and 999 on the end: an unordered Publish
