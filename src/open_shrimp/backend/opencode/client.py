@@ -54,6 +54,27 @@ _BUS_REGISTRY: dict[tuple[str, str, str], EventBus] = {}
 _BUS_LOCK: asyncio.Lock | None = None
 
 
+def _context_window_from_models(
+    models: list[dict[str, Any]],
+    provider_id: str,
+    model_id: str,
+) -> int | None:
+    """Return the selected model's context limit from OpenCode's catalog."""
+    for model in models:
+        if model.get("providerID") != provider_id:
+            continue
+        if model_id not in (model.get("id"), model.get("apiID")):
+            continue
+        limit = model.get("limit")
+        if not isinstance(limit, dict):
+            return None
+        context = limit.get("context")
+        if isinstance(context, bool) or not isinstance(context, (int, float)):
+            return None
+        return int(context) if context > 0 else None
+    return None
+
+
 async def _get_bus(
     server: OpenCodeServer | OpenCodeEndpoint,
     directory: str | None,
@@ -99,6 +120,7 @@ class OpenCodeClient:
         self._session_id: str | None = None
         self._bridge: PermissionBridge | None = None
         self._permission_rules: list[dict[str, Any]] = []
+        self._context_window: int | None = None
 
     async def __aenter__(self) -> "OpenCodeClient":
         await self.connect()
@@ -140,6 +162,7 @@ class OpenCodeClient:
             headers={"Authorization": self._server.auth_header},
         )
         try:
+            await self._load_context_window()
             await self._register_mcp_servers()
             if self._options.resume:
                 self._session_id = self._options.resume
@@ -171,6 +194,19 @@ class OpenCodeClient:
             await self._http.aclose()
             self._http = None
             raise
+
+    async def _load_context_window(self) -> None:
+        """Best-effort model metadata lookup; failure must not prevent a session."""
+        try:
+            models = await self.get_models()
+        except Exception:
+            logger.debug("Failed to load OpenCode model metadata", exc_info=True)
+            return
+        self._context_window = _context_window_from_models(
+            models,
+            self._options.provider,
+            self._options.model,
+        )
 
     async def connect_control(self) -> None:
         """Connect HTTP control-plane APIs without creating a session."""
@@ -914,6 +950,7 @@ class OpenCodeClient:
             self._http,
             bridge,
             self._options.handle_questions,
+            self._context_window,
         ):
             yield msg
 
@@ -963,6 +1000,7 @@ class OpenCodeClient:
                 self._http,
                 self._bridge,
                 self._options.handle_questions,
+                self._context_window,
             ):
                 await merge.put(("msg", msg))
 

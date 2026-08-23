@@ -105,6 +105,7 @@ async def _iter_response(
     http: httpx.AsyncClient | None,
     bridge: PermissionBridge | None,
     handle_questions,
+    context_window: int | None = None,
 ) -> AsyncIterator[Message]:
     """Translate SSE events into backend.types messages until session.idle."""
     text_buffers: dict[str, list[str]] = {}
@@ -217,7 +218,7 @@ async def _iter_response(
                     model_id if isinstance(model_id, str) else None,
                     tokens, cost,
                 )
-                for msg in _flush_step(usage=tokens, error=None):
+                for msg in _flush_step(usage=_normalise_usage(tokens), error=None):
                     yield msg
             else:
                 errors.append(
@@ -236,8 +237,8 @@ async def _iter_response(
             yield ResultMessage(
                 session_id=session_id,
                 total_cost_usd=total_cost_usd,
-                usage=_aggregate_tokens(model_usage),
-                model_usage=model_usage,
+                usage=_normalise_usage(_aggregate_tokens(model_usage)),
+                model_usage=_normalise_model_usage(model_usage, context_window),
                 num_turns=len(seen_step_ids),
                 duration_ms=int(loop.time() * 1000) - turn_start_ms,
                 errors=errors,
@@ -435,6 +436,45 @@ def _aggregate_tokens(
     for bucket in model_usage.values():
         _add_tokens(total, bucket)
     return total
+
+
+def _normalise_usage(tokens: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Translate OpenCode token fields into the backend-neutral usage shape."""
+    if tokens is None:
+        return None
+    bucket = _new_token_bucket()
+    _add_tokens(bucket, tokens)
+    cache = bucket["cache"]
+    return {
+        "input_tokens": bucket["input"],
+        "output_tokens": bucket["output"],
+        "reasoning_tokens": bucket["reasoning"],
+        "cache_creation_input_tokens": cache["write"],
+        "cache_read_input_tokens": cache["read"],
+    }
+
+
+def _normalise_model_usage(
+    model_usage: dict[str, dict[str, Any]],
+    context_window: int | None,
+) -> dict[str, dict[str, Any]]:
+    """Translate accumulated OpenCode model usage into the neutral SDK shape."""
+    out: dict[str, dict[str, Any]] = {}
+    for model_id, bucket in model_usage.items():
+        usage = _normalise_usage(bucket)
+        assert usage is not None
+        normalised = {
+            "inputTokens": usage["input_tokens"],
+            "outputTokens": usage["output_tokens"],
+            "reasoningTokens": usage["reasoning_tokens"],
+            "cacheCreationInputTokens": usage["cache_creation_input_tokens"],
+            "cacheReadInputTokens": usage["cache_read_input_tokens"],
+            "costUSD": bucket.get("cost", 0.0),
+        }
+        if context_window is not None:
+            normalised["contextWindow"] = context_window
+        out[model_id] = normalised
+    return out
 
 
 def _toolpart_messages(

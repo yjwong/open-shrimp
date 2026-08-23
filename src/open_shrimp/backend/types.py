@@ -80,6 +80,10 @@ class AssistantMessage:
 
     ``session_id`` is carried for early-capture so a cancel before the
     ``ResultMessage`` still records the session.
+
+    ``usage`` uses the neutral ``input_tokens``, ``output_tokens``,
+    ``reasoning_tokens``, ``cache_creation_input_tokens``, and
+    ``cache_read_input_tokens`` keys.
     """
 
     content: list[ContentBlock]
@@ -108,6 +112,12 @@ class SystemMessage:
 
 @dataclass
 class ResultMessage:
+    """Final turn metadata in the backend-neutral usage schema.
+
+    Per-model usage follows the SDK field names, including ``costUSD`` and
+    ``contextWindow``.
+    """
+
     session_id: str
     total_cost_usd: float | None = None
     usage: dict[str, Any] | None = None
