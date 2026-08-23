@@ -464,6 +464,9 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
     and the macOS menu-bar app.  When *stop_event* is ``None`` (the CLI
     path), SIGTERM/SIGINT handlers are installed automatically.
     """
+    # httpx includes complete Telegram bot tokens in request URLs at INFO.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     # Before anything that could hold a sandbox guest, because the ordering it
     # asks for only applies to a session end that starts after it.
     _defer_windows_shutdown()
