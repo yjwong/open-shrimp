@@ -10,7 +10,10 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
-    "claude-agent-sdk",
+    # Only the SDK's win_amd64 wheel carries claude.exe; the sdist pip
+    # falls back to is empty.  Not every release publishes that wheel —
+    # 0.2.144 does not — so check the target has one before bumping.
+    "claude-agent-sdk==0.2.143",
     "python-telegram-bot[httpx,job-queue]",
     "aiosqlite",
     "pyyaml",
