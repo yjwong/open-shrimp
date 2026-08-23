@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The wizard's three steps.
+/// The wizard's steps — four, or five where Claude Code still has to be signed
+/// in, which is the model's answer and never this view's.
 ///
 /// Laid out in a stack rather than at hand-computed offsets: the feedback line
 /// sits in the flow between the fields and the buttons, so it cannot end up
@@ -37,20 +38,21 @@ struct SetupWizardView: View {
     }
 
     private var title: String {
-        switch model.step {
-        case 0: return "Connect your bot"
-        case 1:
+        switch model.currentStep {
+        case .token: return "Connect your bot"
+        case .enroll:
             if case .confirming = model.stage { return "Is this you?" }
             return "Who may use it?"
-        case 2: return "Your projects"
-        default: return "One last thing"
+        case .projects: return "Your projects"
+        case .signIn: return "Sign in to Claude"
+        case .finish: return "One last thing"
         }
     }
 
     private var subtitle: String {
-        switch model.step {
-        case 0: return "Create a bot with @BotFather and paste its token here."
-        case 1:
+        switch model.currentStep {
+        case .token: return "Create a bot with @BotFather and paste its token here."
+        case .enroll:
             switch model.stage {
             case .confirming:
                 return "Only this person will be allowed to talk to the bot."
@@ -62,10 +64,13 @@ struct SetupWizardView: View {
                 // Says why the step exists; the body says how to get through it.
                 return "Only the account you enroll here will be allowed to talk to the bot."
             }
-        case 2:
+        case .projects:
             return "The folders you already work in. Untick anything you'd "
                 + "rather not reach from Telegram."
-        default: return lastStepSubtitle
+        case .signIn:
+            return "OpenShrimp answers your messages by running Claude Code on this "
+                + "Mac, under your own Anthropic account."
+        case .finish: return lastStepSubtitle
         }
     }
 
@@ -113,7 +118,7 @@ struct SetupWizardView: View {
             Spacer()
 
             HStack(spacing: 6) {
-                ForEach(0..<SetupWizardModel.stepCount, id: \.self) { index in
+                ForEach(0..<model.stepCount, id: \.self) { index in
                     Circle()
                         .fill(index == model.step ? Color.accentColor : dotIdle)
                         .frame(width: 7, height: 7)
@@ -133,11 +138,12 @@ struct SetupWizardView: View {
     // -- Steps ----------------------------------------------------------------
 
     @ViewBuilder private var content: some View {
-        switch model.step {
-        case 0: tokenStep
-        case 1: enrollStep
-        case 2: contextStep
-        default: lastStep
+        switch model.currentStep {
+        case .token: tokenStep
+        case .enroll: enrollStep
+        case .projects: contextStep
+        case .signIn: signInStep
+        case .finish: lastStep
         }
     }
 
@@ -398,6 +404,65 @@ struct SetupWizardView: View {
                         .textFieldStyle(.roundedBorder)
                 }
             }
+        }
+    }
+
+    /// Signing Claude Code in, in a terminal window this step opens.
+    ///
+    /// The step exists because the alternative is finding out from the bot's
+    /// readiness card, after the wizard has closed, that there is a `/login`
+    /// still to run.
+    private var signInStep: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Claude Code has to be signed in before the bot can answer "
+                 + "anything. Signing in happens in a terminal window and then "
+                 + "in your browser — this step opens the window for you. Skip "
+                 + "it if you mean to run OpenShrimp on another provider's models.")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+
+            signInProgress
+
+            // Nothing left to skip once it has landed.  /login is there for
+            // whoever wants it, and a Mac whose contexts all run on another
+            // backend is never asked again, so the label promises neither a
+            // later step nor a reminder.
+            if model.signInStage != .signedIn {
+                Button("Skip this step") { model.skipSignIn() }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+        }
+    }
+
+    /// What the step is waiting for, if anything.
+    ///
+    /// The spinner is here rather than on the message line: `busy` is derived
+    /// from a `.progress` message, and busy disables the very buttons this step
+    /// is waiting for somebody to press.
+    @ViewBuilder private var signInProgress: some View {
+        switch model.signInStage {
+        case .ready:
+            EmptyView()
+        case .waiting:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("A terminal window is open. Follow the prompt in your browser "
+                     + "to sign in. When the window says Login successful you can "
+                     + "type /exit, or just close it.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for the sign-in to land…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        case .signedIn:
+            Text("Signed in. You can close the terminal window if it is still open.")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

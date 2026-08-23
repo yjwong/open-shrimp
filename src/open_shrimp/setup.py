@@ -581,6 +581,53 @@ def _prompt_sandbox() -> str | None:
     return offer.backend if _prompt_yes_no("Enable sandbox") else None
 
 
+def _offer_sign_in() -> None:
+    """Offer to sign Claude in, where it is not signed in already.
+
+    A host that is signed in already is asked nothing and told nothing.
+
+    Run inline rather than in a window of its own: this wizard already owns a
+    terminal, and the CLI wants one.  No branch here is fatal — the readiness
+    card asks again on a machine that needs it, and stays quiet on one whose
+    contexts all run on another backend, so the copy promises no reminder it
+    cannot keep.
+    """
+    from open_shrimp.backend.claude_sdk.login import auth_status, run_interactive_login
+
+    try:
+        if auth_status().signed_in:
+            return
+    except Exception:
+        # A probe that cannot answer must not cost a config that is still
+        # unwritten, so an unreadable credential store offers the step rather
+        # than skipping it.  Offering costs a question the user can decline.
+        logger.warning("Could not read the Claude sign-in state", exc_info=True)
+
+    print()
+    print("Now, signing in.")
+    print("I work by running Claude Code on this computer, and Claude Code")
+    print("needs an Anthropic account before it can answer anything.")
+    print("Say no if you mean to run me on another provider's models.")
+    print()
+    if not _prompt_yes_no("Sign in now?"):
+        print("  Skipped. Send /login in Telegram if you want it later.")
+        return
+
+    print()
+    try:
+        signed_in = run_interactive_login()
+    except Exception as e:
+        logger.warning("Could not start the Claude sign-in", exc_info=True)
+        print(f"\n  I couldn't start the sign-in: {e}")
+        signed_in = False
+
+    print()
+    if signed_in:
+        print("  Signed in.")
+    else:
+        print("  Not signed in yet. Send /login in Telegram to try again.")
+
+
 def _prompt_model() -> str | None:
     """Ask which model the imported projects run on, once for all of them."""
     print()
@@ -743,10 +790,10 @@ def run_setup_wizard(config_path: Path) -> None:
     enrolled = _prompt_operator(token, identity)
     chosen, model = _prompt_projects()
 
-    # The last step, and it is two questions rather than one — each asked only
-    # where it has something to settle.  Nothing was imported means nothing to
-    # sandbox, and the autostart question skips itself where a supervisor
-    # already owns restarting the core.
+    # What is left is asked only where it has something to settle: nothing
+    # imported means nothing to sandbox, a host already signed in is asked
+    # nothing about signing in, and the autostart question skips itself where
+    # a supervisor already owns restarting the core.
     sandbox = _prompt_sandbox() if chosen else None
     contexts = {
         project.name: build_context_dict(
@@ -754,6 +801,10 @@ def run_setup_wizard(config_path: Path) -> None:
         )
         for project in chosen
     }
+
+    # Before the config is written, so a wizard that runs to its last line
+    # leaves nothing for the first readiness card to report.
+    _offer_sign_in()
 
     config_dict = build_config_dict(token, enrolled.user_id, contexts)
 

@@ -14,6 +14,42 @@ using Windows.Storage.Pickers;
 namespace OpenShrimp.Tray.Setup;
 
 /// <summary>
+/// The wizard's steps, in the order they are asked.
+///
+/// Named rather than counted, because one of them is conditional:
+/// <see cref="SignIn"/> is not asked on a PC where Claude Code is already
+/// signed in, and everything that reads a step position — the dots, the button
+/// labels, whether this is the last one — has to agree about which step comes
+/// fourth on a machine where it is missing.
+/// </summary>
+internal enum SetupStep
+{
+    Token,
+    Enroll,
+    Projects,
+    SignIn,
+    Finish,
+}
+
+/// <summary>
+/// Where the sign-in step is.
+///
+/// The sign-in happens in a console window this app opens and does not own, so
+/// the step has no progress to show — only what it is waiting for.
+/// </summary>
+internal enum SignInStage
+{
+    /// <summary>Not signed in, and no sign-in window opened yet.</summary>
+    Offering,
+
+    /// <summary>A console is open; waiting for the credentials to appear.</summary>
+    Waiting,
+
+    /// <summary>Signed in. Nothing left for this step to ask.</summary>
+    Done,
+}
+
+/// <summary>
 /// Where the enrollment step is.
 ///
 /// Enrollment is an authentication step, so it has more states than a text box:
@@ -81,17 +117,37 @@ internal abstract record PrefetchState
 }
 
 /// <summary>
-/// First-run wizard: bot token, enrollment, projects.
+/// First-run wizard: bot token, enrollment, projects, the Claude sign-in.
 ///
 /// The reason the core grew a non-interactive "config write": the terminal
 /// wizard needs a tty, which a tray app launched from Explorer or a logon task
-/// does not have.
+/// does not have. The sign-in is the one step that cannot be done that way,
+/// because it is a terminal UI, so it gets a console window of its own and
+/// this wizard watches the result rather than driving it.
 /// </summary>
 public sealed partial class SetupWindow : Window
 {
-    private const int StepCount = 4;
+    /// <summary>
+    /// The steps this run will ask, in order.
+    ///
+    /// The sign-in starts present and is dropped only on a core that reports it
+    /// already signed in. That way round because the answer can be slow — a
+    /// cold machine unpacks a Python runtime first — and the two mistakes cost
+    /// different amounts: a step shown to somebody already signed in costs a
+    /// click, and a step dropped because the answer had not arrived costs a
+    /// first turn that fails in Telegram with no wizard left to fix it in.
+    /// </summary>
+    private readonly List<SetupStep> _steps = new()
+    {
+        SetupStep.Token,
+        SetupStep.Enroll,
+        SetupStep.Projects,
+        SetupStep.SignIn,
+        SetupStep.Finish,
+    };
 
     private int _step;
+    private SetupStep CurrentStep => _steps[_step];
     private string? _verifiedToken;
     private string? _verifiedUsername;
     private IReadOnlyList<ModelChoice> _models = Array.Empty<ModelChoice>();
@@ -111,6 +167,17 @@ public sealed partial class SetupWindow : Window
     // is a XAML object and answering from a thread pool thread is what raises
     // RPC_E_WRONG_THREAD. Read once, here, where the UI thread is the caller.
     private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher;
+
+    // Whether Claude Code is signed in on this PC. Sticky once Done: the step
+    // is dropped, drawn and left on the strength of it, and a later check that
+    // could not run must not take a signed-in wizard back to asking for a
+    // sign-in it already has.
+    private SignInStage _signInStage = SignInStage.Offering;
+    private CancellationTokenSource? _signIn;
+    // The console the sign-in runs in. Held to be disposed, never to be waited
+    // on and never to be killed: it outlives this window on purpose, because a
+    // user who closed the wizard mid-browser still has a sign-in to finish.
+    private System.Diagnostics.Process? _login;
 
     private EnrollStage _stage = EnrollStage.Waiting;
     private EnrollmentWindow? _window;
@@ -149,6 +216,13 @@ public sealed partial class SetupWindow : Window
             // there is nothing here left to cancel. A window that has gone also
             // draws nothing, which taking the state to Idle is what says.
             StopPrefetch();
+            // The poll goes; the console it was watching does not. Disposing a
+            // process releases this app's handle on it and nothing else, so a
+            // sign-in half-way through a browser round trip survives the wizard
+            // being closed on top of it.
+            StopSignInPolling();
+            _login?.Dispose();
+            _login = null;
         };
     }
 
@@ -214,9 +288,14 @@ public sealed partial class SetupWindow : Window
 
     // -- Navigation ---------------------------------------------------------
 
+    /// <summary>
+    /// One dot per step this run will ask. Rebuilt rather than hidden when a
+    /// step is dropped, so the dots never count a step nobody will see.
+    /// </summary>
     private void BuildDots()
     {
-        for (var i = 0; i < StepCount; i++)
+        Dots.Children.Clear();
+        for (var i = 0; i < _steps.Count; i++)
         {
             Dots.Children.Add(new Ellipse { Width = 8, Height = 8 });
         }
@@ -225,11 +304,13 @@ public sealed partial class SetupWindow : Window
     private void ShowStep(int step)
     {
         _step = step;
+        var current = CurrentStep;
 
-        StepToken.Visibility = step == 0 ? Visibility.Visible : Visibility.Collapsed;
-        StepEnroll.Visibility = step == 1 ? Visibility.Visible : Visibility.Collapsed;
-        StepContext.Visibility = step == 2 ? Visibility.Visible : Visibility.Collapsed;
-        StepFinish.Visibility = step == 3 ? Visibility.Visible : Visibility.Collapsed;
+        StepToken.Visibility = current == SetupStep.Token ? Visibility.Visible : Visibility.Collapsed;
+        StepEnroll.Visibility = current == SetupStep.Enroll ? Visibility.Visible : Visibility.Collapsed;
+        StepContext.Visibility = current == SetupStep.Projects ? Visibility.Visible : Visibility.Collapsed;
+        StepSignIn.Visibility = current == SetupStep.SignIn ? Visibility.Visible : Visibility.Collapsed;
+        StepFinish.Visibility = current == SetupStep.Finish ? Visibility.Visible : Visibility.Collapsed;
 
         BackButton.IsEnabled = step > 0;
 
@@ -239,9 +320,36 @@ public sealed partial class SetupWindow : Window
                 i == step ? "AccentFillColorDefaultBrush" : "ControlStrongFillColorDefaultBrush");
         }
 
+        // Tied to the step being on screen rather than to the button that opens
+        // the console, so that every way of arriving starts it and every way of
+        // leaving stops it — including the Back button and a sign-in done in
+        // some other window while this one was waiting.
+        if (current == SetupStep.SignIn) EnterSignInStep(); else StopSignInPolling();
+
         // The import step's questions and its button both follow the tick
         // state, which may have changed while the user was elsewhere.
-        if (step == 2) UpdateProjectStep(); else UpdateChrome();
+        if (current == SetupStep.Projects) UpdateProjectStep(); else UpdateChrome();
+    }
+
+    /// <summary>Jump to a step by name, for the paths that do not simply advance.</summary>
+    private void GoToStep(SetupStep step) => ShowStep(_steps.IndexOf(step));
+
+    /// <summary>
+    /// Take the sign-in step out, for a PC that is already signed in.
+    ///
+    /// Dropped rather than shown and skipped past, so the dots do not count it.
+    /// Only while the wizard is still in front of it, so no position in flight
+    /// moves under anybody: a user who has already reached the step keeps it,
+    /// and its own poll settles it into the signed-in reading within a tick.
+    /// </summary>
+    private void DropSignInStep()
+    {
+        var index = _steps.IndexOf(SetupStep.SignIn);
+        if (index < 0 || _step >= index) return;
+
+        _steps.RemoveAt(index);
+        BuildDots();
+        ShowStep(_step);
     }
 
     /// <summary>
@@ -254,13 +362,19 @@ public sealed partial class SetupWindow : Window
     /// </summary>
     private void UpdateChrome()
     {
-        (StepTitle.Text, StepSubtitle.Text) = _step switch
+        (StepTitle.Text, StepSubtitle.Text) = CurrentStep switch
         {
-            0 => ("Connect your bot", "Create a bot with @BotFather and paste its token here."),
-            1 => EnrollHeader(),
-            2 => ("Your projects",
-                  "The folders you already work in. Untick anything you'd rather "
-                  + "not reach from Telegram."),
+            SetupStep.Token =>
+                ("Connect your bot", "Create a bot with @BotFather and paste its token here."),
+            SetupStep.Enroll => EnrollHeader(),
+            SetupStep.Projects =>
+                ("Your projects",
+                 "The folders you already work in. Untick anything you'd rather "
+                 + "not reach from Telegram."),
+            SetupStep.SignIn =>
+                ("Sign in to Claude",
+                 "OpenShrimp runs Claude Code on this computer, and it can't do "
+                 + "any work until Claude Code is signed in."),
             // Says what the step is about, which depends on what it is showing:
             // the sandbox row is absent when nothing was imported, and naming
             // it anyway would promise a question the step does not ask.
@@ -275,14 +389,24 @@ public sealed partial class SetupWindow : Window
         // the click does: setup finishes with no projects, and they are added
         // by chat afterwards. A tick list with no visible way past it is the
         // one shape this step must not have.
-        NextButton.Content = _step switch
+        NextButton.Content = CurrentStep switch
         {
-            StepCount - 1 => "Finish",
-            1 when _stage == EnrollStage.Closed => "Start again",
-            2 when ChosenRows().Count == 0 => "Skip",
+            SetupStep.Finish => "Finish",
+            SetupStep.Enroll when _stage == EnrollStage.Closed => "Start again",
+            SetupStep.Projects when ChosenRows().Count == 0 => "Skip",
             _ => "Next",
         };
-        NextButton.IsEnabled = _step != 1 || _stage != EnrollStage.Confirming;
+
+        NextButton.IsEnabled = CurrentStep switch
+        {
+            // Answered by the confirmation's own two buttons, never by "Next".
+            SetupStep.Enroll => _stage != EnrollStage.Confirming,
+            // Next carries the signed-in case only. Leaving without signing in
+            // is the skip link's job, so it is a choice somebody made rather
+            // than the button they were pressing anyway.
+            SetupStep.SignIn => _signInStage == SignInStage.Done,
+            _ => true,
+        };
     }
 
     private (string Title, string Subtitle) EnrollHeader() => _stage switch
@@ -317,7 +441,7 @@ public sealed partial class SetupWindow : Window
     {
         // Leaving the step ends the window with it: an open poll behind a
         // screen nobody is looking at is exactly the overnight case.
-        if (_step == 1) StopPolling();
+        if (CurrentStep == SetupStep.Enroll) StopPolling();
         if (_step > 0) ShowStep(_step - 1);
     }
 
@@ -325,29 +449,45 @@ public sealed partial class SetupWindow : Window
     {
         if (!await ValidateStepAsync()) return;
 
-        if (_step < StepCount - 1)
+        if (CurrentStep != SetupStep.Finish)
         {
-            ShowStep(_step + 1);
-            if (_step == 1) await StartEnrollmentAsync();
-            // Here rather than when the offering lands: this is the first
-            // moment the user has settled on projects and left the sandbox
-            // ticked, and fetching gigabytes for a wizard somebody might
-            // abandon on the token step is not a head start worth taking.
-            if (_step == StepCount - 1) StartPrefetch();
+            await AdvanceAsync();
             return;
         }
         await FinishAsync();
     }
 
+    /// <summary>
+    /// Move on, and start whatever the step arrived at needs running.
+    ///
+    /// Shared with the sign-in step's skip link, which is a second way of
+    /// leaving a step and must not be a second way of arriving at the next one:
+    /// the last step's download is started here, and a path that forgot it
+    /// would look identical until the first turn took ten minutes.
+    /// </summary>
+    private async Task AdvanceAsync()
+    {
+        ShowStep(_step + 1);
+
+        if (CurrentStep == SetupStep.Enroll) await StartEnrollmentAsync();
+        // Here rather than when the offering lands: this is the first moment
+        // the user has settled on projects and left the sandbox ticked, and
+        // fetching gigabytes for a wizard somebody might abandon on the token
+        // step is not a head start worth taking.
+        if (CurrentStep == SetupStep.Finish) StartPrefetch();
+    }
+
     // -- Validation ---------------------------------------------------------
 
-    private async Task<bool> ValidateStepAsync() => _step switch
+    private async Task<bool> ValidateStepAsync() => CurrentStep switch
     {
-        0 => await ValidateTokenAsync(),
-        1 => await LeaveEnrollmentStepAsync(),
-        2 => ValidateContexts() is not null,
-        // The autostart step has nothing to check: a checkbox is answered by
-        // being in one state or the other.
+        SetupStep.Token => await ValidateTokenAsync(),
+        SetupStep.Enroll => await LeaveEnrollmentStepAsync(),
+        SetupStep.Projects => ValidateContexts() is not null,
+        // Neither of the last two has anything to check. The sign-in step's
+        // Next is enabled only once the core reports it signed in, and its skip
+        // link goes round rather than through; the autostart step's checkboxes
+        // are answered by being in one state or the other.
         _ => true,
     };
 
@@ -413,7 +553,7 @@ public sealed partial class SetupWindow : Window
         // The operator may have left while the drain was in flight; opening a
         // window behind a step nobody is on is exactly what its expiry exists
         // to prevent.
-        if (_step != 1) return;
+        if (CurrentStep != SetupStep.Enroll) return;
 
         NextButton.IsEnabled = true;
         BackButton.IsEnabled = true;
@@ -628,7 +768,7 @@ public sealed partial class SetupWindow : Window
             await TelegramApi.ConfirmOffsetAsync(_verifiedToken, _offset);
 
             ShowStage(EnrollStage.Waiting);
-            ShowStep(2);
+            GoToStep(SetupStep.Projects);
         }
         finally
         {
@@ -782,17 +922,19 @@ public sealed partial class SetupWindow : Window
     // -- Step 2 helpers -----------------------------------------------------
 
     /// <summary>
-    /// Everything the import step needs from the core: the model catalog, the
-    /// projects worth offering, and what this PC can isolate them with.
+    /// Everything the wizard needs from the core: the model catalog, the
+    /// projects worth offering, what this PC can isolate them with, and whether
+    /// Claude Code is already signed in here.
     ///
-    /// None of the three blocks the wizard. A catalog that could not be read
+    /// None of the four blocks the wizard. A catalog that could not be read
     /// leaves "CLI default"; a discovery that failed reads the same as "none
-    /// found", which is a screen this step already has.
+    /// found", which is a screen this step already has; an unanswered sign-in
+    /// check leaves the sign-in step standing, which costs a click.
     ///
     /// This is the first thing in the app that runs the core at all when there
     /// is no config — a core with no config is never started — so the unpack
-    /// is forced first and waited for. Three spawns launched at a
-    /// self-installing binary that has never run would be three racing
+    /// is forced first and waited for. Four spawns launched at a
+    /// self-installing binary that has never run would be four racing
     /// installs of it, and the directory a lost race leaves behind is one the
     /// launcher then skips installing into forever.
     /// </summary>
@@ -801,13 +943,14 @@ public sealed partial class SetupWindow : Window
         if (await OpenShrimpCli.EnsureRuntimeAsync() is string reason)
             TrayLog.Write($"The core is not ready to run: {reason}");
 
-        // Together, not one after another: none of the three depends on the
+        // Together, not one after another: none of the four depends on the
         // others, and each is a separate spawn that re-pays interpreter and
         // import startup.
         var models = OpenShrimpCli.GetModelsAsync();
         var projects = OpenShrimpCli.GetProjectsAsync();
         var sandbox = OpenShrimpCli.GetSandboxOfferingAsync();
-        await Task.WhenAll(models, projects, sandbox);
+        var auth = OpenShrimpCli.GetAuthStatusAsync();
+        await Task.WhenAll(models, projects, sandbox, auth);
         _models = await models;
 
         ModelBox.Items.Clear();
@@ -820,6 +963,19 @@ public sealed partial class SetupWindow : Window
             AddProjectRow(project.ContextName, project.Directory, project.Name);
 
         _sandbox = await sandbox;
+
+        // A PC that is already signed in is never asked to, and its wizard is
+        // four steps rather than five. Only a positive answer drops the step:
+        // an unanswerable check, or one that lands after the user has walked
+        // past where the step would have been, leaves it where it is.
+        if ((await auth) is { SignedIn: true })
+        {
+            // Recorded even when the drop below finds the user already past
+            // where the step would have been: the step they reach then draws
+            // as answered rather than asking again.
+            _signInStage = SignInStage.Done;
+            DropSignInStep();
+        }
 
         DiscoverySpinner.IsActive = false;
         DiscoveryLabel.Visibility = Visibility.Collapsed;
@@ -1091,6 +1247,163 @@ public sealed partial class SetupWindow : Window
         // what they want this project called.
         if (named is not null && box.Text == folder.Name) box.Text = named;
     }
+
+    // -- Sign in to Claude --------------------------------------------------
+
+    /// <summary>Draw the step for this visit, and start watching for the credential.</summary>
+    private void EnterSignInStep()
+    {
+        // The stage survives a trip back to the previous step and forward
+        // again: a console the user opened and left open is still open when
+        // they return, and offering to open another would read as the first
+        // one having failed.
+        ShowSignInStage(_signInStage);
+        // Nothing to watch for on a step that is already answered, and a tick
+        // costs a whole core process.
+        if (_signInStage != SignInStage.Done) StartSignInPolling();
+    }
+
+    /// <summary>
+    /// Open the sign-in in a console window of its own.
+    ///
+    /// A second click opens a second console rather than reclaiming the first:
+    /// the first may be sitting on a browser prompt that is still going to be
+    /// answered, and this button is here for the case where it is not.
+    /// Whichever of them succeeds, the poll below reads the same answer.
+    /// </summary>
+    private void OpenSignInConsole(object sender, RoutedEventArgs e)
+    {
+        System.Diagnostics.Process? console;
+        try
+        {
+            console = OpenShrimpCli.StartLoginConsole();
+        }
+        catch (Exception ex)
+        {
+            SetMessage(SignInMessage, $"Could not open the sign-in window: {ex.Message}", error: true);
+            return;
+        }
+
+        // Releases the handle on the previous console and nothing else: killing
+        // it would strand a browser round trip that is still in flight.
+        if (console is not null)
+        {
+            _login?.Dispose();
+            _login = console;
+        }
+
+        SetMessage(SignInMessage, "", error: false);
+        ShowSignInStage(SignInStage.Waiting);
+    }
+
+    /// <summary>Redraw the sign-in step for the stage it is now in.</summary>
+    private void ShowSignInStage(SignInStage stage)
+    {
+        _signInStage = stage;
+
+        SignInOffering.Visibility = stage == SignInStage.Offering ? Visibility.Visible : Visibility.Collapsed;
+        SignInWaiting.Visibility = stage == SignInStage.Waiting ? Visibility.Visible : Visibility.Collapsed;
+        SignInDone.Visibility = stage == SignInStage.Done ? Visibility.Visible : Visibility.Collapsed;
+        // Stopped rather than hidden: a ring keeps animating while collapsed.
+        SignInSpinner.IsActive = stage == SignInStage.Waiting;
+        // Nothing left to skip once it has landed.
+        SignInSkip.Visibility = stage == SignInStage.Done ? Visibility.Collapsed : Visibility.Visible;
+
+        SignInDone.Text = "Signed in. Claude Code is ready on this PC.";
+
+        UpdateChrome();
+    }
+
+    /// <summary>
+    /// Watch for the credentials appearing, for as long as the step is up.
+    ///
+    /// The core is asked rather than the console watched, because the console
+    /// does not end when the sign-in does: <c>/login</c> hands the browser's
+    /// answer to a REPL that then sits at its prompt, so waiting for that
+    /// process to exit is waiting for the user to type <c>/exit</c>. What the
+    /// sign-in actually writes is the credential store, which is what the
+    /// core's auth status reads.
+    ///
+    /// Idempotent: a step redrawn while a poll is already running must not end
+    /// up with two of them spawning a core between them.
+    /// </summary>
+    private void StartSignInPolling()
+    {
+        if (_signIn is not null) return;
+
+        var cancellation = new CancellationTokenSource();
+        _signIn = cancellation;
+        _ = PollSignInAsync(cancellation);
+    }
+
+    private async Task PollSignInAsync(CancellationTokenSource cancellation)
+    {
+        var ct = cancellation.Token;
+
+        // Fire-and-forget, so anything escaping here faults a task nobody
+        // observes and leaves the step waiting behind a sign-in that worked.
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var status = await OpenShrimpCli.GetAuthStatusAsync(ct);
+                if (ct.IsCancellationRequested) return;
+
+                if (status is { SignedIn: true })
+                {
+                    ShowSignInStage(SignInStage.Done);
+                    return;
+                }
+
+                // Between checks rather than around them, so a check that took
+                // four seconds is not followed two seconds later by another.
+                // A check that could not run reads the same as "not yet" and
+                // says nothing: setup cannot fail on this step, so a core that
+                // will not answer costs a click on the skip link.
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Leaving the step, or closing the window. Neither is a failure.
+        }
+        catch (Exception ex)
+        {
+            // Logged and dropped: the skip link is still there, so a poll that
+            // dies costs a click rather than the wizard.
+            TrayLog.Write("The sign-in poll stopped", ex);
+        }
+        finally
+        {
+            // Disposed by the loop that reads the token, never by the caller
+            // that cancels it: cancellation returns before an in-flight check
+            // does, and a token disposed under one throws where nothing
+            // catches. The field is cleared with it, because the success path
+            // leaves the loop while Next is still one click away, and that
+            // click cancels whatever _signIn points at.
+            if (ReferenceEquals(_signIn, cancellation)) _signIn = null;
+            cancellation.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Stop watching. Touches no element, so the close handler can call it on a
+    /// tree that is being torn down.
+    /// </summary>
+    private void StopSignInPolling()
+    {
+        _signIn?.Cancel();
+        _signIn = null;
+    }
+
+    /// <summary>
+    /// The way past a sign-in the user would rather do later.
+    ///
+    /// Never fatal, which is why it can be offered at all: <c>/login</c> does
+    /// this same job from Telegram afterwards. A link beside a disabled Next
+    /// rather than the Next itself, so skipping is a click somebody meant.
+    /// </summary>
+    private async void SkipSignIn(object sender, RoutedEventArgs e) => await AdvanceAsync();
 
     // -- Finish -------------------------------------------------------------
 

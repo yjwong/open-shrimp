@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from open_shrimp import setup as setup_mod
+from open_shrimp.backend.claude_sdk.login import AuthStatus
 from open_shrimp.backend.claude_sdk.projects import ClaudeProject
 from open_shrimp.doctor import SandboxOffer
 from open_shrimp.setup import _path_completer, _validate_directory, run_setup_wizard
@@ -87,19 +88,22 @@ def _typed(text: str, *, after: int = 1) -> Callable[[_Wizard], str]:
 class _Wizard:
     """Drives ``run_setup_wizard`` against a fake Telegram.
 
-    ``answers`` are consumed in order for every prompt except five: the
+    ``answers`` are consumed in order for every prompt except six: the
     token, which comes from ``tokens``; the code, which comes from ``codes``;
-    the sandbox and autostart offers of the last step, which come from
-    ``sandbox`` and ``autostart``; and the project step, which comes from
-    ``projects`` — so that a test saying nothing about any of them is not made
-    to.  ``codes`` defaults to answering every prompt with the code the
-    operator actually received — the handshake is exercised, not stubbed.
+    the sandbox, sign-in and autostart offers of the closing steps, which come
+    from ``sandbox``, ``sign_in`` and ``autostart``; and the project step,
+    which comes from ``projects`` — so that a test saying nothing about any of
+    them is not made to.  ``codes`` defaults to answering every prompt with the
+    code the operator actually received — the handshake is exercised, not
+    stubbed.
 
-    What the project step discovers, and what enabling the sandbox would mean
-    here, are both decided here.  Neither may come from the machine the tests
-    run on: the developer's own ``~/.claude.json`` would otherwise change what
-    the wizard imports, and whether libvirt happens to be installed would
-    change whether the sandbox is asked about at all.
+    What the project step discovers, what enabling the sandbox would mean
+    here, and whether Claude is already signed in are all decided here.  None
+    of them may come from the machine the tests run on: the developer's own
+    ``~/.claude.json`` would otherwise change what the wizard imports, whether
+    libvirt happens to be installed would change whether the sandbox is asked
+    about at all, and their own Claude credentials would decide whether the
+    sign-in step appears.
     """
 
     def __init__(
@@ -116,6 +120,9 @@ class _Wizard:
         projects: tuple[str, ...] = PROJECT_ANSWERS,
         discovered: tuple[ClaudeProject, ...] = (),
         offer: SandboxOffer | None = _OFFER,
+        signed_in: bool = True,
+        sign_in: str = "n",
+        login_works: bool = True,
     ):
         self.fake = fake
         self.operator = operator
@@ -131,6 +138,10 @@ class _Wizard:
         self._projects = list(projects)
         self._discovered = list(discovered)
         self._offer = offer
+        self._signed_in = signed_in
+        self._sign_in = sign_in
+        self._login_works = login_works
+        self.logins = 0
 
     def __call__(self, prompt: str = "") -> str:
         self.prompts.append(prompt)
@@ -138,6 +149,8 @@ class _Wizard:
             return self._tokens.pop(0)
         if prompt.startswith("Enable sandbox"):
             return self._sandbox
+        if prompt.startswith("Sign in now"):
+            return self._sign_in
         if prompt.startswith("Keep OpenShrimp running"):
             return self._autostart
         if prompt.startswith("Setup code"):
@@ -150,6 +163,14 @@ class _Wizard:
 
     def _client(self):
         return (self._clients.pop(0) if self._clients else self.fake.client)()
+
+    def _status(self) -> AuthStatus:
+        return AuthStatus(self._signed_in, "oauth" if self._signed_in else None)
+
+    def _login(self) -> bool:
+        self.logins += 1
+        self._signed_in = self._login_works
+        return self._signed_in
 
     def run(self, config_path: Path) -> None:
         # Whether autostart is already registered decides whether the wizard
@@ -169,6 +190,13 @@ class _Wizard:
                         with patch(
                             "open_shrimp.doctor.blessed_offer",
                             lambda config=None: self._offer,
+                        ), patch(
+                            "open_shrimp.backend.claude_sdk.login.auth_status",
+                            self._status,
+                        ), patch(
+                            "open_shrimp.backend.claude_sdk.login."
+                            "run_interactive_login",
+                            self._login,
                         ):
                             run_setup_wizard(config_path)
 
@@ -761,6 +789,95 @@ class TestProjectImport:
 
         assert "None found on this machine" in capsys.readouterr().out
         assert list(yaml.safe_load(config_path.read_text())["contexts"]) == ["tmp"]
+
+
+class TestSignInOffer:
+    """The step that exists so nobody finishes setup and is then told to /login.
+
+    The wizard and the readiness card read one answer, so what is asserted is
+    when the step appears at all: never on a host that is already signed in,
+    always on one that is not.
+    """
+
+    def test_a_signed_in_host_is_asked_nothing_and_told_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        wizard = _Wizard(_fake_with_operator(), "y", signed_in=True)
+        wizard.run(tmp_path / "config.yaml")
+
+        assert not [p for p in wizard.prompts if p.startswith("Sign in now")]
+        assert wizard.logins == 0
+        assert "signing in" not in capsys.readouterr().out
+
+    def test_accepting_runs_the_sign_in_here_and_confirms_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Inline, in this terminal: the wizard already owns one and the CLI
+        wants one."""
+        wizard = _Wizard(_fake_with_operator(), "y", signed_in=False, sign_in="y")
+        wizard.run(tmp_path / "config.yaml")
+
+        assert wizard.logins == 1
+        assert "Signed in." in capsys.readouterr().out
+
+    def test_declining_still_writes_the_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The readiness card asks again at the next boot, so the wizard names
+        the fallback and moves on."""
+        config_path = tmp_path / "config.yaml"
+        wizard = _Wizard(_fake_with_operator(), "y", signed_in=False, sign_in="n")
+        wizard.run(config_path)
+
+        assert wizard.logins == 0
+        assert "/login" in capsys.readouterr().out
+        assert yaml.safe_load(config_path.read_text())["allowed_users"] == [OPERATOR]
+
+    def test_a_sign_in_that_did_not_take_points_at_telegram(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            signed_in=False,
+            sign_in="y",
+            login_works=False,
+        ).run(config_path)
+
+        assert "/login" in capsys.readouterr().out
+        assert config_path.exists()
+
+    def test_an_unreadable_credential_store_offers_the_step(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The probe runs before the config is written, so it may not decide
+        whether the config gets written at all."""
+
+        def _unreadable() -> AuthStatus:
+            raise OSError("credential store is unreadable")
+
+        config_path = tmp_path / "config.yaml"
+        wizard = _Wizard(_fake_with_operator(), "y", sign_in="n")
+        wizard._status = _unreadable  # type: ignore[method-assign]
+        wizard.run(config_path)
+
+        assert "Sign in now?" in "".join(wizard.prompts)
+        assert yaml.safe_load(config_path.read_text())["allowed_users"] == [OPERATOR]
+
+    def test_a_missing_cli_does_not_lose_the_config(self, tmp_path: Path) -> None:
+        """find_claude_binary raises when it finds nothing, and the config is
+        the irreplaceable artifact."""
+
+        def _missing() -> bool:
+            raise RuntimeError("Could not find the Claude CLI binary.")
+
+        config_path = tmp_path / "config.yaml"
+        wizard = _Wizard(_fake_with_operator(), "y", signed_in=False, sign_in="y")
+        wizard._login = _missing  # type: ignore[method-assign]
+        wizard.run(config_path)
+
+        assert yaml.safe_load(config_path.read_text())["allowed_users"] == [OPERATOR]
 
 
 class TestAutostartOffer:

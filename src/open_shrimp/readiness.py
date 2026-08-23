@@ -86,7 +86,9 @@ def _sign_in(config: Config) -> Verdict:
 
     Asked only of the Claude backend: the SDK ships a bundled ``claude``, so a
     credential-free install boots perfectly and fails on the first question.
-    OpenCode holds its own provider credentials and is not covered.
+    OpenCode holds its own provider credentials and is not covered.  The
+    gating stays here: ``auth_status`` knows nothing about contexts, and the
+    setup wizards that share it run before a config exists.
     """
     if not any(
         effective_backend(ctx, config) == "claude_sdk"
@@ -94,14 +96,9 @@ def _sign_in(config: Config) -> Verdict:
     ):
         return None
 
-    # Either environment variable authenticates the CLI on its own, and a
-    # headless install is set up with the second one.
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        return State.OK, ""
+    from open_shrimp.backend.claude_sdk.login import auth_status
 
-    from open_shrimp.backend.claude_sdk.cred_watcher import host_signed_in
-
-    if host_signed_in():
+    if auth_status().signed_in:
         return State.OK, ""
     return (
         State.PROBLEM,

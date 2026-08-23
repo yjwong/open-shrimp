@@ -107,6 +107,32 @@ enum EnrollStage: Equatable {
     case manual
 }
 
+/// Where the sign-in step is.
+///
+/// The sign-in does not happen in this window, so all the step can say is what
+/// it is waiting for.
+enum SignInStage: Equatable {
+    /// Nothing opened yet.
+    case ready
+    /// A terminal is open, and the poll is watching for the credential.
+    case waiting
+    /// The core reports Claude Code signed in.
+    case signedIn
+}
+
+/// The steps a run of the wizard can ask, in order.
+///
+/// Named rather than counted, because a position is not a step: the sign-in is
+/// only there on a Mac that needs it, and the slot it would have taken is
+/// Finish's everywhere else.
+enum WizardStep {
+    case token
+    case enroll
+    case projects
+    case signIn
+    case finish
+}
+
 /// The wizard's state and every rule it enforces before the core is asked to
 /// write anything.
 ///
@@ -115,9 +141,22 @@ enum EnrollStage: Equatable {
 /// are for immediate feedback, and the core's own answer is shown verbatim.
 @MainActor
 final class SetupWizardModel: ObservableObject {
-    static let stepCount = 4
+    /// The steps this run will ask, in order.
+    ///
+    /// The sign-in joins them only where the check taken as the wizard opened
+    /// says this Mac still needs it, so a Mac that is already signed in never
+    /// draws a fifth dot the wizard then takes away.  It joins before Finish:
+    /// after the projects are settled, and the last thing asked before anything
+    /// is written.
+    @Published private(set) var steps: [WizardStep] = [.token, .enroll, .projects, .finish]
 
-    @Published private(set) var step = 0
+    /// Four steps, or five where Claude Code still has to be signed in.
+    var stepCount: Int { steps.count }
+
+    @Published private(set) var step = 0 { didSet { syncAuthPoll() } }
+
+    /// The step on screen.
+    var currentStep: WizardStep { steps[step] }
 
     @Published var token = ""
     @Published var userID = ""
@@ -177,6 +216,12 @@ final class SetupWizardModel: ObservableObject {
     @Published private(set) var catalogLoaded = false
     @Published var selection: ModelOption = .cliDefault
 
+    @Published private(set) var signInStage: SignInStage = .ready
+
+    /// The poll that watches for the credential the sign-in window writes.
+    /// Held so it ends with the step, and with the wizard.
+    private var authPollTask: Task<Void, Never>?
+
     @Published private(set) var message: WizardMessage?
 
     /// Derived rather than stored, so a step that returns early cannot leave the
@@ -206,13 +251,19 @@ final class SetupWizardModel: ObservableObject {
     /// alongside it.
     private var warmup: Task<Void, Never>?
 
+    /// Everything the wizard reads off the core before it asks anything.  Held
+    /// because one of its answers — whether Claude Code is signed in — decides
+    /// how many steps there are, and the projects step may not hand over to a
+    /// step count that has not settled.
+    private var discovery: Task<Void, Never>?
+
     /// Called once the config has been written, with the bot the token belongs
     /// to; if one was asked for and refused, why the login item could not be
     /// registered; and, where the assets are still arriving, what that leaves
     /// the first project waiting for.  The window is the caller's to dismiss.
     var onCompleted: ((String?, String?, String?) -> Void)?
 
-    var isLastStep: Bool { step == Self.stepCount - 1 }
+    var isLastStep: Bool { currentStep == .finish }
 
     /// The first step confirms the bot before it is left, so the button says
     /// which of the two things the click will do.
@@ -221,11 +272,18 @@ final class SetupWizardModel: ObservableObject {
     /// is what the click does: setup finishes with no projects, and they are
     /// added by chat afterwards.  A tick list with no visible way past it is
     /// the one shape this step must not have.
+    ///
+    /// On the sign-in step it says "Open sign-in window" until the core reports
+    /// the credential, because that is what the click does: the sign-in happens
+    /// in a terminal, and there is nothing else on the step to press.  It
+    /// becomes "Next" once the credential lands, so the step cannot be left
+    /// before it has.
     var primaryTitle: String {
         if isLastStep { return "Finish" }
-        if step == 0 && verifiedToken != trimmed(token) { return "Verify" }
-        if step == 1 && stage == .closed { return "Start again" }
-        if step == 2 && chosenRows.isEmpty { return "Skip" }
+        if currentStep == .token && verifiedToken != trimmed(token) { return "Verify" }
+        if currentStep == .enroll && stage == .closed { return "Start again" }
+        if currentStep == .projects && chosenRows.isEmpty { return "Skip" }
+        if currentStep == .signIn && signInStage != .signedIn { return "Open sign-in window" }
         return "Next"
     }
 
@@ -235,20 +293,22 @@ final class SetupWizardModel: ObservableObject {
     /// only works if the plain "Next" cannot bypass it.
     var primaryDisabled: Bool {
         if busy { return true }
-        if step == 1, case .confirming = stage { return true }
+        if currentStep == .enroll, case .confirming = stage { return true }
         return false
     }
 
     // -- Setup ----------------------------------------------------------------
 
-    /// Warm the core binary, then read off it everything the import step asks.
+    /// Warm the core binary, then read off it everything the wizard needs
+    /// before it asks anything: the model catalog, the projects to offer, what
+    /// isolation is available, and whether Claude Code is signed in.
     ///
     /// This is the first thing in the app that runs the core at all — a core
     /// with no config is never started — so it also absorbs the launcher's
     /// first-run unpack, which takes minutes on a fresh machine.  Everything
     /// after that unpack is one spawn each and depends on none of the others,
-    /// so the three run together rather than paying interpreter startup three
-    /// times in a row.
+    /// so they run together rather than paying interpreter startup four times
+    /// in a row.
     func prepare() {
         let warmup = Task {
             if let reason = await OpenShrimpCLI.ensureRuntime() {
@@ -263,12 +323,14 @@ final class SetupWizardModel: ObservableObject {
         // Discovered here rather than when the step is reached: the answer
         // decides what that step asks — a list to prune, or a folder to pick —
         // and a step that renders empty and then fills itself has already
-        // asked the wrong question once.
-        Task {
+        // asked the wrong question once.  The sign-in check is here for a
+        // stronger reason: its answer decides whether the step exists at all.
+        discovery = Task {
             await warmup.value
             async let choices = OpenShrimpCLI.models()
             async let found = OpenShrimpCLI.projects()
             async let isolation = OpenShrimpCLI.blessedSandbox()
+            async let authCheck = OpenShrimpCLI.authStatus()
 
             // A catalog that could not be read is a convenience the wizard does
             // without.  Blocking setup on it would make a core that cannot run
@@ -287,6 +349,21 @@ final class SetupWizardModel: ObservableObject {
             // switch drawn in the on position promises isolation the config
             // about to be written will not carry.
             if sandbox?.available != true { sandboxEnabled = false }
+
+            // A check that could not run offers the step too: a step that is
+            // there can be skipped in one click, and a step that was dropped
+            // cannot be brought back without starting the wizard again.
+            //
+            // Added only while Finish is still ahead of the user, so an answer
+            // that arrives late cannot swap the screen they are reading for the
+            // one after it.  The projects step waits this check out before
+            // handing over, so a user who needs the step cannot walk past it on
+            // a machine slow enough that the answer had not landed.
+            let credential = await authCheck
+            if currentStep != .finish, credential?.signedIn != true {
+                steps.insert(.signIn, at: steps.count - 1)
+            }
+
             discoveryFinished = true
         }
     }
@@ -357,7 +434,7 @@ final class SetupWizardModel: ObservableObject {
         guard step > 0, !busy else { return }
         // Leaving the step ends the window with it: an open poll behind a
         // screen nobody is looking at is exactly the overnight case.
-        if step == 1 { stopPolling() }
+        if currentStep == .enroll { stopPolling() }
         message = nil
         step -= 1
     }
@@ -365,6 +442,7 @@ final class SetupWizardModel: ObservableObject {
     /// Called when the wizard window goes away, however it goes away.
     func cancel() {
         stopPolling()
+        stopAuthPoll()
     }
 
     func advance() async {
@@ -373,11 +451,12 @@ final class SetupWizardModel: ObservableObject {
         // is refused by a config the first has already written.
         guard !busy else { return }
 
-        switch step {
-        case 0: await leaveTokenStep()
-        case 1: await leaveEnrollmentStep()
-        case 2: leaveContextStep()
-        default: await finish()
+        switch currentStep {
+        case .token: await leaveTokenStep()
+        case .enroll: await leaveEnrollmentStep()
+        case .projects: await leaveContextStep()
+        case .signIn: leaveSignInStep()
+        case .finish: await finish()
         }
     }
 
@@ -704,6 +783,102 @@ final class SetupWizardModel: ObservableObject {
         botLink = nil
     }
 
+    // -- Sign-in --------------------------------------------------------------
+
+    /// The step's primary opens the sign-in window until the core reports the
+    /// credential, and only then leaves.  Two jobs behind one button because
+    /// the sign-in happens in a terminal, so the alternative is a "Next" that
+    /// cannot yet be pressed.
+    private func leaveSignInStep() {
+        guard signInStage == .signedIn else {
+            openSignInWindow()
+            return
+        }
+        message = nil
+        step += 1
+    }
+
+    /// Open a terminal running the core's sign-in.
+    ///
+    /// Stays available until the credential appears, because a user who closed
+    /// the window too early needs to reopen it, and running the sign-in twice
+    /// is harmless.
+    func openSignInWindow() {
+        if let reason = OpenShrimpCLI.openSignInWindow() {
+            AppLog.write("could not open the sign-in window: \(reason)")
+            message = WizardMessage(tone: .failure, text: reason)
+            return
+        }
+        AppLog.write("opened the Claude sign-in window")
+        message = nil
+        signInStage = .waiting
+    }
+
+    /// Advance without signing in.
+    ///
+    /// Never fatal: `/login` still works from Telegram, and the readiness card
+    /// the bot posts on its first turn asks for it again.  A Mac with no
+    /// browser to hand must not trap a wizard that has already collected
+    /// everything the config needs.
+    func skipSignIn() {
+        AppLog.write("sign-in skipped at setup")
+        message = nil
+        step += 1
+    }
+
+    /// Run the poll exactly while the sign-in step is on screen.
+    ///
+    /// Derived from the step rather than paired by hand with each of the moves
+    /// that reach or leave it, which is how a pair written out seven times comes
+    /// to be written six.  It also states the rule the step needs: the credential
+    /// is watched for the whole time the step is up, however it was reached, so a
+    /// sign-in done in a terminal of the user's own — or before they backed into
+    /// the step from Finish — is noticed too.
+    private func syncAuthPoll() {
+        currentStep == .signIn ? startAuthPoll() : stopAuthPoll()
+    }
+
+    /// Watch for the credential the sign-in window writes.
+    ///
+    /// The poll is the completion signal rather than the terminal's lifetime:
+    /// `claude /login` drops into its REPL rather than exiting, so neither a
+    /// window still open nor one closed by hand says whether the sign-in
+    /// landed.  The credential appearing on disk is what does.
+    ///
+    /// Runs for as long as the step is on screen and no longer, so a wizard
+    /// abandoned on a desk is not spawning a core every two seconds all night.
+    private func startAuthPoll() {
+        guard authPollTask == nil, signInStage != .signedIn else { return }
+        authPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let status = await OpenShrimpCLI.authStatus()
+                if Task.isCancelled { return }
+                if status?.signedIn == true {
+                    self?.reportSignedIn()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: Self.authPollNanoseconds)
+            }
+        }
+    }
+
+    /// Long enough that a spawn per tick costs nothing, short enough that the
+    /// step flips over while the user is still looking at the terminal.
+    private static let authPollNanoseconds: UInt64 = 2_000_000_000
+
+    private func reportSignedIn() {
+        // Cleared rather than cancelled: this runs from inside the poll's own
+        // task, which returns on the next line.
+        authPollTask = nil
+        signInStage = .signedIn
+        message = WizardMessage(tone: .success, text: "Claude Code is signed in.")
+    }
+
+    private func stopAuthPoll() {
+        authPollTask?.cancel()
+        authPollTask = nil
+    }
+
     // -- Finish ---------------------------------------------------------------
 
     /// The import step's answers, checked together.  Returns nil and says what
@@ -775,10 +950,21 @@ final class SetupWizardModel: ObservableObject {
     /// The import step is left on its answers alone.  Nothing is written here:
     /// the config write belongs to the last step, so that a wizard abandoned on
     /// the autostart question leaves no config behind.
-    private func leaveContextStep() {
+    private func leaveContextStep() async {
         guard validatedContexts() != nil else { return }
+
+        // Whether there is a sign-in step at all is one of this batch's
+        // answers, and stepping past it before that answer lands is how a user
+        // who needs signing in never gets asked.  Normally already settled: the
+        // list this step just validated came out of the same batch, behind a
+        // spinner.
+        if !discoveryFinished {
+            message = WizardMessage(tone: .progress, text: "Checking Claude Code…")
+            await discovery?.value
+        }
         message = nil
-        step = 3
+
+        step += 1
         // Here rather than when the offering lands: this is the first moment
         // the user has settled on projects and left the sandbox ticked, and
         // fetching gigabytes for a wizard somebody might abandon on the token

@@ -262,6 +262,17 @@ class TestSignIn:
         assert state is State.PROBLEM
         assert "/login" in detail
 
+    def test_the_row_reads_the_shared_answer(self, monkeypatch) -> None:
+        """The wizards shell out to the same function this row calls, so a
+        host they call signed in cannot be one this row nags."""
+        from open_shrimp.backend.claude_sdk import login as login_mod
+
+        monkeypatch.setattr(
+            login_mod, "auth_status", lambda: login_mod.AuthStatus(True, "oauth")
+        )
+
+        assert _sign_in(_config()) == (State.OK, "")
+
     def test_opencode_is_not_asked(self, monkeypatch) -> None:
         """Provider credentials there are a different mechanism with a
         different fix, and a row nobody can act on is noise."""

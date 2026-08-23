@@ -79,6 +79,20 @@ internal sealed record CoreSettingsReport(
     [property: JsonPropertyName("config")] CoreSettings? Config);
 
 /// <summary>
+/// The <c>auth status --json</c> payload: whether Claude Code is signed in on
+/// this machine, and with which credential.
+///
+/// <c>How</c> is <c>oauth</c>, <c>api_key</c> or <c>env_token</c> when signed
+/// in and null when not. The last two are set in the environment, which no
+/// wizard step can arrange. <c>Ok</c> is false only where the check itself
+/// could not run, which is a different answer from "not signed in".
+/// </summary>
+internal sealed record AuthStatus(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("signed_in")] bool SignedIn,
+    [property: JsonPropertyName("how")] string? How);
+
+/// <summary>
 /// One line of the core's prefetch NDJSON, as it arrives.
 ///
 /// Every field is nullable because the stream carries three shapes down one
@@ -127,7 +141,8 @@ internal static class OpenShrimpCli
 
     /// <summary>
     /// How every core spawn in this file is described, whether its output is
-    /// read to the end or streamed.
+    /// read to the end or streamed — except the sign-in, which needs a console
+    /// and builds its own; see <see cref="StartLoginConsole"/>.
     ///
     /// Argument by argument, never one command line: the arguments carry
     /// folders the user picked and names they typed, so a quote or a space in
@@ -445,6 +460,66 @@ internal static class OpenShrimpCli
             new[] { "config", "show", "--config", CorePaths.ConfigFile, "--json" }, ct)
             .ConfigureAwait(false);
         return report is { Ok: true } ? report.Config : null;
+    }
+
+    /// <summary>
+    /// Whether Claude Code is signed in on this machine, or null where the core
+    /// could not say.
+    ///
+    /// Asked of the core rather than read off disk: credentials live in a
+    /// different place for each way of signing in, and which of them counts is
+    /// Claude Code's rule to state. A check that could not run is null and
+    /// never false, because false costs the user a sign-in they may not need.
+    /// </summary>
+    public static async Task<AuthStatus?> GetAuthStatusAsync(CancellationToken ct = default)
+    {
+        var status = await JsonAsync<AuthStatus>(new[] { "auth", "status", "--json" }, ct)
+            .ConfigureAwait(false);
+        return status is { Ok: true } ? status : null;
+    }
+
+    /// <summary>
+    /// Open Claude Code's interactive sign-in in a console window of its own.
+    ///
+    /// The one spawn in this file that is neither hidden nor redirected. The
+    /// core is a console-subsystem binary, which is why every other call here
+    /// sets <c>CreateNoWindow</c>, but this command hands its stdio to the
+    /// Claude CLI, which paints a terminal UI and reads keys back. The tray is
+    /// a <c>WinExe</c> with no console to lend it, so a hidden child would draw
+    /// onto a handle nobody owns and wait for input nobody can type.
+    ///
+    /// <c>UseShellExecute</c> is what allocates that console: ShellExecuteEx
+    /// starts a console binary with one of its own, in whichever terminal the
+    /// machine is set to open consoles in, so nothing here names a terminal.
+    /// Redirecting any stream would undo that — the runtime refuses to combine
+    /// redirection with shell-execute, and a redirected sign-in has no
+    /// keyboard.
+    ///
+    /// Do not wait on the returned process: <c>/login</c> leaves the CLI
+    /// sitting in its REPL rather than exiting once the browser comes back, so
+    /// its lifetime says nothing about whether anybody signed in.
+    /// <see cref="GetAuthStatusAsync"/> is what says that. Disposing it
+    /// releases the handle, never the console. Throws if no console could be
+    /// started at all.
+    /// </summary>
+    public static Process? StartLoginConsole()
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = CorePaths.CoreExecutable,
+            // One string rather than an ArgumentList, which shell-execute would
+            // flatten into one anyway. Every other spawn here is built argument
+            // by argument because it carries folders the user picked; this argv
+            // is a constant with nothing in it to quote.
+            //
+            // --hold keeps the window up after the CLI is done with it, so a
+            // sign-in that failed says why instead of vanishing.
+            Arguments = "auth login --hold",
+            UseShellExecute = true,
+            CreateNoWindow = false,
+        };
+
+        return Process.Start(psi);
     }
 
     /// <summary>

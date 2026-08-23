@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct ModelChoice: Sendable {
@@ -24,6 +25,16 @@ struct ConfigWriteRequest: Sendable {
     /// May be empty: that is what "Skip" writes, and it is a config the core
     /// starts from.  The user adds projects by chat afterwards.
     let contexts: [ConfigContext]
+}
+
+/// What the core says about Claude Code's credentials on this Mac.
+struct AuthStatus: Sendable {
+    let signedIn: Bool
+    /// Which credential it is signed in with — `oauth`, `api_key` or
+    /// `env_token` — and nil when it is signed in with none.  Carried
+    /// separately from the flag because the sign-in step can only ever create
+    /// the first.
+    let how: String?
 }
 
 /// The settings the core's config holds that this app acts on.
@@ -488,6 +499,86 @@ enum OpenShrimpCLI {
             let autoUpdate = entry["auto_update"] as? Bool
         else { return nil }
         return CoreSettings(autoUpdate: autoUpdate)
+    }
+
+    /// Whether Claude Code is signed in on this Mac, or nil where the check
+    /// could not be made at all.
+    ///
+    /// Asked of the core rather than read off `~/.claude/`: where the
+    /// credential lives, and which of an OAuth token, an API key and an
+    /// environment token counts as signed in, is the core's rule to state, and
+    /// a second copy here would drift from it.
+    ///
+    /// A core that could not run the check exits non-zero, which `jsonObject`
+    /// already turns into nil, so "not signed in" and "could not tell" stay
+    /// apart.
+    static func authStatus() async -> AuthStatus? {
+        guard
+            let parsed = await jsonObject(["auth", "status", "--json"]),
+            parsed["ok"] as? Bool == true,
+            let signedIn = parsed["signed_in"] as? Bool
+        else { return nil }
+        return AuthStatus(signedIn: signedIn, how: parsed["how"] as? String)
+    }
+
+    /// The script the sign-in window runs.
+    ///
+    /// Terminal titles a window after the file it opened, so this filename is
+    /// what the user sees in their window list while they are signing in.
+    static var signInScript: URL {
+        CorePaths.dataDirectory.appendingPathComponent("claude-sign-in.command")
+    }
+
+    /// Open a terminal window running the core's sign-in.  Returns nil once
+    /// one has been asked for, else the reason there is none.
+    ///
+    /// A written-out `.command` opened by Launch Services, rather than
+    /// `osascript`'s `tell application "Terminal" to do script`.  Driving
+    /// another app that way is Automation, which raises a TCC consent dialog
+    /// the first time — a system permission prompt in the middle of a first-run
+    /// wizard.  Launch Services opens a document in whatever the user's default
+    /// terminal is and asks nobody's permission, and the file carries no
+    /// quarantine attribute because this app wrote it rather than downloading
+    /// it.
+    ///
+    /// Rewritten on every open, so the path baked into it is where the core is
+    /// and not where an install that has since moved left it.
+    @MainActor
+    static func openSignInWindow() -> String? {
+        let script = signInScript
+        // Quoted because the core sits under a home directory, whose name may
+        // hold a space or a quote.
+        let body = """
+            #!/bin/sh
+            exec \(shellQuoted(CorePaths.coreExecutable.path)) auth login --hold
+            """
+
+        let manager = FileManager.default
+        do {
+            try manager.createDirectory(
+                at: script.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try (body + "\n").write(to: script, atomically: true, encoding: .utf8)
+            // After the write, because the atomic write replaces the file and
+            // the mode has to be the surviving one's.  Without it Launch
+            // Services opens the script in a text editor instead of running it.
+            try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        } catch {
+            return "Could not write the sign-in script: \(error.localizedDescription)"
+        }
+
+        guard NSWorkspace.shared.open(script) else {
+            return "Could not open a terminal window. Run this in Terminal instead: "
+                + script.path
+        }
+        return nil
+    }
+
+    /// Single-quoted for `/bin/sh`, closing and reopening the quote around any
+    /// quote of its own.
+    private static func shellQuoted(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Writes config.yaml.  Returns nil on success, else the reason.

@@ -229,6 +229,64 @@ func enroll(_ token: String) async {
     stamp("the window closed")
 }
 
+/// The check that decides whether the wizard has a sign-in step at all.
+func showAuth() async {
+    if let reason = await OpenShrimpCLI.ensureRuntime() {
+        stamp("core runtime is not ready: \(reason)")
+    }
+    guard let status = await OpenShrimpCLI.authStatus() else {
+        stamp("the check could not be run; the wizard offers the step anyway")
+        exit(1)
+    }
+    stamp(status.signedIn
+        ? "signed in (\(status.how ?? "unreported")) — the wizard omits the step"
+        : "not signed in — the wizard inserts the step")
+}
+
+/// Run the wizard's sign-in step from a terminal.
+///
+/// Both halves, because they fail apart.  Opening the window is Launch
+/// Services, which over ssh has no session to open anything in; the poll is
+/// what ends the step, since `claude /login` stays in its REPL and a terminal
+/// still open says nothing about whether the sign-in landed.  So a window that
+/// could not be opened is reported and then polled through, with the message
+/// naming the script to run by hand.
+@MainActor
+func signIn(seconds: TimeInterval) async {
+    if let reason = await OpenShrimpCLI.ensureRuntime() {
+        stamp("core runtime is not ready: \(reason)")
+    }
+    guard let status = await OpenShrimpCLI.authStatus() else {
+        stamp("the check could not be run; the wizard offers the step anyway")
+        exit(1)
+    }
+    guard !status.signedIn else {
+        stamp("already signed in (\(status.how ?? "unreported")) — the wizard omits the step")
+        return
+    }
+
+    if let reason = OpenShrimpCLI.openSignInWindow() {
+        stamp("no window: \(reason)")
+    } else {
+        stamp("window opened: \(OpenShrimpCLI.signInScript.path)")
+    }
+
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        guard let status = await OpenShrimpCLI.authStatus() else {
+            stamp("the check stopped answering")
+            exit(1)
+        }
+        if status.signedIn {
+            stamp("signed in (\(status.how ?? "unreported")) — the step would advance")
+            return
+        }
+    }
+    stamp("nothing after \(Int(seconds))s; the step would still be waiting")
+    exit(1)
+}
+
 /// The catalog the wizard's model picker is filled from, and the runtime warm-up
 /// that precedes it.
 func showModels() async {
@@ -265,8 +323,13 @@ case "enroll":
     await enroll(arguments.count > 1 ? arguments[1] : "")
 case "models":
     await showModels()
+case "auth":
+    await showAuth()
+case "login":
+    let seconds = arguments.count > 1 ? Double(arguments[1]) : nil
+    await signIn(seconds: seconds ?? 300)
 default:
     print("usage: openshrimp-probe {paths|status|watch [seconds]|restart|stop|token TOKEN"
-        + "|enroll TOKEN|models} [--instance NAME]")
+        + "|enroll TOKEN|models|auth|login [seconds]} [--instance NAME]")
     exit(64)
 }

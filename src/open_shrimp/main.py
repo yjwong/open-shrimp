@@ -233,6 +233,33 @@ def _parse_args() -> argparse.Namespace:
         help="Emit machine-readable JSON (for a setup UI)",
     )
 
+    sub_auth = subparsers.add_parser(
+        "auth",
+        parents=[common],
+        help="Ask whether Claude Code is signed in here, or sign it in",
+    )
+    auth_subs = sub_auth.add_subparsers(dest="auth_command")
+    sub_auth_status = auth_subs.add_parser(
+        "status",
+        parents=[common],
+        help="Report whether Claude Code can authenticate on this host",
+    )
+    sub_auth_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON (for a setup UI)",
+    )
+    sub_auth_login = auth_subs.add_parser(
+        "login",
+        parents=[common],
+        help="Run the Claude Code sign-in on this terminal (for a setup UI)",
+    )
+    sub_auth_login.add_argument(
+        "--hold",
+        action="store_true",
+        help="Wait for Enter before exiting, so a spawned console can be read",
+    )
+
     sub_projects = subparsers.add_parser(
         "projects",
         parents=[common],
@@ -698,6 +725,98 @@ def _run_models(*, json_output: bool, config_path: str) -> int:
     return 0
 
 
+def _fail(message: str, *, json_output: bool) -> int:
+    """Report a subcommand failure in whichever form the caller asked for.
+
+    The GUI contract for every ``--json`` subcommand is one object carrying
+    ``ok`` and ``error``, and exit 1; a terminal gets the message on stderr.
+    Written once because both desktop wizards decode this shape, and a
+    subcommand that spells it differently is one they cannot read.
+    """
+    if json_output:
+        json.dump({"ok": False, "error": message}, sys.stdout)
+        sys.stdout.write("\n")
+    else:
+        print(message, file=sys.stderr)
+    return 1
+
+
+# How each credential is named to somebody reading a terminal.  A UI decodes
+# the JSON form instead, so nothing parses these strings.
+_HOW_SAID = {
+    "api_key": "Signed in — ANTHROPIC_API_KEY is set in this environment.",
+    "env_token": "Signed in — CLAUDE_CODE_OAUTH_TOKEN is set in this environment.",
+    "oauth": "Signed in to Claude on this computer.",
+    None: "Not signed in. Run 'openshrimp auth login' to sign in.",
+}
+
+
+def _run_auth_status(*, json_output: bool) -> int:
+    """Report whether the Claude CLI on this host can authenticate.
+
+    The two GUI wizards cannot call Python, so their sign-in step reads the
+    answer from here.
+
+    Only a check that could not run at all exits non-zero, so a caller can
+    tell "no credentials" from "I could not look".  A wizard renders the first
+    as the step it is about to offer.
+    """
+    from open_shrimp.backend.claude_sdk.login import auth_status
+
+    try:
+        status = auth_status()
+    except Exception as exc:
+        logger.debug("The sign-in check could not run", exc_info=True)
+        return _fail(str(exc), json_output=json_output)
+
+    if json_output:
+        json.dump(
+            {"ok": True, "signed_in": status.signed_in, "how": status.how},
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    else:
+        print(_HOW_SAID[status.how])
+    return 0
+
+
+def _run_auth_login(*, hold: bool) -> int:
+    """Run the Claude sign-in on whatever terminal this was started from.
+
+    The CLI draws a prompt, a browser opens, and a person finishes it, so the
+    output is written for a reader.  A GUI wizard spawns a console for it and
+    reads the exit code.
+
+    *hold* is for that console.  A window that closes the instant the child
+    exits takes the last line with it, including the one saying the sign-in
+    did not work.
+    """
+    from open_shrimp.backend.claude_sdk.login import run_interactive_login
+
+    try:
+        signed_in = run_interactive_login()
+    except (RuntimeError, OSError) as exc:
+        # find_claude_binary's message names every path it searched, which is
+        # what a reader of this console needs; the traceback goes to the log.
+        logger.debug("The Claude sign-in could not start", exc_info=True)
+        print(f"{exc}", file=sys.stderr)
+        signed_in = False
+    else:
+        print()
+        print(
+            "Signed in to Claude."
+            if signed_in
+            else "Not signed in. You can try again with /login in Telegram."
+        )
+
+    if hold:
+        try:
+            input("Press Enter to close this window. ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return 0 if signed_in else 1
+
+
 def _emit_projects(projects: list[ClaudeProject], *, json_output: bool) -> int:
     """Report importable projects in the one shape every front end decodes.
 
@@ -1078,12 +1197,7 @@ def _run_config_show(args: argparse.Namespace) -> int:
     try:
         config = load_config(args.config)
     except (OSError, ValueError) as exc:
-        if args.json:
-            json.dump({"ok": False, "error": str(exc)}, sys.stdout)
-            sys.stdout.write("\n")
-        else:
-            print(exc, file=sys.stderr)
-        return 1
+        return _fail(str(exc), json_output=args.json)
 
     settings = {
         "instance_name": config.instance_name,
@@ -1144,6 +1258,17 @@ def main() -> None:
 
     if args.subcommand == "models":
         sys.exit(_run_models(json_output=args.json, config_path=args.config))
+
+    if args.subcommand == "auth":
+        if args.auth_command == "status":
+            sys.exit(_run_auth_status(json_output=args.json))
+        if args.auth_command == "login":
+            sys.exit(_run_auth_login(hold=args.hold))
+        print(
+            "usage: openshrimp auth (status [--json] | login [--hold])",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if args.subcommand == "projects":
         if args.projects_command == "discover":
