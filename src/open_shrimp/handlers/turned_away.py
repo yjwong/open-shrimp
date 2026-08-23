@@ -91,7 +91,11 @@ async def note_unauthorized(
 
     config: Config = context.bot_data["config"]
     user = update.effective_user
-    if user is None or _is_authorized(user.id, config):
+    if (
+        user is None
+        or user.id == getattr(context.bot, "id", None)
+        or _is_authorized(user.id, config)
+    ):
         return
 
     chat = update.effective_chat

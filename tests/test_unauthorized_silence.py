@@ -194,6 +194,17 @@ class TestSilence:
 
         context.bot.send_message.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_the_bot_does_not_report_its_own_echoed_message(self) -> None:
+        config = _config()
+        context = _context(config)
+        context.bot.id = STRANGER
+
+        await turned_away.note_unauthorized(_update(STRANGER), context)
+
+        context.bot.send_message.assert_not_awaited()
+        assert turned_away._tally.attempts == 0
+
 
 class TestNotice:
     @pytest.mark.asyncio
