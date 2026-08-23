@@ -1406,6 +1406,13 @@ class HcsSandbox:
                 "/reference:System.Web.Extensions.dll",
                 f"/out:{exe}", str(cs_path),
             ],
+            # Compiled in the directory holding the source, which carries no
+            # assemblies.  csc resolves a reference given as a bare filename —
+            # including the ones its own csc.rsp supplies — from the working
+            # directory before its framework directory, so an inherited one
+            # that happens to hold a .NET runtime binds System.dll to a facade
+            # and every socket type here comes back as CS1070.
+            cwd=str(cs_path.parent),
             capture_output=True, text=True,
         )
         if not exe.exists():

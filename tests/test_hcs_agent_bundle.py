@@ -8,6 +8,7 @@ marker, and the launcher build is stubbed out (it shells to ``csc``).
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -190,6 +191,45 @@ def test_argv_prefix_comes_from_the_bundle(tmp_path, monkeypatch):
 def test_argv_prefix_falls_back_when_no_runtime_is_bound(tmp_path, monkeypatch):
     cfg = _launch_cfg(tmp_path, monkeypatch, None)
     assert cfg["argv_prefix"] == ["claude"]
+
+
+# -- the directory csc compiles in -------------------------------------------
+
+
+def test_the_launcher_is_compiled_away_from_the_install_directory(
+    tmp_path, monkeypatch,
+):
+    """csc resolves a bare-filename reference from the working directory before
+    its own framework directory, so compiling where a .NET runtime sits binds
+    ``System.dll`` to a facade and ``EndPoint``, ``AddressFamily``,
+    ``SocketAddress`` and ``Socket`` all come back as CS1070.  Reproduced on
+    Windows with identical source and compiler: exit 0 from a directory holding
+    no assemblies, exit 1 from one holding a runtime.
+    """
+    sb = _make_sandbox(tmp_path, monkeypatch)
+    sb._sdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(hcs_mod, "find_csc", lambda: "csc.exe")
+
+    seen: dict = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["cwd"] = kwargs.get("cwd")
+        Path(argv[-2].removeprefix("/out:")).write_bytes(b"MZ")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(hcs_mod.subprocess, "run", fake_run)
+
+    launch_json = sb._launch_json_file()
+    launch_json.write_text("{}", encoding="utf-8")
+    exe = sb._launcher_exe()
+    sb._build_launcher_exe(launch_json=launch_json, exe=exe)
+
+    cs_path = exe.with_suffix(".cs")
+    assert seen["cwd"] == str(cs_path.parent)
+    # The directory it compiles in is the one holding the source, and nothing
+    # in it is an assembly csc could bind by accident.
+    assert not list(Path(seen["cwd"]).glob("*.dll"))
 
 
 # -- copy_files_in returns guest paths ---------------------------------------
