@@ -722,15 +722,11 @@ def _build_sub_query_options(
         can_use_tool=can_use_tool,
         mcp_servers=mcp_servers or None,
         extra=extra,
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": (
-                f"Another agent is asking you a question about this project "
-                f"({target}). You have no memory of their conversation. "
-                f"Answer concisely and factually from this project's files."
-            ),
-        },
+        system_prompt=(
+            f"Another agent is asking you a question about this project "
+            f"({target}). You have no memory of their conversation. "
+            f"Answer concisely and factually from this project's files."
+        ),
     )
 
 

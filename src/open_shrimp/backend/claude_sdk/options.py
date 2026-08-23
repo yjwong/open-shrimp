@@ -1,8 +1,9 @@
 """``BackendOptions`` → ``ClaudeAgentOptions`` translation (claude_sdk adapter).
 
 A pure function.  The SDK is where the contract field names came from, so the
-honoured fields map 1:1.  ``system_prompt`` passes through as-is (preset-dict
-or str).  The SDK-only fields (``setting_sources``, ``include_partial_messages``,
+honoured fields map 1:1.  ``system_prompt`` is the exception: the contract
+carries plain appended text, so it is wrapped here into the SDK's preset-dict.
+The SDK-only fields (``setting_sources``, ``include_partial_messages``,
 ``max_buffer_size``, ``cli_path``) are applied; ``extra`` is ignored by this
 backend.
 
@@ -24,7 +25,8 @@ def translate_options(opts: BackendOptions) -> ClaudeAgentOptions:
 
     The SDK honours every honoured-intersection field, so this translation is
     total.  ``mcp_servers``, ``resume``, and ``system_prompt`` are only set
-    when present.
+    when present; ``system_prompt`` becomes an ``append`` on the ``claude_code``
+    preset, which keeps the CLI's own prompt in place.
 
     ``can_use_tool`` returns ``backend.types`` permission results (the shared
     ``hooks`` path imports no SDK type), so it is wrapped in
@@ -52,7 +54,11 @@ def translate_options(opts: BackendOptions) -> ClaudeAgentOptions:
         max_buffer_size=opts.max_buffer_size,
     )
     if opts.system_prompt is not None:
-        sdk.system_prompt = opts.system_prompt
+        sdk.system_prompt = {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": opts.system_prompt,
+        }
     if opts.mcp_servers is not None:
         sdk.mcp_servers = opts.mcp_servers
     if opts.resume is not None:

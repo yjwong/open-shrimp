@@ -776,11 +776,7 @@ async def get_or_create_session(
         )
 
     if system_prompt_parts:
-        options.system_prompt = {
-            "type": "preset",
-            "preset": "claude_code",
-            "append": "\n\n".join(system_prompt_parts),
-        }
+        options.system_prompt = "\n\n".join(system_prompt_parts)
 
     # Register OpenShrimp's own MCP tools (send_file, edit_topic, schedules,
     # host_bash, computer use) over the MCP proxy's host-loopback HTTP

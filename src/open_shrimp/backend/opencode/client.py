@@ -482,9 +482,14 @@ class OpenCodeClient:
         model: str | None = None,
         agent: str | None = None,
         variant: str | None = None,
-        system: str | dict[str, Any] | None = None,
+        system: str | None = None,
     ) -> None:
-        """Prompt an arbitrary OpenCode session."""
+        """Prompt an arbitrary OpenCode session.
+
+        ``system`` is appended to the agent's own prompt by OpenCode, not
+        substituted for it.  An empty string is dropped rather than sent: the
+        server treats it as falsy and would discard it anyway.
+        """
         if self._http is None:
             raise CLIConnectionError("OpenCodeClient.prompt_session called before connect()")
         body: dict[str, Any] = {
@@ -499,8 +504,8 @@ class OpenCodeClient:
             }
         if agent:
             body["agent"] = agent
-        if system is not None:
-            body["system"] = _coerce_system_prompt(system)
+        if system:
+            body["system"] = system
         if variant is not None:
             body["variant"] = variant
         try:
@@ -1235,13 +1240,6 @@ def _coerce_mcp_config(name: str, raw_config: Any) -> dict[str, Any]:
             out["environment"] = {str(k): str(v) for k, v in env.items()}
         return out
     raise ValueError(f"Unsupported MCP config for {name!r}: {raw_config!r}")
-
-
-def _coerce_system_prompt(value: Any) -> str:
-    """Normalise ``options.system_prompt`` into a string for OpenCode."""
-    if isinstance(value, str):
-        return value
-    return ""
 
 
 def _is_not_found_error(exc: BaseException) -> bool:

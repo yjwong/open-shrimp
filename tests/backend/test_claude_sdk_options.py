@@ -36,12 +36,15 @@ def test_honoured_fields_map_1_to_1():
     assert sdk.cli_path == "/usr/bin/wrapper"
 
 
-def test_preset_dict_system_prompt_passes_through():
-    """The live SDK path passes a preset-dict, not a plain string."""
-    preset = {"type": "preset", "preset": "claude_code", "append": "extra"}
-    opts = BackendOptions(cwd="/w", system_prompt=preset)
+def test_system_prompt_becomes_a_preset_append():
+    """Contract text is appended to the CLI's own prompt, never substituted."""
+    opts = BackendOptions(cwd="/w", system_prompt="extra")
     sdk = translate_options(opts)
-    assert sdk.system_prompt == preset
+    assert sdk.system_prompt == {
+        "type": "preset",
+        "preset": "claude_code",
+        "append": "extra",
+    }
 
 
 def test_absent_system_prompt_not_forced():

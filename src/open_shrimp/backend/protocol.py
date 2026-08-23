@@ -111,11 +111,10 @@ class BackendOptions:
     rejected, so the ``client_manager`` call site is identical whichever
     backend is selected.
 
-    ``system_prompt`` is typed ``Any`` rather than ``str | None``: the SDK
-    path passes a *preset-dict*
-    (``{"type": "preset", "preset": "claude_code", "append": ...}``,
-    ``client_manager.py``), not a plain string.  The adapter accepts either
-    shape and passes it through unchanged.
+    ``system_prompt`` is plain text: the instructions OpenShrimp appends to
+    whatever system prompt the agent already has.  Each adapter shapes it into
+    its backend's native form — the SDK's preset-dict, OpenCode's ``system``
+    field on ``prompt_async`` — so no call site builds a backend-native shape.
     """
 
     cwd: str
@@ -127,7 +126,7 @@ class BackendOptions:
     allowed_tools: list[str] | None = None
     disallowed_tools: list[str] | None = None
     add_dirs: list[str] | None = None
-    system_prompt: Any = None  # str | preset-dict | None (see docstring)
+    system_prompt: str | None = None  # appended, not replacing (see docstring)
 
     # Callbacks.
     can_use_tool: CanUseTool | None = None

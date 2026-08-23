@@ -120,15 +120,11 @@ async def generate_meeting_notes(config: Config, transcript: str) -> str:
         model=ctx_config.model,
         allowed_tools=[],
         setting_sources=["project", "user", "local"],
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": (
-                "You are generating meeting notes from a transcript. "
-                "This is an automated run with no tools and no human "
-                "watching. Reply with the notes only."
-            ),
-        },
+        system_prompt=(
+            "You are generating meeting notes from a transcript. "
+            "This is an automated run with no tools and no human "
+            "watching. Reply with the notes only."
+        ),
     )
     prompt = _NOTES_PROMPT.format(envelope=transcript_envelope(transcript))
 
