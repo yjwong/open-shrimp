@@ -1330,12 +1330,16 @@ def _make_opencode_questions_proxy(
             logger.warning("No question callback set, returning empty answers")
             return []
 
-        answers_by_question = await ctx.handle_user_questions(questions)
+        normalized_questions = [
+            {**question, "multiSelect": bool(question.get("multiple", False))}
+            for question in questions
+        ]
+        answers_by_question = await ctx.handle_user_questions(normalized_questions)
         answers: list[list[str]] = []
         for question in questions:
             question_text = str(question.get("question", ""))
             answer = answers_by_question.get(question_text, "")
-            if question.get("multiSelect") and answer != "None selected":
+            if question.get("multiple") and answer != "None selected":
                 answers.append([
                     part.strip() for part in answer.split(", ") if part.strip()
                 ])
