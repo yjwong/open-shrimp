@@ -10,7 +10,6 @@ from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     WrappedCLI,
 )
-from open_shrimp.sandbox.docker import DockerSandbox
 from open_shrimp.sandbox.libvirt import LibvirtSandbox
 from open_shrimp.sandbox.lima import LimaSandbox
 
@@ -51,7 +50,7 @@ def test_claude_runtime_env_forwards_api_key(tmp_path: Path, monkeypatch):
     assert "ANTHROPIC_API_KEY" not in rt2.env
 
 
-@pytest.mark.parametrize("cls", [DockerSandbox, LibvirtSandbox, LimaSandbox])
+@pytest.mark.parametrize("cls", [LibvirtSandbox, LimaSandbox])
 def test_start_agent_wrapped_cli_returns_handle(cls, tmp_path: Path):
     """start_agent dispatches WrappedCLI to build_cli_wrapper and wraps the result."""
     sb = object.__new__(cls)

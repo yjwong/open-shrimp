@@ -145,15 +145,16 @@ contexts:
   myproject:
     # ...
     sandbox:
-      backend: docker          # "docker", "libvirt", or "lima"
-      docker_in_docker: true   # enable Docker inside the container
-      dockerfile: /path/to/Dockerfile.claude  # custom Dockerfile
+      backend: libvirt         # "libvirt" (Linux), "lima" (macOS), "hcs" (Windows)
+      memory: 4096             # guest memory ceiling in MB
+      provision: |             # shell script run on the guest's first boot
+        apt-get update && apt-get install -y nodejs npm
       computer_use: true       # enable GUI interaction
 ```
 
 When a sandbox is enabled, all Bash commands and path-scoped tools are auto-approved since the sandbox provides the safety boundary.
 
-See the dedicated guides for [Docker sandbox](/guides/docker-sandbox/) and [VM sandbox](/guides/vm-sandbox/).
+See the dedicated guides for [VM sandbox](/guides/vm-sandbox/), [Lima sandbox](/guides/lima-sandbox/), and [HCS sandbox](/guides/hcs-sandbox/).
 
 ## Agent backend
 

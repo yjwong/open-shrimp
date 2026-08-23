@@ -151,7 +151,7 @@ These are platform constraints rather than unfinished work, so an error from one
 - **Security-key forwarding.** The same kernel is built without `CONFIG_UHID`, so `/dev/uhid` cannot exist. The forwarding implementation itself is complete and works — supply a UHID-enabled kernel through `OPENSHRIMP_HCS_KERNEL` and it runs with no code changes. OpenShrimp does not ship such a kernel.
 - **virtiofs shares.** The blocker is the host, not the guest. The HCS create document has no virtiofs device in its vocabulary at all, and Windows rejects every spelling of one; WSL's own virtiofs runs through a private device host that is WSL's, not Hyper-V's. 9p with `cache=mmap` covers what the shares are needed for.
 
-A few `sandbox:` keys have no meaning on HCS — `virgl`, `docker_in_docker`, `dockerfile`, `guest_os`, `phone_use`, and `android`. Setting any of them fails config validation rather than being silently ignored, so a context that asks for one tells you instead of quietly not doing it.
+A few `sandbox:` keys have no meaning on HCS — `virgl`, `guest_os`, `phone_use`, and `android`. Setting any of them fails config validation rather than being silently ignored, so a context that asks for one tells you instead of quietly not doing it.
 
 ## Environment variables
 

@@ -66,7 +66,7 @@ def _config(*, public_url: str | None = None) -> Config:
                 description="test",
                 allowed_tools=[],
                 # /vnc needs it; nothing else looks.
-                sandbox=SandboxConfig(backend="docker", computer_use=True),
+                sandbox=SandboxConfig(backend="libvirt", computer_use=True),
             ),
         },
         default_context="default",

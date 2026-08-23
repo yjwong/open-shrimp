@@ -202,7 +202,7 @@ class _FakeSandbox:
 
     @property
     def host_address(self) -> str:
-        return "host.docker.internal"
+        return "10.0.2.2"
 
     def ensure_environment(self, *, log_file=None, progress=None) -> None:
         pass
@@ -363,7 +363,7 @@ async def test_allowed_tools_inherit_target(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_sandboxed_target_uses_sandbox_launch(monkeypatch) -> None:
     cfg = _config()
-    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="docker")
+    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="libvirt")
     captured = {}
 
     def _make_client(options):
@@ -396,7 +396,7 @@ async def test_sandboxed_target_uses_sandbox_launch(monkeypatch) -> None:
         thread_id=None,
         config=cfg,
         context_name="default",
-        sandbox_managers={"docker": manager},
+        sandbox_managers={"libvirt": manager},
     )
     assert tool is not None
     result = await tool.handler({"context": "glints-delta-etl", "question": "q"})
@@ -412,7 +412,7 @@ async def test_sandboxed_target_injects_proxied_mcp_servers(monkeypatch) -> None
     from open_shrimp.mcp_proxy.types import HttpServerConfig, StdioServerConfig
 
     cfg = _config()
-    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="docker")
+    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="libvirt")
     captured = {}
 
     def _make_client(options):
@@ -462,7 +462,7 @@ async def test_sandboxed_target_injects_proxied_mcp_servers(monkeypatch) -> None
         thread_id=None,
         config=cfg,
         context_name="default",
-        sandbox_managers={"docker": manager},
+        sandbox_managers={"libvirt": manager},
         mcp_proxy=mcp_proxy,
     )
     assert tool is not None
@@ -472,19 +472,19 @@ async def test_sandboxed_target_injects_proxied_mcp_servers(monkeypatch) -> None
     mcp_proxy.register_context.assert_called_once()
     servers = captured["mcp_servers"]
     assert servers is not None
-    assert servers["db"]["url"] == "http://host.docker.internal/mcp/glints-delta-etl/db"
+    assert servers["db"]["url"] == "http://10.0.2.2/mcp/glints-delta-etl/db"
     assert servers["db"]["headers"]["Authorization"] == "Bearer tok123"
     assert servers["figma"]["type"] == "sse"
     assert (
         servers["figma"]["url"]
-        == "http://host.docker.internal/http/glints-delta-etl/figma"
+        == "http://10.0.2.2/http/glints-delta-etl/figma"
     )
 
 
 @pytest.mark.asyncio
 async def test_sandboxed_target_without_manager_fails_closed(monkeypatch) -> None:
     cfg = _config()
-    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="docker")
+    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="libvirt")
 
     fake_backend = MagicMock()
     fake_backend.make_client.side_effect = AssertionError(

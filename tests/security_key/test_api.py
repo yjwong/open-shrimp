@@ -41,7 +41,7 @@ def _make_config(*, computer_use: bool = False) -> Config:
                 model="claude-sonnet-4-6",
                 allowed_tools=[],
                 sandbox=(
-                    SandboxConfig(backend="docker", computer_use=True)
+                    SandboxConfig(backend="libvirt", computer_use=True)
                     if computer_use
                     else None
                 ),
@@ -132,7 +132,7 @@ def _make_computer_use_client(
     app = create_review_app(
         _make_config(computer_use=True),
         db,
-        sandbox_managers={"docker": _FakeSandboxManager(sandbox)} if sandbox else None,
+        sandbox_managers={"libvirt": _FakeSandboxManager(sandbox)} if sandbox else None,
         security_key_registry=registry,
     )
     return TestClient(app), db
@@ -495,7 +495,7 @@ def test_vnc_endpoint_creates_security_key_session(tmp_path: Path) -> None:
         assert data["vm_helper_error"] is None
         assert len(sandbox.started) == 1
         started = sandbox.started[0]
-        assert started["relay_url"] == "ws://host.docker.internal:8080"
+        assert started["relay_url"] == "ws://10.0.2.2:8080"
         assert started["session_id"] == data["id"]
         assert started["token"]
 
@@ -540,7 +540,7 @@ class _FakeSandboxManager:
 
 
 class _FakeSandbox:
-    host_address = "host.docker.internal"
+    host_address = "10.0.2.2"
     container_name = "openshrimp-test"
 
     def __init__(self, start_error: Exception | None = None) -> None:

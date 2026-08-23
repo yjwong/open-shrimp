@@ -54,6 +54,18 @@ def db_path() -> Path:
     return data_dir() / "sessions.db"
 
 
+def sandbox_state_dir(context_name: str) -> Path:
+    """Per-context host-side sandbox state directory, created on demand.
+
+    Holds the host halves of the guest's agent home — the resumable session
+    corpus among them — so it is keyed by context and outlives any single
+    sandbox instance.
+    """
+    path = data_dir() / "containers" / context_name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def log_dir() -> Path:
     """Directory for the rotating process log, scoped by instance name.
 

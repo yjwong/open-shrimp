@@ -226,9 +226,9 @@ class LibvirtSandbox:
         if self._screenshots_dir:
             self._screenshots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Host-side directories shared into the VM to mirror Docker's
-        # bind-mount approach: task output files and .claude session data
-        # are written to the host so the terminal mini app can read them.
+        # Host-side directories shared into the VM: task output files and
+        # .claude session data are written to the host so the terminal mini
+        # app can read them.
         self._tmp_dir = self._sdir / "tmp"
         self._claude_home_dir = self._sdir / "claude-home"
 
@@ -248,10 +248,6 @@ class LibvirtSandbox:
     @property
     def host_address(self) -> str:
         return "10.0.2.2"
-
-    @property
-    def container_name(self) -> str | None:
-        return None
 
     def environment_ready(self) -> bool:
         """Check if the VM environment (overlay, cloud-init, SSH key) exists."""
@@ -1045,12 +1041,6 @@ class LibvirtSandbox:
 
     def get_vnc_quirks(self) -> frozenset[VncQuirk]:
         return frozenset()
-
-    def get_text_input_state_path(self) -> Path | None:
-        return None
-
-    def get_text_input_active(self) -> bool:
-        return False
 
     # -- Computer-use operations ---------------------------------------------
 

@@ -1,7 +1,7 @@
 """Sandbox manager: global lifecycle, factory, and build logging.
 
 The :class:`SandboxManager` protocol abstracts global sandbox concerns
-(reaper lifecycle, instance naming, container cleanup, build logging)
+(backend acquisition, instance naming, runtime cleanup, build logging)
 away from the per-instance :class:`~open_shrimp.sandbox.base.Sandbox`
 protocol.  Callers interact with a single manager instance threaded
 through ``bot_data``; individual sandboxes are obtained via
@@ -15,9 +15,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import socket
-import subprocess
-import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -111,19 +108,19 @@ class SandboxManager(Protocol):
         ``"openshrimp-mybot"``)."""
         ...
 
-    @property
-    def container_label(self) -> str:
-        """Docker label used to tag managed containers."""
-        ...
-
     # -- Global lifecycle -----------------------------------------------------
 
-    def start_reaper(self) -> None:
-        """Start crash-safety reaper (Ryuk for Docker, no-op for others)."""
+    def start_backend(self) -> None:
+        """Acquire whatever the backend needs before any sandbox is created.
+
+        Runs once at startup, off the event loop — the bodies block (a
+        ``qemu:///session`` connect, a ``limactl`` download).  A backend with
+        nothing to acquire leaves it empty.
+        """
         ...
 
-    def stop_reaper(self) -> None:
-        """Stop the crash-safety reaper."""
+    def stop_backend(self) -> None:
+        """Release what :meth:`start_backend` acquired."""
         ...
 
     def stop_all(self) -> None:
@@ -135,7 +132,7 @@ class SandboxManager(Protocol):
     def invalidate_sandbox(self, context_name: str) -> None:
         """Evict the cached sandbox for *context_name*.
 
-        Stops the runtime (container/VM) and removes it from the cache so
+        Stops the guest and removes it from the cache so
         the next ``create_sandbox`` call builds a fresh instance with
         updated configuration (e.g. new additional directories).
         """
@@ -155,8 +152,8 @@ class SandboxManager(Protocol):
 
         Stops the runtime (if running), removes persistent state
         (disk images, cloud-init ISOs, state directories), and
-        cleans up any backend-specific resources (Docker images,
-        libvirt domain definitions, Lima instances).
+        cleans up any backend-specific resources (libvirt domain
+        definitions, Lima instances, HCS compute systems).
 
         Unlike ``invalidate_sandbox`` which only evicts from cache
         and stops the runtime, this method deletes everything.
@@ -182,17 +179,16 @@ class SandboxManager(Protocol):
         """Return a cached or new per-context :class:`Sandbox` instance.
 
         The same instance is returned for the same *context_name* across
-        multiple calls.  The sandbox's lifecycle (VM/container) is
-        independent of individual sessions.
+        multiple calls.  The sandbox's lifecycle is independent of
+        individual sessions.
 
         *runtime* is the :class:`AgentRuntime` the sandbox will host.  Its
-        :attr:`AgentRuntime.image_bundle` selects the Docker image / run-argv
-        bundle; its :attr:`AgentRuntime.launch` (for a
-        :class:`ServedEndpoint`) provides the extra host-synced home mounts
-        and the published guest port.  ``None`` selects the wrapped-CLI
-        default bundle.  VM backends consult only the bundle's identity for
-        served-flavour host syncs; the guest binary itself is the operator's
-        precondition.
+        :attr:`AgentRuntime.image_bundle` names the guest layout; its
+        :attr:`AgentRuntime.launch` (for a :class:`ServedEndpoint`) provides
+        the extra host-synced home mounts and the served guest port.  ``None``
+        selects the wrapped-CLI default.  A backend consults only the bundle's
+        identity for served-flavour host syncs; the guest binary itself is the
+        operator's precondition.
         """
         ...
 
@@ -235,354 +231,6 @@ class SandboxManager(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Docker implementation
-# ---------------------------------------------------------------------------
-
-
-class DockerSandboxManager:
-    """Docker-backed :class:`SandboxManager` implementation.
-
-    Lifts the module-level globals from :mod:`open_shrimp.sandbox.docker_helpers` into
-    instance attributes so the manager can be injected and tested.
-    """
-
-    def __init__(self) -> None:
-        self._instance_prefix = "openshrimp"
-        self._container_label = "openshrimp"
-        self._ryuk_socket: socket.socket | None = None
-        self._ryuk_container_id: str | None = None
-        self._sandbox_cache: dict[str, Sandbox] = {}
-        # Name of the agent runtime (backend) each cached sandbox was built
-        # for, so a backend swap invalidates the stale sandbox.
-        self._sandbox_runtime: dict[str, str] = {}
-
-        # Build logging state.
-        self._active_builds: dict[str, Path] = {}
-        self._active_builds_lock = threading.Lock()
-
-        self._build_log_dir = _build_log_dir()
-        self._state_dir = _data_dir() / "containers"
-
-    # -- Instance naming ------------------------------------------------------
-
-    def set_instance_prefix(self, instance_name: str | None) -> None:
-        if instance_name:
-            self._instance_prefix = f"openshrimp-{instance_name}"
-            self._container_label = f"openshrimp-{instance_name}"
-        else:
-            self._instance_prefix = "openshrimp"
-            self._container_label = "openshrimp"
-        # Keep the legacy module globals in sync so that free functions in
-        # docker_helpers.py (called by DockerSandbox) see the right prefix.
-        # Every bundle's image tag is derived from the instance prefix +
-        # ``bundle.tag_suffix`` via :func:`docker_helpers.set_image_prefix`.
-        import open_shrimp.sandbox.docker_helpers as _c
-        _c._INSTANCE_PREFIX = self._instance_prefix  # noqa: SLF001
-        _c._CONTAINER_LABEL = self._container_label  # noqa: SLF001
-        _c.set_image_prefix(self._instance_prefix)
-
-    @property
-    def instance_prefix(self) -> str:
-        return self._instance_prefix
-
-    @property
-    def container_label(self) -> str:
-        return self._container_label
-
-    # -- Global lifecycle -----------------------------------------------------
-
-    def start_reaper(self) -> None:
-        """Start Testcontainers Ryuk and register a label filter.
-
-        Ryuk watches a TCP connection as a liveness signal.  When the
-        connection drops (bot crash/exit), Ryuk reaps labelled containers.
-        """
-        from open_shrimp.sandbox.docker_helpers import RYUK_IMAGE, check_docker_available
-
-        if not check_docker_available():
-            return
-
-        prefix = self._instance_prefix
-        label = self._container_label
-
-        try:
-            result = subprocess.run(
-                [
-                    "docker", "run", "-d",
-                    "--name", f"{prefix}-ryuk",
-                    "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                    "-p", "127.0.0.1::8080",
-                    "--label", f"{label}.ryuk=true",
-                    RYUK_IMAGE,
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                if "Conflict" in result.stderr or "already in use" in result.stderr:
-                    subprocess.run(
-                        ["docker", "rm", "-f", f"{prefix}-ryuk"],
-                        capture_output=True,
-                    )
-                    result = subprocess.run(
-                        [
-                            "docker", "run", "-d",
-                            "--name", f"{prefix}-ryuk",
-                            "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                            "-p", "127.0.0.1::8080",
-                            "--label", f"{label}.ryuk=true",
-                            RYUK_IMAGE,
-                        ],
-                        capture_output=True,
-                        text=True,
-                    )
-                if result.returncode != 0:
-                    logger.warning(
-                        "Failed to start Ryuk container: %s",
-                        result.stderr.strip(),
-                    )
-                    return
-
-            self._ryuk_container_id = result.stdout.strip()
-            logger.info(
-                "Started Ryuk container: %s", self._ryuk_container_id[:12],
-            )
-
-            # Discover the mapped host port.
-            port_result = subprocess.run(
-                ["docker", "port", f"{prefix}-ryuk", "8080"],
-                capture_output=True,
-                text=True,
-            )
-            if port_result.returncode != 0:
-                logger.warning(
-                    "Failed to get Ryuk port: %s",
-                    port_result.stderr.strip(),
-                )
-                self._cleanup_ryuk_container()
-                return
-
-            port_str = port_result.stdout.strip().rsplit(":", 1)[-1]
-            port = int(port_str)
-
-            # Connect and register our label filter.
-            import time as _time
-
-            filter_msg = f"label={label}=true\n".encode()
-            sock: socket.socket | None = None
-            for _attempt in range(10):
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(5)
-                    sock.connect(("127.0.0.1", port))
-                    sock.sendall(filter_msg)
-                    ack = sock.recv(1024).decode().strip()
-                    if ack == "ACK":
-                        break
-                    logger.warning("Unexpected Ryuk response: %s", ack)
-                    sock.close()
-                    sock = None
-                except (ConnectionResetError, ConnectionRefusedError, OSError):
-                    if sock is not None:
-                        sock.close()
-                        sock = None
-                    _time.sleep(0.2)
-            else:
-                logger.warning("Could not connect to Ryuk after retries")
-                self._cleanup_ryuk_container()
-                return
-
-            sock.settimeout(None)
-            self._ryuk_socket = sock
-            logger.info(
-                "Ryuk connected on port %d, label filter registered", port,
-            )
-
-        except Exception:
-            logger.warning(
-                "Failed to start Ryuk (continuing without crash cleanup)",
-                exc_info=True,
-            )
-            self._cleanup_ryuk_container()
-
-    def stop_reaper(self) -> None:
-        """Close the Ryuk connection and remove the Ryuk container."""
-        if self._ryuk_socket is not None:
-            try:
-                self._ryuk_socket.close()
-            except OSError:
-                pass
-            self._ryuk_socket = None
-        self._cleanup_ryuk_container()
-
-    def _cleanup_ryuk_container(self) -> None:
-        if self._ryuk_container_id is not None:
-            subprocess.run(
-                ["docker", "rm", "-f", f"{self._instance_prefix}-ryuk"],
-                capture_output=True,
-            )
-            logger.info("Removed Ryuk container")
-            self._ryuk_container_id = None
-
-    def stop_all(self) -> None:
-        """Stop and remove all OpenShrimp-managed containers."""
-        self._sandbox_cache.clear()
-        self._sandbox_runtime.clear()
-        result = subprocess.run(
-            [
-                "docker", "ps", "-a",
-                "--filter", f"label={self._container_label}=true",
-                "--format", "{{.Names}}",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        for name in result.stdout.strip().splitlines():
-            name = name.strip()
-            if name:
-                subprocess.run(
-                    ["docker", "rm", "-f", name], capture_output=True,
-                )
-                logger.info("Removed container %s", name)
-
-    # -- Invalidation ----------------------------------------------------------
-
-    def invalidate_sandbox(self, context_name: str) -> None:
-        self._sandbox_runtime.pop(context_name, None)
-        cached = self._sandbox_cache.pop(context_name, None)
-        if cached is not None:
-            try:
-                cached.stop()
-            except Exception:
-                logger.debug("Error stopping sandbox %s", context_name, exc_info=True)
-            logger.info("Invalidated Docker sandbox for context '%s'", context_name)
-
-    def get_active_sandbox(self, context_name: str) -> Sandbox | None:
-        return self._sandbox_cache.get(context_name)
-
-    def destroy_context(self, context_name: str) -> None:
-        self.invalidate_sandbox(context_name)
-
-        import open_shrimp.sandbox.docker_helpers as _dh
-
-        # Force-remove the container (may already be gone from invalidate).
-        cname = _dh.container_name(context_name)
-        subprocess.run(["docker", "rm", "-f", cname], capture_output=True)
-
-        # Remove per-context Docker image (custom Dockerfile tag only,
-        # not the shared base images).
-        repo = _dh.CONTAINER_IMAGE.rsplit(":", 1)[0]
-        image_tag = f"{repo}:{context_name}"
-        result = subprocess.run(
-            ["docker", "rmi", image_tag], capture_output=True,
-        )
-        if result.returncode == 0:
-            logger.info("Removed Docker image %s", image_tag)
-
-        state_path = self._state_dir / context_name
-        shutil.rmtree(state_path, ignore_errors=True)
-
-        self.unregister_build(context_name)
-        logger.info("Destroyed Docker resources for context '%s'", context_name)
-
-    def cleanup_orphans(self, active_contexts: set[str]) -> None:
-        if not self._state_dir.exists():
-            return
-        for child in self._state_dir.iterdir():
-            if child.is_dir() and child.name not in active_contexts:
-                logger.info("Orphan Docker context found: %s", child.name)
-                self.destroy_context(child.name)
-
-    # -- Factory --------------------------------------------------------------
-
-    def create_sandbox(
-        self, context_name: str, context: ContextConfig,
-        *, runtime: "AgentRuntime | None" = None,
-    ) -> Sandbox:
-        cached = self._sandbox_cache.get(context_name)
-        if cached is not None:
-            if runtime is None or self._sandbox_runtime.get(context_name) == runtime.name:
-                return cached
-            # The agent backend (runtime) changed for this context.  The
-            # cached sandbox is pinned to the old image/launch, so reusing it
-            # would launch the new agent inside the old backend's container.
-            # Tear it down and rebuild against the new runtime.
-            logger.info(
-                "Runtime changed for context '%s' (%s -> %s); rebuilding sandbox",
-                context_name,
-                self._sandbox_runtime.get(context_name),
-                runtime.name,
-            )
-            self.invalidate_sandbox(context_name)
-
-        assert context.container is not None
-        from open_shrimp.sandbox.docker import DockerSandbox
-
-        sandbox = DockerSandbox(
-            context_name=context_name,
-            project_dir=context.directory,
-            additional_directories=context.additional_directories or None,
-            docker_in_docker=context.container.docker_in_docker,
-            computer_use=context.container.computer_use,
-            custom_dockerfile=context.container.dockerfile,
-            runtime=runtime,
-        )
-        self._sandbox_cache[context_name] = sandbox
-        if runtime is not None:
-            self._sandbox_runtime[context_name] = runtime.name
-        return sandbox
-
-    # -- Build logging --------------------------------------------------------
-
-    def register_build(self, context_name: str) -> Path:
-        self._build_log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self._build_log_dir / f"{context_name}.log"
-        log_path.write_bytes(b"")
-        with self._active_builds_lock:
-            self._active_builds[context_name] = log_path
-        register_active_build(context_name, log_path, self)
-        logger.info(
-            "Registered build log for context '%s': %s",
-            context_name, log_path,
-        )
-        return log_path
-
-    def unregister_build(self, context_name: str) -> None:
-        with self._active_builds_lock:
-            self._active_builds.pop(context_name, None)
-        unregister_active_build(context_name)
-        logger.info("Unregistered build for context '%s'", context_name)
-
-        log_path = self._build_log_dir / f"{context_name}.log"
-
-        def _cleanup() -> None:
-            try:
-                log_path.unlink(missing_ok=True)
-                logger.debug("Cleaned up build log %s", log_path)
-            except Exception:
-                logger.debug("Failed to clean up build log %s", log_path)
-
-        timer = threading.Timer(3600, _cleanup)
-        timer.daemon = True
-        timer.start()
-
-    def is_build_active(self, context_name: str) -> bool:
-        with self._active_builds_lock:
-            return context_name in self._active_builds
-
-    @property
-    def build_log_dir(self) -> Path:
-        return self._build_log_dir
-
-    @property
-    def state_dir(self) -> Path:
-        return self._state_dir
-
-    def agent_home_dir(self, context_name: str) -> Path:
-        return self._state_dir / context_name
-
-
-# ---------------------------------------------------------------------------
 # Lima implementation
 # ---------------------------------------------------------------------------
 
@@ -596,7 +244,6 @@ class LimaSandboxManager:
 
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
-        self._container_label = "openshrimp"  # unused, but protocol requires it
         self._limactl_path: str | None = None
         self._sandbox_cache: dict[str, Sandbox] = {}
         # Name of the agent runtime (backend) each cached sandbox was built
@@ -614,28 +261,22 @@ class LimaSandboxManager:
     def set_instance_prefix(self, instance_name: str | None) -> None:
         if instance_name:
             self._instance_prefix = f"openshrimp-{instance_name}"
-            self._container_label = f"openshrimp-{instance_name}"
         else:
             self._instance_prefix = "openshrimp"
-            self._container_label = "openshrimp"
 
     @property
     def instance_prefix(self) -> str:
         return self._instance_prefix
 
-    @property
-    def container_label(self) -> str:
-        return self._container_label
-
     # -- Global lifecycle -----------------------------------------------------
 
-    def start_reaper(self) -> None:
+    def start_backend(self) -> None:
         """Ensure limactl binary is available (auto-download if needed)."""
         from open_shrimp.sandbox.lima_helpers import ensure_limactl_sync
 
         self._limactl_path = ensure_limactl_sync()
 
-    def stop_reaper(self) -> None:
+    def stop_backend(self) -> None:
         pass
 
     def stop_all(self) -> None:
@@ -753,7 +394,7 @@ class LimaSandboxManager:
 
         if self._limactl_path is None:
             raise RuntimeError(
-                "Lima not available — either start_reaper() was not called "
+                "Lima not available — either start_backend() was not called "
                 "or limactl could not be downloaded. Install with: "
                 "brew install lima"
             )
@@ -840,7 +481,6 @@ class LibvirtSandboxManager:
 
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
-        self._container_label = "openshrimp"  # not used, but protocol requires it
         self._conn: "libvirt.virConnect | None" = None  # type: ignore[name-defined]
         self._sandbox_cache: dict[str, Sandbox] = {}
         # Name of the agent runtime (backend) each cached sandbox was built
@@ -858,30 +498,24 @@ class LibvirtSandboxManager:
     def set_instance_prefix(self, instance_name: str | None) -> None:
         if instance_name:
             self._instance_prefix = f"openshrimp-{instance_name}"
-            self._container_label = f"openshrimp-{instance_name}"
         else:
             self._instance_prefix = "openshrimp"
-            self._container_label = "openshrimp"
 
     @property
     def instance_prefix(self) -> str:
         return self._instance_prefix
 
-    @property
-    def container_label(self) -> str:
-        return self._container_label
-
     # -- Global lifecycle -----------------------------------------------------
 
-    def start_reaper(self) -> None:
+    def start_backend(self) -> None:
         """Open a persistent connection to ``qemu:///session``.
 
         Also ensures a suitable virtiofsd binary is available,
         downloading one from GitHub releases if the system version
         is missing or too old.
 
-        No Ryuk equivalent needed — libvirt session domains don't survive
-        user logout, and we track domain names for cleanup.
+        Nothing outlives a crash: libvirt session domains die with the user
+        session, and domain names are tracked for cleanup.
         """
         # Ensure virtiofsd is available (auto-download if needed).
         from open_shrimp.sandbox.libvirt_helpers import ensure_virtiofsd
@@ -930,7 +564,7 @@ class LibvirtSandboxManager:
             raise RuntimeError("Failed to connect to qemu:///session")
         logger.info("Connected to qemu:///session")
 
-    def stop_reaper(self) -> None:
+    def stop_backend(self) -> None:
         """Close the libvirt connection."""
         if self._conn is not None:
             try:
@@ -1119,7 +753,7 @@ class LibvirtSandboxManager:
 
         if self._conn is None:
             raise RuntimeError(
-                "Libvirt connection not available — either start_reaper() was "
+                "Libvirt connection not available — either start_backend() was "
                 "not called or libvirt-python is not installed. Install with: "
                 "pip install libvirt-python"
             )
@@ -1208,7 +842,6 @@ class HcsSandboxManager:
 
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
-        self._container_label = "openshrimp"  # unused, but protocol requires it
         self._sandbox_cache: dict[str, Sandbox] = {}
         self._sandbox_runtime: dict[str, str] = {}
 
@@ -1223,26 +856,20 @@ class HcsSandboxManager:
     def set_instance_prefix(self, instance_name: str | None) -> None:
         if instance_name:
             self._instance_prefix = f"openshrimp-{instance_name}"
-            self._container_label = f"openshrimp-{instance_name}"
         else:
             self._instance_prefix = "openshrimp"
-            self._container_label = "openshrimp"
 
     @property
     def instance_prefix(self) -> str:
         return self._instance_prefix
 
-    @property
-    def container_label(self) -> str:
-        return self._container_label
-
     # -- Global lifecycle -----------------------------------------------------
 
-    def start_reaper(self) -> None:
-        """No reaper needed — HCS compute systems are enumerable by Owner and
-        terminated explicitly; there is no crash-orphan daemon."""
+    def start_backend(self) -> None:
+        """Nothing to acquire — HCS compute systems are enumerable by Owner
+        and terminated explicitly."""
 
-    def stop_reaper(self) -> None:
+    def stop_backend(self) -> None:
         pass
 
     def stop_all(self) -> None:
@@ -1394,7 +1021,6 @@ def referenced_backends(config: Config) -> set[str]:
 
 
 _MANAGER_FACTORIES: dict[str, type[SandboxManager]] = {
-    "docker": DockerSandboxManager,
     "libvirt": LibvirtSandboxManager,
     "lima": LimaSandboxManager,
     "hcs": HcsSandboxManager,
@@ -1412,21 +1038,14 @@ def create_sandbox_manager(backend: str) -> SandboxManager:
 def create_sandbox_managers(config: Config) -> dict[str, SandboxManager]:
     """Instantiate one :class:`SandboxManager` per backend used in the config.
 
-    Returns one manager per backend (``"docker"``, ``"libvirt"``, ``"lima"``)
-    that is actually referenced by at least one context.
+    One manager per backend that at least one context actually references; a
+    config with no sandboxed context gets none.
 
     Returns:
         A dict mapping backend name to its :class:`SandboxManager` instance.
     """
-    backends = referenced_backends(config)
-
-    managers: dict[str, SandboxManager] = {}
-    if "docker" in backends or (not backends and sys.platform != "darwin"):
-        managers["docker"] = create_sandbox_manager("docker")
-    if "libvirt" in backends:
-        managers["libvirt"] = create_sandbox_manager("libvirt")
-    if "lima" in backends:
-        managers["lima"] = create_sandbox_manager("lima")
-    if "hcs" in backends:
-        managers["hcs"] = create_sandbox_manager("hcs")
-    return managers
+    return {
+        backend: create_sandbox_manager(backend)
+        for backend in _MANAGER_FACTORIES
+        if backend in referenced_backends(config)
+    }

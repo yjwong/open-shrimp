@@ -1,8 +1,8 @@
 """Sandbox abstraction for isolated agent execution.
 
 Defines the :class:`Sandbox` protocol that encapsulates different isolation
-backends (Docker containers, Lima/libvirt VMs, etc.) behind a
-common lifecycle interface.  The agent is launched via
+backends (libvirt, Lima and HCS guests) behind a common lifecycle
+interface.  The agent is launched via
 :meth:`Sandbox.start_agent`, which for the wrapped-CLI strategy points the
 driver's ``cli_path`` option at a generated wrapper script; all other driver
 machinery (stdin/stdout streaming, canUseTool callbacks, MCP) works unchanged.
@@ -102,17 +102,12 @@ class Sandbox(Protocol):
         ...
 
     @property
-    def container_name(self) -> str | None:
-        """Docker container name, or ``None`` for non-container backends."""
-        ...
-
-    @property
     def host_address(self) -> str:
         """IP or hostname the sandbox should use to reach the host.
 
-        Each backend has its own network topology — Docker containers
-        use ``host.docker.internal``, libvirt VMs use the SLIRP gateway
-        ``10.0.2.2``, and Lima VMs use ``192.168.5.2``.
+        Each backend has its own network topology — libvirt VMs use the
+        SLIRP gateway ``10.0.2.2``, Lima VMs use ``192.168.5.2``, and HCS
+        guests reach the host through a relay on their own loopback.
         """
         ...
 
@@ -226,9 +221,9 @@ class Sandbox(Protocol):
     def reach(self, guest_port: int) -> str:
         """Expose a guest TCP port to the host; return ``"127.0.0.1:<host_port>"``.
 
-        Docker: a published-port lookup.  libvirt/lima: an ``ssh -L`` tunnel
-        (reusing :meth:`add_port_forward`).  Both already exist internally; this
-        names them under one method.
+        libvirt/lima: an ``ssh -L`` tunnel (reusing
+        :meth:`add_port_forward`).  HCS: a port bridge over hvsocket.  Both
+        already exist internally; this names them under one method.
 
         Has no caller today — the :class:`~open_shrimp.sandbox.agent_runtime.WrappedCLI`
         launch flavour needs no ``reach``.  Its first consumer is the
@@ -237,7 +232,7 @@ class Sandbox(Protocol):
         ...
 
     def stop(self) -> None:
-        """Tear down the runtime (stop container, terminate VM, etc.)."""
+        """Tear down the guest."""
         ...
 
     def get_screenshots_dir(self) -> Path | None:
@@ -254,7 +249,7 @@ class Sandbox(Protocol):
         Used by the WebSocket proxy to authenticate against the guest's
         VNC server on behalf of clients that shouldn't see credentials
         (e.g. browser-side noVNC).  Backends with unauthenticated VNC
-        servers — Linux ``wayvnc``, Docker computer-use — return ``None``.
+        servers — Linux ``wayvnc`` among them — return ``None``.
         """
         ...
 
@@ -266,14 +261,6 @@ class Sandbox(Protocol):
         all standards-compliant.  Override only when the upstream
         violates the RFB protocol (e.g. crashes on ``SetEncodings``).
         """
-        ...
-
-    def get_text_input_state_path(self) -> Path | None:
-        """Return host-side path to the text-input-state file, or ``None``."""
-        ...
-
-    def get_text_input_active(self) -> bool:
-        """Return ``True`` if a text input field is focused in the sandbox."""
         ...
 
     def take_screenshot(self, output_path: Path) -> None:

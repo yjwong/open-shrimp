@@ -137,15 +137,6 @@ def test_an_asset_already_on_disk_is_ready_without_being_fetched(
     assert events == [{"asset": "cached", "state": "ready"}, {"state": "finished"}]
 
 
-def test_a_backend_with_nothing_to_fetch_still_finishes(monkeypatch):
-    """Docker builds its image rather than fetching one, so its prefetch is
-    empty — and an empty run must still close the stream a front end waits on."""
-    seen: list[dict] = []
-    P.prefetch("docker", emit=seen.append)
-
-    assert seen == [{"state": "finished"}]
-
-
 def test_an_unknown_backend_is_refused():
     with pytest.raises(ValueError, match="Unknown sandbox backend"):
         P.shared_assets("qubes")

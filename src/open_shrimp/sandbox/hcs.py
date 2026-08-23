@@ -335,7 +335,7 @@ class HcsSandbox:
         # argv[0] the launcher execs in the guest, and the chroot path the
         # agent-home share binds to.  Both come off the runtime so the sandbox
         # layer never spells an agent's name.
-        self._agent_argv0 = bundle.context_binary_name if bundle else "claude"
+        self._agent_argv0 = bundle.guest_argv0 if bundle else "claude"
         self._guest_agent_home = _chroot_agent_home(runtime)
 
         # A served-endpoint launch declares extra host dirs to sync into the
@@ -398,10 +398,6 @@ class HcsSandbox:
     @property
     def context_name(self) -> str:
         return self._context_name
-
-    @property
-    def container_name(self) -> str | None:
-        return None
 
     @property
     def host_address(self) -> str:
@@ -1633,15 +1629,6 @@ class HcsSandbox:
         if self._rdp_session is not None:
             return self._rdp_session.get_vnc_quirks()
         return frozenset()
-
-    def get_text_input_state_path(self) -> Path | None:
-        # The GUI rootfs runs bare weston with no input-method client, so no
-        # on-screen-keyboard state exists to report (same shape as libvirt;
-        # only backends running an input-method monitor expose a state file).
-        return None
-
-    def get_text_input_active(self) -> bool:
-        return False
 
     def take_screenshot(self, output_path: Path) -> None:
         self._ensure_rdp_session().take_screenshot(output_path)

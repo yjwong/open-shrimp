@@ -179,11 +179,11 @@ async def _activate_manager(
 ) -> None:
     """Bring a freshly created SandboxManager online.
 
-    ``start_reaper`` does blocking I/O (subprocess/socket/libvirt calls),
+    ``start_backend`` does blocking I/O (subprocess/socket/libvirt calls),
     so it runs off the event loop.
     """
     mgr.set_instance_prefix(instance_name)
-    await asyncio.to_thread(mgr.start_reaper)
+    await asyncio.to_thread(mgr.start_backend)
 
 
 def _reload_failure_text(exc: Exception) -> str:
@@ -755,7 +755,7 @@ async def run_bot(
             logger.warning("Error shutting down login session", exc_info=True)
         stop_idle_sweep()
         await close_all_sessions()
-        # Stop all sandbox managers.  Each stop_reaper() is wrapped in a
+        # Stop all sandbox managers.  Each stop_backend() is wrapped in a
         # timeout because closing a wedged libvirt connection can block
         # indefinitely, and we'd rather lose that reaper cleanup than
         # hang the whole process.
@@ -772,10 +772,10 @@ async def run_bot(
                 )
             try:
                 async with asyncio.timeout(5):
-                    await asyncio.to_thread(mgr.stop_reaper)
+                    await asyncio.to_thread(mgr.stop_backend)
             except (Exception, TimeoutError):
                 logger.warning(
-                    "%s.stop_reaper() did not finish in time",
+                    "%s.stop_backend() did not finish in time",
                     name, exc_info=True,
                 )
         try:

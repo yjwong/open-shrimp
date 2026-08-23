@@ -186,7 +186,7 @@ def test_clearing_a_list_is_written_not_restored():
 def test_clearing_a_scalar_is_written_not_restored():
     raw = _base_raw()
     raw["contexts"]["default"]["model"] = "opus"
-    raw["contexts"]["default"]["sandbox"] = {"backend": "docker"}
+    raw["contexts"]["default"]["sandbox"] = {"backend": "libvirt"}
     patch_raw_yaml(raw, {"contexts": {"default": _saved_context()}})
     assert raw["contexts"]["default"]["model"] is None
     assert raw["contexts"]["default"]["sandbox"] is None

@@ -60,7 +60,7 @@ default_context: frontend
 | `sandbox` | Run the agent in an isolated environment (see sandbox guides) |
 
 :::caution[Two unrelated `backend` keys]
-A context's `backend:` key selects the **agent runtime** (`claude_sdk` or `opencode`). It is **not** the same as `sandbox.backend:`, which selects the **sandbox type** (`docker`, `libvirt`, or `lima`). A context can set both — for example the `opencode` agent runtime running inside a `docker` sandbox. See [Agent Backends](/guides/backends/).
+A context's `backend:` key selects the **agent runtime** (`claude_sdk` or `opencode`). It is **not** the same as `sandbox.backend:`, which selects the **sandbox type** (`libvirt`, `lima`, or `hcs`). A context can set both — for example the `opencode` agent runtime running inside a `libvirt` sandbox. See [Agent Backends](/guides/backends/).
 :::
 
 ## Switching contexts

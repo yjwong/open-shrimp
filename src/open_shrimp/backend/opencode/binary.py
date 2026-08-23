@@ -1,9 +1,8 @@
 """Locate the OpenCode CLI binary for host-side execution.
 
 Used by anything on the host that needs to spawn ``opencode``: sandbox
-image builds (Docker), sandbox provisioning (libvirt installer that SCPs
-the host binary into the guest), and the host-local ``opencode serve``
-spawn used by non-sandboxed contexts.
+provisioning (the libvirt installer SCPs the host binary into the guest), and
+the host-local ``opencode serve`` spawn used by non-sandboxed contexts.
 """
 
 from __future__ import annotations

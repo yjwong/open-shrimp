@@ -176,10 +176,6 @@ class LimaSandbox:
     def host_address(self) -> str:
         return "192.168.5.2"
 
-    @property
-    def container_name(self) -> str | None:
-        return None
-
     def environment_ready(self) -> bool:
         """Check if the Lima instance exists (any status)."""
         return limactl_instance_status(self._limactl, self._inst_name) is not None
@@ -650,20 +646,6 @@ class LimaSandbox:
                 vnc_file, content,
             )
             return None
-
-    def get_text_input_state_path(self) -> Path | None:
-        if self._computer_use:
-            return self._sdir / "text-input-state-dir" / "text-input-state"
-        return None
-
-    def get_text_input_active(self) -> bool:
-        if not self._computer_use:
-            return False
-        try:
-            path = self._sdir / "text-input-state-dir" / "text-input-state"
-            return path.read_text(encoding="utf-8").strip() == "1"
-        except (FileNotFoundError, OSError):
-            return False
 
     # -- Computer-use operations ------------------------------------------------
 

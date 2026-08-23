@@ -95,7 +95,7 @@ def test_a_fresh_install_does_not_report_itself_broken(
     monkeypatch: pytest.MonkeyPatch, nothing_downloaded: None
 ) -> None:
     """The whole point, stated once: neither check may be the reason a new
-    install exits 1.  Backends are excluded because Docker and libvirt are
+    install exits 1.  Backends are excluded because libvirt and its kin are
     system packages this project cannot fetch, so their failures are real."""
     _on(monkeypatch, "Linux", "x86_64")
 

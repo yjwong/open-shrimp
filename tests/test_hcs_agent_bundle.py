@@ -29,10 +29,6 @@ from open_shrimp.sandbox.hcs import HcsSandbox, _chroot_agent_home
 def _bundle(**overrides) -> ImageBundle:
     defaults: dict = {
         "tag_suffix": "claude",
-        "bundled_dockerfile": "Dockerfile.claude",
-        "binary_finder": lambda: "/usr/bin/claude",
-        "context_binary_name": "claude",
-        "build_arg": ("CLAUDE_CLI", "claude"),
         "guest_home": "/home/claude",
     }
     defaults.update(overrides)
@@ -60,7 +56,7 @@ def _claude_runtime() -> AgentRuntime:
 def _opencode_runtime() -> AgentRuntime:
     return _runtime(
         guest_dir="/home/claude/.local/share/opencode",
-        bundle=_bundle(context_binary_name="opencode", tag_suffix="opencode"),
+        bundle=_bundle(tag_suffix="opencode", guest_argv0="opencode"),
     )
 
 

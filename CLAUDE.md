@@ -27,7 +27,7 @@ uv run pytest tests/test_stream.py::test_name -x   # one test
 ```
 Telegram <-> bot.py / handlers/ <-> client_manager.py <-> backend/ (claude_sdk | opencode)
                                           |                    |
-              config.py (YAML) ── db.py (SQLite) ──── sandbox/ (docker | libvirt | lima | hcs)
+              config.py (YAML) ── db.py (SQLite) ──── sandbox/ (libvirt | lima | hcs)
 ```
 
 ### Core concepts (the vocabulary everything else uses)
@@ -48,7 +48,7 @@ Layered: read-only file tools auto-approved inside the context directory; Edit/W
 
 ### Sandbox layer (`sandbox/`)
 
-`Sandbox` protocol in `sandbox/base.py` (lifecycle: `ensure_environment -> ensure_running -> provision_workspace -> build_cli_wrapper -> cleanup/stop`), `SandboxManager` factory in `sandbox/manager.py`. Backends: Docker, libvirt/QEMU (Linux; supports `persistent_paths` qcow2 volumes, computer use, and Waydroid phone use), Lima (macOS), HCS (Windows; a Linux guest on the Hyper-V Compute Service — `persistent_paths` VHDX volumes, computer use over a weston/RDP desktop, port forwarding; shares are 9p, not virtiofs, and phone use and security-key forwarding are unsupported because the WSL-shipped kernel builds without binder and uhid). The agent CLI runs inside via a generated wrapper script pointed at by the SDK's `cli_path`; all SDK streaming/callback machinery is unchanged.
+`Sandbox` protocol in `sandbox/base.py` (lifecycle: `ensure_environment -> ensure_running -> provision_workspace -> build_cli_wrapper -> cleanup/stop`), `SandboxManager` factory in `sandbox/manager.py`. One backend per platform: libvirt/QEMU (Linux; supports `persistent_paths` qcow2 volumes, computer use, and Waydroid phone use), Lima (macOS), HCS (Windows; a Linux guest on the Hyper-V Compute Service — `persistent_paths` VHDX volumes, computer use over a weston/RDP desktop, port forwarding; shares are 9p, not virtiofs, and phone use and security-key forwarding are unsupported because the WSL-shipped kernel builds without binder and uhid). The agent CLI runs inside via a generated wrapper script pointed at by the SDK's `cli_path`; all SDK streaming/callback machinery is unchanged.
 
 ### Inbound events (`events/`)
 

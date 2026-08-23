@@ -187,12 +187,12 @@ def test_the_sandbox_answer_reaches_the_context(tmp_path, monkeypatch, capsys):
     """Importing several host contexts in one tap is a large increase in
     exposure, so the one question the wizard asks has to land in the file."""
     spec = _spec(tmp_path)
-    spec["contexts"][0]["sandbox"] = "docker"
+    spec["contexts"][0]["sandbox"] = "libvirt"
     code, out = _write(tmp_path, monkeypatch, capsys, spec)
 
     assert code == 0
     sandbox = load_config(out["config_path"]).contexts["default"].sandbox
-    assert sandbox is not None and sandbox.backend == "docker"
+    assert sandbox is not None and sandbox.backend == "libvirt"
 
 
 def test_an_unknown_sandbox_backend_is_refused(tmp_path, monkeypatch, capsys):

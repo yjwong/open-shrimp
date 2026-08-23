@@ -61,14 +61,6 @@ class TelegramConfig:
 
 
 @dataclass
-class ContainerConfig:
-    enabled: bool = True
-    docker_in_docker: bool = False
-    dockerfile: str | None = None
-    computer_use: bool = False
-
-
-@dataclass
 class AndroidConfig:
     """Android/Waydroid options for a phone-use context (libvirt only)."""
 
@@ -82,13 +74,10 @@ class AndroidConfig:
 class SandboxConfig:
     """Unified sandbox configuration for all backends."""
 
-    backend: str  # "docker", "libvirt", "lima", "hcs"
+    backend: str  # "libvirt", "lima", "hcs"
     enabled: bool = True
     guest_os: str = "linux"  # "linux" or "macos" (macos requires backend: lima, ARM host)
 
-    # Docker-specific
-    docker_in_docker: bool = False
-    dockerfile: str | None = None
     computer_use: bool = False
     virgl: bool = False  # VirGL 3D GPU acceleration (requires host GPU)
 
@@ -120,18 +109,14 @@ class SandboxConfig:
 
 
 # Valid values for sandbox config fields.
-_SANDBOX_BACKENDS = {"docker", "libvirt", "lima", "hcs"}
+_SANDBOX_BACKENDS = {"libvirt", "lima", "hcs"}
 _SANDBOX_GUEST_OS = {"linux", "macos"}
 _ANDROID_IMAGE_TYPES = {"VANILLA", "GAPPS"}
 _ANDROID_GPU_MODES = {"virgl", "software"}
 
 def is_sandboxed(context: "ContextConfig") -> bool:
     """Return True if the context uses any sandbox backend."""
-    if context.sandbox is not None and context.sandbox.enabled:
-        return True
-    if context.container is not None and context.container.enabled:
-        return True
-    return False
+    return context.sandbox is not None and context.sandbox.enabled
 
 
 def check_directory(path_str: str) -> dict[str, Any]:
@@ -152,13 +137,12 @@ def sandbox_backend(context: "ContextConfig") -> str:
     """Which sandbox backend *context* runs on.
 
     The name the manager registry and ``doctor``'s prerequisite tags are both
-    keyed by, so whoever needs it asks here rather than re-deriving it — a
-    context declaring only ``container`` is on Docker, the same reading
-    :func:`is_sandboxed` and ``referenced_backends`` already take.
+    keyed by, so whoever needs it asks here rather than re-deriving it.
+    Callers reach this only for a sandboxed context — :func:`is_sandboxed`
+    is what says whether there is a backend at all.
     """
-    if context.sandbox is not None:
-        return context.sandbox.backend
-    return "docker"
+    assert context.sandbox is not None
+    return context.sandbox.backend
 
 
 @dataclass
@@ -176,7 +160,6 @@ class ContextConfig:
     additional_directories: list[str] = field(default_factory=list)
     default_for_chats: list[int] = field(default_factory=list)
     locked_for_chats: list[int] = field(default_factory=list)
-    container: ContainerConfig | None = None
     sandbox: SandboxConfig | None = None
     mcp: dict[str, Any] = field(default_factory=dict)
     # Optional per-context backend override.  ``None`` inherits the top-level
@@ -348,35 +331,18 @@ def _validate_raw(raw: dict) -> None:
                 f"{list(_VALID_EFFORT_LEVELS)}, got: {effort!r}"
             )
 
-    # Validate container config
-    for name, ctx in contexts.items():
-        container = ctx.get("container")
-        if container is not None:
-            if not isinstance(container, (dict, bool)):
-                raise ValueError(
-                    f"Context '{name}': container must be a mapping or boolean"
-                )
-            if isinstance(container, dict):
-                dockerfile = container.get("dockerfile")
-                if dockerfile is not None and not isinstance(dockerfile, str):
-                    raise ValueError(
-                        f"Context '{name}': container.dockerfile must be "
-                        f"a string"
-                    )
-
     # Validate sandbox config
     for name, ctx in contexts.items():
+        if ctx.get("container") is not None:
+            raise ValueError(
+                f"Context '{name}': the 'container' key named the Docker "
+                f"backend, which no longer exists — use 'sandbox' with a "
+                f"backend of {sorted(_SANDBOX_BACKENDS)}"
+            )
+
         sandbox = ctx.get("sandbox")
         if sandbox is None:
             continue
-
-        # Cannot specify both container and sandbox
-        if ctx.get("container") is not None:
-            raise ValueError(
-                f"Context '{name}': cannot specify both 'container' and "
-                f"'sandbox' — use 'sandbox' (the 'container' key is a "
-                f"backwards-compatible alias for sandbox.backend: docker)"
-            )
 
         if not isinstance(sandbox, dict):
             raise ValueError(
@@ -396,12 +362,6 @@ def _validate_raw(raw: dict) -> None:
 
         if backend == "hcs":
             _validate_hcs_sandbox(name, sandbox)
-
-        dockerfile = sandbox.get("dockerfile")
-        if dockerfile is not None and not isinstance(dockerfile, str):
-            raise ValueError(
-                f"Context '{name}': sandbox.dockerfile must be a string"
-            )
 
         # Validate libvirt-specific fields.
         for int_field in ("memory", "cpus", "disk_size"):
@@ -608,8 +568,6 @@ def _validate_raw(raw: dict) -> None:
 #: capability that nothing implements, so it is refused rather than dropped.
 _HCS_UNSUPPORTED_KNOBS: tuple[tuple[str, object, str], ...] = (
     ("virgl", False, "VirGL 3D acceleration"),
-    ("docker_in_docker", False, "Docker-in-Docker"),
-    ("dockerfile", None, "custom Dockerfiles"),
     ("guest_os", "linux", "non-Linux guests"),
     ("phone_use", False, "phone use"),
     ("android", None, "Android tuning"),
@@ -868,8 +826,6 @@ def _parse_sandbox_config(raw: dict) -> SandboxConfig:
         backend=raw["backend"],
         enabled=bool(raw.get("enabled", True)),
         guest_os=str(raw.get("guest_os", "linux")),
-        docker_in_docker=bool(raw.get("docker_in_docker", False)),
-        dockerfile=raw.get("dockerfile"),
         computer_use=computer_use,
         virgl=virgl,
         phone_use=phone_use,
@@ -892,50 +848,11 @@ def _parse(raw: dict) -> Config:
     default_backend = str(raw.get("backend") or DEFAULT_BACKEND)
     contexts = {}
     for name, ctx in (raw["contexts"] or {}).items():
-        # Parse container config: presence of the key implies enabled.
-        container_raw = ctx.get("container")
-        container: ContainerConfig | None = None
-        sandbox: SandboxConfig | None = None
-
-        if container_raw is not None:
-            if isinstance(container_raw, dict):
-                container = ContainerConfig(
-                    enabled=bool(container_raw.get("enabled", True)),
-                    docker_in_docker=bool(
-                        container_raw.get("docker_in_docker", False)
-                    ),
-                    dockerfile=container_raw.get("dockerfile"),
-                    computer_use=bool(
-                        container_raw.get("computer_use", False)
-                    ),
-                )
-            else:
-                # e.g. `container: true` as shorthand
-                container = ContainerConfig(enabled=bool(container_raw))
-
-            # Also create a SandboxConfig from the container config
-            # for forward compatibility.
-            sandbox = SandboxConfig(
-                backend="docker",
-                enabled=container.enabled,
-                docker_in_docker=container.docker_in_docker,
-                dockerfile=container.dockerfile,
-                computer_use=container.computer_use,
-            )
-
-        # Parse sandbox config (new-style, takes precedence).
         sandbox_raw = ctx.get("sandbox")
-        if sandbox_raw is not None:
-            sandbox = _parse_sandbox_config(sandbox_raw)
-            # Also populate ContainerConfig for backward compatibility
-            # when the backend is Docker.
-            if sandbox.backend == "docker":
-                container = ContainerConfig(
-                    enabled=sandbox.enabled,
-                    docker_in_docker=sandbox.docker_in_docker,
-                    dockerfile=sandbox.dockerfile,
-                    computer_use=sandbox.computer_use,
-                )
+        sandbox = (
+            _parse_sandbox_config(sandbox_raw) if sandbox_raw is not None
+            else None
+        )
 
         mcp_raw = ctx.get("mcp", {})
         if not isinstance(mcp_raw, dict):
@@ -959,7 +876,6 @@ def _parse(raw: dict) -> Config:
             additional_directories=ctx.get("additional_directories", []),
             default_for_chats=ctx.get("default_for_chats", []),
             locked_for_chats=ctx.get("locked_for_chats", []),
-            container=container,
             sandbox=sandbox,
             mcp=mcp_raw,
             backend=ctx.get("backend"),
@@ -1122,17 +1038,12 @@ def config_to_dict(config: Config) -> dict[str, Any]:
         if ctx.locked_for_chats:
             ctx_dict["locked_for_chats"] = ctx.locked_for_chats
 
-        # Prefer sandbox over legacy container.
         if ctx.sandbox is not None:
             sandbox_dict: dict[str, Any] = {"backend": ctx.sandbox.backend}
             if ctx.sandbox.guest_os != "linux":
                 sandbox_dict["guest_os"] = ctx.sandbox.guest_os
             if not ctx.sandbox.enabled:
                 sandbox_dict["enabled"] = False
-            if ctx.sandbox.docker_in_docker:
-                sandbox_dict["docker_in_docker"] = True
-            if ctx.sandbox.dockerfile is not None:
-                sandbox_dict["dockerfile"] = ctx.sandbox.dockerfile
             if ctx.sandbox.computer_use:
                 sandbox_dict["computer_use"] = True
             if ctx.sandbox.virgl:
@@ -1153,34 +1064,23 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                     sandbox_dict["android"] = android_dict
             if ctx.sandbox.allow_host_escape:
                 sandbox_dict["allow_host_escape"] = True
-            # VM fields — only include non-defaults for VM backends.
-            if ctx.sandbox.backend in ("libvirt", "lima", "hcs"):
-                if ctx.sandbox.memory != 2048:
-                    sandbox_dict["memory"] = ctx.sandbox.memory
-                if ctx.sandbox.cpus != 2:
-                    sandbox_dict["cpus"] = ctx.sandbox.cpus
-                if ctx.sandbox.disk_size != 20:
-                    sandbox_dict["disk_size"] = ctx.sandbox.disk_size
-                if ctx.sandbox.base_image is not None:
-                    sandbox_dict["base_image"] = ctx.sandbox.base_image
-                if ctx.sandbox.provision is not None:
-                    sandbox_dict["provision"] = ctx.sandbox.provision
-                if ctx.sandbox.persistent_paths:
-                    sandbox_dict["persistent_paths"] = ctx.sandbox.persistent_paths
-                if ctx.sandbox.mingw_bin is not None:
-                    sandbox_dict["mingw_bin"] = ctx.sandbox.mingw_bin
+            # Guest-shape fields — written only when they differ from the
+            # default, so a config round-trip stays as short as it was typed.
+            if ctx.sandbox.memory != 2048:
+                sandbox_dict["memory"] = ctx.sandbox.memory
+            if ctx.sandbox.cpus != 2:
+                sandbox_dict["cpus"] = ctx.sandbox.cpus
+            if ctx.sandbox.disk_size != 20:
+                sandbox_dict["disk_size"] = ctx.sandbox.disk_size
+            if ctx.sandbox.base_image is not None:
+                sandbox_dict["base_image"] = ctx.sandbox.base_image
+            if ctx.sandbox.provision is not None:
+                sandbox_dict["provision"] = ctx.sandbox.provision
+            if ctx.sandbox.persistent_paths:
+                sandbox_dict["persistent_paths"] = ctx.sandbox.persistent_paths
+            if ctx.sandbox.mingw_bin is not None:
+                sandbox_dict["mingw_bin"] = ctx.sandbox.mingw_bin
             ctx_dict["sandbox"] = sandbox_dict
-        elif ctx.container is not None:
-            container_dict: dict[str, Any] = {}
-            if not ctx.container.enabled:
-                container_dict["enabled"] = False
-            if ctx.container.docker_in_docker:
-                container_dict["docker_in_docker"] = True
-            if ctx.container.dockerfile is not None:
-                container_dict["dockerfile"] = ctx.container.dockerfile
-            if ctx.container.computer_use:
-                container_dict["computer_use"] = True
-            ctx_dict["container"] = container_dict
 
         if ctx.mcp:
             ctx_dict["mcp"] = ctx.mcp
@@ -1347,7 +1247,7 @@ def build_context_dict(
     cannot drift between them.
 
     *sandbox* names a backend, and a sandboxed context gets a desktop.  The
-    rest of a sandbox block — ``allow_host_escape``, a ``dockerfile`` — is
+    rest of a sandbox block — ``allow_host_escape``, ``persistent_paths`` — is
     chosen later in the config Mini App, because the question a first config
     can fairly ask is whether the context is isolated at all.
 

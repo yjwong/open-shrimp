@@ -234,7 +234,7 @@ def _checked_sandbox(sandbox: Any, current: Any) -> str:
 
     The supervisor may give a project a sandbox and may never edit or
     remove one.  A sandbox block carries more than its backend —
-    ``allow_host_escape``, ``computer_use``, a ``dockerfile`` — and this
+    ``allow_host_escape``, ``computer_use``, ``persistent_paths`` — and this
     tool writes the whole mapping, so editing an existing one would drop
     settings the user chose without ever naming them.  Adding one where
     there is none can only narrow what the context can reach.

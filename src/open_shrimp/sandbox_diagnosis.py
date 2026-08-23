@@ -1,8 +1,8 @@
 """What to say to the operator when a sandbox refuses to start.
 
 A sandbox that will not come up is almost always a machine that is missing
-something — Docker's daemon, a group membership, the WSL kernel, a Python
-binding — and the prerequisite checks behind ``openshrimp doctor`` already
+something — a missing virtiofsd, a group membership, the WSL kernel, a
+Python binding — and the prerequisite checks behind ``openshrimp doctor`` already
 know what and already know the way out.  So the first thing asked on a failure
 is not "what did that line fail to do" but "what is wrong with this machine",
 which is the question the operator has and the only one with an answer they
@@ -31,18 +31,18 @@ from open_shrimp.config import Config
 from open_shrimp.doctor import Outcome, prerequisites
 from open_shrimp.sandbox.base import SandboxStartupError
 
-# How long a diagnosis stands before the checks are run again.  ``docker
-# info`` shells out and the libvirt check opens a connection, and a scope that
-# retries in a loop must not pay for that on every turn — while a person who
-# has actually fixed something takes far longer than this to come back (the
-# docker-group remedy alone requires logging out and in again).
+# How long a diagnosis stands before the checks are run again.  The checks
+# shell out and open connections, and a scope that retries in a loop must not
+# pay for that on every turn — while a person who has actually fixed something
+# takes far longer than this to come back (a group-membership remedy alone
+# requires logging out and in again).
 _TTL = 30.0
 
 _cache: dict[str, tuple[float, list[Outcome]]] = {}
 
-# One diagnosis per backend at a time: a daemon that dies takes every scope
-# with it, and they arrive together, so without this each one would spawn its
-# own ``docker info`` and hold a thread for as long as that takes.
+# One diagnosis per backend at a time: a host fact that breaks takes every
+# scope with it, and they arrive together, so without this each one would run
+# its own probe and hold a thread for as long as that takes.
 _locks: dict[str, asyncio.Lock] = {}
 
 

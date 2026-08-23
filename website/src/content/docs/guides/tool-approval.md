@@ -85,7 +85,7 @@ This ensures you consciously re-approve tools each session.
 
 ## Sandbox auto-approval
 
-When a context has a [sandbox](/guides/docker-sandbox/) configured, all Bash commands and path-scoped tools are **automatically approved** — the sandbox provides the safety boundary instead of manual approval.
+When a context has a [sandbox](/guides/vm-sandbox/) configured, all Bash commands and path-scoped tools are **automatically approved** — the sandbox provides the safety boundary instead of manual approval.
 
 ```yaml
 contexts:
@@ -96,7 +96,7 @@ contexts:
       - LSP
       - AskUserQuestion
     sandbox:
-      backend: docker
+      backend: libvirt
 ```
 
 ## Dangerous operation blocking

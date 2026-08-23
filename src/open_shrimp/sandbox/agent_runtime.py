@@ -1,7 +1,7 @@
 """Agent-runtime profiles: *what* agent a sandbox launches, decoupled from
 *where* it runs.
 
-A :class:`Sandbox` (``base.py``) owns the *where* — Docker, libvirt, Lima.
+A :class:`Sandbox` (``base.py``) owns the *where* — libvirt, Lima, HCS.
 An :class:`AgentRuntime` owns the *what* — the agent and how it is launched.
 The two meet at :meth:`Sandbox.start_agent`, which takes an ``AgentRuntime``
 and dispatches on its :attr:`AgentRuntime.launch` strategy.
@@ -65,7 +65,7 @@ class WrappedCLI:
     ``cli_path``.
 
     This is a **marker** — it carries no argv.  Each backend generates its own
-    wrapper (``docker exec``, ``ssh``, ``limactl shell``) that execs the agent
+    wrapper (``ssh``, ``limactl shell``, an HCS exec channel) that execs the agent
     CLI via a backend-specific ``build_cli_wrapper`` helper; that generation is
     correctly a ``(sandbox × agent)`` cell and stays per-sandbox.  The
     argv-passing form only becomes meaningful if a second wrapped-CLI agent
@@ -95,8 +95,8 @@ class ServedEndpoint:
     and returns an endpoint handle.
 
     The runtime supplies the serve ``argv`` plus the in-guest ``guest_port``;
-    the sandbox owns *reach* (a published-port lookup for Docker, an
-    ``ssh -L`` tunnel for libvirt/lima).  The served process is whatever
+    the sandbox owns *reach* (an ``ssh -L`` tunnel for libvirt/lima, a port
+    bridge for HCS).  The served process is whatever
     ``serve_argv`` names; the sandbox wraps the ``reach(guest_port)`` result as
     the endpoint's ``base_url``.
 
@@ -130,45 +130,26 @@ LaunchStrategy = WrappedCLI | ServedEndpoint
 
 @dataclass(frozen=True)
 class ImageBundle:
-    """The Docker image bundle a runtime needs, carried as data.
+    """The guest image a runtime needs, carried as data.
 
-    Every field describes the *image* (build inputs + guest layout), not the
-    agent's name — so the Docker sandbox can dispatch without any
-    ``if flavour == "..."`` branches, and so adding a third image bundle
-    touches one constructor in the runtime module.
+    Every field describes the *image* (its identity and guest layout), not the
+    agent's name — so a sandbox can dispatch without any
+    ``if flavour == "..."`` branches, and so adding a third bundle touches one
+    constructor in the runtime module.
 
-    Docker uses every field; the VM backends consult ``tag_suffix`` only as an
-    opaque key (their guest binary is the operator's precondition unless
-    ``guest_installer`` is set).
-
-    ``tag_suffix`` is the per-bundle slug appended after the instance prefix to
-    form the image tag (e.g. ``openshrimp-<instance>-<suffix>:latest``).
-    ``bundled_dockerfile`` is the bundled Dockerfile path (read from the
-    package's resources).  ``binary_finder`` returns the host path to the CLI
-    binary copied into the build context; ``context_binary_name`` is the name
-    that binary is copied as inside the build dir.  ``build_arg`` is the
-    Dockerfile build-arg ``(NAME, VALUE)`` pair.  ``guest_home`` is the
-    container's ``HOME``.  ``dind_user`` is the username the DinD entrypoint's
-    passwd rewrite registers — defaults to ``"claude"`` for the wrapped-CLI
-    image; the served image overrides it to match its own ``HOME``.
+    ``tag_suffix`` is the per-bundle slug the sandboxes treat as an opaque
+    identity key: two runtimes with different suffixes cannot share a guest.
+    ``guest_home`` is the agent's ``HOME`` inside the guest.  ``guest_argv0``
+    is the command the guest launcher execs — the CLI's own name on ``PATH``,
+    not a path, because where it was installed is the guest's business.
 
     ``task_tmp_prefix`` is the ``/tmp/<prefix>-<uid>`` slug the agent CLI writes
-    its background-task output under.  Every sandbox bind/shares a host dir at
+    its background-task output under.  Every sandbox shares a host dir at
     :meth:`guest_task_tmp` so the host terminal mini app can read those files.
     This is the agent's own convention, **not** the guest username: Claude Code
     hardcodes ``/tmp/claude-<uid>`` regardless of who runs it, so the default is
     ``"claude"``.  Getting this wrong silently breaks "View output" — the guest
     writes to an unshared path and the host resolver finds nothing.
-
-    ``computer_use_image`` is the optional layered "computer-use" image tag
-    built on top of the base bundle.  ``None`` → this runtime has no
-    computer-use variant.
-
-    ``computer_use_build_args`` is the extra build args injected into the
-    layered computer-use build.  The sandbox helper forwards these as
-    ``--build-arg`` flags, so agent-specific build knobs (e.g.
-    ``INSTALL_CLAUDE_CODE``) live next to the bundle constructor rather than
-    the sandbox layer.
 
     ``libvirt_install`` and ``lima_install`` are optional in-guest installers
     for the VM sandboxes.  When set, the matching sandbox's
@@ -180,15 +161,9 @@ class ImageBundle:
     """
 
     tag_suffix: str
-    bundled_dockerfile: str
-    binary_finder: Callable[[], str]
-    context_binary_name: str
-    build_arg: tuple[str, str]
     guest_home: str
-    dind_user: str = "claude"
+    guest_argv0: str = "claude"
     task_tmp_prefix: str = "claude"
-    computer_use_image: str | None = None
-    computer_use_build_args: tuple[tuple[str, str], ...] = ()
     libvirt_install: Callable[[Path, int, str], None] | None = None
     lima_install: Callable[[str, str, str], None] | None = None
     # HCS installs the CLI from npm inside the rootfs over the exec channel;
@@ -200,9 +175,7 @@ class ImageBundle:
         """Guest dir the agent writes background-task output to.
 
         Every sandbox mirrors this to a host dir so the terminal mini app can
-        tail/read it; *uid* is the in-guest uid the agent CLI runs as (the host
-        uid for the bind-mounted Docker container, the fixed sandbox uid for the
-        VM backends).
+        tail/read it; *uid* is the in-guest uid the agent CLI runs as.
         """
         return f"/tmp/{self.task_tmp_prefix}-{uid}"
 

@@ -1491,10 +1491,7 @@ async def _open_vnc_viewer(
         enabled = ctx.sandbox is not None and ctx.sandbox.phone_use
         capability = "phone use"
     else:
-        enabled = (
-            (ctx.container is not None and ctx.container.computer_use)
-            or (ctx.sandbox is not None and ctx.sandbox.computer_use)
-        )
+        enabled = ctx.sandbox is not None and ctx.sandbox.computer_use
         capability = "computer use"
     if not enabled:
         await update.message.reply_text(
@@ -1539,14 +1536,9 @@ def _get_sandbox_for_security_key(
     ctx: ContextConfig,
     sandbox_managers: dict[str, object] | None,
 ) -> object | None:
-    backend: str | None = None
-    if ctx.container is not None and ctx.container.computer_use:
-        backend = "docker"
-    elif ctx.sandbox is not None and ctx.sandbox.computer_use:
-        backend = ctx.sandbox.backend
-    if backend is None:
+    if ctx.sandbox is None or not ctx.sandbox.computer_use:
         return None
-    manager = (sandbox_managers or {}).get(backend)
+    manager = (sandbox_managers or {}).get(ctx.sandbox.backend)
     create = getattr(manager, "create_sandbox", None) if manager is not None else None
     if create is None:
         return None
@@ -1596,11 +1588,7 @@ async def security_key_handler(
     if resolved is None:
         return
     context_name, ctx = resolved
-    has_computer_use = (
-        (ctx.container is not None and ctx.container.computer_use)
-        or (ctx.sandbox is not None and ctx.sandbox.computer_use)
-    )
-    if not has_computer_use:
+    if ctx.sandbox is None or not ctx.sandbox.computer_use:
         await update.message.reply_text(
             rf"Context `{escape_code(context_name)}` does not have computer use enabled\.",
             parse_mode="MarkdownV2",
@@ -1614,7 +1602,7 @@ async def security_key_handler(
         ctx,
         context.bot_data.get("sandbox_managers"),
     )
-    sandbox_id = getattr(sandbox, "container_name", None) or context_name
+    sandbox_id = context_name
     session = await create_security_key_session(
         db,
         registry=registry,

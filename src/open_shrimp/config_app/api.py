@@ -310,8 +310,8 @@ async def sandbox_reboot_endpoint(request: Request) -> JSONResponse:
 async def sandbox_reset_endpoint(request: Request) -> JSONResponse:
     """POST /api/sandbox/{context_name}/reset -- destroy + recreate.
 
-    Wipes overlays, state directories, Docker images, libvirt domains,
-    and Lima instances.  Persistent volumes (libvirt) survive by design.
+    Wipes overlays, state directories, libvirt domains, Lima instances and
+    HCS compute systems.  Persistent volumes (libvirt) survive by design.
     """
     try:
         await _authenticate(request)

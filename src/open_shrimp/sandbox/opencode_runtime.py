@@ -37,12 +37,12 @@ OPENCODE_GUEST_PORT = 4096
 def get_opencode_home_dir(context_name: str) -> Path:
     """Return the host-side opencode-home state directory for a context.
 
-    Bind-mounted as ``{SANDBOX_HOME}/.local/share/opencode`` inside the served
-    container; holds the resumable session corpus and the synced ``auth.json``.
+    Shared into the guest as ``{SANDBOX_HOME}/.local/share/opencode``; holds
+    the resumable session corpus and the synced ``auth.json``.
     """
-    from open_shrimp.sandbox.docker_helpers import _ensure_state_dir
+    from open_shrimp.paths import sandbox_state_dir
 
-    path = _ensure_state_dir(context_name) / "opencode-home"
+    path = sandbox_state_dir(context_name) / "opencode-home"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -50,12 +50,12 @@ def get_opencode_home_dir(context_name: str) -> Path:
 def get_openshrimp_data_dir(context_name: str) -> Path:
     """Return the host-side OpenShrimp data directory for a context.
 
-    Bind-mounted as ``{SANDBOX_HOME}/.local/share/openshrimp`` inside the served
-    container; holds the managed plugin config.
+    Shared into the guest as ``{SANDBOX_HOME}/.local/share/openshrimp``; holds
+    the managed plugin config.
     """
-    from open_shrimp.sandbox.docker_helpers import _ensure_state_dir
+    from open_shrimp.paths import sandbox_state_dir
 
-    path = _ensure_state_dir(context_name) / "openshrimp-data"
+    path = sandbox_state_dir(context_name) / "openshrimp-data"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

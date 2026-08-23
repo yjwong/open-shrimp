@@ -176,15 +176,6 @@ def _build_mounts_macos(
             "writable": True,
         })
 
-        # Text-input-state directory.
-        text_input_state_dir = str(sdir / "text-input-state-dir")
-        Path(text_input_state_dir).mkdir(parents=True, exist_ok=True)
-        mounts.append({
-            "location": text_input_state_dir,
-            "mountPoint": "/tmp/text-input-state-dir",
-            "writable": True,
-        })
-
     return mounts
 
 

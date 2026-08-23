@@ -335,7 +335,7 @@ def _verify_sha256(path: Path, *, sums_url: str, filename: str) -> None:
 def _download_virtiofsd(*, progress: ProgressFn | None = None) -> str:
     """Download the virtiofsd binary for this platform.
 
-    Synchronous — called from ``start_reaper()`` which runs before any
+    Synchronous — called from ``start_backend()`` which runs before any
     async code.
 
     Returns:

@@ -283,7 +283,7 @@ def test_a_baked_gui_template_satisfies_computer_use(tmp_path, monkeypatch):
 
 
 def test_a_host_with_no_hcs_context_has_nothing_to_check(tmp_path):
-    config = _config(work=SandboxConfig(backend="docker"))
+    config = _config(work=SandboxConfig(backend="libvirt"))
     ok, detail = doctor._check_hcs_base_image(config)
     assert ok
     assert "nothing to check" in detail

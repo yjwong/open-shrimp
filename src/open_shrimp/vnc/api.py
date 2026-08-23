@@ -1,20 +1,18 @@
 """HTTP/WebSocket API routes for the VNC Mini App.
 
 Provides a WebSocket-to-TCP proxy for connecting noVNC clients to
-the VNC server running inside computer-use containers or VMs.
+the VNC server running inside a computer-use guest.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import struct
-from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
@@ -32,10 +30,6 @@ from open_shrimp.security_key.api import (
 )
 from open_shrimp.security_key.bootstrap import start_vm_helper
 from open_shrimp.security_key.db import get_security_key_session_record
-from open_shrimp.sandbox.docker_helpers import (
-    get_text_input_active,
-    get_text_input_state_path,
-)
 from open_shrimp.review.auth import AuthError, validate_token_param
 from open_shrimp.sandbox.base import (
     VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
@@ -54,11 +48,7 @@ logger = logging.getLogger(__name__)
 
 def _is_computer_use_context(ctx: ContextConfig) -> bool:
     """Check whether a context has computer-use enabled (any backend)."""
-    if ctx.container is not None and ctx.container.computer_use:
-        return True
-    if ctx.sandbox is not None and ctx.sandbox.computer_use:
-        return True
-    return False
+    return ctx.sandbox is not None and ctx.sandbox.computer_use
 
 
 def _get_sandbox_for_context(
@@ -67,16 +57,10 @@ def _get_sandbox_for_context(
     sandbox_managers: dict[str, object] | None = None,
 ) -> object | None:
     """Get the cached Sandbox instance for a computer-use context."""
-    backend: str | None = None
-    if ctx.container is not None and ctx.container.computer_use:
-        backend = "docker"
-    elif ctx.sandbox is not None and ctx.sandbox.computer_use:
-        backend = ctx.sandbox.backend
-
-    if backend is None:
+    if ctx.sandbox is None or not ctx.sandbox.computer_use:
         return None
 
-    manager = (sandbox_managers or {}).get(backend)
+    manager = (sandbox_managers or {}).get(ctx.sandbox.backend)
     if manager is None:
         return None
 
@@ -337,120 +321,6 @@ async def vnc_ws_endpoint(websocket: WebSocket) -> None:
         logger.info("VNC proxy disconnected: context=%s", context_name)
 
 
-async def text_input_state_endpoint(request: Request) -> JSONResponse:
-    """GET /api/vnc/text-input-state — text field focus state from container.
-
-    Returns {"active": true/false} indicating whether a text input field
-    is currently focused inside the computer-use container.  Used by the
-    noVNC mobile client to auto-show/hide the soft keyboard.
-    """
-    config: Config = request.app.state.config
-    token = request.query_params.get("token", "")
-    context_name = request.query_params.get("context", "")
-
-    try:
-        await validate_token_param(
-            token,
-            config.telegram.token,
-            config.allowed_users,
-        )
-    except AuthError:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    if not context_name or context_name not in config.contexts:
-        return JSONResponse({"error": "Unknown context"}, status_code=400)
-
-    ctx = config.contexts[context_name]
-    if not _is_computer_use_context(ctx):
-        return JSONResponse({"error": "Not a computer_use context"}, status_code=400)
-
-    active = await asyncio.to_thread(get_text_input_active, context_name)
-    return JSONResponse({"active": active})
-
-
-async def text_input_state_stream_endpoint(
-    request: Request,
-) -> StreamingResponse | JSONResponse:
-    """GET /api/vnc/text-input-state/stream — SSE stream of text-input focus.
-
-    Pushes ``{"active": true/false}`` events whenever the text-input state
-    changes inside the computer-use container, using inotify on the
-    bind-mounted state file for instant notification.
-    """
-    config: Config = request.app.state.config
-    token = request.query_params.get("token", "")
-    context_name = request.query_params.get("context", "")
-
-    try:
-        await validate_token_param(
-            token,
-            config.telegram.token,
-            config.allowed_users,
-        )
-    except AuthError:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    if not context_name or context_name not in config.contexts:
-        return JSONResponse({"error": "Unknown context"}, status_code=400)
-
-    ctx = config.contexts[context_name]
-    if not _is_computer_use_context(ctx):
-        return JSONResponse({"error": "Not a computer_use context"}, status_code=400)
-
-    state_path = get_text_input_state_path(context_name)
-
-    def _read_state() -> bool:
-        try:
-            return state_path.read_text(encoding="utf-8").strip() == "1"
-        except (FileNotFoundError, OSError):
-            return False
-
-    async def event_stream() -> AsyncGenerator[str, None]:
-        from watchfiles import awatch
-
-        last_active = _read_state()
-        yield f"data: {json.dumps({'active': last_active})}\n\n"
-
-        # Detect client disconnect.
-        stop_event = asyncio.Event()
-
-        async def watch_disconnect() -> None:
-            while not stop_event.is_set():
-                if await request.is_disconnected():
-                    stop_event.set()
-                    return
-                await asyncio.sleep(1)
-
-        disconnect_task = asyncio.create_task(watch_disconnect())
-
-        try:
-            if not state_path.exists():
-                # No bind mount (old container) — just keep connection open
-                # with initial state until client disconnects.
-                await stop_event.wait()
-                return
-
-            async for _changes in awatch(
-                state_path, stop_event=stop_event
-            ):
-                active = _read_state()
-                if active != last_active:
-                    last_active = active
-                    yield f"data: {json.dumps({'active': active})}\n\n"
-        finally:
-            stop_event.set()
-            disconnect_task.cancel()
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
 async def clipboard_get_endpoint(request: Request) -> JSONResponse:
     """GET /api/vnc/clipboard — read the sandbox Wayland clipboard."""
     config: Config = request.app.state.config
@@ -573,7 +443,7 @@ async def security_key_session_endpoint(request: Request) -> JSONResponse:
     sandbox = await asyncio.to_thread(
         _get_sandbox_for_context, context_name, ctx, sandbox_managers,
     )
-    sandbox_id = getattr(sandbox, "container_name", None) or context_name
+    sandbox_id = context_name
     session = await create_security_key_session(
         request.app.state.db,
         registry=get_or_create_registry(request.app.state),
@@ -655,11 +525,6 @@ def create_vnc_routes() -> list[Route | Mount | WebSocketRoute]:
             "/api/vnc/security-key-session",
             security_key_session_endpoint,
             methods=["POST"],
-        ),
-        Route("/api/vnc/text-input-state", text_input_state_endpoint),
-        Route(
-            "/api/vnc/text-input-state/stream",
-            text_input_state_stream_endpoint,
         ),
     ]
 

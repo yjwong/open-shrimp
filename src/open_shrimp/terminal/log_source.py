@@ -111,28 +111,22 @@ def _search_tmp_base(base: Path, filename: str) -> Path | None:
     return None
 
 
-def _resolve_container_symlink(
+def _resolve_guest_symlink(
     symlink: Path, context_dir: Path,
 ) -> Path | None:
-    """Resolve a broken symlink created inside a container/VM to its host path.
+    """Resolve a broken symlink created inside a guest to its host path.
 
-    Inside the container/VM, the agent's ``.claude`` home is mounted from
-    the host.  Agent task ``.output`` files are symlinks to ``.jsonl``
-    session files under ``<guest-home>/.claude/projects/…``, which don't
-    exist on the host at that path.  This function translates the
-    container/VM path back to the host equivalent.
+    The agent's ``.claude`` home is shared into the guest from the host.
+    Agent task ``.output`` files are symlinks to ``.jsonl`` session files
+    under ``<guest-home>/.claude/projects/…``, which don't exist on the host
+    at that path.  This function translates the guest path back to the host
+    equivalent: *context_dir* holds a ``claude-home/`` subdirectory that is
+    shared into the guest as ``<guest-home>/.claude``.
 
-    The guest home varies by backend/user (``/home/claude`` for Docker,
-    ``/home/openshrimp`` for the VM backends, ``/home/<user>.guest`` for
-    Lima), so we key off the stable ``/.claude/`` marker rather than a
+    The guest home varies by backend and user (``/home/openshrimp`` for
+    libvirt and HCS, ``/home/<user>.guest`` for Lima), so the stable
+    ``/.claude/`` marker is what the translation keys off rather than a
     hardcoded prefix.
-
-    Two layouts are supported:
-
-    - **Docker**: *context_dir* IS the ``.claude`` home, so the relative
-      path resolves directly.
-    - **Libvirt/Lima VM**: *context_dir* contains a ``claude-home/``
-      subdirectory that is shared into the VM as ``<guest-home>/.claude``.
     """
     try:
         target = os.readlink(symlink)
@@ -143,11 +137,6 @@ def _resolve_container_symlink(
     idx = target.find(marker)
     if idx != -1:
         relative = target[idx + len(marker):]
-        # Docker layout: context_dir IS .claude
-        host_path = context_dir / relative
-        if host_path.is_file():
-            return host_path
-        # Libvirt/Lima VM layout: context_dir / "claude-home" IS .claude
         host_path = context_dir / "claude-home" / relative
         if host_path.is_file():
             return host_path
@@ -162,12 +151,12 @@ def _find_task_output_file(
     """Find the output file for a background task by ID.
 
     Searches the host Claude CLI tmp directory and all sandbox managers'
-    state directories (where containerized/VM contexts write their tmp files).
+    state directories (where sandboxed contexts write their tmp files).
 
-    For containerized agent tasks the ``.output`` file is a symlink whose
-    target uses a container-internal path.  When a broken symlink is found
-    in a container state directory, the target is translated to the host
-    equivalent so the caller can read the actual data.
+    For a sandboxed agent task the ``.output`` file is a symlink whose target
+    uses a guest-internal path.  When a broken symlink is found in a sandbox
+    state directory, the target is translated to the host equivalent so the
+    caller can read the actual data.
     """
     if not _TASK_ID_RE.match(task_id):
         return None
@@ -189,9 +178,9 @@ def _find_task_output_file(
                 tmp_dir = context_dir / "tmp"
                 result = _search_tmp_base(tmp_dir, filename)
                 if result:
-                    # Broken symlink — resolve container path to host path.
+                    # Broken symlink — resolve guest path to host path.
                     if result.is_symlink() and not result.exists():
-                        resolved = _resolve_container_symlink(
+                        resolved = _resolve_guest_symlink(
                             result, context_dir,
                         )
                         if resolved:

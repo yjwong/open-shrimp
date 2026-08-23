@@ -477,15 +477,6 @@ def _build_mounts(
             "writable": True,
         })
 
-        # Text-input-state directory — seat-keyboard writes focus state here.
-        text_input_state_dir = str(sdir / "text-input-state-dir")
-        Path(text_input_state_dir).mkdir(parents=True, exist_ok=True)
-        mounts.append({
-            "location": text_input_state_dir,
-            "mountPoint": "/tmp/text-input-state-dir",
-            "writable": True,
-        })
-
     # Served-endpoint launch: each declared mount is a host dir the runtime's
     # ``inject`` writes into (provider ``auth.json``, managed plugin config),
     # synced into the guest so the served process (which runs under its own

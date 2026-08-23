@@ -27,9 +27,9 @@ backend: claude_sdk   # global default; can be overridden per context
 There are **two** completely separate `backend:` settings. Don't conflate them:
 
 - **`backend:`** (top-level or per-context) — selects the **agent runtime**: `claude_sdk` or `opencode`.
-- **`sandbox.backend:`** (inside a context's `sandbox:` block) — selects the **sandbox type**: `docker`, `libvirt`, or `lima`.
+- **`sandbox.backend:`** (inside a context's `sandbox:` block) — selects the **sandbox type**: `libvirt`, `lima`, or `hcs`.
 
-A context can set both at once, e.g. the `opencode` agent runtime running inside a `docker` sandbox.
+A context can set both at once, e.g. the `opencode` agent runtime running inside a `libvirt` sandbox.
 :::
 
 ## OpenCode setup
@@ -58,9 +58,6 @@ contexts:
 
 ## Interaction with sandboxes
 
-OpenCode works inside sandboxes, with a few backend-specific details:
+OpenCode works inside every sandbox backend. When the host has an `opencode` binary, OpenShrimp auto-installs it into the guest; otherwise the base image or the `provision:` script must supply it.
 
-- **Docker** — OpenCode contexts use a separate image, `openshrimp-opencode:latest`, built lazily on first use (distinct from the `openshrimp-claude` image used by `claude_sdk`).
-- **Libvirt and Lima** — when the host has an `opencode` binary, OpenShrimp auto-installs it into the guest. Otherwise the base image or `provision:` script must supply it.
-
-See the [Docker Sandbox](/guides/docker-sandbox/), [VM Sandbox](/guides/vm-sandbox/), and [Lima Sandbox](/guides/lima-sandbox/) guides for sandbox setup, and the [Configuration Reference](/reference/config/) for all fields.
+See the [VM Sandbox](/guides/vm-sandbox/), [Lima Sandbox](/guides/lima-sandbox/), and [HCS Sandbox](/guides/hcs-sandbox/) guides for sandbox setup, and the [Configuration Reference](/reference/config/) for all fields.

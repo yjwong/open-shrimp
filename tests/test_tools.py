@@ -80,7 +80,7 @@ def test_computer_use_tools_gated_on_flag_not_screenshots_dir() -> None:
     tools = create_openshrimp_tools(bot=MagicMock(), chat_id=1, sandbox=sandbox)
     assert _names(tools) == ["send_file"]
 
-    # ...the flag does, with a screenshots dir (docker/libvirt/lima shape)...
+    # ...the flag does, with a screenshots dir (libvirt/lima shape)...
     tools = create_openshrimp_tools(
         bot=MagicMock(), chat_id=1, sandbox=sandbox, computer_use=True,
     )
@@ -350,8 +350,8 @@ def test_context_computer_use_enabled_flag_combinations() -> None:
 
     from open_shrimp.client_manager import context_computer_use_enabled
 
-    def ctx(container=None, sandbox=None):
-        return SimpleNamespace(container=container, sandbox=sandbox)
+    def ctx(sandbox=None):
+        return SimpleNamespace(sandbox=sandbox)
 
     off = SimpleNamespace(computer_use=False, phone_use=False)
     on = SimpleNamespace(computer_use=True, phone_use=False)
@@ -360,10 +360,5 @@ def test_context_computer_use_enabled_flag_combinations() -> None:
     assert context_computer_use_enabled(ctx()) is False
     assert context_computer_use_enabled(ctx(sandbox=off)) is False
     assert context_computer_use_enabled(ctx(sandbox=on)) is True
+    # A phone-use context carries the desktop too.
     assert context_computer_use_enabled(ctx(sandbox=phone)) is True
-    assert context_computer_use_enabled(
-        ctx(container=SimpleNamespace(computer_use=True))
-    ) is True
-    assert context_computer_use_enabled(
-        ctx(container=SimpleNamespace(computer_use=False))
-    ) is False

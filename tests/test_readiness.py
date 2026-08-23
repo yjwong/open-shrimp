@@ -296,15 +296,15 @@ class TestSandbox:
         monkeypatch.setattr(
             "open_shrimp.doctor.checks_for_backend",
             lambda backend: [
-                ("Docker", lambda config: (False, "add yourself to the docker group"))
+                ("libvirt", lambda config: (False, "add yourself to the libvirt group"))
             ],
         )
         state, detail = _sandbox(
-            _config(sandbox=SandboxConfig(backend="docker", enabled=True))
+            _config(sandbox=SandboxConfig(backend="libvirt", enabled=True))
         )
 
         assert state is State.PROBLEM
-        assert "add yourself to the docker group" in detail
+        assert "add yourself to the libvirt group" in detail
 
     def test_a_check_that_raises_is_unknown_not_ready(self, monkeypatch) -> None:
         """The row that matters most must not go green because the probe for
@@ -315,14 +315,14 @@ class TestSandbox:
 
         monkeypatch.setattr(
             "open_shrimp.doctor.checks_for_backend",
-            lambda backend: [("Docker", _boom)],
+            lambda backend: [("libvirt", _boom)],
         )
         state, detail = _sandbox(
-            _config(sandbox=SandboxConfig(backend="docker", enabled=True))
+            _config(sandbox=SandboxConfig(backend="libvirt", enabled=True))
         )
 
         assert state is State.UNKNOWN
-        assert "Docker" in detail
+        assert "libvirt" in detail
 
 
 class TestAutostart:
@@ -394,12 +394,12 @@ class TestCheckReadiness:
         monkeypatch.delenv("OPENSHRIMP_SUPERVISED", raising=False)
         monkeypatch.setattr(
             "open_shrimp.doctor.checks_for_backend",
-            lambda b: [("Docker", lambda config: (True, "fine"))],
+            lambda b: [("libvirt", lambda config: (True, "fine"))],
         )
         rows = await check_readiness(
             _config(
                 directory=str(tmp_path),
-                sandbox=SandboxConfig(backend="docker", enabled=True),
+                sandbox=SandboxConfig(backend="libvirt", enabled=True),
             )
         )
 

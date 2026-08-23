@@ -64,7 +64,7 @@ def test_mingw_bin_must_be_a_string():
 def test_mingw_bin_rejected_on_another_backend():
     raw = _hcs_raw()
     sandbox = raw["contexts"]["default"]["sandbox"]
-    sandbox["backend"] = "docker"
+    sandbox["backend"] = "libvirt"
     sandbox.pop("base_image")
     sandbox["mingw_bin"] = MINGW
     with pytest.raises(ValueError, match="applies only to the hcs backend"):
@@ -188,8 +188,6 @@ def test_members_delegate_to_the_session(tmp_path, monkeypatch):
     assert sb.get_vnc_credentials() is None
     assert sb.get_vnc_quirks() == frozenset()
     assert sb.get_screenshots_dir() is None
-    assert sb.get_text_input_state_path() is None
-    assert sb.get_text_input_active() is False
 
 
 def test_non_computer_use_context_has_no_session(tmp_path, monkeypatch):

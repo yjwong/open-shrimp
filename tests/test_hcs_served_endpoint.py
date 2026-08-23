@@ -100,12 +100,7 @@ def _fake_win(monkeypatch, events: list[str] | None = None):
 
 def _bundle() -> ImageBundle:
     return ImageBundle(
-        tag_suffix="served",
-        bundled_dockerfile="Dockerfile.served",
-        binary_finder=lambda: "/usr/bin/agent",
-        context_binary_name="opencode",
-        build_arg=("AGENT_BIN", "opencode"),
-        guest_home=GUEST_HOME,
+        tag_suffix="served", guest_home=GUEST_HOME, guest_argv0="opencode",
     )
 
 

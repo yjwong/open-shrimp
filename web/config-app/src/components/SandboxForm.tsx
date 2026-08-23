@@ -5,7 +5,7 @@ interface SandboxFormProps {
   onChange: (sandbox: SandboxConfig | null) => void;
 }
 
-const BACKENDS = ["docker", "libvirt", "lima", "hcs"] as const;
+const BACKENDS = ["libvirt", "lima", "hcs"] as const;
 
 export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
   if (!sandbox) {
@@ -15,7 +15,7 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
           type="button"
           className="add-btn"
           onClick={() =>
-            onChange({ backend: "docker", enabled: true })
+            onChange({ backend: "libvirt", enabled: true })
           }
         >
           + Enable Sandbox
@@ -209,34 +209,6 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
         </div>
       )}
 
-      {sandbox.backend === "docker" && (
-        <>
-          <div className="form-toggle-row">
-            <span className="form-toggle-label">Docker-in-Docker</span>
-            <button
-              type="button"
-              className={`toggle${sandbox.docker_in_docker ? " on" : ""}`}
-              onClick={() =>
-                update({ docker_in_docker: !sandbox.docker_in_docker })
-              }
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Dockerfile</label>
-            <input
-              className="form-input"
-              value={sandbox.dockerfile ?? ""}
-              onChange={(e) =>
-                update({
-                  dockerfile: e.target.value || null,
-                })
-              }
-              placeholder="Optional custom Dockerfile path"
-            />
-          </div>
-        </>
-      )}
-
       {isVM && (
         <>
           <div className="form-group">
@@ -319,7 +291,7 @@ export default function SandboxForm({ sandbox, onChange }: SandboxFormProps) {
                     next[i] = e.target.value;
                     update({ persistent_paths: next });
                   }}
-                  placeholder="/var/lib/docker"
+                  placeholder="/var/lib/postgresql"
                 />
                 <button
                   type="button"

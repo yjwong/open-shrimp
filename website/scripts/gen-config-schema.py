@@ -37,10 +37,8 @@ _DESCRIPTIONS: dict[str, dict[str, str]] = {
         "token": "Bot token from @BotFather.",
     },
     "SandboxConfig": {
-        "backend": 'Sandbox backend: "docker", "libvirt", or "lima".',
+        "backend": 'Sandbox backend: "libvirt", "lima", or "hcs".',
         "enabled": "Enable or disable the sandbox.",
-        "docker_in_docker": "Enable rootless Docker inside the container (Docker backend).",
-        "dockerfile": "Path to a custom Dockerfile (Docker backend).",
         "computer_use": "Enable GUI interaction with a headless desktop.",
         "memory": "Memory ceiling in MB (Libvirt backend).",
         "cpus": "Number of vCPUs (Libvirt backend).",
@@ -56,7 +54,6 @@ _DESCRIPTIONS: dict[str, dict[str, str]] = {
         "additional_directories": "Extra directories the agent can access.",
         "default_for_chats": "Chat IDs where this context is auto-selected.",
         "locked_for_chats": "Chat IDs locked to this context.",
-        "container": "Legacy Docker sandbox config (use sandbox instead).",
         "sandbox": "Sandbox configuration.",
     },
     "ReviewConfig": {

@@ -6,67 +6,18 @@ for it — these tests exercise the primitive so it is covered before the
 served-endpoint flavour wires it in.
 
 Each backend is constructed via ``object.__new__`` to bypass the heavyweight
-``__init__`` (which would boot a VM / talk to Docker); only the attributes
+``__init__`` (which would boot a VM); only the attributes
 ``reach`` touches are set, and the underlying primitive it delegates to is
 mocked.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from open_shrimp.sandbox.base import PortForward
-from open_shrimp.sandbox.docker import DockerSandbox
 from open_shrimp.sandbox.libvirt import LibvirtSandbox
 from open_shrimp.sandbox.lima import LimaSandbox
-
-
-# -- Docker: published-port lookup ------------------------------------------
-
-
-def test_docker_reach_returns_published_host_port():
-    """Docker resolves the dynamically-mapped host port via ``docker port``."""
-    sb = object.__new__(DockerSandbox)
-    sb._context_name = "demo"
-
-    with patch("open_shrimp.sandbox.docker.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="0.0.0.0:32768\n", stderr="",
-        )
-        endpoint = sb.reach(5900)
-
-    assert endpoint == "127.0.0.1:32768"
-    # Queried the guest port on this context's container.
-    argv = mock_run.call_args[0][0]
-    assert argv[:3] == ["docker", "port", "openshrimp-demo"]
-    assert argv[3] == "5900"
-
-
-def test_docker_reach_handles_ipv6_first_line():
-    """A leading ``[::]:PORT`` line is skipped in favour of a parseable port."""
-    sb = object.__new__(DockerSandbox)
-    sb._context_name = "demo"
-
-    with patch("open_shrimp.sandbox.docker.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="[::]:49160\n0.0.0.0:49160\n", stderr="",
-        )
-        endpoint = sb.reach(8080)
-
-    assert endpoint == "127.0.0.1:49160"
-
-
-def test_docker_reach_raises_when_port_not_published():
-    """A non-zero ``docker port`` exit (no mapping) raises."""
-    sb = object.__new__(DockerSandbox)
-    sb._context_name = "demo"
-
-    with patch("open_shrimp.sandbox.docker.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="No such port",
-        )
-        with pytest.raises(RuntimeError):
-            sb.reach(5900)
 
 
 # -- libvirt / lima: ssh -L tunnel via add_port_forward ----------------------

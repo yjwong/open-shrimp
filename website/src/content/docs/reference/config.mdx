@@ -90,11 +90,6 @@ contexts:
 | `locked_for_chats` | list of int | No | `[]` | Chat IDs locked to this context (users cannot switch) |
 | `backend` | string | No | inherits top-level | Per-context override of the agent runtime (`claude_sdk` or `opencode`). Inherits the top-level `backend` when omitted. This is the agent runtime — distinct from `sandbox.backend` (the sandbox type) |
 | `sandbox` | object | No | `null` | Sandbox configuration (see below) |
-| `container` | object or bool | No | `null` | Legacy Docker sandbox config (use `sandbox` instead) |
-
-:::caution
-You cannot specify both `container` and `sandbox` on the same context. The `container` key is a backwards-compatible alias for `sandbox` with `backend: docker`.
-:::
 
 :::note
 The context-level `backend` (agent runtime) is unrelated to `sandbox.backend` (sandbox type). The `opencode` backend has extra preconditions: provider-qualified models (`provider/model`), out-of-band `opencode auth login`, and a discoverable `opencode` binary. See [Agent Backends](/guides/backends/).
@@ -158,34 +153,14 @@ Run the Claude CLI inside an isolated environment. When a sandbox is enabled, al
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `backend` | string | Yes | — | `"docker"`, `"libvirt"`, or `"lima"` |
+| `backend` | string | Yes | — | `"libvirt"` (Linux), `"lima"` (macOS), or `"hcs"` (Windows) |
 | `enabled` | bool | No | `true` | Enable or disable the sandbox |
-| `docker_in_docker` | bool | No | `false` | Enable rootless Docker inside the container (Docker backend only) |
-| `dockerfile` | string | No | `null` | Path to a custom Dockerfile (Docker backend only) |
 | `computer_use` | bool | No | `false` | Enable GUI interaction with a headless desktop |
 | `memory` | int | No | `2048` | Memory ceiling in MB (Libvirt, Lima, and HCS backends) |
 | `cpus` | int | No | `2` | Number of vCPUs (Libvirt, Lima, and HCS backends). HCS rejects a count above the host's logical processor count |
 | `disk_size` | int | No | `20` | Disk size in GB for the qcow2 overlay (Libvirt, Lima) or each dynamic VHDX volume (HCS) |
 | `base_image` | string | No | `null` | Path to a base image you supply — qcow2 for Libvirt, VHDX for HCS. Both backends download one when unset |
 | `provision` | string | No | `null` | Shell script to run on first boot (Libvirt, Lima, and HCS backends) |
-
-### Docker backend
-
-```yaml
-sandbox:
-  backend: docker
-  docker_in_docker: true
-  dockerfile: /path/to/Dockerfile.claude
-  computer_use: true
-```
-
-- The project directory is bind-mounted into the container
-- Session storage is isolated under `~/.config/openshrimp/containers/<context>/`
-- Container runs as host uid/gid
-- Custom Dockerfiles should `FROM openshrimp-claude:latest`; images are tagged `openshrimp-claude:<context-name>` and built lazily
-- `docker_in_docker: true` adds `--cap-add SYS_ADMIN` (reduced isolation)
-
-See the [Docker Sandbox guide](/guides/docker-sandbox/) for detailed setup instructions.
 
 ### Libvirt backend
 
@@ -302,8 +277,8 @@ contexts:
     additional_directories:
       - /home/you/Documents/shared-components
     sandbox:
-      backend: docker
-      docker_in_docker: true
+      backend: libvirt
+      memory: 4096
       computer_use: true
 
   infrastructure:

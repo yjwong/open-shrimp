@@ -1,10 +1,10 @@
 """When the agent backend (runtime) for a sandboxed context changes, the
-cached sandbox is pinned to the old image/launch and must be torn down and
-rebuilt — otherwise the new agent is launched inside the previous backend's
-container/VM and fails.
+cached sandbox is pinned to the old launch and must be torn down and rebuilt —
+otherwise the new agent is launched inside the previous backend's guest and
+fails.
 
 These tests exercise the manager-level cache invalidation without touching
-Docker by stubbing the concrete ``DockerSandbox`` constructor.
+libvirt by stubbing the concrete ``LibvirtSandbox`` constructor.
 """
 
 from __future__ import annotations
@@ -15,9 +15,10 @@ from typing import Any
 
 import pytest
 
-import open_shrimp.sandbox.docker as docker_mod
+import open_shrimp.sandbox.libvirt as libvirt_mod
 from open_shrimp import paths
-from open_shrimp.sandbox.manager import DockerSandboxManager
+from open_shrimp.config import SandboxConfig
+from open_shrimp.sandbox.manager import LibvirtSandboxManager
 
 
 @pytest.fixture(autouse=True)
@@ -29,22 +30,16 @@ def _init_paths():
 
 
 @dataclass
-class _FakeContainer:
-    docker_in_docker: bool = False
-    computer_use: bool = False
-    dockerfile: str | None = None
-    enabled: bool = True
-
-
-@dataclass
 class _FakeCtx:
     directory: str = "/tmp/openshrimp-fake"
     additional_directories: list[str] = field(default_factory=list)
-    container: _FakeContainer = field(default_factory=_FakeContainer)
+    sandbox: SandboxConfig = field(
+        default_factory=lambda: SandboxConfig(backend="libvirt"),
+    )
 
 
 class _FakeSandbox:
-    """Minimal stand-in for DockerSandbox: records its runtime and stop()."""
+    """Minimal stand-in for LibvirtSandbox: records its runtime and stop()."""
 
     def __init__(self, *, runtime: Any, **_kw: Any) -> None:
         self.runtime = runtime
@@ -58,17 +53,19 @@ def _runtime(name: str) -> Any:
     return types.SimpleNamespace(name=name)
 
 
-def _patch_sandbox(monkeypatch) -> None:
-    monkeypatch.setattr(docker_mod, "DockerSandbox", _FakeSandbox)
+def _manager(monkeypatch) -> LibvirtSandboxManager:
+    monkeypatch.setattr(libvirt_mod, "LibvirtSandbox", _FakeSandbox)
+    mgr = LibvirtSandboxManager()
+    # create_sandbox refuses without a connection; the fake never uses it.
+    mgr._conn = object()
+    return mgr
 
 
 def test_same_runtime_reuses_cached_sandbox(monkeypatch):
-    _patch_sandbox(monkeypatch)
-    mgr = DockerSandboxManager()
+    mgr = _manager(monkeypatch)
     ctx = _FakeCtx()
-    rt = _runtime("claude")
 
-    first = mgr.create_sandbox("dev", ctx, runtime=rt)
+    first = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
     second = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
 
     assert first is second
@@ -76,8 +73,7 @@ def test_same_runtime_reuses_cached_sandbox(monkeypatch):
 
 
 def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
-    _patch_sandbox(monkeypatch)
-    mgr = DockerSandboxManager()
+    mgr = _manager(monkeypatch)
     ctx = _FakeCtx()
 
     claude_sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
@@ -95,8 +91,7 @@ def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
 
 def test_runtime_none_keeps_cached_sandbox(monkeypatch):
     """A ``None`` runtime must not invalidate an existing sandbox."""
-    _patch_sandbox(monkeypatch)
-    mgr = DockerSandboxManager()
+    mgr = _manager(monkeypatch)
     ctx = _FakeCtx()
 
     first = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))

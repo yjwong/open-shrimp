@@ -112,15 +112,11 @@ The `/restart` command is the quickest way to restart without SSH access.
 
 Both the `open-shrimp` bot and the `moonshine-stt` speech-to-text binary share a single version number. To check the current version, run `./openshrimp update` — the first line of output prints the installed version before checking for newer ones.
 
-## Docker sandbox images
+## Sandbox guests
 
-If you use Docker sandboxes, updated code may require rebuilding the container image. OpenShrimp builds images lazily — the next time a sandboxed context is used, the image will be rebuilt if the Dockerfile or base image has changed.
+Updated code may need a fresh guest. OpenShrimp rebuilds one lazily — the next time a sandboxed context is used, its guest is rebuilt if the configuration that shaped it has changed. Persistent volumes survive a rebuild.
 
-To force a rebuild, remove the existing image:
-
-```bash
-docker rmi openshrimp-claude:your-context-name
-```
+To force one, use the "Reset" button on the context in the config Mini App (`/config`).
 
 ## Configuration changes
 

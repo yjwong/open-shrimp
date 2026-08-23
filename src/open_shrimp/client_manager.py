@@ -158,9 +158,8 @@ def context_computer_use_enabled(context: "ContextConfig") -> bool:
     context also carries the computer-use desktop.
     """
     return bool(
-        (context.container is not None and context.container.computer_use)
-        or (context.sandbox is not None and context.sandbox.computer_use)
-        or (context.sandbox is not None and context.sandbox.phone_use)
+        context.sandbox is not None
+        and (context.sandbox.computer_use or context.sandbox.phone_use)
     )
 
 
@@ -606,14 +605,13 @@ async def get_or_create_session(
         )
 
         # Serialise sandbox boot per context_name so two scopes sharing
-        # the same libvirt domain (or Docker container) don't race on VM
-        # boot, virtiofsd startup, port allocation, etc.
+        # the same guest don't race on VM boot, virtiofsd startup, port
+        # allocation, etc.
         ctx_lock = _context_locks.setdefault(context_name, asyncio.Lock())
         async with ctx_lock:
             # Resolved before create_sandbox so the runtime's image bundle +
-            # served-launch home mounts feed the Docker image/run-argv
-            # selection.  ``make_runtime`` is pure/cheap, so computing it
-            # first is safe.
+            # served-launch home mounts are in hand when the sandbox is built.
+            # ``make_runtime`` is pure/cheap, so computing it first is safe.
             _runtime = backend.make_runtime(
                 sandbox_manager.agent_home_dir(context_name),
                 context_name=context_name,
@@ -621,9 +619,9 @@ async def get_or_create_session(
             )
             runtime = _runtime
 
-            # The runtime selects the Docker image/run-argv bundle and (for
-            # served launches) the extra host-synced home mounts; VM backends
-            # consume only the served-launch's mounts.
+            # The runtime names the guest layout and (for served launches)
+            # the extra host-synced home mounts; the backends consume only the
+            # served-launch's mounts.
             sandbox = sandbox_manager.create_sandbox(
                 context_name,
                 context,

@@ -78,8 +78,8 @@ You're away from your desk but need the agent to fix a bug, review a diff, or sc
 - **Multiple projects, one bot.** Switch between project contexts on the fly with `/context`. Each context has its own working directory, CLAUDE.md, model, and tool permissions.
 - **Persistent sessions.** Pick up where you left off. Sessions survive restarts, and you can `/resume` any previous conversation.
 - **Forum topic support.** Use Telegram forum channels to organize conversations — each topic thread gets its own independent agent session. Run parallel tasks in the same chat without them stepping on each other. The agent auto-titles each topic for easy navigation.
-- **Container isolation.** Run each context inside a sandbox — Docker or a full VM — with only the project directory exposed.
-- **Computer use.** Enable a headless desktop inside the container — the agent can launch Chromium, click around, take screenshots, and interact with GUIs. Watch live via VNC.
+- **Sandbox isolation.** Run each context inside its own virtual machine, with only the project directory exposed.
+- **Computer use.** Enable a headless desktop inside the sandbox — the agent can launch Chromium, click around, take screenshots, and interact with GUIs. Watch live via VNC.
 - **Group chat ready.** Add the bot to a team chat. It responds to @mentions and replies, so it stays out of the way until you need it.
 - **Schedule recurring tasks.** Tell the agent to check your repo every morning, monitor a CI pipeline, or run a one-shot task later — all via natural language. Tasks run in isolated sessions automatically.
 - **Watch background tasks.** When the agent runs a long command in the background, tap "View output" to open a live terminal viewer right in Telegram.
@@ -103,23 +103,21 @@ Set up recurring or one-shot tasks that the agent runs automatically. Just descr
 
 The agent manages schedules via built-in tools. Use `/schedule` to see what's active or remove tasks. Scheduled tasks run in isolated sessions with read-only access, so they can report but not modify your code without a follow-up conversation.
 
-## Container Isolation
+## Sandbox Isolation
 
-You can run each context inside an isolated sandbox by adding a `sandbox:` block to your context config. The agent runs inside the sandbox with only the project directory mounted — so it can't touch anything else on the host.
+You can run each context inside an isolated sandbox by adding a `sandbox:` block to your context config. The agent runs inside the guest with only the project directory shared in — so it can't touch anything else on the host.
 
 ```yaml
 contexts:
   my-project:
     directory: /home/you/projects/my-project
     sandbox:
-      backend: docker   # docker (Linux), libvirt (Linux VM), lima (macOS VM), hcs (Windows VM)
+      backend: libvirt   # libvirt (Linux), lima (macOS), hcs (Windows)
 ```
 
 Session state is stored separately per context under `~/.config/openshrimp/containers/`, so sandboxed contexts don't interfere with each other or your host agent state (e.g. `~/.claude`).
 
-On Linux, use `backend: docker` or `backend: libvirt`. On macOS, use `backend: lima` for full VM isolation via Apple's Virtualization.framework. On Windows, use `backend: hcs` for a Linux guest on the Host Compute Service — guest images download automatically on first boot, but the host has its own prerequisites, so read the [HCS sandbox guide](https://shrimp.wong.place/guides/hcs-sandbox/) before enabling it.
-
-OpenCode contexts use a separate `openshrimp-opencode:latest` image — see [Agent Backends](#agent-backends).
+There is one backend per platform. On Linux, `backend: libvirt` runs a QEMU/KVM guest. On macOS, `backend: lima` gives full VM isolation via Apple's Virtualization.framework. On Windows, `backend: hcs` runs a Linux guest on the Host Compute Service — guest images download automatically on first boot, but the host has its own prerequisites, so read the [HCS sandbox guide](https://shrimp.wong.place/guides/hcs-sandbox/) before enabling it.
 
 ## macOS App
 
@@ -278,7 +276,7 @@ When a tool needs approval, you get three options: **Allow** (once), **Accept al
 
 ## Agent Backends
 
-The top-level `backend:` key picks the agent runtime that drives OpenShrimp. Two ship: `claude_sdk` (the default — the Claude Agent SDK) and `opencode` ([`sst/opencode`](https://github.com/sst/opencode) over its HTTP serve API, supporting OpenAI, Anthropic, and Google models). Any context can override the global choice with its own `backend:` key. Note this agent `backend:` is a different setting from the sandbox `backend:` (`docker`/`libvirt`/`lima`/`hcs`) described under [Container Isolation](#container-isolation).
+The top-level `backend:` key picks the agent runtime that drives OpenShrimp. Two ship: `claude_sdk` (the default — the Claude Agent SDK) and `opencode` ([`sst/opencode`](https://github.com/sst/opencode) over its HTTP serve API, supporting OpenAI, Anthropic, and Google models). Any context can override the global choice with its own `backend:` key. Note this agent `backend:` is a different setting from the sandbox `backend:` (`libvirt`/`lima`/`hcs`) described under [Sandbox Isolation](#sandbox-isolation).
 
 OpenCode isn't bundled, so satisfy three preconditions on the host first:
 

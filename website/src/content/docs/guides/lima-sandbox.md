@@ -140,4 +140,4 @@ Screenshots use `screencapture`, clicks and keyboard input use `CGEvent` (via Py
 
 ## Limitations
 
-- **macOS only** — the Lima backend uses Apple Virtualization.framework, which is not available on Linux. Use the [Docker](/guides/docker-sandbox/) or [Libvirt](/guides/vm-sandbox/) sandbox on Linux.
+- **macOS only** — the Lima backend uses Apple Virtualization.framework, which is not available on Linux. Use the [Libvirt](/guides/vm-sandbox/) sandbox on Linux.

@@ -4,9 +4,8 @@ The failure this replaces was silent in the only way that matters: the message
 never ran, and the reply said nothing the operator could act on.  So each test
 here asserts what the reply *refuses* to say as well as what it says — a
 sandbox failure that renders "An error occurred while processing your request"
-has thrown away a remedy the code already held, and one that tells a user
-outside the ``docker`` group to start a daemon that is already running sends
-them somewhere there is nothing to fix.
+has thrown away a remedy the code already held, and one that names the wrong
+missing piece sends the operator somewhere there is nothing to fix.
 """
 
 from __future__ import annotations
@@ -60,7 +59,7 @@ def _fresh_cache():
     sandbox_diagnosis._cache.clear()
 
 
-def _config(backend: str = "docker") -> Config:
+def _config(backend: str = "libvirt") -> Config:
     return Config(
         telegram=TelegramConfig(token="0:fake"),
         allowed_users=[1],
@@ -77,7 +76,7 @@ def _config(backend: str = "docker") -> Config:
     )
 
 
-def _error(backend: str = "docker", message: str = "boom") -> SandboxStartupError:
+def _error(backend: str = "libvirt", message: str = "boom") -> SandboxStartupError:
     return SandboxStartupError("work", backend, RuntimeError(message))
 
 
@@ -85,67 +84,6 @@ def _checks(monkeypatch, *checks: tuple[str, Any]) -> None:
     monkeypatch.setattr(
         "open_shrimp.doctor.checks_for_backend", lambda backend: list(checks)
     )
-
-
-# -- W3: the Docker remedies that did not exist --------------------------------
-
-
-class TestDockerCheck:
-    """``docker info`` exits non-zero for two opposite reasons."""
-
-    def _run(self, monkeypatch, *, returncode: int, stderr: bytes):
-        monkeypatch.setattr(
-            "shutil.which", lambda name: "/usr/bin/docker" if name == "docker" else None
-        )
-        monkeypatch.setattr(
-            subprocess,
-            "run",
-            lambda *a, **k: SimpleNamespace(returncode=returncode, stderr=stderr),
-        )
-        return doctor._check_docker(None)
-
-    def test_permission_denied_names_the_group_not_the_daemon(self, monkeypatch):
-        ok, detail = self._run(
-            monkeypatch,
-            returncode=1,
-            stderr=(
-                b"permission denied while trying to connect to the Docker "
-                b"daemon socket at unix:///var/run/docker.sock"
-            ),
-        )
-
-        assert not ok
-        assert "usermod -aG docker" in detail
-        # The trap this check used to set: the daemon is running, and sending
-        # the operator to start it wastes the one attempt they will make.
-        assert "daemon is not running" not in detail
-
-    def test_the_group_remedy_says_a_fresh_login_is_needed(self, monkeypatch):
-        """A new terminal in the same session still carries the old token, so
-        a remedy that stops at ``usermod`` leaves the user where it found
-        them."""
-        _, detail = self._run(
-            monkeypatch, returncode=1, stderr=b"permission denied"
-        )
-
-        assert "log out and back in" in detail
-
-    def test_a_dead_daemon_still_says_so(self, monkeypatch):
-        ok, detail = self._run(
-            monkeypatch,
-            returncode=1,
-            stderr=b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
-        )
-
-        assert not ok
-        assert "daemon is not running" in detail
-        assert "usermod" not in detail
-
-    def test_a_running_daemon_passes(self, monkeypatch):
-        ok, detail = self._run(monkeypatch, returncode=0, stderr=b"")
-
-        assert ok
-        assert "/usr/bin/docker" in detail
 
 
 # -- B1: the Lima check that could never run ----------------------------------
@@ -210,7 +148,7 @@ class TestLibvirtImportRemedy:
         monkeypatch.setitem(sys.modules, "libvirt", None)
 
         with pytest.raises(ImportError) as caught:
-            LibvirtSandboxManager().start_reaper()
+            LibvirtSandboxManager().start_backend()
 
         # ``str()`` is what a caller renders; "No module named 'libvirt'" is
         # a symptom with no way out of it.
@@ -258,20 +196,20 @@ class TestDiagnose:
         """The remedy leads, because it is the actionable half.  The exception
         still travels with it, since a check can fail over something this
         failure had nothing to do with."""
-        _checks(monkeypatch, ("Docker", lambda config: (False, "join the docker group")))
+        _checks(monkeypatch, ("libvirt", lambda config: (False, "add yourself to the libvirt group")))
 
         what, prerequisite = await diagnose(
             _error(message="Failed to start container"), _config()
         )
 
         assert prerequisite
-        assert "join the docker group" in what
+        assert "add yourself to the libvirt group" in what
         assert "Failed to start container" in what
-        assert what.index("join the docker group") < what.index("Failed to start")
+        assert what.index("add yourself to the libvirt group") < what.index("Failed to start")
 
     @pytest.mark.asyncio
     async def test_a_clean_host_renders_the_failure_itself(self, monkeypatch):
-        _checks(monkeypatch, ("Docker", lambda config: (True, "daemon running")))
+        _checks(monkeypatch, ("libvirt", lambda config: (True, "qemu:///session reachable")))
 
         what, prerequisite = await diagnose(
             _error(message="VM SSH not reachable after 120s"), _config()
@@ -312,7 +250,7 @@ class TestDiagnose:
         self, monkeypatch
     ):
         _checks(monkeypatch)
-        error = SandboxStartupError("work", "docker", RuntimeError(""))
+        error = SandboxStartupError("work", "libvirt", RuntimeError(""))
 
         what, _ = await diagnose(error, _config())
 
@@ -329,9 +267,9 @@ class TestDiagnosisCost:
         def _count(config):
             nonlocal runs
             runs += 1
-            return False, "join the docker group"
+            return False, "add yourself to the libvirt group"
 
-        _checks(monkeypatch, ("Docker", _count))
+        _checks(monkeypatch, ("libvirt", _count))
 
         for _ in range(3):
             await diagnose(_error(), _config())
@@ -345,9 +283,9 @@ class TestDiagnosisCost:
         def _count(config):
             nonlocal runs
             runs += 1
-            return False, "join the docker group"
+            return False, "add yourself to the libvirt group"
 
-        _checks(monkeypatch, ("Docker", _count))
+        _checks(monkeypatch, ("libvirt", _count))
         clock = [1000.0]
         monkeypatch.setattr(sandbox_diagnosis, "_now", lambda: clock[0])
         await diagnose(_error(), _config())
@@ -363,20 +301,20 @@ class TestFailureReply:
     async def test_it_names_the_project_and_says_the_message_did_not_run(
         self, monkeypatch
     ):
-        _checks(monkeypatch, ("Docker", lambda config: (False, "join the docker group")))
+        _checks(monkeypatch, ("libvirt", lambda config: (False, "add yourself to the libvirt group")))
 
         text = await failure_reply(_error(), _config())
 
         assert '"work"' in text
         assert "hasn't run" in text
-        assert "join the docker group" in text
+        assert "add yourself to the libvirt group" in text
         assert "/context" in text
 
     @pytest.mark.asyncio
     async def test_a_runtime_failure_is_not_sold_as_a_missing_piece(
         self, monkeypatch
     ):
-        _checks(monkeypatch, ("Docker", lambda config: (True, "daemon running")))
+        _checks(monkeypatch, ("libvirt", lambda config: (True, "qemu:///session reachable")))
 
         text = await failure_reply(
             _error(message="guest control agent never came up"), _config()
@@ -416,7 +354,7 @@ class _Context:
         self.bot = AsyncMock()
         self.bot.send_message.return_value = SimpleNamespace(message_id=7)
         self.bot_data: dict[str, Any] = {
-            "sandbox_managers": {"docker": _StubManager(sandbox)}
+            "sandbox_managers": {"libvirt": _StubManager(sandbox)}
         }
 
 
@@ -459,7 +397,7 @@ async def _drive(db, message: str = "Failed to start container") -> _Context:
 
     Nothing between the lifecycle call and the reply is stubbed: the refusal
     is raised by ``ensure_environment`` and travels the same path a real
-    Docker failure would.
+    libvirt failure would.
     """
     sandbox = _RefusingSandbox(message)
     context = _Context(sandbox)
@@ -500,20 +438,20 @@ class TestTheWholeChain:
     async def test_a_missing_prerequisite_reaches_the_user(self, monkeypatch, db):
         _checks(
             monkeypatch,
-            ("Docker", lambda config: (False, "add yourself to the docker group")),
+            ("libvirt", lambda config: (False, "add yourself to the libvirt group")),
         )
 
         context = await _drive(db)
 
         said = _failure_message(context)
-        assert "add yourself to the docker group" in said
+        assert "add yourself to the libvirt group" in said
         assert "An error occurred while processing your request" not in "".join(
             _sent(context)
         )
 
     @pytest.mark.asyncio
     async def test_a_runtime_failure_reaches_the_user(self, monkeypatch, db):
-        _checks(monkeypatch, ("Docker", lambda config: (True, "daemon running")))
+        _checks(monkeypatch, ("libvirt", lambda config: (True, "qemu:///session reachable")))
 
         context = await _drive(db, "VM SSH not reachable after 120s")
 
@@ -567,7 +505,7 @@ class TestTheReconnectPath:
         from open_shrimp import client_manager
 
         async def _refuse(**kwargs):
-            raise SandboxStartupError("work", "docker", RuntimeError("boom"))
+            raise SandboxStartupError("work", "libvirt", RuntimeError("boom"))
 
         monkeypatch.setattr(client_manager, "get_or_create_session", _refuse)
         monkeypatch.setitem(

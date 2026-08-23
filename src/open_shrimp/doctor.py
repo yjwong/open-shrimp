@@ -1,7 +1,7 @@
 """Detect common issues with optional components.
 
 Run via ``openshrimp doctor`` to check that optional dependencies
-(moonshine-stt, cloudflared, Docker, libvirt, virtiofsd, Lima, etc.)
+(moonshine-stt, cloudflared, libvirt, virtiofsd, Lima, etc.)
 are available and functional.
 
 Every check takes the loaded config (``None`` when there is none to load) and
@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import os
 import platform
-import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -78,60 +77,6 @@ def _check_cloudflared(config: Config | None) -> tuple[bool, str]:
             "— install cloudflared yourself and put it on $PATH"
         )
     return True, "not downloaded yet — fetched on first tunnel start"
-
-
-def _check_docker(config: Config | None) -> tuple[bool, str]:
-    path = shutil.which("docker")
-    if not path:
-        return False, (
-            "docker CLI not found — install Docker Engine (or Docker "
-            "Desktop) and make sure docker is on your PATH"
-        )
-    # Check if daemon is responsive.
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return False, _docker_refusal(result.stderr)
-    except subprocess.TimeoutExpired:
-        return False, (
-            "docker CLI found but the daemon did not answer in 10 seconds — "
-            "it is starting up or wedged; restart it with: sudo systemctl "
-            "restart docker  (or restart Docker Desktop)"
-        )
-    except Exception as e:
-        return False, f"docker CLI found but check failed: {e}"
-    return True, f"found at {path}, daemon running"
-
-
-def _docker_refusal(stderr: bytes) -> str:
-    """Why ``docker info`` failed, told apart by what the daemon said.
-
-    A socket that refuses this account and a daemon that is not there both
-    exit non-zero, and the remedies are opposites: one is a group membership,
-    the other is starting a service.  Conflating them sends an operator to
-    start a daemon that is already running, so the permission case is split
-    out on the only evidence there is — the CLI's own words.
-    """
-    said = stderr.decode("utf-8", "replace").lower()
-    if "permission denied" in said:
-        return (
-            "docker CLI found, but this account is not allowed to talk to the "
-            "Docker daemon — the daemon may well be running; add yourself to "
-            "the docker group with: sudo usermod -aG docker $USER  — then log "
-            "out and back in, because the group is read from the token your "
-            "session was created with, so a new terminal in the same session "
-            "still will not have it"
-        )
-    return (
-        "docker CLI found but daemon is not running — start it with: sudo "
-        "systemctl start docker  (or launch Docker Desktop)"
-    )
 
 
 def _check_libvirt(config: Config | None) -> tuple[bool, str]:
@@ -451,7 +396,6 @@ _Check = Callable[[Config | None], tuple[bool, str]]
 _CHECKS: list[tuple[str, _Check, str | None, tuple[str, ...]]] = [
     ("moonshine-stt", _check_moonshine_stt, None, ()),
     ("cloudflared", _check_cloudflared, None, ()),
-    ("Docker", _check_docker, "Linux", ("docker",)),
     ("libvirt", _check_libvirt, "Linux", ("libvirt",)),
     ("virtiofsd", _check_virtiofsd, "Linux", ("libvirt",)),
     ("Lima", _check_lima, "Darwin", ("lima",)),
@@ -543,7 +487,6 @@ class SandboxOffer:
 # given words is a KeyError a test catches rather than a choice the wizard
 # silently never shows.
 _SANDBOX_LABELS: dict[str, tuple[str, str]] = {
-    "docker": ("Docker", "each project runs in a container on this computer"),
     "libvirt": ("libvirt", "each project runs in its own virtual machine"),
     "lima": ("Lima", "each project runs in its own Linux virtual machine"),
     "hcs": ("Hyper-V", "each project runs in its own Linux virtual machine"),
@@ -569,8 +512,8 @@ def _offer(backend: str, config: Config | None) -> SandboxOffer | None:
     label, summary = _SANDBOX_LABELS[backend]
     failed = [o for o in outcomes if not o.ok]
     # The check's own name is dropped where it repeats the backend's, so a
-    # single-prerequisite backend reads as "Docker — docker CLI not found"
-    # rather than naming Docker twice in one line.
+    # single-prerequisite backend reads as "Lima — limactl not found" rather
+    # than naming Lima twice in one line.
     return SandboxOffer(
         backend=backend,
         label=label,
@@ -595,11 +538,9 @@ def sandbox_offers(config: Config | None = None) -> list[SandboxOffer]:
     return [offer for offer in offers if offer is not None]
 
 
-# One backend per platform, and setup names no other.  Somebody who has to be
-# told what libvirt is cannot weigh it against Docker, so offering the choice
-# buys nothing and costs the one question of the step its answer; the pick
-# here is the best-trodden path on each platform, and the config Mini App can
-# still move a context to any backend afterwards.
+# One backend per platform, which is also the only one each platform has.
+# Named here rather than derived at the call site so a platform that grows a
+# second backend has one place to say which of them setup blesses.
 _BLESSED_BACKEND: dict[str, str] = {
     "Linux": "libvirt",
     "Darwin": "lima",

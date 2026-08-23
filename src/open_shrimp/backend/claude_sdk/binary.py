@@ -1,7 +1,7 @@
 """Locate the Claude CLI binary for host-side execution.
 
 Used by anything on the host that needs a *path* to ``claude``: sandbox
-provisioning (Docker, libvirt, Lima) and the ``/login`` pty endpoint.
+provisioning (libvirt, Lima) and the ``/login`` pty endpoint.
 The SDK-bundled binary is preferred so the version Claude runs with
 matches the SDK version pinned in this project, instead of drifting to
 whatever ``claude`` the user happens to have on PATH.

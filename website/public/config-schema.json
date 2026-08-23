@@ -75,7 +75,7 @@
       "properties": {
         "backend": {
           "type": "string",
-          "description": "Sandbox backend: \"docker\", \"libvirt\", or \"lima\"."
+          "description": "Sandbox backend: \"libvirt\", \"lima\", or \"hcs\"."
         },
         "enabled": {
           "type": "boolean",
@@ -85,15 +85,6 @@
         "guest_os": {
           "type": "string",
           "default": "linux"
-        },
-        "docker_in_docker": {
-          "type": "boolean",
-          "description": "Enable rootless Docker inside the container (Docker backend).",
-          "default": false
-        },
-        "dockerfile": {
-          "description": "Path to a custom Dockerfile (Docker backend).",
-          "default": null
         },
         "computer_use": {
           "type": "boolean",
@@ -214,10 +205,6 @@
           },
           "description": "Chat IDs locked to this context.",
           "default": []
-        },
-        "container": {
-          "description": "Legacy Docker sandbox config (use sandbox instead).",
-          "default": null
         },
         "sandbox": {
           "description": "Sandbox configuration.",

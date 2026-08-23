@@ -12,8 +12,8 @@ the problem this solves — nothing here creates or boots anything.
 This is not a diagnosis, so it does not live in :mod:`open_shrimp.doctor`,
 which only reports whether an asset is already present.  Nor does it live in
 :mod:`open_shrimp.sandbox.manager`: a manager is the factory for a *running*
-backend and needs a live host behind it (a Docker daemon, a libvirt
-connection), while a prefetch must work on a host where none of that is up
+backend and needs a live host behind it (a libvirt connection, a running
+Hyper-V), while a prefetch must work on a host where none of that is up
 yet — it is a download and a filesystem, nothing more.
 
 Every fetch reached from here is idempotent and lands through a temporary
@@ -410,11 +410,6 @@ def shared_assets(backend: str) -> list[SharedAsset]:
         return _lima_assets()
     if backend == "hcs":
         return _hcs_assets()
-    if backend == "docker":
-        # Docker's shared artifact is built, not fetched: ``docker build``
-        # resolves its own base layers and reports its own progress, and the
-        # build needs a running daemon this command deliberately does not.
-        return []
     raise ValueError(f"Unknown sandbox backend: {backend!r}")
 
 

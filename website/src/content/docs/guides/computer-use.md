@@ -9,30 +9,10 @@ Computer use gives Claude a headless desktop environment inside the sandbox. Cla
 
 ## Requirements
 
-- A sandbox with `computer_use: true` — supported on every sandbox backend: Docker, Libvirt, Lima, and [HCS](/guides/hcs-sandbox/)
+- A sandbox with `computer_use: true` — supported on every sandbox backend: Libvirt, Lima, and [HCS](/guides/hcs-sandbox/)
 - The `review` section configured for Mini Apps (needed for VNC viewer)
 
 ## Setup
-
-### Docker
-
-```yaml
-contexts:
-  browser-tasks:
-    directory: /home/you/Documents/browser-project
-    description: "Browser automation"
-    allowed_tools:
-      - LSP
-      - AskUserQuestion
-    sandbox:
-      backend: docker
-      computer_use: true
-
-review:
-  tunnel: cloudflared  # needed for VNC Mini App
-```
-
-The computer-use Docker image (`openshrimp-computer-use`) extends the base image with a Wayland compositor, Chromium, and a terminal.
 
 ### Libvirt VM
 
@@ -97,13 +77,6 @@ The `/vnc` command requires the `review` section to be configured with either `p
 :::
 
 ## Implementation differences by backend
-
-### Docker
-
-- Screenshots via `grim` (Wayland screenshot tool)
-- Input via `wlrctl` (Wayland input simulation)
-- Window focus via `wlrctl`
-- VNC exposed on a dynamic port
 
 ### Libvirt VM
 

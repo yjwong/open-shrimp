@@ -172,11 +172,11 @@ def test_opencode_top_level_still_validates_each_context(_stub_opencode_binary):
 
 
 def test_opencode_per_context_allows_computer_use(_stub_opencode_binary):
-    """OpenCode + computer_use validates: the layered image carries opencode."""
+    """OpenCode + computer_use validates: the guest desktop is agent-neutral."""
     raw = _opencode_raw(
         backend="opencode",
         model="openai/gpt-5.5",
-        sandbox={"backend": "docker", "computer_use": True},
+        sandbox={"backend": "libvirt", "computer_use": True},
     )
     _validate_raw(raw)  # no raise
 
@@ -190,7 +190,7 @@ def test_claude_context_allows_computer_use_when_other_context_is_opencode(
         "directory": "/tmp/c",
         "description": "gui",
         "allowed_tools": [],
-        "sandbox": {"backend": "docker", "computer_use": True},
+        "sandbox": {"backend": "libvirt", "computer_use": True},
     }
     raw["contexts"]["opencode_ctx"] = {
         "directory": "/tmp/o",

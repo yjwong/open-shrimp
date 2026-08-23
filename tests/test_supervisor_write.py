@@ -289,9 +289,9 @@ async def test_a_sandbox_can_be_added_but_not_edited(
     await _call(
         config_file,
         "write_context",
-        **_write_args(config_file, name="work", sandbox="docker"),
+        **_write_args(config_file, name="work", sandbox="libvirt"),
     )
-    assert load_config(str(config_file)).contexts["work"].sandbox.backend == "docker"
+    assert load_config(str(config_file)).contexts["work"].sandbox.backend == "libvirt"
 
     # Rewriting the block wholesale would drop settings the user chose
     # and never name them on the diff, so it is refused outright.
@@ -302,7 +302,7 @@ async def test_a_sandbox_can_be_added_but_not_edited(
     )
     assert result.get("is_error")
     assert "/config" in _text(result)
-    assert load_config(str(config_file)).contexts["work"].sandbox.backend == "docker"
+    assert load_config(str(config_file)).contexts["work"].sandbox.backend == "libvirt"
 
 
 # ---------------------------------------------------------------------------

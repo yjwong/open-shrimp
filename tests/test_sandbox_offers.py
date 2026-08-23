@@ -2,14 +2,15 @@
 
 Two audiences, and the difference between them is the whole point.  The
 config Mini App is owed every backend this platform can run; setup is owed
-one, because the person answering it cannot weigh libvirt against Docker.
-Offering a backend this machine cannot start would write a config that fails
+one, because the person answering it cannot weigh one hypervisor against
+another.  Offering a backend this machine cannot start would write a config
+that fails
 on its first turn, far from the wizard that could still have said so — so
 the platform filter and the prerequisite probe are the contract for both.
 
-The probes themselves are replaced: ``docker info`` and a libvirt connection
-are neither fast nor the same answer on two machines, and what is under test
-is which backends reach a person rather than what Docker said today.
+The probes themselves are replaced: a libvirt connection and a ``limactl``
+lookup are neither fast nor the same answer on two machines, and what is under
+test is which backends reach a person rather than what this host said today.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ def _on(monkeypatch: pytest.MonkeyPatch, system: str) -> None:
 @pytest.mark.parametrize(
     "system,expected",
     [
-        ("Linux", ["docker", "libvirt"]),
+        ("Linux", ["libvirt"]),
         ("Darwin", ["lima"]),
         ("Windows", ["hcs"]),
     ],
@@ -83,7 +84,6 @@ def test_a_backend_that_cannot_start_here_keeps_its_remedy(
     monkeypatch.setattr(doctor, "run_check", _run)
 
     offers = {offer.backend: offer for offer in doctor.sandbox_offers(None)}
-    assert offers["docker"].available
     assert not offers["libvirt"].available
     assert "install virtiofsd" in offers["libvirt"].detail
 
@@ -162,7 +162,7 @@ def test_the_shared_promise_names_no_mechanism(
 
     lowered = doctor.SANDBOX_SUMMARY.lower()
     for word in ("virtual machine", "vm", "container", "hypervisor", "lima",
-                 "libvirt", "docker", "hyper-v", "linux"):
+                 "libvirt", "hyper-v", "linux"):
         assert word not in lowered, f"the shared note names a mechanism: {word!r}"
 
 

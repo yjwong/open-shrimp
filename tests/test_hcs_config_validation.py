@@ -70,8 +70,6 @@ def test_other_backends_keep_their_own_cpu_rules():
     "knob",
     [
         {"virgl": True},
-        {"docker_in_docker": True},
-        {"dockerfile": "Dockerfile.custom"},
         {"guest_os": "macos"},
         {"phone_use": True},
         {"android": {"image_type": "GAPPS"}},
@@ -93,8 +91,6 @@ def test_the_rejection_names_the_hcs_backend():
     "knob",
     [
         {"virgl": False},
-        {"docker_in_docker": False},
-        {"dockerfile": None},
         {"guest_os": "linux"},
         {"phone_use": False},
         {"android": None},
@@ -108,7 +104,7 @@ def test_knobs_left_at_their_unset_value_are_inert(knob):
 def test_the_knobs_still_work_on_the_backends_that_implement_them():
     raw = _hcs_raw()
     raw["contexts"]["default"]["sandbox"] = {
-        "backend": "docker", "virgl": True, "docker_in_docker": True,
-        "dockerfile": "Dockerfile.custom",
+        "backend": "libvirt", "virgl": True, "phone_use": True,
+        "android": {"image_type": "GAPPS"},
     }
     _validate_raw(raw)
