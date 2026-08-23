@@ -2,12 +2,11 @@ import AppKit
 
 /// The status item and its menu.
 ///
-/// Status, start/stop, open config, open logs, start at login, quit — the same
-/// six the Windows tray offers, so the two front ends stay one design.  Check
-/// for Updates is the one item that does not pair: the tray has no feed and no
-/// bundle it could replace.  A further item shows only while a headless service
-/// is configured to start at login too: nothing on Windows registers that
-/// second autostart by itself, so the tray has nothing to say about it.
+/// Status, start/stop, open config, open logs, start at login, check for
+/// updates, about, quit.  Two further items appear only when something is
+/// wrong — the core running a different version than this app, and a headless
+/// service set to start at login beside it — because this menu is the only
+/// place either is shown.
 ///
 /// An `NSStatusItem` rather than a `MenuBarExtra`: the latter hands out no
 /// status item to give a template image to, and behaves awkwardly for an app
@@ -114,8 +113,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(conflictEntry)
         menu.addItem(autostartEntry)
         menu.addItem(.separator())
+        menu.addItem(entry("About OpenShrimp", #selector(showAbout)))
         menu.addItem(entry("Check for Updates…", #selector(checkForUpdates)))
-        menu.addItem(entry("Quit", #selector(quit), key: "q"))
+        menu.addItem(entry("Quit OpenShrimp", #selector(quit), key: "q"))
 
         statusItem.menu = menu
         applyIcon()
@@ -478,6 +478,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 autostartEntry.state = .on
             }
         }
+    }
+
+    /// Nothing is added to what the bundle already says.  Which version the
+    /// core is running is the version item's to report, and only when the two
+    /// disagree.
+    @objc private func showAbout() {
+        AboutPanel.show()
     }
 
     @objc private func checkForUpdates() {

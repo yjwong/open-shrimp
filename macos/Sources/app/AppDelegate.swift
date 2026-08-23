@@ -92,6 +92,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    /// The main menu's About item carries no target, and the responder chain a
+    /// menu action travels ends here.
+    @objc func showAbout(_ sender: Any?) {
+        AboutPanel.show()
+    }
+
     // -- Setup ----------------------------------------------------------------
 
     /// The wizard, reached both from a launch with no config and from the menu's

@@ -16,6 +16,15 @@ enum MainMenu {
         // The first submenu is the app menu whatever it is called; the system
         // titles it from the bundle.
         let application = NSMenu()
+        // No target, so the action travels the responder chain, which ends at
+        // the app delegate.  `NSApplication`'s own About action would be one
+        // link shorter, but it opens the panel this app does not want.
+        application.addItem(
+            withTitle: "About OpenShrimp",
+            action: #selector(AppDelegate.showAbout(_:)),
+            keyEquivalent: ""
+        )
+        application.addItem(.separator())
         application.addItem(
             withTitle: "Quit OpenShrimp",
             action: #selector(NSApplication.terminate(_:)),

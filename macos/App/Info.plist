@@ -20,6 +20,10 @@
 	<string>@VERSION@</string>
 	<key>CFBundleIconFile</key>
 	<string>icon</string>
+	<!-- The line the standard About panel prints under the version.  Absent, it
+	     prints nothing there, which reads as a panel that was never finished. -->
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Yong Jie Wong. MIT licensed.</string>
 	<!-- How the app launches and what it goes back to: no Dock icon and no menu
 	     bar of its own, because the status item is the whole interface and an
 	     app with no windows that took the Dock would offer a tile that opens
