@@ -176,6 +176,14 @@ def _offer(
     # "nothing here applies" answer, so asking `checks_for_backend` separately
     # would be a second reading of it that can disagree.
     outcomes = prerequisites(declaration.backend, config)
+    return _offer_from_outcomes(declaration, outcomes)
+
+
+def _offer_from_outcomes(
+    declaration: SandboxBackendDeclaration,
+    outcomes: list[Outcome],
+) -> SandboxOffer | None:
+    """Build an offer from prerequisite outcomes already taken for this host."""
     if not outcomes:
         return None
     failed = [o for o in outcomes if not o.ok]
@@ -284,6 +292,33 @@ def sandbox_note(offer: SandboxOffer | None) -> str:
             "run directly on this computer."
         )
     return SANDBOX_SUMMARY
+
+
+def sandboxes_payload(
+    offers: list[SandboxOffer],
+    blessed: SandboxOffer | None,
+) -> dict[str, object]:
+    """The sandbox catalog contract shared by setup and the config Mini App."""
+    return {
+        "sandbox": {
+            "backend": blessed.backend if blessed is not None else None,
+            "available": blessed is not None and blessed.available,
+            "note": sandbox_note(blessed),
+        },
+        "sandboxes": [
+            {
+                "backend": offer.backend,
+                "label": offer.label,
+                "summary": offer.summary,
+                "capabilities": sorted(offer.capabilities),
+                "base_image_placeholder": offer.base_image_placeholder,
+                "unsupported_reasons": dict(offer.unsupported_reasons),
+                "available": offer.available,
+                "detail": offer.detail,
+            }
+            for offer in offers
+        ],
+    }
 
 
 def _load_config(path: str | None) -> Config | None:

@@ -28,8 +28,14 @@ import asyncio
 import time
 
 from open_shrimp.config import Config
-from open_shrimp.doctor import Outcome, prerequisites
+from open_shrimp.doctor import (
+    Outcome,
+    SandboxOffer,
+    _offer_from_outcomes,
+    prerequisites,
+)
 from open_shrimp.sandbox.base import SandboxStartupError
+from open_shrimp.sandbox.prerequisites import DECLARATIONS
 
 # How long a diagnosis stands before the checks are run again.  The checks
 # shell out and open connections, and a scope that retries in a loop must not
@@ -76,6 +82,19 @@ async def _diagnose_host(backend: str, config: Config | None) -> list[Outcome]:
         outcomes = await asyncio.to_thread(prerequisites, backend, config)
         _cache[backend] = (_now(), outcomes)
         return outcomes
+
+
+async def sandbox_offers(config: Config | None = None) -> list[SandboxOffer]:
+    """Every host-applicable sandbox offer, using the standing diagnoses."""
+    outcomes = await asyncio.gather(*(
+        _diagnose_host(declaration.backend, config)
+        for declaration in DECLARATIONS
+    ))
+    offers = (
+        _offer_from_outcomes(declaration, result)
+        for declaration, result in zip(DECLARATIONS, outcomes, strict=True)
+    )
+    return [offer for offer in offers if offer is not None]
 
 
 async def diagnose(

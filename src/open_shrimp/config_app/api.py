@@ -232,6 +232,23 @@ async def models_endpoint(request: Request) -> JSONResponse:
     })
 
 
+async def sandboxes_endpoint(request: Request) -> JSONResponse:
+    """GET /api/config/sandboxes -- return host sandbox choices and remedies."""
+    try:
+        await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    from open_shrimp.doctor import blessed_backend, sandboxes_payload
+    from open_shrimp.sandbox_diagnosis import sandbox_offers
+
+    config: Config = request.app.state.config
+    offers = await sandbox_offers(config)
+    backend = blessed_backend()
+    blessed = next((offer for offer in offers if offer.backend == backend), None)
+    return JSONResponse(sandboxes_payload(offers, blessed))
+
+
 def _resolve_sandbox_manager(
     request: Request, context_name: str,
 ) -> tuple[SandboxManager | None, JSONResponse | None]:
@@ -378,6 +395,7 @@ def create_config_routes() -> list[Route | Mount]:
         Route("/api/config", config_get_endpoint, methods=["GET"]),
         Route("/api/config", config_put_endpoint, methods=["PUT"]),
         Route("/api/config/models", models_endpoint, methods=["GET"]),
+        Route("/api/config/sandboxes", sandboxes_endpoint, methods=["GET"]),
         Route(
             "/api/config/validate-path",
             validate_path_endpoint,

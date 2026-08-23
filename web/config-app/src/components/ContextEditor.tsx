@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchModels, validatePath, type ModelOption } from "../lib/api";
 import { BACKENDS, EFFORT_LEVELS, defaultLabel } from "../lib/types";
-import type { AppConfig, ContextConfig, EffortLevel } from "../lib/types";
+import type {
+  AppConfig,
+  ContextConfig,
+  EffortLevel,
+  SandboxCatalog,
+} from "../lib/types";
 import TagInput from "./TagInput";
 import SandboxForm from "./SandboxForm";
 
 interface ContextEditorProps {
   config: AppConfig;
+  sandboxCatalog: SandboxCatalog;
   contextName: string | null; // null = new context
   onSave: (name: string, ctx: ContextConfig, isDefault: boolean) => void;
   onDelete: (name: string) => void;
@@ -91,6 +97,7 @@ function useModelOptions(directory: string, enabled: boolean) {
 
 export default function ContextEditor({
   config,
+  sandboxCatalog,
   contextName,
   onSave,
   onDelete,
@@ -401,7 +408,11 @@ export default function ContextEditor({
           />
         </div>
 
-        <SandboxForm sandbox={sandbox} onChange={setSandbox} />
+        <SandboxForm
+          sandbox={sandbox}
+          catalog={sandboxCatalog}
+          onChange={setSandbox}
+        />
       </div>
 
       {contextName && (

@@ -943,9 +943,9 @@ def _run_sandboxes(*, json_output: bool) -> int:
     """
     from open_shrimp.doctor import (
         _load_config,
-        blessed_offer,
-        sandbox_note,
+        blessed_backend,
         sandbox_offers,
+        sandboxes_payload,
     )
 
     config = _load_config(None)
@@ -954,35 +954,11 @@ def _run_sandboxes(*, json_output: bool) -> int:
     # settled as the unscoped one, when there is no config to read.
     init_paths(config.instance_name if config is not None else None)
     offers = sandbox_offers(config)
-    blessed = blessed_offer(config)
+    backend = blessed_backend()
+    blessed = next((offer for offer in offers if offer.backend == backend), None)
 
     if json_output:
-        json.dump(
-            {
-                "sandbox": {
-                    # Null where this platform has no sandbox at all, which is
-                    # why it is not the empty string: a backend nobody can
-                    # name is not a backend called "".
-                    "backend": blessed.backend if blessed is not None else None,
-                    "available": blessed is not None and blessed.available,
-                    "note": sandbox_note(blessed),
-                },
-                "sandboxes": [
-                    {
-                        "backend": offer.backend,
-                        "label": offer.label,
-                        "summary": offer.summary,
-                        "capabilities": sorted(offer.capabilities),
-                        "base_image_placeholder": offer.base_image_placeholder,
-                        "unsupported_reasons": dict(offer.unsupported_reasons),
-                        "available": offer.available,
-                        "detail": offer.detail,
-                    }
-                    for offer in offers
-                ],
-            },
-            sys.stdout,
-        )
+        json.dump(sandboxes_payload(offers, blessed), sys.stdout)
         sys.stdout.write("\n")
     else:
         for offer in offers:

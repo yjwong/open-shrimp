@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useConfig } from "./hooks/useConfig";
 import { BACKENDS } from "./lib/types";
-import type { AppConfig, ContextConfig } from "./lib/types";
+import type { AppConfig, ContextConfig, SandboxCatalog } from "./lib/types";
 import ContextList from "./components/ContextList";
 import ContextEditor from "./components/ContextEditor";
 import AllowedUsers from "./components/AllowedUsers";
@@ -9,8 +9,18 @@ import AllowedUsers from "./components/AllowedUsers";
 type View = { type: "list" } | { type: "edit"; name: string | null };
 
 export default function App() {
-  const { config, setConfig, loading, saving, error, dirty, save, toast, dismissToast } =
-    useConfig();
+  const {
+    config,
+    setConfig,
+    sandboxCatalog,
+    loading,
+    saving,
+    error,
+    dirty,
+    save,
+    toast,
+    dismissToast,
+  } = useConfig();
   const [tab, setTab] = useState<"contexts" | "users" | "settings">("contexts");
   const [view, setView] = useState<View>({ type: "list" });
 
@@ -30,7 +40,7 @@ export default function App() {
     );
   }
 
-  if (error || !config) {
+  if (error || !config || !sandboxCatalog) {
     return (
       <div className="loading">
         <div style={{ textAlign: "center", padding: 24 }}>
@@ -50,6 +60,7 @@ export default function App() {
     return (
       <ContextEditorView
         config={config}
+        sandboxCatalog={sandboxCatalog}
         setConfig={setConfig}
         contextName={view.name}
         onBack={() => setView({ type: "list" })}
@@ -157,11 +168,13 @@ export default function App() {
 
 function ContextEditorView({
   config,
+  sandboxCatalog,
   setConfig,
   contextName,
   onBack,
 }: {
   config: AppConfig;
+  sandboxCatalog: SandboxCatalog;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig | null>>;
   contextName: string | null;
   onBack: () => void;
@@ -223,6 +236,7 @@ function ContextEditorView({
   return (
     <ContextEditor
       config={config}
+      sandboxCatalog={sandboxCatalog}
       contextName={contextName}
       onSave={handleSave}
       onDelete={handleDelete}

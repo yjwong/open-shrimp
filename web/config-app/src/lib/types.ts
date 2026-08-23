@@ -6,7 +6,7 @@ export interface AndroidConfig {
 }
 
 export interface SandboxConfig {
-  backend: "libvirt" | "lima" | "hcs";
+  backend: string;
   enabled?: boolean;
   guest_os?: "linux" | "macos";
   computer_use?: boolean;
@@ -20,6 +20,29 @@ export interface SandboxConfig {
   provision?: string | null;
   persistent_paths?: string[];
   allow_host_escape?: boolean;
+  mingw_bin?: string | null;
+}
+
+export type SandboxCapability = Exclude<keyof SandboxConfig, "backend">;
+
+export interface SandboxOffer {
+  backend: SandboxConfig["backend"];
+  label: string;
+  summary: string;
+  capabilities: SandboxCapability[];
+  base_image_placeholder: string;
+  unsupported_reasons: Partial<Record<SandboxCapability, string>>;
+  available: boolean;
+  detail: string;
+}
+
+export interface SandboxCatalog {
+  sandbox: {
+    backend: SandboxConfig["backend"] | null;
+    available: boolean;
+    note: string;
+  };
+  sandboxes: SandboxOffer[];
 }
 
 export interface ContextConfig {

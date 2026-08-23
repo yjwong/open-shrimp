@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchConfig, saveConfig } from "../lib/api";
-import type { AppConfig } from "../lib/types";
+import { fetchConfig, fetchSandboxes, saveConfig } from "../lib/api";
+import type { AppConfig, SandboxCatalog } from "../lib/types";
 
 export function useConfig() {
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [sandboxCatalog, setSandboxCatalog] =
+    useState<SandboxCatalog | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -14,8 +16,12 @@ export function useConfig() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchConfig();
+      const [data, sandboxes] = await Promise.all([
+        fetchConfig(),
+        fetchSandboxes(),
+      ]);
       setConfig(data);
+      setSandboxCatalog(sandboxes);
       initialRef.current = JSON.stringify(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load config");
@@ -45,5 +51,17 @@ export function useConfig() {
 
   const dismissToast = useCallback(() => setToast(null), []);
 
-  return { config, setConfig, loading, saving, error, dirty, save, toast, dismissToast, reload: load };
+  return {
+    config,
+    setConfig,
+    sandboxCatalog,
+    loading,
+    saving,
+    error,
+    dirty,
+    save,
+    toast,
+    dismissToast,
+    reload: load,
+  };
 }
