@@ -1,13 +1,18 @@
 """Tests for the AgentRuntime profile and the WrappedCLI start_agent dispatch."""
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+import open_shrimp.sandbox.libvirt as libvirt_mod
 from open_shrimp.backend.claude_sdk.runtime import claude_runtime
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
+    AgentRuntime,
+    HomeMount,
+    ServedEndpoint,
     WrappedCLI,
 )
 from open_shrimp.sandbox.libvirt import LibvirtSandbox
@@ -63,3 +68,55 @@ def test_start_agent_wrapped_cli_returns_handle(cls, tmp_path: Path):
     assert handle.cli_path == "/tmp/wrapper.sh"
     assert handle.cleanup_paths == ["/tmp/wrapper.sh"]
     sb.build_cli_wrapper.assert_called_once()
+
+
+def test_libvirt_served_endpoint_forwards_ssh_agent(tmp_path: Path, monkeypatch):
+    sb = object.__new__(LibvirtSandbox)
+    sb._served_proc = None
+    sb._served_endpoint = None
+    sb._ssh_port = 2222
+    sb._sdir = tmp_path
+    sb._project_dir = "/workspace"
+    sb._context_name = "test"
+
+    proc = MagicMock()
+    popen = MagicMock(return_value=proc)
+    monkeypatch.setattr(libvirt_mod.subprocess, "Popen", popen)
+
+    endpoint = object()
+
+    def run_endpoint(
+        runtime: AgentRuntime,
+        launch: ServedEndpoint,
+        *,
+        spawn: Any,
+        **kwargs: Any,
+    ) -> tuple[Any, object]:
+        return spawn(launch.serve_argv, runtime.env), endpoint
+
+    monkeypatch.setattr(libvirt_mod, "run_served_endpoint", run_endpoint)
+    launch = ServedEndpoint(
+        serve_argv=["opencode", "serve"],
+        guest_port=4096,
+        home_mounts=(),
+        auth_username="opencode",
+        password_env_var="OPENCODE_SERVER_PASSWORD",
+        make_endpoint=MagicMock(),
+        wait_ready=MagicMock(),
+        drain_output=MagicMock(),
+    )
+    runtime = AgentRuntime(
+        name="opencode",
+        home_mount=HomeMount(tmp_path / "home", "/home/openshrimp", True),
+        inject=MagicMock(),
+        env={},
+        launch=launch,
+    )
+
+    handle = sb.start_agent(runtime)
+
+    assert handle.endpoint is endpoint
+    ssh_argv = popen.call_args.args[0]
+    assert ["-o", "ForwardAgent=yes"] == ssh_argv[
+        ssh_argv.index("ForwardAgent=yes") - 1:ssh_argv.index("ForwardAgent=yes") + 1
+    ]

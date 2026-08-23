@@ -879,7 +879,11 @@ class LibvirtSandbox:
             )
             ssh_opts = _ssh_common_opts(self._sdir / "ssh_key", ssh_port)
             return subprocess.Popen(
-                ["ssh", *ssh_opts, f"{SANDBOX_USER}@localhost", remote_cmd],
+                [
+                    "ssh", *ssh_opts,
+                    "-o", "ForwardAgent=yes",
+                    f"{SANDBOX_USER}@localhost", remote_cmd,
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
