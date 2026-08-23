@@ -423,7 +423,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # scope bound to something outside ``contexts`` — the supervisor — needs
     # no special case: _get_context_name already resolves it.
     if await _get_context_name(scope, config, db) is None:
-        await reply_no_context(message)
+        await reply_no_context(message, config)
         return
 
     # If this message is part of a media group (album), batch it.
@@ -932,7 +932,7 @@ async def _start_agent_task(
     if resolved is None:
         # No directory to run in and no model to run with, so the turn cannot
         # start.  Say so rather than failing somewhere deeper.
-        await send_no_context(context.bot, scope)
+        await send_no_context(context.bot, scope, config)
         return
     ctx_name, ctx_config = resolved
     session_id = await get_session_id(db, scope, ctx_name)

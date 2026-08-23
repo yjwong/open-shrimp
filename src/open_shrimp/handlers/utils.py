@@ -146,43 +146,70 @@ async def _get_context(
     return name, ctx
 
 
-# Said wherever a scope needs a project and has none.  Names the route that
-# needs nothing but this chat: the OpenShrimp context writes config.yaml, so
-# a user with no project never has to reach the machine the bot runs on.
-# /config is named second because it is a Mini App, and the supervisor
-# answers in words on any device the user is already holding.
-NO_CONTEXT_TEXT = (
+# Said wherever a scope needs a project and has none.  Every branch names the
+# route that needs nothing but this chat: the OpenShrimp context writes
+# config.yaml, so a user with no project never has to reach the machine the bot
+# runs on.  /config is named second because it is a Mini App, and the
+# supervisor answers in words on any device the user is already holding.
+_NO_PROJECTS_TEXT = (
     "No project is set up yet, so there's nothing for me to work in.\n\n"
     "Open /context, pick OpenShrimp, and tell it which folder to add — "
     "it edits my config for you, and shows you the change before it lands. "
     "You can also add one in /config."
 )
 
+# Having no project and having picked none are different problems with
+# different remedies, and setup produces the second one on purpose: it writes
+# no ``default_context``, because it cannot know which imported project a topic
+# should mean.  An install with one project therefore reaches its first message
+# unbound, and telling that user nothing is set up is both false and useless —
+# it sends them to add a second copy of the project they already have.
+_UNBOUND_TEXT = (
+    "No project is picked here yet, so there's nothing for me to work in.\n\n"
+    "Open /context and choose one — or pick OpenShrimp there to add a folder "
+    "I don't know about."
+)
 
-# Telegram caps a callback answer at 200 characters, so the alert carries the
+
+# Telegram caps a callback answer at 200 characters, so the alerts carry the
 # first sentence and the remedy only.
-NO_CONTEXT_ANSWER = (
+_NO_PROJECTS_ANSWER = (
     "No project is set up yet — open /context, pick OpenShrimp, and ask it "
     "to add one."
 )
 
+_UNBOUND_ANSWER = (
+    "No project is picked here yet — open /context and choose one, or pick "
+    "OpenShrimp there to add a folder."
+)
 
-async def reply_no_context(message: Message) -> None:
+
+def no_context_text(config: Config) -> str:
+    """What to say to a scope with no project, told apart by which is missing."""
+    return _NO_PROJECTS_TEXT if not config.contexts else _UNBOUND_TEXT
+
+
+def no_context_answer(config: Config) -> str:
+    """The callback-alert form of :func:`no_context_text`."""
+    return _NO_PROJECTS_ANSWER if not config.contexts else _UNBOUND_ANSWER
+
+
+async def reply_no_context(message: Message, config: Config) -> None:
     """Tell the user this scope has no project bound, and how to get one."""
     await message.reply_text(
-        _escape_mdv2(NO_CONTEXT_TEXT), parse_mode="MarkdownV2"
+        _escape_mdv2(no_context_text(config)), parse_mode="MarkdownV2"
     )
 
 
-async def answer_no_context(query: Any) -> None:
+async def answer_no_context(query: Any, config: Config) -> None:
     """The callback-query form of :func:`reply_no_context`."""
-    await query.answer(NO_CONTEXT_ANSWER, show_alert=True)
+    await query.answer(no_context_answer(config), show_alert=True)
 
 
-async def send_no_context(bot: Bot, scope: ChatScope) -> None:
+async def send_no_context(bot: Bot, scope: ChatScope, config: Config) -> None:
     """The scope-addressed form, for paths with no message to reply to."""
     await bot.send_message(
-        chat_id=scope.chat_id, text=NO_CONTEXT_TEXT, **_thread_kwargs(scope)
+        chat_id=scope.chat_id, text=no_context_text(config), **_thread_kwargs(scope)
     )
 
 
@@ -199,7 +226,7 @@ async def require_context(
     """
     resolved = await _get_context(scope, config, db)
     if resolved is None:
-        await reply_no_context(message)
+        await reply_no_context(message, config)
     return resolved
 
 

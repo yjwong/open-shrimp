@@ -29,7 +29,7 @@ from telegram import Bot
 
 from open_shrimp.config import Config
 from open_shrimp.db import claim_once, release_once
-from open_shrimp.handlers.utils import NO_CONTEXT_TEXT
+from open_shrimp.handlers.utils import no_context_text
 from open_shrimp.markdown import TELEGRAM_MAX_LENGTH
 from open_shrimp.readiness import KEYS, Row, State, check_readiness, readiness_text
 
@@ -61,7 +61,7 @@ def orientation_text(config: Config) -> str:
             [
                 "OpenShrimp is running.",
                 "",
-                NO_CONTEXT_TEXT,
+                no_context_text(config),
                 "",
                 "Once a project exists, just send me a message — or a voice "
                 "note. There's no command to learn: describe what you want "

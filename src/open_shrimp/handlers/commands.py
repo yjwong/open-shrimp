@@ -112,7 +112,13 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     resolved = await _get_context(scope, config, db)
 
     if resolved is None:
-        working_in = "*No project set up yet.* Add one with /config."
+        # Setup writes no default_context, so an install with projects reaches
+        # this card unbound; "none set up" would deny the project it has.
+        working_in = (
+            "*No project picked yet.* Choose one with /context."
+            if config.contexts
+            else "*No project set up yet.* Add one with /context."
+        )
     else:
         ctx_name, ctx = resolved
         working_in = f"*Working in:* `{ctx_name}` → `{ctx.directory}`"
@@ -561,7 +567,7 @@ async def handle_model_callback(
     ctx_name = await _get_context_name(scope, config, db)
     ctx = resolve_context(config, ctx_name)
     if ctx is None:
-        await answer_no_context(query)
+        await answer_no_context(query, config)
         return True
     backend = get_backend_by_name(effective_backend(ctx, config))
 
@@ -615,7 +621,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # command exists to show separately from.
     ctx = resolve_context(config, ctx_name)
     if ctx is None:
-        await reply_no_context(message)
+        await reply_no_context(message, config)
         return
     ctx_default_model = ctx.model
     backend = get_backend_by_name(effective_backend(ctx, config))
@@ -704,7 +710,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # active /effort override into the value shown as the context default.
     ctx_unmerged = resolve_context(config, ctx_name)
     if ctx_unmerged is None:
-        await reply_no_context(message)
+        await reply_no_context(message, config)
         return
     ctx_default_effort = ctx_unmerged.effort
     current_override = _effort_overrides.get(scope)
@@ -1324,7 +1330,7 @@ async def handle_resume_callback(
         # lookup and override merge.
         ctx_name = await _get_context_name(scope, config, db)
         if ctx_name is None:
-            await answer_no_context(query)
+            await answer_no_context(query, config)
             return True
         current_session_id = await get_session_id(db, scope, ctx_name)
         text, keyboard = _build_resume_detail(
@@ -1355,7 +1361,7 @@ async def handle_resume_callback(
 
     resolved = await _get_context(scope, config, db)
     if resolved is None:
-        await answer_no_context(query)
+        await answer_no_context(query, config)
         return True
     ctx_name, ctx = resolved
     await close_session(scope)

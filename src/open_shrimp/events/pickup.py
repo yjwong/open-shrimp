@@ -32,7 +32,7 @@ from open_shrimp.db import (
     set_active_context,
     set_inbound_event_pickup_thread,
 )
-from open_shrimp.handlers.utils import NO_CONTEXT_ANSWER, _escape_mdv2
+from open_shrimp.handlers.utils import _escape_mdv2, no_context_answer
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +279,7 @@ async def _open_picker(
         # Swapping in a cancel-only keyboard would read as a broken picker.
         # Leave the "Pick up" button alone so the event stays claimable once
         # a project exists.
-        await query.answer(NO_CONTEXT_ANSWER, show_alert=True)
+        await query.answer(no_context_answer(config), show_alert=True)
         return
     markup = _build_picker(
         config, event_id, _default_context_for(row.source, config), page
@@ -460,7 +460,7 @@ async def _handle_context_chosen(
         # changed to empty there is nothing to re-pick from, so say that
         # rather than redrawing a picker with only a cancel button.
         if not names:
-            await query.answer(NO_CONTEXT_ANSWER, show_alert=True)
+            await query.answer(no_context_answer(config), show_alert=True)
             return
         await _edit_markup(
             query,

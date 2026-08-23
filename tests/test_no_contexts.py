@@ -338,19 +338,41 @@ async def test_generate_meeting_notes_names_the_missing_setting():
 
 
 def test_the_no_context_copy_points_at_the_supervisor_not_at_the_wizard():
-    """One constant carries both surfaces, and neither may send a user back to
-    the machine the bot runs on: the OpenShrimp context writes the config from
-    this chat."""
-    from open_shrimp.handlers.utils import NO_CONTEXT_ANSWER, NO_CONTEXT_TEXT
+    """No surface may send a user back to the machine the bot runs on: the
+    OpenShrimp context writes the config from this chat."""
+    from open_shrimp.handlers.utils import no_context_answer, no_context_text
 
-    for copy in (NO_CONTEXT_TEXT, NO_CONTEXT_ANSWER):
-        assert "OpenShrimp" in copy
-        assert "/context" in copy
-        assert "setup wizard" not in copy
+    one_project = _config(
+        {"proj": ContextConfig(directory="/tmp", description="Acme", allowed_tools=[])},
+        None,
+    )
+    for config in (_empty_config(), one_project):
+        for copy in (no_context_text(config), no_context_answer(config)):
+            assert "OpenShrimp" in copy
+            assert "/context" in copy
+            assert "setup wizard" not in copy
 
-    # Telegram truncates a callback alert past 200 characters, which would cut
-    # the remedy off the end of the sentence that carries it.
-    assert len(NO_CONTEXT_ANSWER) <= 200
+        # Telegram truncates a callback alert past 200 characters, which would
+        # cut the remedy off the end of the sentence that carries it.
+        assert len(no_context_answer(config)) <= 200
+
+
+def test_the_no_context_copy_does_not_deny_a_project_that_exists():
+    """Setup writes no default_context on purpose, so an install with one
+    project reaches its first message unbound.  Saying nothing is set up is
+    false there, and sends the user to add a second copy of what they have."""
+    from open_shrimp.handlers.utils import no_context_answer, no_context_text
+
+    config = _config(
+        {"proj": ContextConfig(directory="/tmp", description="Acme", allowed_tools=[])},
+        None,
+    )
+    for copy in (no_context_text(config), no_context_answer(config)):
+        assert "No project is set up yet" not in copy
+        assert "picked" in copy
+
+    # The empty install keeps the copy that is true of it.
+    assert "No project is set up yet" in no_context_text(_empty_config())
 
 
 def test_orientation_text_does_not_claim_a_project_when_there_are_none():
