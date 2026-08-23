@@ -972,6 +972,9 @@ def _run_sandboxes(*, json_output: bool) -> int:
                         "backend": offer.backend,
                         "label": offer.label,
                         "summary": offer.summary,
+                        "capabilities": sorted(offer.capabilities),
+                        "base_image_placeholder": offer.base_image_placeholder,
+                        "unsupported_reasons": dict(offer.unsupported_reasons),
                         "available": offer.available,
                         "detail": offer.detail,
                     }

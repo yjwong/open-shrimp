@@ -108,8 +108,9 @@ class SandboxConfig:
     allow_host_escape: bool = False
 
 
-# Valid values for sandbox config fields.
-_SANDBOX_BACKENDS = {"libvirt", "lima", "hcs"}
+# Valid values for sandbox config fields.  ``_SANDBOX_BACKENDS`` is populated
+# from the sandbox declarations at the end of the module, after the config
+# types are available to the sandbox package's public imports.
 _SANDBOX_GUEST_OS = {"linux", "macos"}
 _ANDROID_IMAGE_TYPES = {"VANILLA", "GAPPS"}
 _ANDROID_GPU_MODES = {"virgl", "software"}
@@ -360,6 +361,8 @@ def _validate_raw(raw: dict) -> None:
                 f"{sorted(_SANDBOX_BACKENDS)}, got: {backend!r}"
             )
 
+        _validate_sandbox_capabilities(name, sandbox, backend)
+
         if backend == "hcs":
             _validate_hcs_sandbox(name, sandbox)
 
@@ -416,29 +419,12 @@ def _validate_raw(raw: dict) -> None:
                 f"Context '{name}': sandbox.phone_use must be a boolean, "
                 f"got: {phone_use!r}"
             )
-        if phone_use and backend != "libvirt":
-            raise ValueError(
-                f"Context '{name}': sandbox.phone_use requires "
-                f"backend 'libvirt', got: {backend!r}"
-            )
-
         mingw_bin = sandbox.get("mingw_bin")
         if mingw_bin is not None and not isinstance(mingw_bin, str):
             raise ValueError(
                 f"Context '{name}': sandbox.mingw_bin must be a string, "
                 f"got: {mingw_bin!r}"
             )
-        # mingw_bin is optional even with computer_use: the RDP helper ships
-        # prebuilt with its FreeRDP DLLs, and a toolchain is only the
-        # source-install fallback for building it.  It is meaningless anywhere
-        # but the hcs backend, so reject it there rather than ignore it.
-        if mingw_bin and backend != "hcs":
-            raise ValueError(
-                f"Context '{name}': sandbox.mingw_bin applies only to the "
-                f"hcs backend (it builds the Windows RDP helper), got "
-                f"backend: {backend!r}"
-            )
-
         android = sandbox.get("android")
         if android is not None:
             if not isinstance(android, dict):
@@ -481,11 +467,6 @@ def _validate_raw(raw: dict) -> None:
                 f"{sorted(_SANDBOX_GUEST_OS)}, got: {guest_os!r}"
             )
         if guest_os == "macos":
-            if backend != "lima":
-                raise ValueError(
-                    f"Context '{name}': sandbox.guest_os 'macos' requires "
-                    f"backend 'lima', got: {backend!r}"
-                )
             if platform.machine() != "arm64":
                 raise ValueError(
                     f"Context '{name}': sandbox.guest_os 'macos' requires "
@@ -562,16 +543,25 @@ def _validate_raw(raw: dict) -> None:
     _validate_meetings(raw)
 
 
-#: ``sandbox`` keys the hcs backend has no code path for, each paired with the
-#: value that means "unset" and a phrase naming the capability.  A key left at
-#: its unset value is inert; one set to anything else would read as an enabled
-#: capability that nothing implements, so it is refused rather than dropped.
-_HCS_UNSUPPORTED_KNOBS: tuple[tuple[str, object, str], ...] = (
-    ("virgl", False, "VirGL 3D acceleration"),
-    ("guest_os", "linux", "non-Linux guests"),
-    ("phone_use", False, "phone use"),
-    ("android", None, "Android tuning"),
-)
+def _validate_sandbox_capabilities(
+    name: str,
+    sandbox: dict,
+    backend: str,
+) -> None:
+    """Reject enabled config fields the selected backend cannot honour."""
+    declaration = DECLARATIONS_BY_BACKEND[backend]
+    defaults = SandboxConfig(backend=backend)
+    for key, value in sandbox.items():
+        if key == "backend" or key in declaration.capabilities:
+            continue
+        if not hasattr(defaults, key) or value == getattr(defaults, key):
+            continue
+        reason = declaration.unsupported_reason(key)
+        suffix = f": {reason}" if reason else ""
+        raise ValueError(
+            f"Context '{name}': sandbox.{key} is not supported on the "
+            f"'{backend}' backend{suffix}"
+        )
 
 #: The smallest processor count HCS accepts.  Its upper bound is the host's
 #: logical processor count — a property of the machine rather than of the
@@ -581,15 +571,6 @@ _HCS_MIN_CPUS = 1
 
 def _validate_hcs_sandbox(name: str, sandbox: dict) -> None:
     """Reject an ``hcs`` sandbox block the backend cannot honour."""
-    for key, unset, capability in _HCS_UNSUPPORTED_KNOBS:
-        if sandbox.get(key, unset) != unset:
-            raise ValueError(
-                f"Context '{name}': sandbox.{key} is not supported on the "
-                f"'hcs' backend, which has no implementation of {capability} "
-                f"— remove the key, or move the context to a backend that "
-                f"does"
-            )
-
     cpus = sandbox.get("cpus")
     if isinstance(cpus, int) and not isinstance(cpus, bool):
         if cpus < _HCS_MIN_CPUS:
@@ -1403,3 +1384,14 @@ def patch_raw_yaml(raw: Any, body: dict[str, Any]) -> None:
 
     if "contexts" in body:
         patch_contexts(raw, body["contexts"])
+
+
+# Importing a sandbox submodule first executes ``sandbox.__init__``, whose
+# manager imports the config types above.  Keeping this registry import last
+# preserves that cycle's lazy, platform-neutral boundary.
+from open_shrimp.sandbox.prerequisites import (  # noqa: E402
+    DECLARATIONS,
+    DECLARATIONS_BY_BACKEND,
+)
+
+_SANDBOX_BACKENDS = {declaration.backend for declaration in DECLARATIONS}

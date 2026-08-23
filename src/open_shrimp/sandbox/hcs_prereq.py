@@ -6,6 +6,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from open_shrimp.sandbox.prerequisites import (
+    COMMON_CONFIG_FIELDS,
+    SandboxBackendDeclaration,
+)
+
 
 def _hcs_sandboxes(config: Any) -> list[tuple[str, Any]]:
     """``(context name, sandbox)`` for every context on the HCS backend."""
@@ -240,10 +245,12 @@ def _missing_freerdp_dlls(directory: Path) -> list[str]:
     ]
 
 
-DECLARATION = (
-    "hcs",
-    "Windows",
-    (
+DECLARATION = SandboxBackendDeclaration(
+    backend="hcs",
+    label="Hyper-V",
+    summary="each project runs in its own Linux virtual machine",
+    platform="Windows",
+    checks=(
         ("win32more", _check_win32more),
         ("Hyper-V rights", _check_hyperv_rights),
         ("HCS kernel", _check_hcs_kernel),
@@ -252,4 +259,10 @@ DECLARATION = (
         ("HCS base image", _check_hcs_base_image),
         ("HCS RDP helper", _check_hcs_rdp_helper),
     ),
+    capabilities=COMMON_CONFIG_FIELDS | {"persistent_paths", "mingw_bin"},
+    base_image_placeholder="Path to rootfs VHDX (required)",
+    unsupported_reasons=((
+        "phone_use",
+        "the WSL-shipped kernel is built without binder and uhid",
+    ),),
 )

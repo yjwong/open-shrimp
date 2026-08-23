@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from open_shrimp.sandbox.prerequisites import (
+    COMMON_CONFIG_FIELDS,
+    SandboxBackendDeclaration,
+)
+
 
 def _check_libvirt(config: Any) -> tuple[bool, str]:
     from open_shrimp.sandbox.libvirt_helpers import LIBVIRT_INSTALL_REMEDY
@@ -43,11 +48,22 @@ def _check_virtiofsd(config: Any) -> tuple[bool, str]:
     )
 
 
-DECLARATION = (
-    "libvirt",
-    "Linux",
-    (
+DECLARATION = SandboxBackendDeclaration(
+    backend="libvirt",
+    label="libvirt",
+    summary="each project runs in its own virtual machine",
+    platform="Linux",
+    checks=(
         ("libvirt", _check_libvirt),
         ("virtiofsd", _check_virtiofsd),
     ),
+    capabilities=COMMON_CONFIG_FIELDS | {
+        "virgl", "phone_use", "android", "persistent_paths",
+    },
+    base_image_placeholder="Path to base qcow2/cloud image",
+    unsupported_reasons=((
+        "mingw_bin",
+        "mingw_bin applies only to the hcs backend, where it builds the "
+        "Windows RDP helper",
+    ),),
 )

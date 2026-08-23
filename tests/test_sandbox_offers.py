@@ -17,15 +17,20 @@ from __future__ import annotations
 
 import importlib
 import json
-from dataclasses import replace
+import subprocess
+import sys
+from dataclasses import fields, replace
 
 import pytest
 
 from open_shrimp import doctor
-from open_shrimp.config import _SANDBOX_BACKENDS
+from open_shrimp.config import SandboxConfig, _SANDBOX_BACKENDS, _validate_raw
 from open_shrimp.main import _run_sandboxes
 from open_shrimp.sandbox import manager
-from open_shrimp.sandbox.prerequisites import DECLARATIONS
+from open_shrimp.sandbox.prerequisites import (
+    DECLARATIONS,
+    DECLARATIONS_BY_BACKEND,
+)
 
 
 @pytest.fixture
@@ -73,9 +78,7 @@ def test_every_backend_the_config_accepts_reaches_a_wizard(
 
 
 def test_every_backend_has_exactly_one_prerequisite_declaration() -> None:
-    declared = [
-        backend for backend, _platform, _checks in DECLARATIONS
-    ]
+    declared = [declaration.backend for declaration in DECLARATIONS]
 
     assert len(declared) == len(set(declared))
     assert set(declared) == set(manager._MANAGER_FACTORIES)
@@ -86,6 +89,76 @@ def test_every_prerequisite_leaf_imports_on_this_host() -> None:
     for module in ("libvirt_prereq", "lima_prereq", "hcs_prereq"):
         imported = importlib.import_module(f"open_shrimp.sandbox.{module}")
         assert imported.DECLARATION
+
+
+def test_loading_declarations_does_not_import_windows_plumbing_on_linux() -> None:
+    if sys.platform != "linux":
+        pytest.skip("Linux import boundary")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import open_shrimp.sandbox.prerequisites; "
+            "assert 'open_shrimp.sandbox.hcs_win' not in sys.modules",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_capabilities_account_for_every_sandbox_config_field() -> None:
+    declared_fields = {
+        capability
+        for declaration in DECLARATIONS
+        for capability in declaration.capabilities
+    }
+
+    assert declared_fields | {"backend"} == {
+        config_field.name for config_field in fields(SandboxConfig)
+    }
+
+
+@pytest.mark.parametrize(
+    "backend,field,value",
+    [
+        ("hcs", "phone_use", True),
+        ("lima", "persistent_paths", ["/var/lib/data"]),
+        ("libvirt", "guest_os", "macos"),
+    ],
+)
+def test_unsupported_capabilities_are_rejected(
+    backend: str,
+    field: str,
+    value: object,
+) -> None:
+    raw = {
+        "telegram": {"token": "t"},
+        "allowed_users": [1],
+        "contexts": {
+            "work": {
+                "directory": "/tmp",
+                "description": "work",
+                "allowed_tools": [],
+                "sandbox": {"backend": backend, field: value},
+            },
+        },
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=rf"sandbox\.{field} is not supported on the '{backend}' backend",
+    ):
+        _validate_raw(raw)
+
+
+def test_hcs_phone_use_explains_the_kernel_limitation() -> None:
+    reason = DECLARATIONS_BY_BACKEND["hcs"].unsupported_reason("phone_use")
+
+    assert reason is not None
+    assert "binder and uhid" in reason
 
 
 def test_a_backend_that_cannot_start_here_keeps_its_remedy(
@@ -302,6 +375,22 @@ def test_the_json_form_is_parsable(
             "backend": "lima",
             "label": "Lima",
             "summary": "each project runs in its own Linux virtual machine",
+            "capabilities": [
+                "allow_host_escape",
+                "base_image",
+                "computer_use",
+                "cpus",
+                "disk_size",
+                "enabled",
+                "guest_os",
+                "memory",
+                "provision",
+            ],
+            "base_image_placeholder": "Path to base qcow2/cloud image",
+            "unsupported_reasons": {
+                "mingw_bin": "mingw_bin applies only to the hcs backend, "
+                "where it builds the Windows RDP helper",
+            },
             "available": True,
             "detail": "",
         }

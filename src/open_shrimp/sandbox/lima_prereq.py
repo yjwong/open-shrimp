@@ -5,6 +5,11 @@ from __future__ import annotations
 import platform
 from typing import Any
 
+from open_shrimp.sandbox.prerequisites import (
+    COMMON_CONFIG_FIELDS,
+    SandboxBackendDeclaration,
+)
+
 
 def _check_lima(config: Any) -> tuple[bool, str]:
     """``limactl``, which the backend downloads when the host has none.
@@ -38,8 +43,17 @@ def _check_lima(config: Any) -> tuple[bool, str]:
     )
 
 
-DECLARATION = (
-    "lima",
-    "Darwin",
-    (("Lima", _check_lima),),
+DECLARATION = SandboxBackendDeclaration(
+    backend="lima",
+    label="Lima",
+    summary="each project runs in its own Linux virtual machine",
+    platform="Darwin",
+    checks=(("Lima", _check_lima),),
+    capabilities=COMMON_CONFIG_FIELDS | {"guest_os"},
+    base_image_placeholder="Path to base qcow2/cloud image",
+    unsupported_reasons=((
+        "mingw_bin",
+        "mingw_bin applies only to the hcs backend, where it builds the "
+        "Windows RDP helper",
+    ),),
 )

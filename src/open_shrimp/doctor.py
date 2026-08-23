@@ -21,13 +21,16 @@ from dataclasses import dataclass
 
 from open_shrimp.binaries import managed_binary
 from open_shrimp.config import (
-    _SANDBOX_BACKENDS,
     Config,
     SandboxConfig,
     load_config,
 )
 from open_shrimp.paths import init_paths
-from open_shrimp.sandbox.prerequisites import DECLARATIONS
+from open_shrimp.sandbox.prerequisites import (
+    DECLARATIONS,
+    DECLARATIONS_BY_BACKEND,
+    SandboxBackendDeclaration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +100,10 @@ def checks_for_backend(backend: str) -> list[tuple[str, _Check]]:
     than to report a pass nobody established.
     """
     current = platform.system()
-    return [
-        check
-        for declared_backend, declared_platform, checks in DECLARATIONS
-        if backend == declared_backend and current == declared_platform
-        for check in checks
-    ]
+    declaration = DECLARATIONS_BY_BACKEND.get(backend)
+    if declaration is None or declaration.platform != current:
+        return []
+    return list(declaration.checks)
 
 
 @dataclass(frozen=True)
@@ -153,26 +154,16 @@ class SandboxOffer:
     summary: str
     available: bool
     detail: str
+    capabilities: frozenset[str] = frozenset()
+    base_image_placeholder: str = ""
+    unsupported_reasons: tuple[tuple[str, str], ...] = ()
 
 
-# What each backend is, in the words a person choosing one needs — not the
-# words an operator debugging one needs.  Beside the offer rather than in the
-# three wizards, so the answer to "what does this do to my project" is the
-# same sentence on every platform.
-#
-# Which backends exist is not decided here: the offer list is driven off the
-# registry the config validates against, so a backend added there and not
-# given words is a KeyError a test catches rather than a choice the wizard
-# silently never shows.
-_SANDBOX_LABELS: dict[str, tuple[str, str]] = {
-    "libvirt": ("libvirt", "each project runs in its own virtual machine"),
-    "lima": ("Lima", "each project runs in its own Linux virtual machine"),
-    "hcs": ("Hyper-V", "each project runs in its own Linux virtual machine"),
-}
-
-
-def _offer(backend: str, config: Config | None) -> SandboxOffer | None:
-    """What *backend* would give a context here, or ``None`` if it cannot run.
+def _offer(
+    declaration: SandboxBackendDeclaration,
+    config: Config | None,
+) -> SandboxOffer | None:
+    """What *declaration* would give a context here, or ``None`` if it cannot run.
 
     A backend with no prerequisite that applies here cannot run here at all —
     ``checks_for_backend`` already filters by platform — so it answers
@@ -184,21 +175,23 @@ def _offer(backend: str, config: Config | None) -> SandboxOffer | None:
     # One expression of the platform filter, not two: the empty list *is* the
     # "nothing here applies" answer, so asking `checks_for_backend` separately
     # would be a second reading of it that can disagree.
-    outcomes = prerequisites(backend, config)
+    outcomes = prerequisites(declaration.backend, config)
     if not outcomes:
         return None
-    label, summary = _SANDBOX_LABELS[backend]
     failed = [o for o in outcomes if not o.ok]
     # The check's own name is dropped where it repeats the backend's, so a
     # single-prerequisite backend reads as "Lima — limactl not found" rather
     # than naming Lima twice in one line.
     return SandboxOffer(
-        backend=backend,
-        label=label,
-        summary=summary,
+        backend=declaration.backend,
+        label=declaration.label,
+        summary=declaration.summary,
+        capabilities=declaration.capabilities,
+        base_image_placeholder=declaration.base_image_placeholder,
+        unsupported_reasons=declaration.unsupported_reasons,
         available=not failed,
         detail="; ".join(
-            o.detail if o.label == label else f"{o.label}: {o.detail}"
+            o.detail if o.label == declaration.label else f"{o.label}: {o.detail}"
             for o in failed
         ),
     )
@@ -212,18 +205,9 @@ def sandbox_offers(config: Config | None = None) -> list[SandboxOffer]:
     see ``blessed_offer``, because a first config asks whether a project is
     isolated, not which hypervisor isolates it.
     """
-    offers = (_offer(backend, config) for backend in sorted(_SANDBOX_BACKENDS))
+    offers = (_offer(declaration, config) for declaration in DECLARATIONS)
     return [offer for offer in offers if offer is not None]
 
-
-# One backend per platform, which is also the only one each platform has.
-# Named here rather than derived at the call site so a platform that grows a
-# second backend has one place to say which of them setup blesses.
-_BLESSED_BACKEND: dict[str, str] = {
-    "Linux": "libvirt",
-    "Darwin": "lima",
-    "Windows": "hcs",
-}
 
 # What "Enable sandbox" promises, in the words of somebody who has never heard
 # of a hypervisor.  Beside the backends rather than in the three wizards, so
@@ -255,7 +239,12 @@ SANDBOX_SUMMARY = (
 
 def blessed_backend() -> str | None:
     """The one sandbox backend setup offers on this platform."""
-    return _BLESSED_BACKEND.get(platform.system())
+    current = platform.system()
+    return next(
+        (declaration.backend for declaration in DECLARATIONS
+         if declaration.platform == current),
+        None,
+    )
 
 
 def blessed_offer(config: Config | None = None) -> SandboxOffer | None:
@@ -266,7 +255,9 @@ def blessed_offer(config: Config | None = None) -> SandboxOffer | None:
     ``sandbox_note`` is what a front end should say about either.
     """
     backend = blessed_backend()
-    return _offer(backend, config) if backend is not None else None
+    if backend is None:
+        return None
+    return _offer(DECLARATIONS_BY_BACKEND[backend], config)
 
 
 def sandbox_note(offer: SandboxOffer | None) -> str:
@@ -367,9 +358,9 @@ def run_doctor(config_path: str | None = None) -> int:
 
     sandbox_checks = (
         check
-        for _backend, declared_platform, checks in DECLARATIONS
-        if platform.system() == declared_platform
-        for check in checks
+        for declaration in DECLARATIONS
+        if platform.system() == declaration.platform
+        for check in declaration.checks
     )
     for label, check_fn in (*_CHECKS, *sandbox_checks):
         outcome = run_check(label, check_fn, config)
