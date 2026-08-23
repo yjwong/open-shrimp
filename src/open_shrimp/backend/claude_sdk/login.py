@@ -23,7 +23,9 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
+from open_shrimp import paths
 from open_shrimp.backend.claude_sdk.binary import find_claude_binary
 
 logger = logging.getLogger(__name__)
@@ -63,6 +65,25 @@ def auth_status() -> AuthStatus:
     return AuthStatus(False, None)
 
 
+def login_workspace() -> Path:
+    """The directory to start the CLI in for a sign-in.
+
+    A sign-in opens no workspace, but the CLI is a coding agent and always
+    starts in *some* directory.  Left to inherit, that is wherever the core
+    was launched from — the folder an installer happened to run in, which
+    the CLI has never seen and so asks the user to vouch for before it draws
+    the login prompt at all.  The question is then about a folder the user
+    never chose and that nothing will be read from.
+
+    Sign-in gets a directory of its own instead: empty, under the data dir,
+    and the same one on every run.  Whatever the CLI asks about it, it asks
+    once and remembers, and it names something that explains itself.
+    """
+    workspace = paths.data_dir() / "login"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
+
+
 def run_interactive_login() -> bool:
     """Hand this terminal to ``claude /login``, and report what came of it.
 
@@ -86,10 +107,10 @@ def run_interactive_login() -> bool:
     """
     binary = find_claude_binary()
     try:
-        subprocess.run([binary, "/login"], check=False)
+        subprocess.run([binary, "/login"], check=False, cwd=login_workspace())
     except KeyboardInterrupt:
         logger.debug("The Claude sign-in was interrupted")
     return auth_status().signed_in
 
 
-__all__ = ["AuthStatus", "auth_status", "run_interactive_login"]
+__all__ = ["AuthStatus", "auth_status", "login_workspace", "run_interactive_login"]

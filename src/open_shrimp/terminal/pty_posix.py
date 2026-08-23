@@ -109,7 +109,8 @@ class PosixPtyProcess(PtyProcess):
 
 
 async def spawn(
-    argv: list[str], env: dict[str, str], rows: int, cols: int
+    argv: list[str], env: dict[str, str], rows: int, cols: int,
+    cwd: str | None = None,
 ) -> PtyProcess:
     """Start *argv* attached to a new pty."""
     master_fd, slave_fd = pty.openpty()
@@ -121,6 +122,7 @@ async def spawn(
             stdout=slave_fd,
             stderr=slave_fd,
             env=env,
+            cwd=cwd,
             # Own session, so the child has a controlling terminal and
             # any children of its own die with it.
             preexec_fn=os.setsid,

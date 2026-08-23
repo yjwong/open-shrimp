@@ -10,6 +10,7 @@ that key is what the CLI would actually use.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +38,14 @@ def _on_disk(monkeypatch: pytest.MonkeyPatch, present: bool) -> None:
         "open_shrimp.backend.claude_sdk.cred_watcher.host_signed_in",
         lambda: present,
     )
+
+
+@pytest.fixture
+def data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A managed data directory of this test's own, so a sign-in that creates
+    its workspace creates it there and not in the developer's."""
+    monkeypatch.setattr(login_mod.paths, "data_dir", lambda: tmp_path)
+    return tmp_path
 
 
 # -- What the answer is ------------------------------------------------------
@@ -107,7 +116,7 @@ class TestAuthStatus:
 
 class TestInteractiveLogin:
     def test_the_child_gets_this_terminal_and_no_browser_override(
-        self, no_env: None, monkeypatch: pytest.MonkeyPatch
+        self, no_env: None, data_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Inherited stdio, so the CLI draws its own prompts, and no BROWSER:
         the override elsewhere exists only where there is no desktop to open a
@@ -124,10 +133,33 @@ class TestInteractiveLogin:
         assert run_interactive_login() is True
         (argv, kwargs), = calls
         assert argv == ["/opt/claude", "/login"]
-        assert set(kwargs) == {"check"}
+        assert set(kwargs) == {"check", "cwd"}
+
+    def test_the_child_starts_in_a_directory_of_its_own(
+        self, no_env: None, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Never an inherited working directory.  The CLI asks the user to
+        vouch for the directory it starts in the first time it sees one, and
+        inherited that is wherever the core was launched from — the folder an
+        installer happened to run in, which the user is then asked about
+        instead of being asked to sign in."""
+        calls: list[tuple] = []
+        monkeypatch.setattr(login_mod, "find_claude_binary", lambda: "/opt/claude")
+        monkeypatch.setattr(
+            login_mod.subprocess,
+            "run",
+            lambda argv, **kwargs: calls.append((argv, kwargs)),
+        )
+        _on_disk(monkeypatch, True)
+
+        run_interactive_login()
+
+        (_, kwargs), = calls
+        assert kwargs["cwd"] == data_dir / "login"
+        assert kwargs["cwd"].is_dir()
 
     def test_the_answer_is_the_credentials_after_the_child_exits(
-        self, no_env: None, monkeypatch: pytest.MonkeyPatch
+        self, no_env: None, data_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Not the exit code: the CLI exits zero on a sign-in the user backed
         out of, and the only thing that settles it is what is on disk."""
@@ -138,7 +170,7 @@ class TestInteractiveLogin:
         assert run_interactive_login() is False
 
     def test_ctrl_c_is_giving_up_not_a_crash(
-        self, no_env: None, monkeypatch: pytest.MonkeyPatch
+        self, no_env: None, data_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The wizard calls this before its config is written, so unwinding
         out of an abandoned sign-in would cost a whole setup."""

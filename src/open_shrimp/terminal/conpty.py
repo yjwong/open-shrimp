@@ -373,7 +373,8 @@ class ConPtyProcess(PtyProcess):
 
 
 def _spawn_blocking(
-    argv: list[str], env: dict[str, str], rows: int, cols: int
+    argv: list[str], env: dict[str, str], rows: int, cols: int,
+    cwd: str | None = None,
 ) -> ConPtyProcess:
     if _CREATE_PSEUDO_CONSOLE is None:
         raise PtyUnavailable(
@@ -455,7 +456,7 @@ def _spawn_blocking(
         False,
         EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
         _environment_block(env),
-        None,
+        cwd,
         ctypes.byref(startup.StartupInfo),
         ctypes.byref(proc_info),
     )
@@ -473,7 +474,8 @@ def _spawn_blocking(
 
 
 async def spawn(
-    argv: list[str], env: dict[str, str], rows: int, cols: int
+    argv: list[str], env: dict[str, str], rows: int, cols: int,
+    cwd: str | None = None,
 ) -> PtyProcess:
     """Start *argv* attached to a new pseudo-console."""
-    return await asyncio.to_thread(_spawn_blocking, argv, env, rows, cols)
+    return await asyncio.to_thread(_spawn_blocking, argv, env, rows, cols, cwd)

@@ -815,6 +815,14 @@ def _run_auth_login(*, hold: bool) -> int:
     did not work.
     """
     from open_shrimp.backend.claude_sdk.login import run_interactive_login
+    from open_shrimp.doctor import _load_config
+
+    # The sign-in runs under the managed data directory, which is only
+    # locatable once the instance name has been read off the config — or
+    # settled as the unscoped one, which is the case a wizard hits: it signs
+    # in before there is a config to read.
+    config = _load_config(None)
+    init_paths(config.instance_name if config is not None else None)
 
     try:
         signed_in = run_interactive_login()

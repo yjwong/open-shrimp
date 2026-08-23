@@ -22,6 +22,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from open_shrimp.backend.claude_sdk.binary import find_claude_binary
+from open_shrimp.backend.claude_sdk.login import login_workspace
 from open_shrimp.config import Config
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
@@ -595,7 +596,9 @@ async def login_ws_endpoint(websocket: WebSocket) -> None:
     }
 
     try:
-        pty = await spawn_pty([claude_bin, "/login"], env)
+        pty = await spawn_pty(
+            [claude_bin, "/login"], env, cwd=str(login_workspace())
+        )
     except (PtyUnavailable, OSError) as e:
         logger.warning("Login PTY could not start", exc_info=True)
         await websocket.send_text(f"\x1b[31mError: {e}\x1b[0m\r\n")

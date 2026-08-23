@@ -104,8 +104,12 @@ async def spawn_pty(
     env: dict[str, str],
     rows: int = 24,
     cols: int = 80,
+    cwd: str | None = None,
 ) -> PtyProcess:
     """Start *argv* attached to a pseudo-terminal.
+
+    *cwd* is the child's working directory; *None* inherits this process's,
+    which is wherever the core was launched from.
 
     Raises:
         PtyUnavailable: if this host has no usable pty.
@@ -113,8 +117,8 @@ async def spawn_pty(
     if sys.platform == "win32":
         from open_shrimp.terminal import conpty
 
-        return await conpty.spawn(argv, env, rows, cols)
+        return await conpty.spawn(argv, env, rows, cols, cwd)
 
     from open_shrimp.terminal import pty_posix
 
-    return await pty_posix.spawn(argv, env, rows, cols)
+    return await pty_posix.spawn(argv, env, rows, cols, cwd)
