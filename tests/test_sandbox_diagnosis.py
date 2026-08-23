@@ -252,7 +252,12 @@ class TestTheReport:
 
 class TestDiagnose:
     @pytest.mark.asyncio
-    async def test_a_failing_prerequisite_outranks_the_exception(self, monkeypatch):
+    async def test_a_failing_prerequisite_leads_but_keeps_the_exception(
+        self, monkeypatch,
+    ):
+        """The remedy leads, because it is the actionable half.  The exception
+        still travels with it, since a check can fail over something this
+        failure had nothing to do with."""
         _checks(monkeypatch, ("Docker", lambda config: (False, "join the docker group")))
 
         what, prerequisite = await diagnose(
@@ -261,8 +266,8 @@ class TestDiagnose:
 
         assert prerequisite
         assert "join the docker group" in what
-        # The traceback's own words explain nothing the user can act on.
-        assert "Failed to start container" not in what
+        assert "Failed to start container" in what
+        assert what.index("join the docker group") < what.index("Failed to start")
 
     @pytest.mark.asyncio
     async def test_a_clean_host_renders_the_failure_itself(self, monkeypatch):

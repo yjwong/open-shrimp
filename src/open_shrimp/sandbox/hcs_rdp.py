@@ -42,6 +42,7 @@ from pathlib import Path
 from platformdirs import user_data_path
 
 from open_shrimp.sandbox import hcs_assets as A
+from open_shrimp.sandbox.prefetch import ProgressFn, exclusive
 
 from open_shrimp.sandbox.hcs_rdp_keymap import (
     combo_scancodes,
@@ -851,27 +852,56 @@ def find_shipped_helper() -> Path | None:
     return cached if cached.is_file() else None
 
 
-def download_shipped_helper() -> Path:
+def helper_staged() -> bool:
+    """Whether a prebuilt helper is already resolvable, for a caller deciding
+    whether to fetch one.
+
+    An override resolving to nothing counts as staged.  Downloading the bundle
+    would not repair it: :func:`find_shipped_helper` goes on preferring the
+    override and goes on raising the same error, so the transfer buys nothing.
+    """
+    try:
+        return find_shipped_helper() is not None
+    except RuntimeError:
+        return True
+
+
+def download_shipped_helper(progress: ProgressFn | None = None) -> Path:
     """Fetch the released helper bundle and unpack it; return the exe.
 
     The archive is extracted whole — the exe alone is not runnable, because
     the FreeRDP DLLs shipped beside it are what the loader resolves against.
+
+    The lock is held across the unpack as well as the transfer.  A prefetch and
+    a first turn reach this path together, and an exe visible while its DLLs
+    are still being written is one :func:`find_shipped_helper` reports as
+    staged and the loader then kills.
+
+    *progress* counts the bytes of the archive; the unpack that follows is not
+    reported.
     """
     target_dir = shipped_helper_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
-    archive = target_dir / HELPER_ASSET
-    try:
-        A.download_release_asset(HELPER_ASSET, archive)
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(target_dir)
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise RuntimeError(
-            f"Failed to unpack the HCS RDP helper from "
-            f"{HELPER_DOWNLOAD_URL}: {exc}"
-        ) from exc
-    finally:
-        archive.unlink(missing_ok=True)
     exe = target_dir / HELPER_EXE_NAME
+    archive = target_dir / HELPER_ASSET
+    # Keyed on the exe, which is what the presence check reads, and never on
+    # the archive: :func:`download_release_asset` locks that itself, and a
+    # second lock on one path from one process deadlocks.
+    with exclusive(exe):
+        if exe.is_file():
+            # The winner landed the whole bundle while this caller blocked.
+            return exe
+        try:
+            A.download_release_asset(HELPER_ASSET, archive, progress=progress)
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(target_dir)
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise RuntimeError(
+                f"Failed to unpack the HCS RDP helper from "
+                f"{HELPER_DOWNLOAD_URL}: {exc}"
+            ) from exc
+        finally:
+            archive.unlink(missing_ok=True)
     if not exe.is_file():
         raise RuntimeError(
             f"The HCS RDP helper archive at {HELPER_DOWNLOAD_URL} contains no "

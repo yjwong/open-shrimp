@@ -369,10 +369,12 @@ def _check_hcs_base_image(config: Config | None) -> tuple[bool, str]:
 def _check_hcs_rdp_helper(config: Config | None) -> tuple[bool, str]:
     """The computer-use RDP helper and the FreeRDP DLLs it loads.
 
-    Only the prebuilt bundle and the local toolchain are inspected \u2014 never the
-    download that ``ensure_rdp_helper`` would fall back to, since a check must
-    not fetch anything.  Either source is enough, so a host with a toolchain
-    and no bundle passes.
+    A check may not fetch anything, so what is inspected is the bundle already
+    staged and the local toolchain.  With neither, this passes: the bundle is
+    prefetched with the guest images and downloaded on first use failing that,
+    so a host that has not staged one is missing nothing.  What fails is what
+    no download repairs \u2014 an override resolving to nothing, a bundle without
+    its DLLs, a ``mingw_bin`` without a compiler.
     """
     from open_shrimp.sandbox.hcs_rdp import (
         HELPER_ASSET,
@@ -401,18 +403,16 @@ def _check_hcs_rdp_helper(config: Config | None) -> tuple[bool, str]:
             )
         return True, f"found at {shipped}, FreeRDP DLLs alongside"
 
-    # No bundle: the source build is the remaining path, and it needs both a
-    # toolchain and the FreeRDP DLLs from the same mingw64 bin directory.
+    # No bundle.  A configured toolchain is still inspected, since a source
+    # install compiles from it and a half-installed MSYS2 fails that build.
     problems: list[str] = []
+    pending: list[str] = []
     buildable: list[str] = []
     for name, sandbox in sandboxes:
         if not sandbox.mingw_bin:
-            problems.append(
-                f"{name}: no prebuilt helper in {shipped_helper_dir()} and no "
-                "sandbox.mingw_bin to build one \u2014 unpack the "
-                f"{HELPER_ASSET} release asset there (or point "
-                "OPENSHRIMP_HCS_RDP_HELPER at it), or set sandbox.mingw_bin to "
-                r"an MSYS2 mingw64 bin directory (e.g. C:\msys64\mingw64\bin)"
+            pending.append(
+                f"{name}: the {HELPER_ASSET} release asset will be "
+                f"downloaded to {shipped_helper_dir()} before it is needed"
             )
             continue
         mingw = Path(sandbox.mingw_bin)
@@ -430,7 +430,7 @@ def _check_hcs_rdp_helper(config: Config | None) -> tuple[bool, str]:
 
     if problems:
         return False, "; ".join(problems)
-    return True, "no prebuilt helper; " + "; ".join(buildable)
+    return True, "no prebuilt helper; " + "; ".join(pending + buildable)
 
 
 def _missing_freerdp_dlls(directory: Path) -> list[str]:

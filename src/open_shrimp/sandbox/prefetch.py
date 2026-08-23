@@ -460,6 +460,7 @@ def _lima_assets() -> list[SharedAsset]:
 def _hcs_assets() -> list[SharedAsset]:
     from open_shrimp.sandbox import hcs
     from open_shrimp.sandbox import hcs_assets
+    from open_shrimp.sandbox import hcs_rdp
 
     # A computer-use template, because a sandboxed context carries a desktop:
     # :func:`open_shrimp.config.build_context_dict` sets ``computer_use`` on
@@ -492,6 +493,20 @@ def _hcs_assets() -> list[SharedAsset]:
                 description=description,
                 progress=progress,
             ),
+        ),
+        SharedAsset(
+            name=hcs_rdp.HELPER_ASSET,
+            directory=hcs_rdp.shipped_helper_dir(),
+            # The desktop above is what this drives, and the helper is
+            # resolved on the first computer-use call rather than on boot, so
+            # left out of this list it downloads in the middle of a turn —
+            # where the wait can be neither shown nor abandoned.
+            #
+            # A 50 MB archive unpacking to 130 MB of FreeRDP DLLs, both on
+            # disk at once.
+            needs_bytes=256 * 1024 * 1024,
+            present=hcs_rdp.helper_staged,
+            fetch=lambda progress: hcs_rdp.download_shipped_helper(progress),
         ),
     ]
 

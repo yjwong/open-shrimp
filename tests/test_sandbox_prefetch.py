@@ -27,6 +27,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -365,9 +366,15 @@ def _wizard_sandbox(backend: str):
     return _parse_sandbox_config(context["sandbox"])
 
 
-def _recorded_downloads(monkeypatch) -> list[tuple[str, Path]]:
-    """Every ``(asset, destination)`` the HCS fetchers would have downloaded."""
-    from open_shrimp.sandbox import hcs_assets
+def _recorded_downloads(monkeypatch, tmp_path) -> list[tuple[str, Path]]:
+    """Every ``(asset, destination)`` the HCS fetchers would have downloaded.
+
+    ``download_release_asset`` is stopped as well as ``ensure_asset``: the RDP
+    helper goes through that one, and leaving it open pulls the real 50 MB
+    bundle off the network on every run.  Its stand-in writes a zip holding the
+    exe, because the caller unpacks what it is handed.
+    """
+    from open_shrimp.sandbox import hcs_assets, hcs_rdp
 
     seen: list[tuple[str, Path]] = []
 
@@ -375,11 +382,22 @@ def _recorded_downloads(monkeypatch) -> list[tuple[str, Path]]:
         seen.append((asset, Path(dest)))
         return Path(dest)
 
+    def record_raw(asset, dest, *, progress=None):
+        seen.append((asset, Path(dest)))
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr(hcs_rdp.HELPER_EXE_NAME, b"MZ")
+
     monkeypatch.setattr(hcs_assets, "ensure_asset", record)
+    monkeypatch.setattr(hcs_assets, "download_release_asset", record_raw)
+    # The bundle lands per-user, so without this the suite writes into the
+    # data directory of whoever is running it.
+    monkeypatch.setattr(hcs_rdp, "shipped_helper_dir", lambda: tmp_path / "helper")
     return seen
 
 
-def test_the_hcs_prefetch_fetches_the_rootfs_that_config_will_boot(monkeypatch):
+def test_the_hcs_prefetch_fetches_the_rootfs_that_config_will_boot(
+    monkeypatch, tmp_path,
+):
     """Prefetching an image the first turn does not read is worse than not
     prefetching at all: it spends the download twice, once on a file nothing
     opens and once on the one it needed.
@@ -393,11 +411,44 @@ def test_the_hcs_prefetch_fetches_the_rootfs_that_config_will_boot(monkeypatch):
     wanted = _wizard_sandbox("hcs")
     asset, cache, _ = hcs.managed_rootfs_asset(computer_use=wanted.computer_use)
 
-    downloads = _recorded_downloads(monkeypatch)
+    downloads = _recorded_downloads(monkeypatch, tmp_path)
     for shared in P.shared_assets("hcs"):
         shared.fetch(lambda done, total: None)
 
     assert (asset, cache) in downloads
+
+
+def test_the_hcs_prefetch_stages_the_rdp_helper(monkeypatch, tmp_path):
+    """The helper is resolved on the first computer-use call rather than on
+    boot, so left out of the prefetch it downloads in the middle of a turn.
+    Its precondition is the desktop rootfs's, which the same wizard block
+    enables.
+    """
+    from open_shrimp.sandbox import hcs_rdp
+
+    assert _wizard_sandbox("hcs").computer_use
+
+    downloads = _recorded_downloads(monkeypatch, tmp_path)
+    for shared in P.shared_assets("hcs"):
+        shared.fetch(lambda done, total: None)
+
+    assert hcs_rdp.HELPER_ASSET in [asset for asset, _ in downloads]
+    assert (tmp_path / "helper" / hcs_rdp.HELPER_EXE_NAME).is_file()
+
+
+def test_a_staged_rdp_helper_is_not_fetched_again(monkeypatch, tmp_path):
+    """``present`` is what spares a machine the 50 MB on every run after the
+    first, so it has to answer for the helper as it does for the images."""
+    from open_shrimp.sandbox import hcs_rdp
+
+    _recorded_downloads(monkeypatch, tmp_path)
+    helper = tmp_path / "helper" / hcs_rdp.HELPER_EXE_NAME
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"MZ")
+
+    staged = [a for a in P.shared_assets("hcs") if a.name == hcs_rdp.HELPER_ASSET]
+    assert [a.name for a in staged] == [hcs_rdp.HELPER_ASSET]
+    assert staged[0].present()
 
 
 # -- the fetchers -------------------------------------------------------------

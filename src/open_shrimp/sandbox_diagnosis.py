@@ -6,9 +6,9 @@ binding — and the prerequisite checks behind ``openshrimp doctor`` already
 know what and already know the way out.  So the first thing asked on a failure
 is not "what did that line fail to do" but "what is wrong with this machine",
 which is the question the operator has and the only one with an answer they
-can act on.  Only when every prerequisite passes is the failure the exception's
-own, and then its message is the best information there is and is rendered
-rather than discarded.
+can act on.  The exception's own message is rendered either way, after the
+remedy where there is one: a check can fail over something this failure had
+nothing to do with, and the reply has to survive that.
 
 The remedy sentences here are ``doctor``'s, word for word, and the boot-time
 readiness card renders the same ones: the fix must not drift between the three
@@ -88,11 +88,18 @@ async def diagnose(
     caller needs to say what to do next.
     """
     outcomes = await _diagnose_host(error.backend, config)
+    reported = str(error).strip() or "the sandbox did not start"
     failing = [o for o in outcomes if o.ok is False]
     if failing:
-        return "\n".join(f"{o.label}: {o.detail}" for o in failing), True
+        # The remedy leads because it is the actionable half, and the exception
+        # follows it rather than being dropped for it: a reply carrying only
+        # the check sends the operator to repair something that was not broken,
+        # and leaves the one sentence naming what did break in the log.
+        return (
+            "\n".join(f"{o.label}: {o.detail}" for o in failing)
+            + f"\n\nWhat actually failed was: {reported}"
+        ), True
 
-    reported = str(error).strip() or "the sandbox did not start"
     unanswered = [o.label for o in outcomes if o.ok is None]
     if unanswered:
         # Not a clean bill of health: say so rather than let the silence of a

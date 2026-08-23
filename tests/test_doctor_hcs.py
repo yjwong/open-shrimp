@@ -390,26 +390,31 @@ def test_an_incomplete_toolchain_names_the_missing_packages(tmp_path, monkeypatc
     assert "-freerdp" in detail
 
 
-def test_neither_a_bundle_nor_a_toolchain_names_both_ways_out(tmp_path, monkeypatch):
+def test_neither_a_bundle_nor_a_toolchain_is_not_a_fault(tmp_path, monkeypatch):
+    """The state every clean install starts in, and one that repairs itself:
+    the bundle is prefetched with the guest images and downloaded on first use
+    failing that.  Reporting it as a fault failed this check on every fresh
+    machine, and since a sandbox failure reports whichever prerequisite is
+    failing, it stood in front of whatever had actually gone wrong."""
     _no_bundle(monkeypatch)
     config = _config(work=_hcs(tmp_path, computer_use=True))
     ok, detail = doctor._check_hcs_rdp_helper(config)
-    assert not ok
+    assert ok
     assert "openshrimp-hcs-rdp-helper-windows-x86_64.zip" in detail
-    assert "mingw_bin" in detail
+    assert "will be downloaded" in detail
 
 
 def test_the_check_never_downloads(tmp_path, monkeypatch):
     _no_bundle(monkeypatch)
 
-    def _boom() -> None:
+    def _boom(*args, **kwargs) -> None:
         raise AssertionError("doctor must not fetch the helper bundle")
 
     monkeypatch.setattr(
         "open_shrimp.sandbox.hcs_rdp.download_shipped_helper", _boom,
     )
     config = _config(work=_hcs(tmp_path, computer_use=True))
-    assert not doctor._check_hcs_rdp_helper(config)[0]
+    assert doctor._check_hcs_rdp_helper(config)[0]
 
 
 # -- an output stream that cannot carry the icons ------------------------------
