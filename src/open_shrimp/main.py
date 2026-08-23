@@ -419,6 +419,44 @@ def _create_http_server(
     return server
 
 
+async def _release_resources(
+    control: Any,
+    mcp_proxy: Any,
+    tunnel_proc: "asyncio.subprocess.Process | None",
+    db: Any,
+) -> None:
+    """Release everything the core holds, control channel last.
+
+    A supervising UI treats the endpoint going quiet as the core being down, and
+    reaps the process handle it holds.  Release it before the rest and the core
+    is killed partway through this function, leaving the tunnel, the proxy's
+    stdio servers and the database open behind it.
+
+    Each step is isolated: a failure tearing one down must not skip the rest,
+    and must not replace the failure that actually killed the bot — an operator
+    debugging a rejected token should not be shown a tunnel error instead.
+    """
+
+    async def release(what: str, coro: "Awaitable[Any]") -> None:
+        try:
+            await coro
+        except Exception:
+            logger.exception("Failed to stop %s during shutdown", what)
+
+    if mcp_proxy is not None:
+        await release("the MCP proxy", mcp_proxy.shutdown())
+
+    if tunnel_proc is not None:
+        from open_shrimp.tunnel import stop_tunnel
+
+        await release("the tunnel", stop_tunnel(tunnel_proc))
+
+    await release("the database", db.close())
+
+    if control is not None:
+        await release("the control channel", control.shutdown())
+
+
 async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = None) -> None:
     """Run the bot and HTTP server until *stop_event* is set.
 
@@ -609,30 +647,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
             if task_failure is None:
                 task_failure = exc
 
-    # Each step is isolated: a failure tearing one down must not skip the
-    # rest, and must not replace the failure that actually killed the bot —
-    # an operator debugging a rejected token should not be shown a tunnel
-    # error instead.
-    async def _release(what: str, coro: "Awaitable[Any]") -> None:
-        try:
-            await coro
-        except Exception:
-            logger.exception("Failed to stop %s during shutdown", what)
-
-    if control is not None:
-        await _release("the control channel", control.shutdown())
-
-    # Stop the MCP proxy and its stdio server processes.
-    if mcp_proxy is not None:
-        await _release("the MCP proxy", mcp_proxy.shutdown())
-
-    # Stop the tunnel if we started one.
-    if tunnel_proc is not None:
-        from open_shrimp.tunnel import stop_tunnel
-
-        await _release("the tunnel", stop_tunnel(tunnel_proc))
-
-    await _release("the database", db.close())
+    await _release_resources(control, mcp_proxy, tunnel_proc, db)
     logger.info("Shutdown complete")
 
     # Surfaced only now, so the CLI still exits non-zero on a boot failure.

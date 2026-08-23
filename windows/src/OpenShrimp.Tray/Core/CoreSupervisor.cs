@@ -466,9 +466,13 @@ internal sealed class CoreSupervisor : IAsyncDisposable
 
         if (_process is { HasExited: false } && outcome != StopOutcome.Refused)
         {
-            // The outcome this whole class is arranged to avoid: a core killed
-            // while it holds an HCS compute system strands the guest.
-            TrayLog.Write("Core did not stop in time; killing it");
+            // On Lapsed this is the outcome the whole class is arranged to
+            // avoid: a core killed while it holds an HCS compute system strands
+            // the guest. On Quiet it is only the launcher being reaped, because
+            // the core releases the endpoint after everything else it holds.
+            TrayLog.Write(outcome == StopOutcome.Lapsed
+                ? "Core did not stop in time; killing it"
+                : "Core stopped; reaping the launcher");
             try { _process.Kill(entireProcessTree: true); }
             catch (Exception) { /* already gone */ }
         }

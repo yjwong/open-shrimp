@@ -83,9 +83,9 @@ class ControlServer:
         self._pipe_servers.clear()
 
         # Drop the clients first: a connected client's handler is parked in a
-        # read, and `wait_closed` waits on handlers.  Shutdown is the one path
-        # that must not stall — everything downstream of it releases the
-        # proxy, the tunnel and the sandbox guests.
+        # read, and `wait_closed` waits on handlers.  Nothing is released after
+        # this, so a stall holds the endpoint open on a core that has finished,
+        # which a supervising UI reads as the core still running.
         for writer in list(self._clients):
             writer.close()
         self._clients.clear()
