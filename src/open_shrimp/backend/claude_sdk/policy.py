@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
-from open_shrimp.markdown import escape_code
+from open_shrimp.markdown import escape, escape_code
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.supervisor import SUPERVISOR_WRITE_TOOL_NAMES
 
@@ -214,18 +214,6 @@ def _is_single_subcommand_safe(
 
 # Escape function for MarkdownV2 (the SDK rendering uses MarkdownV2).  Kept
 # private to this module so the policy doesn't reach into handlers/utils.
-_MDV2_ESCAPE = "_*[]()~`>#+-=|{}.!"
-
-
-def _escape_mdv2(text: str) -> str:
-    escaped: list[str] = []
-    for ch in text:
-        if ch in _MDV2_ESCAPE:
-            escaped.append("\\")
-        escaped.append(ch)
-    return "".join(escaped)
-
-
 # ---------------------------------------------------------------------------
 # Per-tool summary renderers
 # ---------------------------------------------------------------------------
@@ -360,7 +348,7 @@ def _format_bash_approval(tool_input: dict[str, Any]) -> str:
 
     parts: list[str] = []
     if description:
-        parts.append(f"\U0001f4bb *Bash:* {_escape_mdv2(description)}")
+        parts.append(f"\U0001f4bb *Bash:* {escape(description)}")
     else:
         parts.append("\U0001f4bb *Bash*")
 
@@ -382,7 +370,7 @@ def _format_monitor_approval(tool_input: dict[str, Any]) -> str:
     parts: list[str] = []
     header = "\U0001f4e1 *Monitor*"
     if description:
-        header = f"{header}: {_escape_mdv2(description)}"
+        header = f"{header}: {escape(description)}"
     if persistent:
         header = f"{header} _\\(persistent\\)_"
     parts.append(header)
@@ -425,13 +413,13 @@ def _format_agent_approval(
 
     if subagent_type:
         parts.append(
-            f"\U0001f916 *Agent* \\({_escape_mdv2(subagent_type)}\\)",
+            f"\U0001f916 *Agent* \\({escape(subagent_type)}\\)",
         )
     else:
         parts.append("\U0001f916 *Agent*")
 
     if description:
-        parts.append(_escape_mdv2(description))
+        parts.append(escape(description))
 
     if expanded and prompt:
         max_prompt_len = 4096 - 300
@@ -456,7 +444,7 @@ def _format_plan_approval(tool_input: dict[str, Any]) -> str:
         preview = preview[:77] + "..."
     header = "\U0001f4cb *Plan*"
     if preview:
-        header += f": {_escape_mdv2(preview)}"
+        header += f": {escape(preview)}"
     return header
 
 
@@ -469,8 +457,8 @@ def _format_generic_approval(
         val_str = str(val)
         if len(val_str) > 200:
             val_str = val_str[:200] + "..."
-        key_escaped = key.replace("_", "\\_")
-        val_escaped = _escape_mdv2(val_str)
+        key_escaped = escape(key)
+        val_escaped = escape(val_str)
         summary_parts.append(f"*{key_escaped}:* {val_escaped}")
     return "\n".join(summary_parts)
 

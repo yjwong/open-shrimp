@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from telegram import Bot, InlineKeyboardMarkup
 
-from open_shrimp.markdown import escape_code
+from open_shrimp.markdown import escape, escape_code
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox.launch import start_sandboxed_agent
@@ -500,7 +500,6 @@ async def _request_outer_approval(
         register_pending_approval,
         release_pending_approval,
     )
-    from open_shrimp.handlers.utils import _escape_mdv2
 
     tool_use_id = f"askctx{os.urandom(6).hex()}"
     inline_data = f"{_HANDOFF_INLINE_PREFIX}{tool_use_id}"
@@ -508,12 +507,12 @@ async def _request_outer_approval(
     deny_data = f"{_HANDOFF_DENY_PREFIX}{tool_use_id}"
 
     header = (
-        f"🔎 *Ask {_escape_mdv2(target)}?*" if include_inline
-        else f"↗️ *Hand off to {_escape_mdv2(target)}?*"
+        f"🔎 *Ask {escape(target)}?*" if include_inline
+        else f"↗️ *Hand off to {escape(target)}?*"
     )
     text = (
         f"{header}\n"
-        f"> {_escape_mdv2(_summary_line(question, limit=300))}"
+        f"> {escape(_summary_line(question, limit=300))}"
     )
     buttons = []
     if include_inline:
@@ -643,9 +642,8 @@ def _make_parent_routed_approval(
     originates from the cross-context sub-query.
     """
     from open_shrimp.handlers.approval import _send_approval_keyboard
-    from open_shrimp.handlers.utils import _escape_mdv2
 
-    provenance = f"🔎 *{_escape_mdv2(target)}* sub\\-query wants to:"
+    provenance = f"🔎 *{escape(target)}* sub\\-query wants to:"
 
     async def _request_approval(
         tool_name: str,
@@ -831,11 +829,10 @@ class _StatusMessage:
     async def start(
         self, keyboard: InlineKeyboardMarkup | None,
     ) -> None:
-        from open_shrimp.handlers.utils import _escape_mdv2
 
         # The question is already shown on the approval card above this
         # message, so don't echo it again here.
-        text = f"🔎 *Asking {_escape_mdv2(self._target)}…*"
+        text = f"🔎 *Asking {escape(self._target)}…*"
         kwargs: dict[str, Any] = {}
         if self._thread_id is not None:
             kwargs["message_thread_id"] = self._thread_id
@@ -856,9 +853,8 @@ class _StatusMessage:
     async def finish(self, result: _SubQueryResult) -> None:
         if self._message_id is None:
             return
-        from open_shrimp.handlers.utils import _escape_mdv2
 
-        target = _escape_mdv2(self._target)
+        target = escape(self._target)
         if result.outcome == "ok":
             tools = (
                 "1 tool" if result.tool_count == 1
@@ -966,7 +962,6 @@ async def _run_handoff(
     """
     from open_shrimp.db import ChatScope, set_active_context
     from open_shrimp.dispatch_registry import dispatch
-    from open_shrimp.handlers.utils import _escape_mdv2
 
     # Topic gate: createForumTopic works in a private chat (bots may always
     # create topics there) OR a forum supergroup. Telegram only sets
@@ -1043,7 +1038,7 @@ async def _run_handoff(
         brief = brief[:3000] + "…"
     placeholder = (
         "↗️ *Handoff brief* \\(injected as the first turn\\)\n\n"
-        f"{_escape_mdv2(brief)}"
+        f"{escape(brief)}"
     )
     try:
         await dispatch(

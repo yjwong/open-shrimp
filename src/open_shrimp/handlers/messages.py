@@ -50,7 +50,7 @@ from open_shrimp.handlers.approval import (
     _send_host_bash_approval,
 )
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
-from open_shrimp.markdown import escape as _escape_md, split_message
+from open_shrimp.markdown import escape, split_message
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox_diagnosis import failure_reply
 from open_shrimp.supervisor import (
@@ -341,8 +341,8 @@ async def _warn_skipped_attachments(
     """
     if not skipped:
         return
-    lines = "\n".join(f"• {_escape_md(item)}" for item in skipped)
-    header = _escape_md(
+    lines = "\n".join(f"• {escape(item)}" for item in skipped)
+    header = escape(
         "Couldn't read this file:" if len(skipped) == 1 else "Couldn't read these files:"
     )
     try:

@@ -29,7 +29,7 @@ from open_shrimp.config import (
     is_sandboxed,
     sandbox_backend,
 )
-from open_shrimp.markdown import escape_code
+from open_shrimp.markdown import escape, escape_code
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
 from open_shrimp.backend.factory import default_model_label, get_backend_by_name
 from open_shrimp.android_companion import (
@@ -55,7 +55,7 @@ from open_shrimp.handlers.state import (
 )
 from open_shrimp.handlers.utils import (
     _cancel_running,
-    _escape_mdv2,
+    escape,
     _get_context,
     _get_context_name,
     _get_locked_context,
@@ -223,8 +223,8 @@ async def handle_context_callback(
             await reset_scope(scope, ctx_name, db)
 
         ctx = resolve_context(config, target)
-        desc = _escape_mdv2(ctx.description) if ctx else ""
-        target_escaped = _escape_mdv2(target)
+        desc = escape(ctx.description) if ctx else ""
+        target_escaped = escape_code(target)
         try:
             await query.message.edit_text(
                 f"Switched to context `{target_escaped}` \\- {desc}\n_Started fresh session\\._",
@@ -273,8 +273,8 @@ async def handle_context_callback(
         from open_shrimp.db import set_active_context
 
         await set_active_context(db, scope, target)
-        desc = _escape_mdv2(ctx.description)
-        target_escaped = _escape_mdv2(target)
+        desc = escape(ctx.description)
+        target_escaped = escape_code(target)
 
         existing_session = await get_session_id(db, scope, target)
         if existing_session:
@@ -319,8 +319,8 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         locked = _get_locked_context(scope.chat_id, config)
         if locked:
             ctx = config.contexts[locked]
-            escaped_name = _escape_mdv2(locked)
-            escaped_desc = _escape_mdv2(ctx.description)
+            escaped_name = escape_code(locked)
+            escaped_desc = escape(ctx.description)
             await message.reply_text(
                 f"This chat is locked to context `{escaped_name}` \\- {escaped_desc}",
                 parse_mode="MarkdownV2",
@@ -363,8 +363,8 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     await set_active_context(db, scope, target)
     ctx = selectable[target]
-    desc = _escape_mdv2(ctx.description)
-    target_escaped = _escape_mdv2(target)
+    desc = escape(ctx.description)
+    target_escaped = escape_code(target)
 
     existing_session = await get_session_id(db, scope, target)
     if existing_session:
@@ -462,7 +462,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             elapsed = int(now - task.started_at)
             minutes, seconds = divmod(elapsed, 60)
             duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
-            tid_short = task.task_id[:12]
+            tid_short = escape_code(task.task_id[:12])
             ttype = task.task_type or "unknown"
             lines.append(
                 f"  • `{tid_short}` {ttype}: "
@@ -643,7 +643,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if current_override:
             del _model_overrides[scope]
             await close_session(scope)
-            model_escaped = _escape_mdv2(
+            model_escaped = escape_code(
                 ctx_default_model or default_model_label(backend.name)
             )
             await message.reply_text(
@@ -664,7 +664,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _model_overrides[scope] = resolved
     await close_session(scope)
 
-    shown = _escape_mdv2(resolved)
+    shown = escape_code(resolved)
     if resolved != target:
         shown = f"`{escape_code(target)}` → `{shown}`"
     else:
@@ -738,7 +738,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if current_override:
             del _effort_overrides[scope]
             await close_session(scope)
-            effort_escaped = _escape_mdv2(ctx_default_effort or "default")
+            effort_escaped = escape_code(ctx_default_effort or "default")
             await message.reply_text(
                 f"Effort override cleared\\. Using context default: `{effort_escaped}`",
                 parse_mode="MarkdownV2",
@@ -761,7 +761,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Set override
     _effort_overrides[scope] = target
     await close_session(scope)
-    effort_escaped = _escape_mdv2(target)
+    effort_escaped = escape_code(target)
     await message.reply_text(
         f"Effort overridden to `{effort_escaped}`\\. "
         f"Use `/effort reset` to revert\\.",
@@ -910,7 +910,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ],
     ])
     await message.reply_text(
-        f"Add `{escape_code(target)}` to *{_escape_mdv2(ctx_name)}*?",
+        f"Add `{escape_code(target)}` to *{escape(ctx_name)}*?",
         parse_mode="MarkdownV2",
         reply_markup=markup,
     )
@@ -954,7 +954,7 @@ async def handle_add_dir_callback(
 
         try:
             await query.message.edit_text(
-                f"Added `{escape_code(target)}` to *{_escape_mdv2(ctx_name)}* "
+                f"Added `{escape_code(target)}` to *{escape(ctx_name)}* "
                 f"\\(this session\\)\\.\n"
                 f"Session will reconnect on next message\\.",
                 parse_mode="MarkdownV2",
@@ -997,7 +997,7 @@ async def handle_add_dir_callback(
 
         try:
             await query.message.edit_text(
-                f"Added `{escape_code(target)}` to *{_escape_mdv2(ctx_name)}* "
+                f"Added `{escape_code(target)}` to *{escape(ctx_name)}* "
                 f"\\(saved to config\\)\\.\n"
                 f"Session will reconnect on next message\\.",
                 parse_mode="MarkdownV2",
@@ -1153,20 +1153,20 @@ def _build_resume_detail(
     lines.append(f"*Session details*\n")
 
     if s.custom_title:
-        lines.append(f"*Title:* {_escape_mdv2(s.custom_title)}")
-    lines.append(f"*Summary:* {_escape_mdv2(s.summary or 'No summary')}")
+        lines.append(f"*Title:* {escape(s.custom_title)}")
+    lines.append(f"*Summary:* {escape(s.summary or 'No summary')}")
 
     if s.first_prompt:
         prompt = s.first_prompt
         if len(prompt) > 200:
             prompt = prompt[:197] + "..."
-        lines.append(f"*First prompt:* {_escape_mdv2(prompt)}")
+        lines.append(f"*First prompt:* {escape(prompt)}")
 
     if s.git_branch:
         lines.append(f"*Branch:* `{escape_code(s.git_branch)}`")
 
-    lines.append(f"*Created:* {_escape_mdv2(_relative_time(s.created_at))}")
-    lines.append(f"*Last active:* {_escape_mdv2(_relative_time(s.last_modified))}")
+    lines.append(f"*Created:* {escape(_relative_time(s.created_at))}")
+    lines.append(f"*Last active:* {escape(_relative_time(s.last_modified))}")
 
     if s.file_size:
         size_kb = s.file_size / 1024
@@ -1174,7 +1174,7 @@ def _build_resume_detail(
             size_str = f"{size_kb / 1024:.1f} MB"
         else:
             size_str = f"{size_kb:.0f} KB"
-        lines.append(f"*Size:* {_escape_mdv2(size_str)}")
+        lines.append(f"*Size:* {escape(size_str)}")
 
     lines.append(f"*ID:* `{escape_code(s.session_id)}`")
 
@@ -1244,7 +1244,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await close_session(scope)
         await set_session_id(db, scope, ctx_name, match.session_id)
-        summary = _escape_mdv2(match.summary or "No summary")
+        summary = escape(match.summary or "No summary")
         await message.reply_text(
             f"Resumed session `{escape_code(match.session_id[:12])}...`\n_{summary}_",
             parse_mode="MarkdownV2",
@@ -1412,7 +1412,7 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     context_name, ctx = resolved
 
-    escaped_context = _escape_mdv2(context_name)
+    escaped_context = escape(context_name)
     dirs = [ctx.directory] + (ctx.additional_directories or [])
     thread_param = f"&thread_id={scope.thread_id}" if scope.thread_id is not None else ""
 
@@ -1421,7 +1421,7 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "\U0001f4dd Open Review",
             f"/app/?chat_id={scope.chat_id}{thread_param}",
         )]
-        escaped_dir = _escape_mdv2(ctx.directory)
+        escaped_dir = escape_code(ctx.directory)
         text = (
             f"Review changes in *{escaped_context}*\n"
             f"\U0001f4c1 `{escaped_dir}`"
@@ -1504,7 +1504,7 @@ async def _open_vnc_viewer(
         )
         return
 
-    escaped_context = _escape_mdv2(context_name)
+    escaped_context = escape(context_name)
     await reply_mini_app(
         update.message,
         text=f"{noun.capitalize()} for *{escaped_context}*",
@@ -1751,9 +1751,9 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             lines.append(
                 f"• `{escape_code(device['device_id'])}` — "
-                f"{_escape_mdv2(device['display_name'])} "
-                rf"\({_escape_mdv2(status)}, {_escape_mdv2(push)}, "
-                rf"last seen {_escape_mdv2(last_seen)}\)"
+                f"{escape(device['display_name'])} "
+                rf"\({escape(status)}, {escape(push)}, "
+                rf"last seen {escape(last_seen)}\)"
             )
         lines.extend(
             [
@@ -1818,7 +1818,7 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # discover it as a failed turn later.
     await reply_mini_app(
         update.message,
-        text=_escape_mdv2(body),
+        text=escape(body),
         buttons=[("Open login", "/terminal/?mode=login")],
         config=config,
         user_id=update.effective_user.id,
@@ -1924,17 +1924,17 @@ async def _mcp_list(message: Any, session: AgentSession) -> None:
         emoji = _MCP_STATUS_EMOJI.get(status, "\u2753")
         scope = srv.get("scope", "")
 
-        line = f"{emoji} *{_escape_mdv2(name)}*"
+        line = f"{emoji} *{escape(name)}*"
         if scope:
-            line += f" \\({_escape_mdv2(scope)}\\)"
-        line += f" \u2014 {_escape_mdv2(status)}"
+            line += f" \\({escape(scope)}\\)"
+        line += f" \u2014 {escape(status)}"
 
         # Show server info (version) when connected
         server_info = srv.get("serverInfo")
         if server_info:
             version = server_info.get("version", "")
             if version:
-                line += f" v{_escape_mdv2(version)}"
+                line += f" v{escape(version)}"
 
         # Show error message for failed servers
         error = srv.get("error")
@@ -1942,7 +1942,7 @@ async def _mcp_list(message: Any, session: AgentSession) -> None:
             # Truncate long errors
             if len(error) > 120:
                 error = error[:117] + "..."
-            line += f"\n    \u26a0\ufe0f {_escape_mdv2(error)}"
+            line += f"\n    \u26a0\ufe0f {escape(error)}"
 
         # Show tool count when connected
         tools = srv.get("tools", [])
@@ -1976,7 +1976,7 @@ async def _mcp_reconnect(message: Any, session: AgentSession, server_name: str) 
         )
         return
 
-    escaped = _escape_mdv2(server_name)
+    escaped = escape_code(server_name)
     await message.reply_text(
         f"Reconnecting `{escaped}`\\.\\.\\. Use /mcp to check status\\.",
         parse_mode="MarkdownV2",
@@ -1991,13 +1991,13 @@ async def _mcp_toggle(message: Any, session: AgentSession, server_name: str, *, 
     except Exception:
         logger.exception("Failed to %s MCP server %s", action, server_name)
         await message.reply_text(
-            f"Failed to {_escape_mdv2(action)} `{escape_code(server_name)}`\\.",
+            f"Failed to {escape(action)} `{escape_code(server_name)}`\\.",
             parse_mode="MarkdownV2",
         )
         return
 
     past = "enabled" if enabled else "disabled"
-    escaped = _escape_mdv2(server_name)
+    escaped = escape_code(server_name)
     emoji = "\U0001f7e2" if enabled else "\u26aa"
     await message.reply_text(
         f"{emoji} `{escaped}` {past}\\.",
@@ -2050,13 +2050,13 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 # The topic itself stays in Telegram as a record.
                 await delete_event_topic(db, topic_key(task_id))
 
-            escaped = _escape_mdv2(task_name)
+            escaped = escape_code(task_name)
             await message.reply_text(
                 f"Deleted scheduled task `{escaped}`\\.",
                 parse_mode="MarkdownV2",
             )
         else:
-            escaped = _escape_mdv2(task_name)
+            escaped = escape_code(task_name)
             await message.reply_text(
                 f"No scheduled task named `{escaped}` found\\.",
                 parse_mode="MarkdownV2",
@@ -2083,10 +2083,10 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         }.get(t.schedule_type, t.schedule_expr)
 
         prompt_preview = t.prompt[:50] + ("..." if len(t.prompt) > 50 else "")
-        name_escaped = _escape_mdv2(t.name)
-        desc_escaped = _escape_mdv2(type_desc)
-        prompt_escaped = _escape_mdv2(prompt_preview)
-        ctx_escaped = _escape_mdv2(t.context_name)
+        name_escaped = escape(t.name)
+        desc_escaped = escape(type_desc)
+        prompt_escaped = escape(prompt_preview)
+        ctx_escaped = escape_code(t.context_name)
 
         lines.append(
             f"• *{name_escaped}*\n"
@@ -2168,7 +2168,7 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             scope_tasks.pop(matched_task.task_id, None)
             if not scope_tasks:
                 _active_bg_tasks.pop(scope, None)
-            tid_short = _escape_mdv2(matched_task.task_id[:12])
+            tid_short = escape_code(matched_task.task_id[:12])
             await message.reply_text(
                 f"Stopped task `{tid_short}`\\.",
                 parse_mode="MarkdownV2",
@@ -2198,16 +2198,16 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         minutes, seconds = divmod(elapsed, 60)
         duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
 
-        tid_short = _escape_mdv2(task.task_id[:12])
-        desc_escaped = _escape_mdv2(task.description or "No description")
-        type_escaped = _escape_mdv2(task.task_type or "unknown")
+        tid_short = escape_code(task.task_id[:12])
+        desc_escaped = escape(task.description or "No description")
+        type_escaped = escape(task.task_type or "unknown")
 
         line = (
             f"• `{tid_short}` \\- {desc_escaped}\n"
-            f"  Type: {type_escaped} \\| Duration: {_escape_mdv2(duration)}"
+            f"  Type: {type_escaped} \\| Duration: {escape(duration)}"
         )
         if task.last_tool_name:
-            line += f" \\| Last tool: {_escape_mdv2(task.last_tool_name)}"
+            line += f" \\| Last tool: {escape(task.last_tool_name)}"
         lines.append(line)
 
     lines.append(f"\nUse `/tasks stop <id>` to stop a task\\.")

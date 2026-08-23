@@ -1830,7 +1830,6 @@ def create_openshrimp_tools(
             # 📺 View output button (Terminal Mini App tails the tee file),
             # edited in place to a terminal state when the monitor ends.
             # Best-effort — presentation must never break the monitor.
-            from open_shrimp.handlers.utils import _escape_mdv2
 
             view_output = (
                 make_web_app_button(
@@ -1852,7 +1851,7 @@ def create_openshrimp_tools(
             try:
                 status_msg = await bot.send_message(
                     chat_id=chat_id,
-                    text=f"⏳ {_escape_mdv2(description)}",
+                    text=f"⏳ {escape(description)}",
                     parse_mode="MarkdownV2",
                     reply_markup=reply_markup,
                     disable_notification=True,
@@ -1881,8 +1880,8 @@ def create_openshrimp_tools(
                             chat_id=chat_id,
                             message_id=_status_message_id,
                             text=(
-                                f"{icon} {_escape_mdv2(description)} — "
-                                f"{_escape_mdv2(reason)}"
+                                f"{icon} {escape(description)} — "
+                                f"{escape(reason)}"
                             ),
                             parse_mode="MarkdownV2",
                             reply_markup=_status_markup,

@@ -36,8 +36,7 @@ from open_shrimp.handlers.state import (
     RESOLVED_VIA_ANDROID,
     take_pending_approvals,
 )
-from open_shrimp.handlers.utils import _escape_mdv2
-from open_shrimp.markdown import escape_code
+from open_shrimp.markdown import escape, escape_code
 from open_shrimp.hooks import ApprovalRule, HostBashOutcome
 from open_shrimp.sudo_audit import log_sudo
 
@@ -273,7 +272,7 @@ async def _send_approval_keyboard(
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=sent_msg.message_id,
-                    text=f"{text}\n\n{icon} *{_escape_mdv2(action)}\\.*",
+                    text=f"{text}\n\n{icon} *{escape(action)}\\.*",
                     parse_mode="MarkdownV2",
                     reply_markup=None,
                 )
@@ -373,7 +372,7 @@ def _format_host_bash_approval(
     )
     parts: list[str] = [header]
     if description:
-        parts.append(_escape_mdv2(description))
+        parts.append(escape(description))
     parts.append(_render_command_block(command, 4096 - 400))
     if cwd:
         parts.append(f"_cwd:_ `{escape_code(cwd)}`")
@@ -607,9 +606,9 @@ def _format_config_write(headline: str, diff: str, note: str = "") -> str:
     the rest would print the backslashes — and a diff is almost entirely
     the characters the prose escaper touches.
     """
-    parts = [f"⚙️ *Change OpenShrimp's configuration*\n\n{_escape_mdv2(headline)}\\."]
+    parts = [f"⚙️ *Change OpenShrimp's configuration*\n\n{escape(headline)}\\."]
     if note:
-        parts.append(_escape_mdv2(note))
+        parts.append(escape(note))
     parts.append(f"```diff\n{escape_code(diff)}\n```")
     return "\n\n".join(parts)
 
@@ -786,7 +785,7 @@ async def _auto_resolve_pending_approvals(
 
         if msg_id:
             try:
-                escaped_tool = _escape_mdv2(t_name)
+                escaped_tool = escape(t_name)
                 icon = '✅'
                 compact = f"{icon} *{escaped_tool}* — Auto\\-approved\\."
                 await bot.edit_message_text(
@@ -984,7 +983,7 @@ async def handle_approval_callback(
                 )
 
         future.set_result(True)
-        escaped_prefix = _escape_mdv2(prefix)
+        escaped_prefix = escape(prefix)
         await query.answer(
             f"Approved. Rule saved: {prefix} * auto-approved."
         )
@@ -1118,7 +1117,7 @@ async def handle_approval_callback(
                 )
 
         future.set_result(True)
-        escaped_tool = _escape_mdv2(accepted_tool_name)
+        escaped_tool = escape(accepted_tool_name)
         await query.answer(
             f"Approved. All future {accepted_tool_name} calls will be auto-approved."
         )
@@ -1197,7 +1196,7 @@ async def handle_approval_callback(
             try:
                 if tool_name and p.is_bash_like(tool_name):
                     icon = '✅' if approved else '❌'
-                    compact = f"{icon} *{_escape_mdv2(tool_name)}* — {action}\\."
+                    compact = f"{icon} *{escape(tool_name)}* — {action}\\."
                     await query.message.edit_text(
                         text=compact,
                         parse_mode="MarkdownV2",

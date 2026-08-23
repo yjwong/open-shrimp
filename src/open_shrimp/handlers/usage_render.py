@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from open_shrimp.backend.usage import UsageReport, UsageTier
-from open_shrimp.handlers.utils import _escape_mdv2
+from open_shrimp.markdown import escape
 
 
 def render_usage_reports(reports: list[tuple[str, UsageReport]]) -> str:
@@ -26,7 +26,7 @@ def render_usage_reports(reports: list[tuple[str, UsageReport]]) -> str:
 
     sections: list[str] = []
     for name, report in reports:
-        header = f"*{_escape_mdv2(name)}*"
+        header = f"*{escape(name)}*"
         lines = _render_report(report)
         sections.append("\n".join([header, *lines]))
     return "\n\n".join(sections)
@@ -40,8 +40,8 @@ def _render_report(report: UsageReport) -> list[str]:
         used = report.extra.used_usd
         limit = report.extra.limit_usd
         pct = min(100, used / limit * 100) if limit > 0 else 0
-        label = _escape_mdv2(report.extra.label)
-        body = _escape_mdv2(f"${used:.2f} / ${limit:.2f} ({pct:.0f}%)")
+        label = escape(report.extra.label)
+        body = escape(f"${used:.2f} / ${limit:.2f} ({pct:.0f}%)")
         lines.append(f"*{label}:* {body}")
     return lines
 
@@ -50,8 +50,8 @@ def _format_tier(tier: UsageTier) -> str:
     used = min(100, tier.used_pct)
     bar = _usage_bar(used)
     line = (
-        f"*{_escape_mdv2(tier.name)}:* {bar} "
-        f"{_escape_mdv2(f'{used:.0f}% used')}"
+        f"*{escape(tier.name)}:* {bar} "
+        f"{escape(f'{used:.0f}% used')}"
     )
     if tier.resets_at is not None:
         delta = tier.resets_at - datetime.now(timezone.utc)
@@ -60,15 +60,15 @@ def _format_tier(tier: UsageTier) -> str:
             hours, rem = divmod(total, 3600)
             minutes = rem // 60
             if hours > 0:
-                line += _escape_mdv2(f" (resets in {hours}h{minutes}m)")
+                line += escape(f" (resets in {hours}h{minutes}m)")
             else:
-                line += _escape_mdv2(f" (resets in {minutes}m)")
+                line += escape(f" (resets in {minutes}m)")
     return line
 
 
 def _usage_bar(used: float) -> str:
     filled = round(used / 10)
-    return _escape_mdv2("[" + "█" * filled + "░" * (10 - filled) + "]")
+    return escape("[" + "█" * filled + "░" * (10 - filled) + "]")
 
 
 __all__ = ["render_usage_reports"]

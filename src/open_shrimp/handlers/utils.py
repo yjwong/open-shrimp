@@ -11,7 +11,7 @@ from telegram.error import BadRequest
 
 from open_shrimp.backend import default_model_label
 from open_shrimp.config import Config, ContextConfig, effective_backend
-from open_shrimp.markdown import escape_code
+from open_shrimp.markdown import escape, escape_code
 from open_shrimp.db import (
     ChatScope,
     get_active_context,
@@ -52,13 +52,6 @@ def get_backend_for_scope(bot_data: dict[str, Any], scope: ChatScope) -> Any | N
     if existing is not None and existing.backend is not None:
         return existing.backend
     return bot_data.get("backend")
-
-
-def _escape_mdv2(text: str) -> str:
-    """Escape MarkdownV2 special characters in plain text."""
-    for ch in r"_*[]()~`>#+-=|{}.!":
-        text = text.replace(ch, f"\\{ch}")
-    return text
 
 
 def _get_locked_context(chat_id: int, config: Config) -> str | None:
@@ -197,7 +190,7 @@ def no_context_answer(config: Config) -> str:
 async def reply_no_context(message: Message, config: Config) -> None:
     """Tell the user this scope has no project bound, and how to get one."""
     await message.reply_text(
-        _escape_mdv2(no_context_text(config)), parse_mode="MarkdownV2"
+        escape(no_context_text(config)), parse_mode="MarkdownV2"
     )
 
 
@@ -380,10 +373,10 @@ def _build_status_text(
     todos: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the pinned status message text in MarkdownV2."""
-    escaped_name = _escape_mdv2(ctx_name)
-    escaped_desc = _escape_mdv2(ctx.description)
-    escaped_dir = _escape_mdv2(ctx.directory)
-    escaped_model = _escape_mdv2(
+    escaped_name = escape_code(ctx_name)
+    escaped_desc = escape(ctx.description)
+    escaped_dir = escape_code(ctx.directory)
+    escaped_model = escape_code(
         ctx.model or default_model_label(effective_backend(ctx, config))
     )
     lines = [
@@ -412,10 +405,10 @@ def _build_status_text(
             + turn_usage.get("cache_read_input_tokens", 0)
         )
 
-        total_str = _escape_mdv2(_format_token_count(total_tokens))
-        limit_str = _escape_mdv2(_format_token_count(context_window))
+        total_str = escape(_format_token_count(total_tokens))
+        limit_str = escape(_format_token_count(context_window))
         pct = min(total_tokens / context_window * 100, 100) if context_window > 0 else 0
-        pct_str = _escape_mdv2(f"{pct:.0f}%")
+        pct_str = escape(f"{pct:.0f}%")
 
         lines.append("")
         lines.append(f"\U0001f4ca *Context:* {total_str} / {limit_str} \\({pct_str}\\)")
@@ -423,7 +416,7 @@ def _build_status_text(
     if model_usage:
         total_cost = sum(m.get("costUSD", 0) for m in model_usage.values())
         if total_cost > 0:
-            cost_str = _escape_mdv2(f"${total_cost:.4f}")
+            cost_str = escape(f"${total_cost:.4f}")
             lines.append(f"\U0001f4b0 *Cost:* {cost_str}")
 
     if todos:
@@ -434,14 +427,14 @@ def _build_status_text(
         for todo in display_todos:
             status = todo.get("status", "pending")
             emoji = _TODO_STATUS_EMOJI.get(status, "\u2b1c")
-            content = _escape_mdv2(todo.get("content", ""))
+            content = escape(todo.get("content", ""))
             if status == "completed":
                 lines.append(f"{emoji} ~{content}~")
             else:
                 lines.append(f"{emoji} {content}")
         remaining = len(todos) - len(display_todos)
         if remaining > 0:
-            lines.append(_escape_mdv2(f"   ...and {remaining} more"))
+            lines.append(escape(f"   ...and {remaining} more"))
 
     return "\n".join(lines)
 

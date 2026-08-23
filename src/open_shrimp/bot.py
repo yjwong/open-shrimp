@@ -606,12 +606,12 @@ async def run_bot(
     # seeded a newer binary and spawned it.  An install nobody approved is one
     # the operator finds out about here or not at all.
     if update_version is not None:
-        from open_shrimp.updater import _escape_md
+        from open_shrimp.markdown import escape_code
 
         await notify_operators(
             app.bot,
             config.allowed_users,
-            f"Updated to `{_escape_md(update_version)}`\\. Back online\\.",
+            f"Updated to `{escape_code(update_version)}`\\. Back online\\.",
             parse_mode="MarkdownV2",
         )
 

@@ -32,7 +32,8 @@ from open_shrimp.db import (
     set_active_context,
     set_inbound_event_pickup_thread,
 )
-from open_shrimp.handlers.utils import _escape_mdv2, no_context_answer
+from open_shrimp.handlers.utils import no_context_answer
+from open_shrimp.markdown import escape
 
 logger = logging.getLogger(__name__)
 
@@ -376,9 +377,9 @@ async def spawn_pickup_topic(
     if len(body) > _BRIEF_DISPLAY_MAX:
         body = body[:_BRIEF_DISPLAY_MAX] + "…"
     placeholder = (
-        f"*{_escape_mdv2(header)}*\n"
+        f"*{escape(header)}*\n"
         "_the agent reads this via read\\_inbound\\_event_\n\n"
-        f"{_escape_mdv2(body)}"
+        f"{escape(body)}"
     )
 
     from open_shrimp.dispatch_registry import dispatch

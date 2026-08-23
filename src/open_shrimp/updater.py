@@ -23,6 +23,8 @@ from pathlib import Path
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
+from open_shrimp.markdown import escape, escape_code
+
 logger = logging.getLogger(__name__)
 
 # ── Constants ──
@@ -289,13 +291,6 @@ def _stamp_version(target: Path, version: str) -> None:
 # ── Telegram notification and confirmation ──
 
 
-def _escape_md(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    for ch in r"\_*[]()~`>#+-=|{}.!":
-        text = text.replace(ch, f"\\{ch}")
-    return text
-
-
 async def _send_update_notification(
     bot: Bot,
     user_ids: list[int],
@@ -311,10 +306,10 @@ async def _send_update_notification(
 
     text = (
         f"*Update available*\n\n"
-        f"`{_escape_md(current)}` \\-\\> `{_escape_md(update_info.version)}`\n\n"
+        f"`{escape_code(current)}` \\-\\> `{escape_code(update_info.version)}`\n\n"
     )
     if notes.strip():
-        text += f"{_escape_md(notes)}\n\n"
+        text += f"{escape(notes)}\n\n"
     text += f"[View release]({update_info.release_url})"
 
     keyboard = InlineKeyboardMarkup(
@@ -448,7 +443,7 @@ async def apply_update(
                     chat_id=uid,
                     text=(
                         f"Update failed: permission denied writing to "
-                        f"`{_escape_md(str(binary_path))}`\\. "
+                        f"`{escape_code(str(binary_path))}`\\. "
                         f"Check file ownership/permissions\\."
                     ),
                     parse_mode="MarkdownV2",
@@ -474,7 +469,7 @@ async def apply_update(
         try:
             await bot.send_message(
                 chat_id=uid,
-                text=f"Update to `{_escape_md(update_info.version)}` downloaded\\. Restarting\\.\\.\\.",
+                text=f"Update to `{escape_code(update_info.version)}` downloaded\\. Restarting\\.\\.\\.",
                 parse_mode="MarkdownV2",
             )
         except Exception:

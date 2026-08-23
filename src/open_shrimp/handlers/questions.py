@@ -16,7 +16,8 @@ from open_shrimp.handlers.state import (
     _pending_other_input,
     _question_states,
 )
-from open_shrimp.handlers.utils import _escape_mdv2, _is_authorized
+from open_shrimp.handlers.utils import _is_authorized
+from open_shrimp.markdown import escape
 from open_shrimp.stream import _DraftState, finalize_and_reset
 
 logger = logging.getLogger(__name__)
@@ -61,14 +62,14 @@ def _format_question_text(question: dict[str, Any]) -> str:
 
     parts: list[str] = []
     if header:
-        parts.append(f"\u2753 *{_escape_mdv2(header)}*")
-    parts.append(_escape_mdv2(question_text))
+        parts.append(f"\u2753 *{escape(header)}*")
+    parts.append(escape(question_text))
 
     for opt in options:
         label = opt.get("label", "")
         desc = opt.get("description", "")
         if desc:
-            parts.append(f"\u2022 *{_escape_mdv2(label)}* \u2014 {_escape_mdv2(desc)}")
+            parts.append(f"\u2022 *{escape(label)}* \u2014 {escape(desc)}")
 
     return "\n".join(parts)
 
@@ -178,7 +179,7 @@ async def _complete_other_input(
         if query and query.message:
             try:
                 await query.message.edit_text(
-                    text=original_md + f"\n\n\u2705 *Answer:* {_escape_mdv2(custom_text)}",
+                    text=original_md + f"\n\n\u2705 *Answer:* {escape(custom_text)}",
                     parse_mode="MarkdownV2",
                     reply_markup=None,
                 )
@@ -233,7 +234,7 @@ async def _handle_question_callback(
                 try:
                     original_md = query.message.text_markdown_v2 or query.message.text or ""
                     await query.message.edit_text(
-                        text=original_md + f"\n\n\u2705 *Selected:* {_escape_mdv2(label)}",
+                        text=original_md + f"\n\n\u2705 *Selected:* {escape(label)}",
                         parse_mode="MarkdownV2",
                         reply_markup=None,
                     )
@@ -278,7 +279,7 @@ async def _handle_question_callback(
             try:
                 original_md = query.message.text_markdown_v2 or query.message.text or ""
                 await query.message.edit_text(
-                    text=original_md + f"\n\n\u2705 *Selected:* {_escape_mdv2(result)}",
+                    text=original_md + f"\n\n\u2705 *Selected:* {escape(result)}",
                     parse_mode="MarkdownV2",
                     reply_markup=None,
                 )
