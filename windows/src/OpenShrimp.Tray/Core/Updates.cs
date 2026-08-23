@@ -135,6 +135,11 @@ internal sealed class Updates
             // is ever skipped, and the version to compare against comes from
             // TrayAssembly. The default would keep all three in the registry.
             Configuration = new DefaultConfiguration(new TrayAssembly()),
+            // Asking the server yields the last path segment of the final
+            // redirect, and GitHub's release CDN ends its URLs in a bare GUID.
+            // A package saved under one has no extension to pick the installer
+            // command by. The appcast link ends in the real name.
+            CheckServerFileName = false,
             RelaunchAfterUpdate = true,
             RelaunchAfterUpdateCommandSuffix = UpdatedFlag,
             // Named rather than left to the reflection the library falls back
@@ -439,10 +444,16 @@ internal sealed class QuietMsiUpdater : SparkleUpdater
 
     protected override string GetWindowsInstallerCommand(string downloadFilePath)
     {
-        // Only the package this feed ships. Anything else is not something to
-        // guess a silent switch for, so it goes back to the base class as it is.
+        // Only the package this feed ships. Handed an extension it does not
+        // recognise, the base class answers with the bare path, which cmd
+        // cannot run and the handoff script does not check; the tray comes back
+        // at the old version with nothing in the log to say why. The library
+        // reads InvalidDataException as "no command for this" and raises
+        // InstallUpdateFailed, before the core is stopped, so a package it
+        // cannot install costs the download and nothing else.
         if (!DoExtensionsMatch(Path.GetExtension(downloadFilePath), ".msi"))
-            return base.GetWindowsInstallerCommand(downloadFilePath);
+            throw new InvalidDataException(
+                $"{downloadFilePath} is not the .msi this feed ships");
 
         // /norestart because nothing this package installs needs a reboot, and
         // msiexec is entitled to take one otherwise.
