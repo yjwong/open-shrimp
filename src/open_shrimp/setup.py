@@ -606,9 +606,12 @@ def _offer_sign_in() -> None:
 
     print()
     print("Now, signing in.")
-    print("I work by running Claude Code on this computer, and Claude Code")
-    print("needs an Anthropic account before it can answer anything.")
-    print("Say no if you mean to run me on another provider's models.")
+    print("I answer your messages by running Claude Code on this computer,")
+    print("under your own Claude Code login. Signing in happens in your")
+    print("browser; you'll choose there between a Claude subscription and")
+    print("API billing.")
+    print("Say no only if you mean to run me on a different backend, like")
+    print("OpenCode.")
     print()
     if not _prompt_yes_no("Sign in now?"):
         print("  Skipped. Send /login in Telegram if you want it later.")

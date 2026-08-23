@@ -69,7 +69,7 @@ struct SetupWizardView: View {
                 + "rather not reach from Telegram."
         case .signIn:
             return "OpenShrimp answers your messages by running Claude Code on this "
-                + "Mac, under your own Anthropic account."
+                + "Mac, under your own Claude Code login."
         case .finish: return lastStepSubtitle
         }
     }
@@ -414,10 +414,11 @@ struct SetupWizardView: View {
     /// still to run.
     private var signInStep: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Claude Code has to be signed in before the bot can answer "
-                 + "anything. Signing in happens in a terminal window and then "
-                 + "in your browser — this step opens the window for you. Skip "
-                 + "it if you mean to run OpenShrimp on another provider's models.")
+            Text("Signing in happens in a terminal window and then in your "
+                 + "browser — this step opens the window for you, and you'll "
+                 + "choose there between a Claude subscription and API billing. "
+                 + "Skip it only if you mean to run OpenShrimp on a different "
+                 + "backend, like OpenCode.")
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 

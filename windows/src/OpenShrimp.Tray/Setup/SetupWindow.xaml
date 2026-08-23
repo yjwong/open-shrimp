@@ -174,7 +174,7 @@
 
                     <StackPanel x:Name="SignInOffering" Spacing="10">
                         <TextBlock TextWrapping="Wrap"
-                                   Text="OpenShrimp works by running Claude Code here on this PC, and Claude Code needs an Anthropic account before it can answer anything. This opens a window and sends you to your browser; it happens once per computer. Skip it if you mean to run OpenShrimp on another provider's models." />
+                                   Text="Signing in happens in a console window and then in your browser; you'll choose there between a Claude subscription and API billing. It's once per computer. Skip it only if you mean to run OpenShrimp on a different backend, like OpenCode." />
                         <Button Content="Open sign-in window"
                                 Style="{StaticResource AccentButtonStyle}"
                                 Click="OpenSignInConsole" />

@@ -373,8 +373,8 @@ public sealed partial class SetupWindow : Window
                  + "not reach from Telegram."),
             SetupStep.SignIn =>
                 ("Sign in to Claude",
-                 "OpenShrimp runs Claude Code on this computer, and it can't do "
-                 + "any work until Claude Code is signed in."),
+                 "OpenShrimp answers your messages by running Claude Code on "
+                 + "this PC, under your own Claude Code login."),
             // Says what the step is about, which depends on what it is showing:
             // the sandbox row is absent when nothing was imported, and naming
             // it anyway would promise a question the step does not ask.
