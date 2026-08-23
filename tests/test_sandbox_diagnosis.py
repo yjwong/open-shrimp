@@ -34,6 +34,7 @@ from open_shrimp.handlers.messages import _start_agent_task
 from open_shrimp.handlers.state import _running_tasks
 from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, split_message
 from open_shrimp.sandbox.base import SandboxStartupError
+from open_shrimp.sandbox import libvirt_prereq, lima_prereq
 from open_shrimp.sandbox_diagnosis import diagnose, failure_reply
 
 CHAT_ID = 100
@@ -95,15 +96,19 @@ class TestLimaCheck:
         the only platform it applies to — and a crash reads as ``UNKNOWN``,
         not as the missing binary it was written to report."""
         monkeypatch.setattr(
-            "open_shrimp.doctor.find_binary", lambda name: None
+            "open_shrimp.sandbox.lima_helpers.find_limactl", lambda: None
         )
-        ok, detail = doctor._check_lima(None)
+        ok, detail = lima_prereq._check_lima(None)
 
         assert not ok
         assert "brew install lima" in detail
 
     def test_every_lima_prerequisite_runs_on_darwin(self, monkeypatch):
         monkeypatch.setattr(platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            "open_shrimp.sandbox.lima_helpers.find_limactl",
+            lambda: "/managed/bin/limactl",
+        )
         checks = doctor.checks_for_backend("lima")
 
         assert checks, "Lima has prerequisites on macOS"
@@ -119,7 +124,7 @@ class TestLimaCheck:
 class TestLibvirtChecks:
     def test_the_missing_binding_names_its_install_line(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "libvirt", None)
-        ok, detail = doctor._check_libvirt(None)
+        ok, detail = libvirt_prereq._check_libvirt(None)
 
         assert not ok
         assert "pip install libvirt-python" in detail
@@ -131,7 +136,7 @@ class TestLibvirtChecks:
         from open_shrimp.sandbox import libvirt_helpers
 
         monkeypatch.setattr(libvirt_helpers, "find_virtiofsd", lambda: None)
-        ok, detail = doctor._check_virtiofsd(None)
+        ok, detail = libvirt_prereq._check_virtiofsd(None)
 
         assert ok
         assert "downloaded on first use" in detail
@@ -172,8 +177,8 @@ class TestTheReport:
             doctor,
             "_CHECKS",
             [
-                ("Wobbly", _boom, None, ()),
-                ("Steady", lambda config: (True, "fine"), None, ()),
+                ("Wobbly", _boom),
+                ("Steady", lambda config: (True, "fine")),
             ],
         )
         code = doctor.run_doctor(None)

@@ -101,8 +101,7 @@ def test_a_fresh_install_does_not_report_itself_broken(
 
     fetched = [
         doctor.run_check(label, check, None)
-        for label, check, _plat, backends in doctor._CHECKS
-        if not backends
+        for label, check in doctor._CHECKS
     ]
     assert fetched, "the platform-agnostic checks are the subject of this test"
     assert all(outcome.ok for outcome in fetched), [

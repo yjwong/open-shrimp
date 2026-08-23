@@ -18,6 +18,7 @@ import pytest
 from open_shrimp import doctor, paths
 from open_shrimp import sandbox as sandbox_pkg
 from open_shrimp.config import Config, ContextConfig, SandboxConfig, TelegramConfig
+from open_shrimp.sandbox import hcs_prereq
 
 
 def _config(**sandboxes: SandboxConfig | None) -> Config:
@@ -93,14 +94,14 @@ def test_a_windows_host_runs_every_hcs_check(monkeypatch, capsys):
 
 def test_a_privileged_token_passes(monkeypatch):
     _fake_hcs_win(monkeypatch, permitted=True)
-    ok, detail = doctor._check_hyperv_rights(None)
+    ok, detail = hcs_prereq._check_hyperv_rights(None)
     assert ok
     assert "Hyper-V Administrators" in detail
 
 
 def test_an_unprivileged_token_fails_with_the_hresult_and_the_remedy(monkeypatch):
     _fake_hcs_win(monkeypatch, permitted=False)
-    ok, detail = doctor._check_hyperv_rights(None)
+    ok, detail = hcs_prereq._check_hyperv_rights(None)
     assert not ok
     # The bare HRESULT is what the operator would otherwise meet at create.
     assert "0x8037011B" in detail
@@ -112,7 +113,7 @@ def test_a_probe_that_cannot_answer_is_not_a_failure(monkeypatch):
     # Same rule the backend's preflight holds to: a broken probe must not
     # ground a host that would have worked.
     _fake_hcs_win(monkeypatch, permitted=OSError("no token"))
-    ok, detail = doctor._check_hyperv_rights(None)
+    ok, detail = hcs_prereq._check_hyperv_rights(None)
     assert ok
     assert "no token" in detail
 
@@ -120,7 +121,7 @@ def test_a_probe_that_cannot_answer_is_not_a_failure(monkeypatch):
 def test_rights_cannot_be_probed_without_win32more(monkeypatch):
     monkeypatch.delattr(sandbox_pkg, "hcs_win", raising=False)
     monkeypatch.setitem(sys.modules, "open_shrimp.sandbox.hcs_win", None)
-    ok, detail = doctor._check_hyperv_rights(None)
+    ok, detail = hcs_prereq._check_hyperv_rights(None)
     assert not ok
     assert "win32more" in detail
 
@@ -132,14 +133,14 @@ def test_the_kernel_is_found_where_the_environment_points(monkeypatch, tmp_path)
     kernel = tmp_path / "kernel"
     kernel.write_bytes(b"")
     monkeypatch.setenv("OPENSHRIMP_HCS_KERNEL", str(kernel))
-    ok, detail = doctor._check_hcs_kernel(None)
+    ok, detail = hcs_prereq._check_hcs_kernel(None)
     assert ok
     assert str(kernel) in detail
 
 
 def test_a_missing_kernel_names_wsl_and_the_override(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENSHRIMP_HCS_KERNEL", str(tmp_path / "absent"))
-    ok, detail = doctor._check_hcs_kernel(None)
+    ok, detail = hcs_prereq._check_hcs_kernel(None)
     assert not ok
     assert "WSL" in detail
     assert "OPENSHRIMP_HCS_KERNEL" in detail
@@ -149,7 +150,7 @@ def test_the_initramfs_is_found_where_the_environment_points(monkeypatch, tmp_pa
     initrd = tmp_path / "initrd.img"
     initrd.write_bytes(b"")
     monkeypatch.setenv("OPENSHRIMP_HCS_INITRD", str(initrd))
-    ok, detail = doctor._check_hcs_initrd(None)
+    ok, detail = hcs_prereq._check_hcs_initrd(None)
     assert ok
     assert str(initrd) in detail
 
@@ -160,7 +161,7 @@ def test_an_override_pointing_at_nothing_is_the_one_failure(
     """The override suppresses the download, so it is the only way to have no
     path to an initramfs at all."""
     monkeypatch.setenv("OPENSHRIMP_HCS_INITRD", str(tmp_path / "absent"))
-    ok, detail = doctor._check_hcs_initrd(None)
+    ok, detail = hcs_prereq._check_hcs_initrd(None)
     assert not ok
     assert "OPENSHRIMP_HCS_INITRD" in detail
     assert "scripts/build_hcs_initrd.sh" in detail
@@ -175,7 +176,7 @@ def test_an_unstaged_initramfs_reports_the_pending_download(
     monkeypatch.setattr(
         "open_shrimp.sandbox.hcs.initrd_path", lambda: tmp_path / "absent",
     )
-    ok, detail = doctor._check_hcs_initrd(None)
+    ok, detail = hcs_prereq._check_hcs_initrd(None)
     assert ok
     assert "openshrimp-hcs-initrd.img" in detail
 
@@ -187,7 +188,7 @@ def test_csc_is_found_where_the_override_points(monkeypatch, tmp_path):
     csc = tmp_path / "csc.exe"
     csc.write_bytes(b"")
     monkeypatch.setenv("OPENSHRIMP_HCS_CSC", str(csc))
-    ok, detail = doctor._check_csc(None)
+    ok, detail = hcs_prereq._check_csc(None)
     assert ok
     assert str(csc) in detail
 
@@ -202,7 +203,7 @@ def test_a_missing_csc_says_what_it_builds(monkeypatch):
         )
 
     monkeypatch.setattr("open_shrimp.sandbox.hcs.find_csc", _absent)
-    ok, detail = doctor._check_csc(None)
+    ok, detail = hcs_prereq._check_csc(None)
     assert not ok
     assert "Framework64" in detail
     assert "launcher" in detail
@@ -220,7 +221,7 @@ def _hcs(tmp_path, **kwargs) -> SandboxConfig:
 
 
 def test_a_staged_base_image_passes_and_names_the_context(tmp_path):
-    ok, detail = doctor._check_hcs_base_image(_config(work=_hcs(tmp_path)))
+    ok, detail = hcs_prereq._check_hcs_base_image(_config(work=_hcs(tmp_path)))
     assert ok
     assert "work" in detail
     assert "root.vhdx" in detail
@@ -228,7 +229,7 @@ def test_a_staged_base_image_passes_and_names_the_context(tmp_path):
 
 def test_a_base_image_that_is_not_there_fails(tmp_path):
     config = _config(work=SandboxConfig(backend="hcs", base_image="C:/absent.vhdx"))
-    ok, detail = doctor._check_hcs_base_image(config)
+    ok, detail = hcs_prereq._check_hcs_base_image(config)
     assert not ok
     assert "work" in detail
     assert "C:/absent.vhdx" in detail
@@ -242,7 +243,9 @@ def test_an_hcs_context_with_no_base_image_reports_the_pending_download(
     monkeypatch.setattr(
         "open_shrimp.sandbox.hcs_assets.asset_dir", lambda: tmp_path,
     )
-    ok, detail = doctor._check_hcs_base_image(_config(work=SandboxConfig(backend="hcs")))
+    ok, detail = hcs_prereq._check_hcs_base_image(
+        _config(work=SandboxConfig(backend="hcs"))
+    )
     assert ok
     assert "openshrimp-hcs-base-rootfs.vhdx.zst" in detail
 
@@ -255,7 +258,7 @@ def test_a_computer_use_context_with_no_base_image_names_the_gui_asset(
         "open_shrimp.sandbox.hcs_assets.asset_dir", lambda: tmp_path,
     )
     config = _config(work=SandboxConfig(backend="hcs", computer_use=True))
-    ok, detail = doctor._check_hcs_base_image(config)
+    ok, detail = hcs_prereq._check_hcs_base_image(config)
     assert ok
     assert "openshrimp-hcs-gui-rootfs.vhdx.zst" in detail
     assert "base-rootfs" not in detail
@@ -263,7 +266,7 @@ def test_a_computer_use_context_with_no_base_image_names_the_gui_asset(
 
 def test_computer_use_also_needs_the_baked_gui_template(tmp_path):
     config = _config(work=_hcs(tmp_path, computer_use=True))
-    ok, detail = doctor._check_hcs_base_image(config)
+    ok, detail = hcs_prereq._check_hcs_base_image(config)
     assert not ok
     assert "scripts/build_hcs_gui_rootfs.sh" in detail
 
@@ -277,20 +280,23 @@ def test_a_baked_gui_template_satisfies_computer_use(tmp_path, monkeypatch):
         "open_shrimp.sandbox.hcs_helpers.gui_image_path", lambda base: str(gui),
     )
     config = _config(work=_hcs(tmp_path, computer_use=True))
-    ok, detail = doctor._check_hcs_base_image(config)
+    ok, detail = hcs_prereq._check_hcs_base_image(config)
     assert ok
     assert "computer use" in detail
 
 
 def test_a_host_with_no_hcs_context_has_nothing_to_check(tmp_path):
     config = _config(work=SandboxConfig(backend="libvirt"))
-    ok, detail = doctor._check_hcs_base_image(config)
+    ok, detail = hcs_prereq._check_hcs_base_image(config)
     assert ok
     assert "nothing to check" in detail
 
 
 def test_an_unreadable_config_leaves_the_per_context_checks_idle():
-    for check in (doctor._check_hcs_base_image, doctor._check_hcs_rdp_helper):
+    for check in (
+        hcs_prereq._check_hcs_base_image,
+        hcs_prereq._check_hcs_rdp_helper,
+    ):
         ok, detail = check(None)
         assert ok
         assert "no config loaded" in detail
@@ -298,7 +304,7 @@ def test_an_unreadable_config_leaves_the_per_context_checks_idle():
 
 def test_a_disabled_sandbox_is_not_an_hcs_context(tmp_path):
     config = _config(work=_hcs(tmp_path, enabled=False))
-    assert doctor._hcs_sandboxes(config) == []
+    assert hcs_prereq._hcs_sandboxes(config) == []
 
 
 # -- RDP helper and its FreeRDP DLLs ------------------------------------------
@@ -336,7 +342,7 @@ def _no_bundle(monkeypatch) -> None:
 
 
 def test_a_context_without_computer_use_needs_no_helper(tmp_path):
-    ok, detail = doctor._check_hcs_rdp_helper(_config(work=_hcs(tmp_path)))
+    ok, detail = hcs_prereq._check_hcs_rdp_helper(_config(work=_hcs(tmp_path)))
     assert ok
     assert "computer_use" in detail
 
@@ -344,7 +350,7 @@ def test_a_context_without_computer_use_needs_no_helper(tmp_path):
 def test_a_complete_prebuilt_bundle_passes(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENSHRIMP_HCS_RDP_HELPER", _bundle(tmp_path, dlls=True))
     config = _config(work=_hcs(tmp_path, computer_use=True))
-    ok, detail = doctor._check_hcs_rdp_helper(config)
+    ok, detail = hcs_prereq._check_hcs_rdp_helper(config)
     assert ok
     assert "hcs_rdp_helper.exe" in detail
 
@@ -353,7 +359,7 @@ def test_a_helper_without_its_dlls_fails(tmp_path, monkeypatch):
     # The exe alone is not runnable: the loader resolves FreeRDP beside it.
     monkeypatch.setenv("OPENSHRIMP_HCS_RDP_HELPER", _bundle(tmp_path, dlls=False))
     config = _config(work=_hcs(tmp_path, computer_use=True))
-    ok, detail = doctor._check_hcs_rdp_helper(config)
+    ok, detail = hcs_prereq._check_hcs_rdp_helper(config)
     assert not ok
     assert "libfreerdp" in detail
     assert "openshrimp-hcs-rdp-helper-windows-x86_64.zip" in detail
@@ -362,7 +368,7 @@ def test_a_helper_without_its_dlls_fails(tmp_path, monkeypatch):
 def test_a_helper_override_pointing_at_nothing_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENSHRIMP_HCS_RDP_HELPER", str(tmp_path / "absent"))
     config = _config(work=_hcs(tmp_path, computer_use=True))
-    ok, detail = doctor._check_hcs_rdp_helper(config)
+    ok, detail = hcs_prereq._check_hcs_rdp_helper(config)
     assert not ok
     assert "OPENSHRIMP_HCS_RDP_HELPER" in detail
 
@@ -373,7 +379,7 @@ def test_a_toolchain_is_enough_when_no_bundle_is_staged(tmp_path, monkeypatch):
         work=_hcs(tmp_path, computer_use=True,
                   mingw_bin=_toolchain(tmp_path, complete=True)),
     )
-    ok, detail = doctor._check_hcs_rdp_helper(config)
+    ok, detail = hcs_prereq._check_hcs_rdp_helper(config)
     assert ok
     assert "buildable" in detail
 
@@ -384,7 +390,7 @@ def test_an_incomplete_toolchain_names_the_missing_packages(tmp_path, monkeypatc
         work=_hcs(tmp_path, computer_use=True,
                   mingw_bin=_toolchain(tmp_path, complete=False)),
     )
-    ok, detail = doctor._check_hcs_rdp_helper(config)
+    ok, detail = hcs_prereq._check_hcs_rdp_helper(config)
     assert not ok
     assert "pkgconf.exe" in detail
     assert "-freerdp" in detail
@@ -398,7 +404,7 @@ def test_neither_a_bundle_nor_a_toolchain_is_not_a_fault(tmp_path, monkeypatch):
     failing, it stood in front of whatever had actually gone wrong."""
     _no_bundle(monkeypatch)
     config = _config(work=_hcs(tmp_path, computer_use=True))
-    ok, detail = doctor._check_hcs_rdp_helper(config)
+    ok, detail = hcs_prereq._check_hcs_rdp_helper(config)
     assert ok
     assert "openshrimp-hcs-rdp-helper-windows-x86_64.zip" in detail
     assert "will be downloaded" in detail
@@ -414,7 +420,7 @@ def test_the_check_never_downloads(tmp_path, monkeypatch):
         "open_shrimp.sandbox.hcs_rdp.download_shipped_helper", _boom,
     )
     config = _config(work=_hcs(tmp_path, computer_use=True))
-    assert doctor._check_hcs_rdp_helper(config)[0]
+    assert hcs_prereq._check_hcs_rdp_helper(config)[0]
 
 
 # -- an output stream that cannot carry the icons ------------------------------
@@ -473,6 +479,6 @@ def test_a_stream_that_cannot_encode_a_character_gets_a_placeholder(monkeypatch)
 
 @pytest.mark.skipif(sys.platform == "win32", reason="win32more is installed there")
 def test_win32more_missing_names_the_extra():
-    ok, detail = doctor._check_win32more(None)
+    ok, detail = hcs_prereq._check_win32more(None)
     assert not ok
     assert "--extra hcs" in detail

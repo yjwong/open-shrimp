@@ -15,6 +15,7 @@ test is which backends reach a person rather than what this host said today.
 
 from __future__ import annotations
 
+import importlib
 import json
 from dataclasses import replace
 
@@ -23,6 +24,8 @@ import pytest
 from open_shrimp import doctor
 from open_shrimp.config import _SANDBOX_BACKENDS
 from open_shrimp.main import _run_sandboxes
+from open_shrimp.sandbox import manager
+from open_shrimp.sandbox.prerequisites import DECLARATIONS
 
 
 @pytest.fixture
@@ -67,6 +70,22 @@ def test_every_backend_the_config_accepts_reaches_a_wizard(
         offered |= {offer.backend for offer in doctor.sandbox_offers(None)}
 
     assert offered == _SANDBOX_BACKENDS
+
+
+def test_every_backend_has_exactly_one_prerequisite_declaration() -> None:
+    declared = [
+        backend for backend, _platform, _checks in DECLARATIONS
+    ]
+
+    assert len(declared) == len(set(declared))
+    assert set(declared) == set(manager._MANAGER_FACTORIES)
+    assert set(declared) == _SANDBOX_BACKENDS
+
+
+def test_every_prerequisite_leaf_imports_on_this_host() -> None:
+    for module in ("libvirt_prereq", "lima_prereq", "hcs_prereq"):
+        imported = importlib.import_module(f"open_shrimp.sandbox.{module}")
+        assert imported.DECLARATION
 
 
 def test_a_backend_that_cannot_start_here_keeps_its_remedy(
