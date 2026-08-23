@@ -1518,9 +1518,32 @@ public sealed partial class SetupWindow : Window
 
     // -- Links --------------------------------------------------------------
 
-    private void OpenBotFather(object sender, RoutedEventArgs e) => OpenUri("tg://resolve?domain=BotFather");
+    /// <summary>
+    /// The BotFather walkthrough, which lives in the documentation rather than
+    /// on this step: the wizard asks for a token in one line, and the six-step
+    /// errand in another app that produces one does not fit beside the box.
+    /// </summary>
+    private void OpenTokenHelp(object sender, RoutedEventArgs e) =>
+        OpenUri("https://shrimp.wong.place/getting-started/telegram-setup/");
 
-    private void OpenUserInfoBot(object sender, RoutedEventArgs e) => OpenUri("tg://resolve?domain=userinfobot");
+    private void OpenBotFather(object sender, RoutedEventArgs e) => OpenTelegram("BotFather");
+
+    private void OpenUserInfoBot(object sender, RoutedEventArgs e) => OpenTelegram("userinfobot");
+
+    /// <summary>
+    /// Open a chat with a bot, preferring Telegram Desktop and falling back to
+    /// the web.
+    ///
+    /// A machine without Telegram Desktop has no handler registered for tg:,
+    /// and the shell reports that as an error rather than declining quietly —
+    /// so the fallback is what makes the link work at all there, and skipping
+    /// it would take the wizard down with it.
+    /// </summary>
+    private static void OpenTelegram(string domain)
+    {
+        if (TryOpenUri($"tg://resolve?domain={domain}")) return;
+        TryOpenUri($"https://t.me/{domain}");
+    }
 
     /// <summary>
     /// The accelerator, for the case where Telegram Desktop is on this machine
@@ -1533,12 +1556,29 @@ public sealed partial class SetupWindow : Window
         OpenUri(_window.DeepLink(_verifiedUsername));
     }
 
-    private static void OpenUri(string uri)
+    private static void OpenUri(string uri) => TryOpenUri(uri);
+
+    /// <summary>
+    /// Hand a URI to the shell, reporting whether anything took it. A missing
+    /// handler is an ordinary outcome here, not a fault to propagate: every
+    /// link on the wizard is an accelerator for a step the user can also take
+    /// by hand.
+    /// </summary>
+    private static bool TryOpenUri(string uri)
     {
-        using var _ = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        try
         {
-            FileName = uri,
-            UseShellExecute = true,
-        });
+            using var _ = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = uri,
+                UseShellExecute = true,
+            });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            TrayLog.Write($"Could not open {uri}", ex);
+            return false;
+        }
     }
 }

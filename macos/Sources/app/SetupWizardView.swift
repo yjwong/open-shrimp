@@ -152,8 +152,19 @@ struct SetupWizardView: View {
             SecureField("123456:ABC-DEF…", text: $model.token)
                 .textFieldStyle(.roundedBorder)
             telegramLink("Open @BotFather in Telegram", domain: "BotFather")
+            // The walkthrough lives in the documentation rather than on this
+            // step: the wizard asks for a token in one line, and the errand in
+            // another app that produces one does not fit beside the box.
+            Button("How do I create a bot?") {
+                guard let url = URL(string: Self.tokenHelpURL) else { return }
+                NSWorkspace.shared.open(url)
+            }
+            .buttonStyle(.link)
+            .font(.caption)
         }
     }
+
+    private static let tokenHelpURL = "https://shrimp.wong.place/getting-started/telegram-setup/"
 
     @ViewBuilder private var enrollStep: some View {
         switch model.stage {
@@ -538,10 +549,18 @@ struct SetupWizardView: View {
         Task { await model.addDirectories(panel.urls.map(\.path)) }
     }
 
+    /// A link to a chat with a bot, preferring the Telegram app and falling
+    /// back to the web.
+    ///
+    /// A Mac without Telegram installed has no handler for tg:, and a link that
+    /// declines to do anything is indistinguishable from a broken window. The
+    /// fallback is what makes the link work at all there.
     private func telegramLink(_ title: String, domain: String) -> some View {
         Button(title) {
-            guard let url = URL(string: "tg://resolve?domain=\(domain)") else { return }
-            NSWorkspace.shared.open(url)
+            if let app = URL(string: "tg://resolve?domain=\(domain)"),
+               NSWorkspace.shared.open(app) { return }
+            guard let web = URL(string: "https://t.me/\(domain)") else { return }
+            NSWorkspace.shared.open(web)
         }
         .buttonStyle(.link)
         .font(.caption)

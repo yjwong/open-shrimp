@@ -57,6 +57,7 @@
                                  PlaceholderText="123456:ABC-DEF…"
                                  PasswordRevealMode="Peek" />
                     <HyperlinkButton Content="Open @BotFather in Telegram →" Click="OpenBotFather" />
+                    <HyperlinkButton Content="How do I create a bot? →" Click="OpenTokenHelp" />
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <ProgressRing x:Name="TokenSpinner" IsActive="False" Width="16" Height="16" />
                         <TextBlock x:Name="TokenMessage" TextWrapping="Wrap" />
