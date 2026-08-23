@@ -293,12 +293,12 @@ func showModels() async {
     if let reason = await OpenShrimpCLI.ensureRuntime() {
         stamp("core runtime is not ready: \(reason)")
     }
-    let choices = await OpenShrimpCLI.models()
-    guard !choices.isEmpty else {
-        stamp("no catalog; the picker offers CLI default alone")
+    let catalog = await OpenShrimpCLI.models()
+    guard !catalog.choices.isEmpty else {
+        stamp("no catalog; the picker offers \"\(catalog.defaultLabel)\" alone")
         return
     }
-    for choice in choices {
+    for choice in catalog.choices {
         print("\(choice.alias) — \(choice.description)  [\(choice.modelID)]")
     }
 }

@@ -9,7 +9,8 @@ import aiosqlite
 from telegram import Bot, Message, Update
 from telegram.error import BadRequest
 
-from open_shrimp.config import Config, ContextConfig
+from open_shrimp.backend import default_model_label
+from open_shrimp.config import Config, ContextConfig, effective_backend
 from open_shrimp.markdown import escape_code
 from open_shrimp.db import (
     ChatScope,
@@ -346,6 +347,7 @@ _TODO_STATUS_EMOJI: dict[str, str] = {
 def _build_status_text(
     ctx_name: str,
     ctx: ContextConfig,
+    config: Config,
     model_usage: dict[str, Any] | None = None,
     turn_usage: dict[str, Any] | None = None,
     todos: list[dict[str, Any]] | None = None,
@@ -354,7 +356,9 @@ def _build_status_text(
     escaped_name = _escape_mdv2(ctx_name)
     escaped_desc = _escape_mdv2(ctx.description)
     escaped_dir = _escape_mdv2(ctx.directory)
-    escaped_model = _escape_mdv2(ctx.model or "CLI default")
+    escaped_model = _escape_mdv2(
+        ctx.model or default_model_label(effective_backend(ctx, config))
+    )
     lines = [
         f"\U0001f4cc *Active context:* `{escaped_name}`",
         f"{escaped_desc}",
@@ -428,13 +432,14 @@ async def _update_pinned_status(
     ctx_name: str,
     ctx: ContextConfig,
     db: aiosqlite.Connection,
+    config: Config,
     model_usage: dict[str, Any] | None = None,
     turn_usage: dict[str, Any] | None = None,
     todos: list[dict[str, Any]] | None = None,
 ) -> None:
     """Send or update the pinned status message for a scope."""
     text = _build_status_text(
-        ctx_name, ctx, model_usage=model_usage, turn_usage=turn_usage,
+        ctx_name, ctx, config, model_usage=model_usage, turn_usage=turn_usage,
         todos=todos,
     )
     existing_msg_id = await get_pinned_message_id(db, scope)

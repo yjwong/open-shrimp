@@ -14,6 +14,7 @@ from __future__ import annotations
 from open_shrimp.backend.errors import CLIConnectionError, ProcessError
 from open_shrimp.backend.factory import (
     DEFAULT_BACKEND,
+    default_model_label,
     get_backend,
     get_backend_by_name,
     known_backends,
@@ -61,6 +62,7 @@ __all__ = [
     "CLIConnectionError",
     "ContentBlock",
     "DEFAULT_BACKEND",
+    "default_model_label",
     "ExtraUsage",
     "get_backend",
     "get_backend_by_name",

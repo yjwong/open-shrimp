@@ -29,6 +29,7 @@ except ImportError:
     readline = None  # type: ignore[assignment]
 
 from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
+from open_shrimp.backend.factory import default_model_label
 from open_shrimp.backend.claude_sdk.projects import name_directory
 from open_shrimp.config import (
     RESERVED_CONTEXT_NAME,
@@ -85,7 +86,7 @@ def _path_completion() -> Iterator[bool]:
 # The wizard writes a Claude SDK config, so it offers that backend's catalog.
 # "Custom model name" is the entry one past the end of this tuple.
 _MODELS: tuple[tuple[str | None, str], ...] = (
-    (None, "let the agent CLI decide — recommended"),
+    (None, "pin nothing, and let Claude Code decide — recommended"),
     *((c.alias, c.description) for c in MODEL_CHOICES),
 )
 
@@ -633,7 +634,7 @@ def _prompt_model() -> str | None:
     print()
     print("Which model should they use?")
     for i, (model_name, model_desc) in enumerate(_MODELS, 1):
-        display = model_name or "CLI default"
+        display = model_name or default_model_label()
         print(f"  {i}. {display} ({model_desc})")
     print(f"  {len(_MODELS) + 1}. Enter a custom model name")
 

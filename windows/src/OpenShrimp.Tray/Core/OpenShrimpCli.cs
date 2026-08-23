@@ -10,6 +10,25 @@ internal sealed record ModelChoice(
     [property: JsonPropertyName("model_id")] string ModelId,
     [property: JsonPropertyName("description")] string Description);
 
+/// <summary>
+/// The models a context may be pinned to, and what to call the entry that pins
+/// none of them. Pinning nothing hands the choice to the agent's own
+/// configuration, so the label names that agent — and which agent it is follows
+/// from the backend the catalog came from, so the two travel together.
+/// </summary>
+internal sealed record ModelCatalog(
+    [property: JsonPropertyName("default_label")] string DefaultLabel,
+    [property: JsonPropertyName("models")] IReadOnlyList<ModelChoice> Choices)
+{
+    /// <summary>
+    /// What a catalog that could not be read still offers. A wizard runs
+    /// before any config exists, and a config it has not written yet names no
+    /// backend, so the label is the default backend's.
+    /// </summary>
+    public static readonly ModelCatalog Unread =
+        new("Claude Code default", Array.Empty<ModelChoice>());
+}
+
 internal sealed record ConfigContext(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("directory")] string Directory,
@@ -372,11 +391,13 @@ internal static class OpenShrimpCli
     }
 
     /// <summary>
-    /// The model catalog. The picker falls back to "CLI default" rather than
-    /// blocking the wizard on a catalog it can only offer as a convenience.
+    /// The model catalog. The picker falls back to the unpinned entry alone
+    /// rather than blocking the wizard on a catalog it can only offer as a
+    /// convenience.
     /// </summary>
-    public static Task<IReadOnlyList<ModelChoice>> GetModelsAsync(CancellationToken ct = default) =>
-        ListAsync<ModelChoice>(new[] { "models", "--json" }, "models", ct);
+    public static async Task<ModelCatalog> GetModelsAsync(CancellationToken ct = default) =>
+        await JsonAsync<ModelCatalog>(new[] { "models", "--json" }, ct).ConfigureAwait(false)
+            ?? ModelCatalog.Unread;
 
     /// <summary>
     /// The projects the core found worth offering to import.

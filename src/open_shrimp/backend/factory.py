@@ -59,6 +59,20 @@ def get_backend_by_name(name: str) -> Backend:
     return instance
 
 
+def default_model_label(name: str | None = None) -> str:
+    """How the UI names a context that pins no model: "Claude Code default".
+
+    An unset ``model:`` passes no model to the agent at all, so the agent's own
+    configuration decides.  The label names that agent: a bare "default" reads
+    as a choice OpenShrimp made, and "CLI" does not say which one where two
+    backends ship a CLI each.
+
+    *name* is a backend name; absent selects :data:`DEFAULT_BACKEND`, the
+    backend a context with no ``backend:`` key is served by.
+    """
+    return f"{get_backend_by_name(name or DEFAULT_BACKEND).display_name} default"
+
+
 def get_backend(config: Any) -> Backend:
     """Resolve the backend named by ``config['backend']`` (default ``claude_sdk``).
 
@@ -76,6 +90,7 @@ def get_backend(config: Any) -> Backend:
 
 __all__ = [
     "DEFAULT_BACKEND",
+    "default_model_label",
     "get_backend",
     "get_backend_by_name",
     "known_backends",

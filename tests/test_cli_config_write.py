@@ -58,16 +58,24 @@ def test_models_json_is_parsable(capsys, tmp_path):
     assert _run_models(json_output=True, config_path=str(tmp_path / "none.yaml")) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["models"]
+    assert payload["default_label"] == "Claude Code default"
     for entry in payload["models"]:
         assert set(entry) == {"alias", "model_id", "description"}
 
 
 def test_models_follows_the_configured_backend(capsys, tmp_path, monkeypatch):
     """OpenCode wants provider-qualified ids, so offering Claude aliases there
-    would let a setup UI pin a model the backend rejects on every turn."""
+    would let a setup UI pin a model the backend rejects on every turn.
+
+    The label the picker gives its unpinned entry follows the same way: a
+    picker filled from OpenCode's catalog that offers Claude Code's default
+    names an agent that will not be serving the context.
+    """
     from open_shrimp.backend.protocol import ModelChoice
 
     class _Backend:
+        name = "opencode"
+
         def model_catalog(self):
             return [ModelChoice("gpt", "openai/gpt-5.5", "provider-qualified")]
 
@@ -79,6 +87,7 @@ def test_models_follows_the_configured_backend(capsys, tmp_path, monkeypatch):
     assert _run_models(json_output=True, config_path=str(config)) == 0
     payload = json.loads(capsys.readouterr().out)
     assert [m["model_id"] for m in payload["models"]] == ["openai/gpt-5.5"]
+    assert payload["default_label"] == "OpenCode default"
 
 
 # -- config write ------------------------------------------------------------

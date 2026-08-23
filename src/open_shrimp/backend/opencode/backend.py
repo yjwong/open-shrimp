@@ -61,6 +61,7 @@ class OpenCodeBackend:
     """The OpenCode backend.  ``name == "opencode"``."""
 
     name = "opencode"
+    display_name = "OpenCode"
 
     policy: OpenCodePolicy = OpenCodePolicy()
 

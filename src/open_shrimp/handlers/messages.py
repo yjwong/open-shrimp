@@ -939,7 +939,7 @@ async def _start_agent_task(
 
     # Ensure pinned status message exists (e.g. after a restart)
     if not await get_pinned_message_id(db, scope):
-        await _update_pinned_status(context.bot, scope, ctx_name, ctx_config, db)
+        await _update_pinned_status(context.bot, scope, ctx_name, ctx_config, db, config)
 
     async def _run() -> None:
         draft_state = _DraftState(
@@ -1110,7 +1110,7 @@ async def _start_agent_task(
                 # the refreshed count to the live notification.
                 _scope_todos[scope] = list(todos)
                 await _update_pinned_status(
-                    context.bot, scope, ctx_name, ctx_config, db,
+                    context.bot, scope, ctx_name, ctx_config, db, config,
                     todos=todos if todos else None,
                 )
                 await notify_agent_status(
@@ -1279,7 +1279,7 @@ async def _start_agent_task(
 
                     if result.model_usage or result.turn_usage:
                         await _update_pinned_status(
-                            context.bot, scope, ctx_name, ctx_config, db,
+                            context.bot, scope, ctx_name, ctx_config, db, config,
                             model_usage=result.model_usage,
                             turn_usage=result.turn_usage,
                             todos=latest_todos if latest_todos else None,

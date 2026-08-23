@@ -708,20 +708,28 @@ def _run_models(*, json_output: bool, config_path: str) -> int:
     would let a setup UI write a config the backend rejects on every turn.
     Falls back to the default backend's catalog when there is no config yet,
     which is the first-run case.
+
+    ``default_label`` travels with the catalog for the same reason: the entry
+    that pins no model names the agent whose default it defers to, and which
+    agent that is follows from the backend the catalog came from.
     """
-    from open_shrimp.backend import get_backend
+    from open_shrimp.backend import default_model_label, get_backend
     from open_shrimp.config import load_config
 
     try:
         backend = get_backend(load_config(config_path))
     except Exception:
         from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
+
+        default_label = default_model_label()
     else:
         MODEL_CHOICES = tuple(backend.model_catalog())
+        default_label = default_model_label(backend.name)
 
     if json_output:
         json.dump(
             {
+                "default_label": default_label,
                 "models": [
                     {
                         "alias": choice.alias,
@@ -729,7 +737,7 @@ def _run_models(*, json_output: bool, config_path: str) -> int:
                         "description": choice.description,
                     }
                     for choice in MODEL_CHOICES
-                ]
+                ],
             },
             sys.stdout,
         )

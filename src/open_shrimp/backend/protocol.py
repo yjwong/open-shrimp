@@ -251,6 +251,12 @@ class Backend(Protocol):
 
     name: str
 
+    #: What to call this backend's agent in user-facing copy.  ``name`` is the
+    #: config key (``claude_sdk``); this is the product ("Claude Code").  A
+    #: picker offering an unpinned model says whose default it would be
+    #: falling back to, which the config key alone does not answer.
+    display_name: str
+
     #: Per-backend tool taxonomy and rendering.  Answers tool-shape
     #: questions (path-scoped? mutating? how to summarise?) in the
     #: backend's native vocabulary so the orchestration code never

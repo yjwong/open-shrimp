@@ -31,7 +31,7 @@ from open_shrimp.config import (
 )
 from open_shrimp.markdown import escape_code
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
-from open_shrimp.backend.factory import get_backend_by_name
+from open_shrimp.backend.factory import default_model_label, get_backend_by_name
 from open_shrimp.android_companion import (
     create_pairing_code,
     get_or_create_server_id,
@@ -290,7 +290,7 @@ async def handle_context_callback(
             logger.exception("Failed to update context message")
 
         await query.answer(f"Switched to {target}")
-        await _update_pinned_status(context.bot, scope, target, ctx, db)
+        await _update_pinned_status(context.bot, scope, target, ctx, db, config)
         return True
 
     return False
@@ -371,7 +371,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         markup = None
 
     await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=markup)
-    await _update_pinned_status(context.bot, scope, target, ctx, db)
+    await _update_pinned_status(context.bot, scope, target, ctx, db, config)
 
 
 # ── /clear ──
@@ -411,7 +411,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     )
 
     await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
-    await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
+    await _update_pinned_status(context.bot, scope, ctx_name, ctx, db, config)
 
 
 # ── /status ──
@@ -435,11 +435,12 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     injectable = scope in _injectable_sessions
     setup_queued = len(_setup_queues.get(scope, []))
 
+    backend_name = effective_backend(ctx, config)
     lines = [
         f"*Context:* `{ctx_name}`",
         f"*Directory:* `{ctx.directory}`",
-        f"*Backend:* `{effective_backend(ctx, config)}`",
-        f"*Model:* `{ctx.model or 'CLI default'}`" + (" (override)" if scope in _model_overrides else ""),
+        f"*Backend:* `{backend_name}`",
+        f"*Model:* `{ctx.model or default_model_label(backend_name)}`" + (" (override)" if scope in _model_overrides else ""),
         f"*Effort:* `{ctx.effort or 'default'}`" + (" (override)" if scope in _effort_overrides else ""),
         f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
         f"*Running:* {'Yes' if running else 'No'}",
@@ -507,13 +508,14 @@ def _build_model_page(
     Backends with an empty catalog get text only — there is nothing to offer
     as a button, so the picker is absent rather than empty.
     """
-    in_effect = current_override or ctx_default_model or "CLI default"
+    unpinned = default_model_label(backend.name)
+    in_effect = current_override or ctx_default_model or unpinned
     label = "override" if current_override else "context default"
     lines = [f"*Model:* `{escape_code(in_effect)}` \\({label}\\)"]
     if current_override:
         lines.append(
             "*Context default:* "
-            f"`{escape_code(ctx_default_model or 'CLI default')}`"
+            f"`{escape_code(ctx_default_model or unpinned)}`"
         )
 
     catalog = backend.model_catalog()
@@ -635,7 +637,9 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if current_override:
             del _model_overrides[scope]
             await close_session(scope)
-            model_escaped = _escape_mdv2(ctx_default_model or "CLI default")
+            model_escaped = _escape_mdv2(
+                ctx_default_model or default_model_label(backend.name)
+            )
             await message.reply_text(
                 f"Model override cleared\\. Using context default: `{model_escaped}`",
                 parse_mode="MarkdownV2",
@@ -1239,7 +1243,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Resumed session `{escape_code(match.session_id[:12])}...`\n_{summary}_",
             parse_mode="MarkdownV2",
         )
-        await _update_pinned_status(context.bot, scope, ctx_name, ctx, db)
+        await _update_pinned_status(context.bot, scope, ctx_name, ctx, db, config)
         return
 
     # List recent sessions for the current context (page 0)
@@ -1373,7 +1377,7 @@ async def handle_resume_callback(
             logger.exception("Failed to remove resume keyboard")
 
     await _update_pinned_status(
-        context.bot, scope, ctx_name, ctx, db
+        context.bot, scope, ctx_name, ctx, db, config
     )
     # Clean up remaining selections from this listing
     expired = [k for k in _resume_selections if k.startswith("resume:")]

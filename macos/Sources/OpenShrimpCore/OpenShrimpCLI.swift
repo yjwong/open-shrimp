@@ -7,6 +7,20 @@ struct ModelChoice: Sendable {
     let description: String
 }
 
+/// The models a context may be pinned to, and what to call the entry that pins
+/// none of them.  Pinning nothing hands the choice to the agent's own
+/// configuration, so the label names that agent — and which agent it is follows
+/// from the backend the catalog came from, so the two travel together.
+struct ModelCatalog: Sendable {
+    let defaultLabel: String
+    let choices: [ModelChoice]
+
+    /// What a catalog that could not be read still offers.  A wizard runs
+    /// before any config exists, and a config it has not written yet names no
+    /// backend, so the label is the default backend's.
+    static let unread = ModelCatalog(defaultLabel: "Claude Code default", choices: [])
+}
+
 /// One project the config will name.
 struct ConfigContext: Sendable {
     let name: String
@@ -397,10 +411,12 @@ enum OpenShrimpCLI {
         return parsed?[key] as? [[String: Any]] ?? []
     }
 
-    /// The picker falls back to "CLI default" rather than blocking the wizard
-    /// on a catalog it can only offer as a convenience.
-    static func models() async -> [ModelChoice] {
-        await jsonList(["models", "--json"], key: "models").compactMap { entry in
+    /// The picker falls back to the unpinned entry alone rather than blocking
+    /// the wizard on a catalog it can only offer as a convenience.
+    static func models() async -> ModelCatalog {
+        guard let parsed = await jsonObject(["models", "--json"]) else { return .unread }
+        let choices = (parsed["models"] as? [[String: Any]] ?? []).compactMap {
+            entry -> ModelChoice? in
             guard let alias = entry["alias"] as? String else { return nil }
             return ModelChoice(
                 alias: alias,
@@ -408,6 +424,10 @@ enum OpenShrimpCLI {
                 description: entry["description"] as? String ?? ""
             )
         }
+        return ModelCatalog(
+            defaultLabel: parsed["default_label"] as? String ?? ModelCatalog.unread.defaultLabel,
+            choices: choices
+        )
     }
 
     private static func project(_ entry: [String: Any]) -> DiscoveredProject? {

@@ -150,7 +150,7 @@ public sealed partial class SetupWindow : Window
     private SetupStep CurrentStep => _steps[_step];
     private string? _verifiedToken;
     private string? _verifiedUsername;
-    private IReadOnlyList<ModelChoice> _models = Array.Empty<ModelChoice>();
+    private ModelCatalog _catalog = ModelCatalog.Unread;
     // What enabling the sandbox would mean on this PC, once the core has said.
     // Null while the answer is in flight, and where the core could not give one
     // — which the last step renders the same way, as no sandbox row at all.
@@ -927,9 +927,10 @@ public sealed partial class SetupWindow : Window
     /// Claude Code is already signed in here.
     ///
     /// None of the four blocks the wizard. A catalog that could not be read
-    /// leaves "CLI default"; a discovery that failed reads the same as "none
-    /// found", which is a screen this step already has; an unanswered sign-in
-    /// check leaves the sign-in step standing, which costs a click.
+    /// leaves the unpinned entry standing alone; a discovery that failed reads
+    /// the same as "none found", which is a screen this step already has; an
+    /// unanswered sign-in check leaves the sign-in step standing, which costs
+    /// a click.
     ///
     /// This is the first thing in the app that runs the core at all when there
     /// is no config — a core with no config is never started — so the unpack
@@ -951,11 +952,11 @@ public sealed partial class SetupWindow : Window
         var sandbox = OpenShrimpCli.GetSandboxOfferingAsync();
         var auth = OpenShrimpCli.GetAuthStatusAsync();
         await Task.WhenAll(models, projects, sandbox, auth);
-        _models = await models;
+        _catalog = await models;
 
         ModelBox.Items.Clear();
-        ModelBox.Items.Add(new ComboBoxItem { Content = "CLI default (recommended)", Tag = null });
-        foreach (var model in _models)
+        ModelBox.Items.Add(new ComboBoxItem { Content = $"{_catalog.DefaultLabel} (recommended)", Tag = null });
+        foreach (var model in _catalog.Choices)
             ModelBox.Items.Add(new ComboBoxItem { Content = $"{model.Alias} — {model.Description}", Tag = model.Alias });
         ModelBox.SelectedIndex = 0;
 

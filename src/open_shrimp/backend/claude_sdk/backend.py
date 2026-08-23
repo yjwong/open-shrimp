@@ -76,6 +76,7 @@ class ClaudeSdkBackend:
     """The Claude Agent SDK backend.  ``name == "claude_sdk"``."""
 
     name = "claude_sdk"
+    display_name = "Claude Code"
 
     policy: ClaudeSdkPolicy = ClaudeSdkPolicy()
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchModels, validatePath, type ModelOption } from "../lib/api";
-import { BACKENDS, EFFORT_LEVELS } from "../lib/types";
+import { BACKENDS, EFFORT_LEVELS, defaultLabel } from "../lib/types";
 import type { AppConfig, ContextConfig, EffortLevel } from "../lib/types";
 import TagInput from "./TagInput";
 import SandboxForm from "./SandboxForm";
@@ -16,9 +16,9 @@ interface ContextEditorProps {
 type PathStatus = "idle" | "checking" | "valid" | "invalid";
 
 // Mirrors MODEL_CHOICES in backend/claude_sdk/models.py. Aliases are bare:
-// the [1m] suffix is redundant on these models and entitlement-gated.
+// the [1m] suffix is redundant on these models and entitlement-gated.  The
+// unpinned choice is not here — it is the empty field, named by its placeholder.
 const MODELS = [
-  { value: "", label: "CLI default" },
   { value: "fable", label: "fable" },
   { value: "opus", label: "opus" },
   { value: "sonnet", label: "sonnet" },
@@ -287,10 +287,10 @@ export default function ContextEditor({
                 list="model-options"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder="CLI default, or e.g. claude-opus-4-8"
+                placeholder={`${defaultLabel(effectiveBackend)}, or e.g. claude-opus-4-8`}
               />
               <datalist id="model-options">
-                {MODELS.filter((m) => m.value !== "").map((m) => (
+                {MODELS.map((m) => (
                   <option key={m.value} value={m.value}>
                     {m.label}
                   </option>
@@ -307,7 +307,7 @@ export default function ContextEditor({
             value={effort}
             onChange={(e) => setEffort(e.target.value)}
           >
-            <option value="">CLI default</option>
+            <option value="">{defaultLabel(effectiveBackend)}</option>
             {EFFORT_LEVELS.map((level) => (
               <option key={level} value={level}>
                 {level}

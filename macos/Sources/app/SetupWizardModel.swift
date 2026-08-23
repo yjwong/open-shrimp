@@ -2,17 +2,20 @@ import Foundation
 
 /// One entry in the model picker.
 enum ModelOption: Hashable {
-    /// Pin nothing, and let the agent CLI decide.
-    case cliDefault
+    /// Pin nothing, and let the agent decide.  The label names that agent
+    /// ("Claude Code default"), and travels with the case because which agent
+    /// it is follows from the backend the catalog came from — so the entry
+    /// cannot be spelled before the catalog is read.
+    case unpinned(label: String)
     case alias(name: String, description: String)
     case custom
 
-    /// The default entry is not composed the way an alias is.  Its text already
-    /// reads as a recommendation, and pairing it with a name renders
-    /// "CLI default — CLI default (recommended)".
+    /// The unpinned entry is not composed the way an alias is.  Its text
+    /// already reads as a recommendation, and pairing it with a name renders
+    /// "Claude Code default — Claude Code default (recommended)".
     var title: String {
         switch self {
-        case .cliDefault: return "CLI default (recommended)"
+        case .unpinned(let label): return "\(label) (recommended)"
         case .alias(let name, let description): return "\(name) — \(description)"
         case .custom: return "Custom…"
         }
@@ -212,9 +215,11 @@ final class SetupWizardModel: ObservableObject {
     /// carries everyone else, so nothing depends on this working.
     @Published private(set) var botLink: String?
 
-    @Published private(set) var options: [ModelOption] = [.cliDefault, .custom]
+    @Published private(set) var options: [ModelOption] =
+        [.unpinned(label: ModelCatalog.unread.defaultLabel), .custom]
     @Published private(set) var catalogLoaded = false
-    @Published var selection: ModelOption = .cliDefault
+    @Published var selection: ModelOption =
+        .unpinned(label: ModelCatalog.unread.defaultLabel)
 
     @Published private(set) var signInStage: SignInStage = .ready
 
@@ -335,8 +340,14 @@ final class SetupWizardModel: ObservableObject {
             // A catalog that could not be read is a convenience the wizard does
             // without.  Blocking setup on it would make a core that cannot run
             // unfixable from the only UI that could correct its config.
-            options = [.cliDefault]
-                + (await choices).map { .alias(name: $0.alias, description: $0.description) }
+            let catalog = await choices
+            // Re-selected as well as re-listed: the unpinned entry carries the
+            // label the catalog named, so a selection made against the seeded
+            // spelling matches nothing in the list that replaces it.
+            let unpinned = ModelOption.unpinned(label: catalog.defaultLabel)
+            if case .unpinned = selection { selection = unpinned }
+            options = [unpinned]
+                + catalog.choices.map { .alias(name: $0.alias, description: $0.description) }
                 + [.custom]
             catalogLoaded = true
 
@@ -920,7 +931,7 @@ final class SetupWizardModel: ObservableObject {
 
         let model: String?
         switch selection {
-        case .cliDefault:
+        case .unpinned:
             model = nil
         case .alias(let alias, _):
             model = alias
