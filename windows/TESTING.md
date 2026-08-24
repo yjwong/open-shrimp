@@ -12,8 +12,10 @@ validates on them.
 
 The guests run under the calling user's libvirt session (`qemu:///session`).
 They use KVM, Q35, UEFI Secure Boot, an emulated TPM 2.0, 8 vCPUs, 12 GiB of
-RAM, and a 64 GiB qcow2 disk. QEMU user networking exposes guest SSH only on the
-host loopback interface. VNC also listens only on loopback.
+RAM, and a 64 GiB qcow2 disk. QEMU user networking publishes guest SSH on the
+host loopback interface only, which still reaches other VMs on that host — see
+[From another VM on the same host](#from-another-vm-on-the-same-host). VNC also
+listens only on loopback.
 
 The Pro guest is the tool-equipped development environment. The Home guest is
 the clean installation and acceptance-test environment. **Do not install build
@@ -367,6 +369,31 @@ together.
 Neither domain has a `<filesystem>` device, so a bare `virsh start` is safe;
 guests that use virtiofs need their `virtiofsd` started alongside and cannot be
 started this way.
+
+### From another VM on the same host
+
+Binding `hostfwd` to the host's loopback does not confine it to the host. SLIRP
+maps the host loopback to `10.0.2.2` inside every QEMU user-networking guest, so
+from any such guest on the same machine:
+
+```bash
+ssh -i vm_key -p 2299 spike@10.0.2.2
+```
+
+reaches the same sshd, with `scp` and `-File` working normally. `10.0.2.2` is
+the gateway of SLIRP's default `10.0.2.0/24`, so it holds across boots unless
+that guest overrides the subnet with `net=`. Copying `vm_key` in is the whole
+setup; nothing then needs a shell on the host except `virsh` itself.
+
+Every SLIRP guest shares that address, so `known_hosts` entries for
+`[10.0.2.2]:2299` collide across unrelated machines that happened to use the
+same forwarded port. "Host key has changed" there is a stale entry rather than a
+compromised guest — clear it with `ssh-keygen -R '[10.0.2.2]:2299'`.
+
+The loopback bind is therefore not a boundary between VMs on the host, only
+between the host and the outside. What keeps a guest private is `vm_key`, so
+every copy of it is another way in: give the guest that needs access its own
+copy at mode 600 and leave the rest of the host's VMs without one.
 
 ### Quoting and transport
 
