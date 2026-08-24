@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <strong>Claude Code and OpenCode in your pocket. No laptop required.</strong>
+  <strong>Your personal Claude, on Telegram.</strong>
 </p>
 
 ---
 
-OpenShrimp puts a full coding agent in Telegram — complete with file editing, tool use, and project awareness. It's the shrimp 🦐 to [OpenClaw](https://openclaw.ai/)'s lobster.
+Chat with Claude from Telegram while it works on real projects on your own computer. It runs on your machine, asks before it changes anything, and goes wherever your phone does. It's the shrimp 🦐 to [OpenClaw](https://openclaw.ai/)'s lobster.
 
 Small, personal, gets the job done.
 
@@ -45,13 +45,13 @@ Both are self-hosted and open source. They solve different problems.
 
 | | **OpenShrimp** | **OpenClaw** |
 |---|---|---|
-| **Focus** | Code agent — reads, edits, and writes files in your projects | General-purpose assistant — browsing, memory, smart home, 50+ integrations |
+| **Focus** | Works on your projects — reads, edits, and runs things in folders you choose | General-purpose assistant — browsing, memory, smart home, 50+ integrations |
 | **Platform** | Telegram | WhatsApp, Telegram, Discord, Slack, Signal, iMessage |
 | **AI model** | Claude (Agent SDK) or any OpenCode provider — OpenAI, Anthropic, Google | Claude, GPT, local models |
 | **Tool approval** | Interactive — inline keyboard approve/deny per tool call | Autonomous by default |
 | **Project awareness** | Full — CLAUDE.md, working directories, path-scoped permissions | Limited — general shell access |
 
-**TL;DR:** OpenClaw is a Swiss Army knife for daily life. OpenShrimp is a scalpel for code — it does one thing and does it well.
+**TL;DR:** OpenClaw is a Swiss Army knife for daily life. OpenShrimp is your personal Claude at work on your own computer, asking before every change.
 
 ## OpenShrimp vs Claude Code Remote Control
 
@@ -69,9 +69,9 @@ Both let you use Claude Code from your phone. They take very different approache
 
 ## Why OpenShrimp?
 
-You're away from your desk but need the agent to fix a bug, review a diff, or scaffold something quick. OpenShrimp gives you a proper coding-agent session from any Telegram chat — on your phone, your tablet, wherever.
+You're away from your desk but want Claude to fix a bug, review a diff, dig through a website, or set something running for the morning. OpenShrimp gives you a full agent session from any Telegram chat — on your phone, your tablet, wherever.
 
-- **Real agent, not a chatbot.** The agent can read, edit, and write files in your actual project directories. Full tool use, not just text completion.
+- **Real work on real files.** Claude reads, edits, and writes files in your actual project directories, runs commands, and uses tools — no copy-pasting between a chat window and your computer.
 - **Pluggable backends.** Run on the Claude Agent SDK (default), or point a context at OpenCode to use GPT, Gemini, or any OpenCode-supported provider.
 - **You stay in control.** Every file mutation needs your explicit approval — one tap to approve or deny. See [How Tool Approval Works](#how-tool-approval-works). When you're ready to commit, `/review` opens a swipe-based staging UI.
 - **Talk to it.** Send a voice note and it gets transcribed automatically as a prompt — no typing needed. Great for quick instructions when you're on the go.
