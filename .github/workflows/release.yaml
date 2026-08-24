@@ -167,6 +167,8 @@ jobs:
             artifact: openshrimp-windows-x86_64.exe
             dist_artifact: dist-openshrimp
             exec_code: "from open_shrimp.main import main; main()"
+            rust_target: x86_64-pc-windows-msvc
+            rustflags: "-C target-feature=+crt-static"
             features: "hcs"
           # moonshine-stt
           - os: ubuntu-latest
@@ -190,6 +192,8 @@ jobs:
             artifact: moonshine-stt-windows-x86_64.exe
             dist_artifact: dist-moonshine-stt
             exec_code: "from moonshine_stt.main import main; main()"
+            rust_target: x86_64-pc-windows-msvc
+            rustflags: "-C target-feature=+crt-static"
 
     steps:
       - uses: actions/checkout@v6
@@ -235,6 +239,13 @@ jobs:
           PYAPP_EXEC_CODE: ${{ matrix.exec_code }}
           PYAPP_DISTRIBUTION_EMBED: "1"
           PYAPP_PASS_LOCATION: "1"
+          # Without a static CRT the launcher imports VCRUNTIME140.dll, which
+          # ships with the Visual C++ redistributable rather than with Windows,
+          # so on a PC that has never installed one it dies in the loader with
+          # 0xC0000135 before reaching its own code. The Windows entries name a
+          # rust_target they would get by default because of this flag: cargo
+          # confines RUSTFLAGS to target units only when a target is named.
+          RUSTFLAGS: ${{ matrix.rustflags || '' }}
         run: |
           if [ -n "${{ matrix.rust_target }}" ]; then
             cargo install pyapp --force --root dist/pyapp --target ${{ matrix.rust_target }}
