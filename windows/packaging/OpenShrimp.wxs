@@ -20,6 +20,7 @@
       -d ProductVersion=<x.y.z.0> \
       -d TrayPublishDir=<publish dir> \
       -d CoreExe=<path to openshrimp.exe> \
+      -d ElevateExe=<path to OpenShrimp.Elevate.exe> \
       -o OpenShrimp-<version>-x64.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -314,6 +315,19 @@
       </Files>
       <Component>
         <File Id="TrayExecutable" Source="$(TrayPublishDir)\OpenShrimp.Tray.exe" />
+      </Component>
+
+      <!--
+        The elevated setup helper, from its own publish because it is a
+        self-contained single file: published into the tray's directory it
+        would be a second set of runtime assemblies under the same names.
+
+        Beside the tray rather than anywhere else, because that is where
+        SandboxSetup looks for it, and small enough to audit because it is what
+        the user's one administrator prompt runs.
+      -->
+      <Component>
+        <File Id="ElevateExecutable" Source="$(ElevateExe)" Name="OpenShrimp.Elevate.exe" />
       </Component>
     </ComponentGroup>
 

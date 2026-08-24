@@ -15,9 +15,13 @@ Both guests are built by `TESTING.md`, which also covers reaching them over ssh.
 **`win11-spike` (Pro)** is the build machine: .NET SDK 9, Visual Studio 2022
 BuildTools at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`
 with the `MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage` targets present, WiX
-5 on PATH, git, and `uv` from WinGet. It is also where the HCS sandbox is
-normally exercised, since the repo checkout and the staged kernel and rootfs
-live there.
+7 as a global dotnet tool with the UI extension added, git, and `uv` from WinGet.
+The toolset major has to match what `OpenShrimp.wxs` is authored for and what
+the release job installs: WiX 5 cannot build it, because the `Files` harvest
+element the tray's component group uses arrived in 6.
+
+It is also where the HCS sandbox is normally exercised, since the repo checkout
+and the staged kernel and rootfs live there.
 
 **`win11-home-spike` (Home)** carries no .NET, no Visual Studio, and no SDK. It
 is where MSI installation, missing prerequisites, and unelevated behaviour are
@@ -25,12 +29,14 @@ tested. Installing a toolchain there destroys the only environment in which a
 framework-dependent binary fails the way a user's machine would.
 
 Home runs HCS. `setup.ps1` logs a `hyperv-exit` failure on that edition because
-it lacks the `Microsoft-Hyper-V-All` role, and that is not an HCS blocker: the
-backend needs `VirtualMachinePlatform`, which is enabled on both guests and is
-the same feature WSL2 runs on. `hcs_prereq.py` bears this out — its checks are
-win32more, a token in Administrators or Hyper-V Administrators, the kernel,
-initramfs, `csc`, the base image, and the RDP helper. None of them looks for the
-Hyper-V role.
+it lacks the `Microsoft-Hyper-V-All` role, and that is not an HCS blocker: what
+the backend needs is `VirtualMachinePlatform`, the same feature WSL2 runs on.
+`hcs_prereq.py` bears this out — none of its checks looks for the Hyper-V role.
+
+That feature is **not** enabled on `win11-home-spike`: the guest was
+provisioned from media predating the feature-enable step, so `vmcompute.exe`
+is absent there and every HCS call fails to reach a service. The `HCS platform`
+check is what reports it, and the wizard's setup step is what turns it on.
 
 ## Build the tray and the MSI
 
@@ -43,9 +49,21 @@ $BT = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
   -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
   -p:VersionPrefix=<version> -p:PublishDir=<abs>\publish\
 
+dotnet publish windows\src\OpenShrimp.Elevate\OpenShrimp.Elevate.csproj `
+  -c Release -p:VersionPrefix=<version> -o <abs>\publish-elevate
+
 wix build windows\packaging\OpenShrimp.wxs -arch x64 -d ProductVersion="<version>.0" `
-  -d TrayPublishDir=<abs>\publish -d CoreExe=<abs>\core.exe -o <out>.msi
+  -d TrayPublishDir=<abs>\publish -d CoreExe=<abs>\core.exe `
+  -d ElevateExe=<abs>\publish-elevate\OpenShrimp.Elevate.exe -o <out>.msi
 ```
+
+`OpenShrimp.Elevate.exe` is the elevated setup helper the wizard runs to join
+the account to `Hyper-V Administrators`, turn on `VirtualMachinePlatform` and
+install WSL. It goes to its own
+directory because it is self-contained and single-file: published into the
+tray's, it would be a second copy of the runtime assemblies under the same
+names. Plain `dotnet publish` builds it — it has no Windows App SDK targets to
+resolve, so it needs neither the VS toolset nor a `-p:Platform`.
 
 Check free space on `C:` first. Under 1 GB, the publish fails with `MSB3021`
 after a successful compile, which reads like a build error and is not one; see
@@ -82,8 +100,10 @@ desktop. Both paths are testable over plain SSH and exit 0.
 | Subject | Guest | Notes |
 | --- | --- | --- |
 | Tray build, MSI build | Pro | the only machine with the VS toolset |
+| The setup helper's three fixes | either | over plain SSH: that token is already elevated, so they run with no prompt |
+| The consent prompt and the restart | either | needs a desktop and a filtered token; see `TESTING.md` |
 | Tray UI, Mica and theming | Pro | needs the throwaway desktop and `ForceEffectMode` |
-| HCS sandbox backend | either | `VirtualMachinePlatform` is enabled on both |
+| HCS sandbox backend | Pro | the only guest with `VirtualMachinePlatform` on |
 | MSI install, upgrade, uninstall | Home | prerequisites are only missing here |
 | Unelevated behaviour | Home | `InteractiveToken` + `LeastPrivilege` needs a signed-in session |
 | Session-end and shutdown veto | either | see the measurements in `TESTING.md` |

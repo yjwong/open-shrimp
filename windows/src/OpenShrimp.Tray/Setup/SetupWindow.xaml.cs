@@ -155,7 +155,15 @@ public sealed partial class SetupWindow : Window
     // Null while the answer is in flight, and where the core could not give one
     // — which the last step renders the same way, as no sandbox row at all.
     private SandboxOffering? _sandbox;
+    // Where the elevation that would make an unavailable sandbox available has
+    // got to. Never re-derived from a second preflight; see SandboxSetupState.
+    private SandboxSetupState _sandboxState = new SandboxSetupState.NotAsked();
     private readonly List<ProjectRow> _rows = new();
+
+    // Set once the window has gone. The elevation cannot be cancelled, since it
+    // waits out an msiexec transaction, so its continuation is the one place
+    // that can reach a torn-down visual tree.
+    private bool _closed;
 
     // The sandbox's shared assets, while they are still this window's to stop.
     // Released rather than cancelled once the config is written, because a
@@ -188,6 +196,13 @@ public sealed partial class SetupWindow : Window
 
     public event Action? Completed;
 
+    /// <summary>
+    /// Bring the core down, for the one path that ends in a restart. Supplied by
+    /// the tray, which owns the supervisor: a restart that lets Windows
+    /// terminate the core strands whatever sandbox guest it was running.
+    /// </summary>
+    public Func<Task>? DrainCore;
+
     public SetupWindow()
     {
         InitializeComponent();
@@ -210,6 +225,7 @@ public sealed partial class SetupWindow : Window
         // the first turn's wait being paid early. Only the first is stopped.
         Closed += (_, _) =>
         {
+            _closed = true;
             StopPolling();
             // Unconditional, because what a finished wizard leaves behind is a
             // null reference: writing the config hands the download on, so
@@ -889,6 +905,21 @@ public sealed partial class SetupWindow : Window
         SandboxBox.IsChecked == true ? _sandbox?.Backend : null;
 
     /// <summary>
+    /// Whether the box may be ticked at all: the core said the sandbox works
+    /// here, or the user has since taken the setup step the core said was
+    /// missing.
+    ///
+    /// The second case is the user's answer, not a fact re-established. The
+    /// membership that elevation grants reaches a token only at the next logon,
+    /// so a second preflight would say no for the rest of this session, and
+    /// writing the sandbox off on the strength of that throws away the thing
+    /// they just approved.
+    /// </summary>
+    private bool SandboxOfferable =>
+        _sandbox is not null
+        && (_sandbox.Available || _sandboxState is SandboxSetupState.Done);
+
+    /// <summary>
     /// Whether the last step has a sandbox row to show at all. Nothing ticked
     /// means nothing to isolate, and a question with no consequence teaches the
     /// user to answer without reading. A PC with no sandbox to offer still
@@ -999,15 +1030,124 @@ public sealed partial class SetupWindow : Window
     /// core's sentence beside it rather than in place of it: a row that is
     /// simply absent reads as a missing feature instead of a missing
     /// prerequisite.
+    ///
+    /// Where what it is missing is administrator rights, the row also carries
+    /// the way to supply them. That button is offered on the strength of the
+    /// core's remedies and nothing else: a prerequisite no elevation installs
+    /// leaves the row as it was, since a consent dialog that ends in an
+    /// unavailable sandbox is worse than no button.
     /// </summary>
     private void RenderSandboxRow()
     {
         SandboxSection.Visibility = ShowsSandboxRow ? Visibility.Visible : Visibility.Collapsed;
         if (_sandbox is null) return;
 
-        SandboxBox.IsEnabled = _sandbox.Available;
-        if (!_sandbox.Available) SandboxBox.IsChecked = false;
+        var offerable = SandboxOfferable;
+        SandboxBox.IsEnabled = offerable;
+        if (!offerable) SandboxBox.IsChecked = false;
         SandboxNote.Text = _sandbox.Note;
+
+        SandboxFixRow.Visibility =
+            !_sandbox.Available && SandboxSetup.CanTake(_sandbox.Remedies)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        // Offered once. Every other state is either in flight or already spent,
+        // and a second elevation over the first would be two msiexec
+        // transactions against the same feature.
+        SandboxFixButton.IsEnabled = _sandboxState
+            is SandboxSetupState.NotAsked
+            or SandboxSetupState.Declined
+            or SandboxSetupState.Failed;
+        // Stopped rather than hidden: a ring keeps animating while collapsed.
+        SandboxFixSpinner.IsActive = _sandboxState is SandboxSetupState.Running;
+
+        var message = SandboxFixText();
+        SandboxFixMessage.Text = message ?? "";
+        SandboxFixMessage.Visibility =
+            message is null ? Visibility.Collapsed : Visibility.Visible;
+        SandboxFixMessage.Foreground = ThemeBrush(
+            _sandboxState is SandboxSetupState.Failed
+                ? "SystemFillColorCriticalBrush"
+                : "TextFillColorSecondaryBrush");
+    }
+
+    /// <summary>
+    /// What the setup step has to say for itself, or null while it has nothing
+    /// to say. A failure shows the helper's own words: it is the only thing that
+    /// knows why an install stopped.
+    /// </summary>
+    private string? SandboxFixText() => _sandboxState switch
+    {
+        // The download is named because it is most of the wait, and a progress
+        // bar is not on offer: an elevated process inherits no handles, so
+        // nothing it does shows here until it exits.
+        SandboxSetupState.Running when _sandbox is not null
+            && SandboxSetup.Downloads(_sandbox.Remedies) =>
+            "Setting up… there is a large download, so this takes a few minutes.",
+        SandboxSetupState.Running => "Setting up…",
+        SandboxSetupState.Done { RestartRequired: true } =>
+            "Done. Your projects will be isolated once this PC restarts.",
+        SandboxSetupState.Done => "Done.",
+        SandboxSetupState.Declined =>
+            "Nothing was changed. Your projects will run directly on this computer.",
+        SandboxSetupState.Failed failed => failed.Reason,
+        _ => null,
+    };
+
+    /// <summary>Name what the elevation will leave behind, then take it.</summary>
+    private async void OfferSandboxSetup(object sender, RoutedEventArgs e)
+    {
+        if (_sandbox is null || !SandboxSetup.CanTake(_sandbox.Remedies)) return;
+        var remedies = _sandbox.Remedies;
+
+        var consented = await ShowDialogAsync(
+            "Set up the sandbox", ConsentBody(remedies),
+            primary: "Continue", close: "Cancel",
+            // The consequential button is not the one a return key reaches.
+            defaultButton: ContentDialogButton.Close);
+        if (!consented) return;
+
+        ShowSandboxState(new SandboxSetupState.Running());
+
+        var outcome = await SandboxSetup.RunAsync(remedies);
+
+        // The elevation outlives a wizard somebody closed on top of it, since an
+        // msiexec transaction is not a thing to cancel, so there may be no tree
+        // left to draw the answer on.
+        if (_closed) return;
+
+        ShowSandboxState(outcome);
+
+        // The tick follows the answer: somebody who has just approved an
+        // administrator prompt for the sandbox has said they want it. Ticking
+        // it is also what starts the assets downloading.
+        if (outcome is SandboxSetupState.Done) SandboxBox.IsChecked = true;
+    }
+
+    /// <summary>
+    /// One paragraph per thing that changes, and only for the ones this PC is
+    /// missing. The sentences come from the same table the fixes are taken from,
+    /// so nobody approves a change this dialog did not name.
+    /// </summary>
+    private static StackPanel ConsentBody(IReadOnlyList<string> remedies)
+    {
+        var body = new StackPanel { Spacing = 10 };
+        void Say(string text) => body.Children.Add(new TextBlock
+        {
+            Text = text,
+            TextWrapping = TextWrapping.Wrap,
+        });
+
+        Say("Windows will ask you to approve this once.");
+        foreach (var consequence in SandboxSetup.Consequence(remedies)) Say(consequence);
+
+        return body;
+    }
+
+    private void ShowSandboxState(SandboxSetupState state)
+    {
+        _sandboxState = state;
+        RenderSandboxRow();
     }
 
     // -- The sandbox download -----------------------------------------------
@@ -1039,7 +1179,7 @@ public sealed partial class SetupWindow : Window
     /// </summary>
     private void StartPrefetch()
     {
-        if (_sandbox?.Available != true || SandboxBox.IsChecked != true) return;
+        if (!SandboxOfferable || SandboxBox.IsChecked != true) return;
         if (_prefetch is not null) return;
 
         var cancellation = new CancellationTokenSource();
@@ -1454,16 +1594,24 @@ public sealed partial class SetupWindow : Window
                 return;
             }
 
-            // A written config asks for the assets being fetched, so the
-            // download stops being this window's to cancel: dropping the
-            // reference is what lets it outlive the wizard closing.
-            _prefetch = null;
+            // A config asking for a sandbox this session cannot start is the
+            // answer the user gave, and the restart below is what makes it true.
+            // The wizard cannot show the box going green first: the membership
+            // only reaches a token at the next logon.
+            var restartNeeded =
+                _sandboxState is SandboxSetupState.Done { RestartRequired: true }
+                && contexts.Any(context => context.Sandbox is not null);
 
-            var complete = $"OpenShrimp will start now. Say hello to @{_verifiedUsername} on Telegram.";
+            var complete = restartNeeded
+                ? "Setup is done. Your projects will be isolated once this PC "
+                  + $"restarts; then say hello to @{_verifiedUsername} on Telegram."
+                : $"OpenShrimp will start now. Say hello to @{_verifiedUsername} on Telegram.";
 
             // Read after the write rather than before it: the config write is a
             // spawn, and the bytes that moved while it ran belong in the count.
-            if (PrefetchNote() is { } note) complete += $"\n\n{note}";
+            // Not on the restart path, where the download is about to be
+            // interrupted and telling somebody it keeps going would be false.
+            if (!restartNeeded && PrefetchNote() is { } note) complete += $"\n\n{note}";
 
             // The tray supervises the core and is its own logon task, so
             // autostart here is the tray registering itself — never a service:
@@ -1489,9 +1637,23 @@ public sealed partial class SetupWindow : Window
                 }
             }
 
-            await ShowDialogAsync("Setup complete", complete);
+            // One dialog either way: the restart is offered as the last screen's
+            // primary button rather than in a second box on top of it.
+            var restarting = false;
+            if (restartNeeded) restarting = await OfferRestartAsync(complete);
+            else await ShowDialogAsync("Setup complete", complete);
 
-            Completed?.Invoke();
+            // A written config asks for the assets being fetched, so the
+            // download stops being this window's to cancel: dropping the
+            // reference is what lets it outlive the wizard closing. Not on the
+            // way to a restart, where the reboot ends it anyway and the close
+            // handler may as well stop the bytes now.
+            if (!restarting) _prefetch = null;
+
+            // Not on the way to a restart: the core has just been drained for
+            // it, and starting one to be killed seconds later is how a sandbox
+            // guest gets stranded.
+            if (!restarting) Completed?.Invoke();
             done = true;
         }
         finally
@@ -1504,16 +1666,78 @@ public sealed partial class SetupWindow : Window
         Close();
     }
 
-    private async Task ShowDialogAsync(string title, string message)
+    /// <summary>
+    /// The last screen, where a restart is what the config just written is
+    /// waiting on. True once one has been asked for.
+    ///
+    /// A restart rather than a sign-out. A sign-out is enough for a group
+    /// membership, but a Windows feature enable wants a boot, and the two are
+    /// indistinguishable to the person reading this.
+    ///
+    /// Declining costs a sentence, not a broken install: the config is written
+    /// either way, and the first turn in a sandboxed context says what is still
+    /// missing instead of failing with a bare HRESULT.
+    /// </summary>
+    private async Task<bool> OfferRestartAsync(string complete)
+    {
+        if (!await ShowDialogAsync(
+                "Setup complete", complete, primary: "Restart now", close: "Later"))
+        {
+            return false;
+        }
+
+        // The core goes down through the control channel first. A restart that
+        // lets Windows terminate it strands whatever sandbox guest it was
+        // running, which is the exact failure that channel exists to prevent.
+        if (DrainCore is not null)
+        {
+            try
+            {
+                await DrainCore();
+            }
+            catch (Exception ex)
+            {
+                // Logged and carried on from: a core that would not drain is
+                // not a reason to strand the user on an unrestarted PC, and the
+                // session end has its own drain behind this one.
+                TrayLog.Write("Could not stop the core before restarting", ex);
+            }
+        }
+
+        if (Restart.Ask() is { } failure)
+        {
+            await ShowDialogAsync(
+                "Could not restart",
+                $"{failure} Restart this PC yourself to finish switching the sandbox on.");
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// One dialog on this window's root. True where the primary button was the
+    /// answer, which a dialog with no primary button — the default, and what a
+    /// bare message is — never has.
+    /// </summary>
+    private async Task<bool> ShowDialogAsync(
+        string title,
+        object content,
+        string primary = "",
+        string close = "OK",
+        ContentDialogButton defaultButton = ContentDialogButton.Primary)
     {
         var dialog = new ContentDialog
         {
             Title = title,
-            Content = message,
-            CloseButtonText = "OK",
+            Content = content,
+            // Empty is how a ContentDialog is told to draw no primary button.
+            PrimaryButtonText = primary,
+            CloseButtonText = close,
+            DefaultButton = defaultButton,
             XamlRoot = Content.XamlRoot,
         };
-        await dialog.ShowAsync();
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
     }
 
     // -- Links --------------------------------------------------------------

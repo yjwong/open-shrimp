@@ -147,6 +147,11 @@ class SandboxOffer:
     ``detail`` carries the remedy when ``available`` is false, so a wizard can
     say why a backend it names is not on offer instead of leaving a gap the
     user reads as a missing feature.
+
+    ``remedies`` is that for a front end rather than a reader: the ids of the
+    privileged fixes that would clear every failed check, empty where one of
+    them is nobody's to fix from here.  A wizard that can take them offers to;
+    one that cannot still renders ``detail``.
     """
 
     backend: str
@@ -157,6 +162,7 @@ class SandboxOffer:
     capabilities: frozenset[str] = frozenset()
     base_image_placeholder: str = ""
     unsupported_reasons: tuple[tuple[str, str], ...] = ()
+    remedies: tuple[str, ...] = ()
 
 
 def _offer(
@@ -198,11 +204,33 @@ def _offer_from_outcomes(
         base_image_placeholder=declaration.base_image_placeholder,
         unsupported_reasons=declaration.unsupported_reasons,
         available=not failed,
+        remedies=_remedies(declaration, failed),
         detail="; ".join(
             o.detail if o.label == declaration.label else f"{o.label}: {o.detail}"
             for o in failed
         ),
     )
+
+
+def _remedies(
+    declaration: SandboxBackendDeclaration,
+    failed: list[Outcome],
+) -> tuple[str, ...]:
+    """The elevated fixes that would clear every one of *failed*.
+
+    All of them or none: what renders these puts an administrator prompt behind
+    them, and a prompt that leaves the sandbox unavailable anyway is worse than
+    no offer.  The rule lives here, beside the other folds over the same list,
+    so that a backend answers for one failed check at a time and cannot forget
+    to withdraw.
+
+    Deduplicated because nothing stops two checks naming the same fix, and in
+    check order because that is the order an elevation performs them in.
+    """
+    fixes = [declaration.remedy(outcome.label) for outcome in failed]
+    if any(fix is None for fix in fixes):
+        return ()
+    return tuple(dict.fromkeys(fix for fix in fixes if fix is not None))
 
 
 def sandbox_offers(config: Config | None = None) -> list[SandboxOffer]:
@@ -286,6 +314,16 @@ def sandbox_note(offer: SandboxOffer | None) -> str:
             "There is no sandbox I can set up on this computer, so your "
             "projects will run directly on it."
         )
+    if not offer.available and offer.remedies:
+        # What is missing is administrator rights, supplied by approving a
+        # prompt rather than by installing anything, so the note says what that
+        # costs.  The failed checks stay in ``doctor``, whose reader knows what
+        # an HRESULT is.
+        return (
+            "Your projects can be isolated on this computer once it is set up "
+            "for that, which takes one administrator approval and a restart. "
+            "Until then they will run directly on it."
+        )
     if not offer.available:
         return (
             f"{offer.label} is unavailable: {offer.detail}. Your projects will "
@@ -304,6 +342,10 @@ def sandboxes_payload(
             "backend": blessed.backend if blessed is not None else None,
             "available": blessed is not None and blessed.available,
             "note": sandbox_note(blessed),
+            # What a front end that can raise an administrator prompt may still
+            # offer.  Empty on every host whose sandbox either works or needs
+            # something no such prompt supplies.
+            "remedies": list(blessed.remedies) if blessed is not None else [],
         },
         "sandboxes": [
             {

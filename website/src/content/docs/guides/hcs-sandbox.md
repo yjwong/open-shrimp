@@ -15,7 +15,7 @@ Nothing needs staging by hand, but a context's first boot fetches a rootfs image
 
 ## Requirements
 
-- **Windows 11**, Home or Pro. The Hyper-V role is *not* required; the `VirtualMachinePlatform` optional feature is what HCS actually needs, and installing WSL enables it.
+- **Windows 11**, Home or Pro. The Hyper-V role is *not* required; the `VirtualMachinePlatform` optional feature is what HCS actually needs — it installs `vmcompute.exe`, the service the backend calls. It is off on a default install, and installing WSL from the standalone MSI does *not* turn it on. `dism /online /enable-feature /featurename:VirtualMachinePlatform /all` does, and it wants a restart.
 - **WSL installed.** The guest boots the kernel WSL ships at `C:\Program Files\WSL\tools\kernel`. Nothing is ever *run* in WSL — the kernel file just has to be on disk. Point `OPENSHRIMP_HCS_KERNEL` elsewhere if you stage your own.
 - **OpenShrimp with the `hcs` extra.** The `openshrimp-windows-x86_64.exe` binary from [Releases](https://github.com/yjwong/open-shrimp/releases) bundles it. From source, install the extra explicitly — it pulls in `win32more`, the binding the backend calls Windows through:
 
@@ -28,6 +28,14 @@ Nothing needs staging by hand, but a context's first boot fetches a rootfs image
 Nothing else needs installing. The host-side launcher the agent CLI is invoked through is compiled with the in-box .NET Framework compiler that ships with Windows, so there is no toolchain to set up.
 
 Run `openshrimp doctor` at any point — it checks each of the above, plus the guest images below, and names the fix for whatever is missing.
+
+### Letting setup supply them
+
+Three of the requirements above need administrator rights — the group membership, the platform feature and the WSL install — and a per-user MSI install never asks for any, so a PC nobody has prepared cannot turn the sandbox on. The setup wizard offers it instead: on its last step, one administrator approval takes whichever of the three this PC is missing, and it then offers the restart that makes them take effect.
+
+That approval is worth reading before you give it. The group membership does not expire and is not scoped to OpenShrimp: from then on anything running as your account can create virtual machines, with no further prompt. The platform feature is machine-wide and stays on, and other virtualisation software cannot share it, so VMware, VirtualBox and Android emulators may stop working.
+
+Declining costs nothing but the sandbox — contexts without one are unaffected, and the first turn in a sandboxed context says what is missing rather than failing with a bare error code. Installing from source does them by hand.
 
 ## Guest images
 

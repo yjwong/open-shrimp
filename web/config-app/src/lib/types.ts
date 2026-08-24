@@ -41,6 +41,10 @@ export interface SandboxCatalog {
     backend: SandboxConfig["backend"] | null;
     available: boolean;
     note: string;
+    // Privileged fixes that would make an unavailable sandbox available, for a
+    // front end that can ask for administrator rights. This app runs in
+    // Telegram and cannot, so it renders the note and leaves these alone.
+    remedies: string[];
   };
   sandboxes: SandboxOffer[];
 }

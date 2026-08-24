@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <RootNamespace>OpenShrimp.Elevate</RootNamespace>
+    <AssemblyName>OpenShrimp.Elevate</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!--
+      The name and publisher on the consent dialog come from the version
+      resource, and "OpenShrimp.Elevate.exe" is not what somebody being asked
+      for administrator rights should have to recognise.
+    -->
+    <AssemblyTitle>OpenShrimp sandbox setup</AssemblyTitle>
+    <Product>OpenShrimp</Product>
+    <Company>OpenShrimp</Company>
+
+    <!--
+      One file, carrying its own runtime.  It is launched by a tray that sits
+      beside a self-contained copy of .NET and cannot lend it out, and the
+      MSI's file harvest would otherwise pick up a second set of runtime
+      assemblies with the same names as the tray's.
+    -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!-- The single source of truth for the version; see the tray's csproj. -->
+  <PropertyGroup>
+    <_VersionFile>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\VERSION'))</_VersionFile>
+    <VersionPrefix Condition="'$(VersionPrefix)' == '' And Exists('$(_VersionFile)')"
+    >$([System.IO.File]::ReadAllText('$(_VersionFile)').Trim())</VersionPrefix>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      The contract between the two sides of the elevation: the flags this
+      accepts, the report it writes, and where it writes it. Linked rather than
+      copied, so renaming a fix is one edit that fails to compile on both sides
+      instead of a helper writing where nobody looks.
+    -->
+    <Compile Include="..\OpenShrimp.Tray\Core\CorePaths.cs" Link="Core\CorePaths.cs" />
+    <Compile Include="..\OpenShrimp.Tray\Core\SandboxFix.cs" Link="Core\SandboxFix.cs" />
+  </ItemGroup>
+
+</Project>

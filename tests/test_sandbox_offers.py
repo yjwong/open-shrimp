@@ -297,6 +297,151 @@ def test_the_blessed_offer_carries_the_remedy_it_cannot_honour(
     assert "install virtiofsd" in offer.detail
 
 
+class TestTheFixesAnAdministratorCanSupply:
+    """What a default Windows install is missing, and who can supply it.
+
+    Two of the HCS prerequisites are absent on a PC nobody has prepared, and
+    neither is fixable from the unelevated process that finds them: the token
+    is not in ``Hyper-V Administrators``, and there is no WSL kernel.  A front
+    end that can raise a consent prompt is owed those as ids rather than as a
+    sentence, and is owed them only when taking all of them would actually
+    leave the sandbox available.
+    """
+
+    @staticmethod
+    def _failing(*labels: str, detail: str = "") -> object:
+        return lambda label, check, config: doctor.Outcome(
+            label, label not in labels, detail or f"{label} is missing"
+        )
+
+    def test_every_prerequisite_an_elevation_supplies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All three are absent on a PC nobody has prepared, and they come back
+        in the order the elevation performs them in."""
+        _on(monkeypatch, "Windows")
+        monkeypatch.delenv("OPENSHRIMP_HCS_KERNEL", raising=False)
+        monkeypatch.setattr(
+            doctor,
+            "run_check",
+            self._failing("Hyper-V rights", "HCS platform", "HCS kernel"),
+        )
+
+        offer = doctor.blessed_offer(None)
+        assert offer is not None and not offer.available
+        assert offer.remedies == ("hyperv-group", "vm-platform", "wsl-kernel")
+
+    def test_the_platform_feature_is_one_of_them(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one a WSL install does not supply: the standalone MSI drops a
+        kernel and turns no feature on, so a host can have every other
+        prerequisite and still have no Host Compute Service."""
+        _on(monkeypatch, "Windows")
+        monkeypatch.setattr(doctor, "run_check", self._failing("HCS platform"))
+
+        offer = doctor.blessed_offer(None)
+        assert offer is not None and offer.remedies == ("vm-platform",)
+
+    def test_a_failure_no_administrator_can_fix_withdraws_them_all(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An elevation that leaves the sandbox unavailable is a UAC prompt
+        spent for nothing, so a leftover failure retracts the whole offer."""
+        _on(monkeypatch, "Windows")
+        monkeypatch.setattr(
+            doctor, "run_check", self._failing("Hyper-V rights", "win32more")
+        )
+
+        offer = doctor.blessed_offer(None)
+        assert offer is not None and not offer.available
+        assert offer.remedies == ()
+
+    def test_an_overridden_kernel_path_is_not_the_installers_to_fix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The WSL installer drops a kernel at the in-box path.  Where
+        ``OPENSHRIMP_HCS_KERNEL`` points somewhere else, running it would leave
+        the check failing exactly as it was."""
+        _on(monkeypatch, "Windows")
+        monkeypatch.setenv("OPENSHRIMP_HCS_KERNEL", r"D:\kernels\bzImage")
+        monkeypatch.setattr(doctor, "run_check", self._failing("HCS kernel"))
+
+        offer = doctor.blessed_offer(None)
+        assert offer is not None and offer.remedies == ()
+
+    def test_withdrawing_them_all_is_the_folds_rule_not_a_backends(self) -> None:
+        """A declaration answers for one failed check at a time, so no backend
+        can forget the all-or-nothing rule — which is the whole guarantee, and
+        was unenforceable while each of them applied it itself."""
+        declaration = replace(
+            DECLARATIONS_BY_BACKEND["hcs"],
+            remedy=lambda label: "fix-a" if label == "a" else None,
+        )
+        fixable = [doctor.Outcome("a", False, "")]
+        with_leftover = [*fixable, doctor.Outcome("b", False, "")]
+
+        assert doctor._remedies(declaration, fixable) == ("fix-a",)
+        assert doctor._remedies(declaration, with_leftover) == ()
+
+    def test_a_working_sandbox_has_nothing_to_offer(
+        self, monkeypatch: pytest.MonkeyPatch, all_pass: None
+    ) -> None:
+        _on(monkeypatch, "Windows")
+
+        offer = doctor.blessed_offer(None)
+        assert offer is not None and offer.available
+        assert offer.remedies == ()
+
+    def test_the_note_stops_being_a_doctor_report(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The wizard says this to somebody who has never heard of a
+        hypervisor.  What they can act on is an administrator prompt, so the
+        failed checks stay in ``doctor`` where the reader knows what an
+        HRESULT is."""
+        _on(monkeypatch, "Windows")
+        monkeypatch.delenv("OPENSHRIMP_HCS_KERNEL", raising=False)
+        monkeypatch.setattr(
+            doctor,
+            "run_check",
+            self._failing(
+                "Hyper-V rights", "HCS kernel",
+                detail="0x8037011B; add the account to Hyper-V Administrators",
+            ),
+        )
+
+        note = doctor.sandbox_note(doctor.blessed_offer(None))
+        assert "administrator approval" in note
+        assert "0x8037011B" not in note and "Hyper-V" not in note
+        assert note.endswith(".")
+
+    def test_the_json_form_carries_them(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The tray cannot call Python, so this is how it learns there is an
+        elevation worth offering."""
+        _on(monkeypatch, "Windows")
+        monkeypatch.delenv("OPENSHRIMP_HCS_KERNEL", raising=False)
+        monkeypatch.setattr(doctor, "_load_config", lambda path: None)
+        monkeypatch.setattr("open_shrimp.main.init_paths", lambda name: None)
+        monkeypatch.setattr(
+            doctor,
+            "run_check",
+            self._failing("Hyper-V rights", "HCS platform", "HCS kernel"),
+        )
+
+        assert _run_sandboxes(json_output=True) == 0
+
+        sandbox = json.loads(capsys.readouterr().out)["sandbox"]
+        assert sandbox == {
+            "backend": "hcs",
+            "available": False,
+            "note": doctor.sandbox_note(doctor.blessed_offer(None)),
+            "remedies": ["hyperv-group", "vm-platform", "wsl-kernel"],
+        }
+
+
 class TestPendingDownloadsAreNotFailures:
     """A prerequisite the backend fetches itself must not deny the sandbox.
 
@@ -403,6 +548,7 @@ def test_the_json_form_is_parsable(
         "backend": "lima",
         "available": True,
         "note": doctor.SANDBOX_SUMMARY,
+        "remedies": [],
     }
 
 

@@ -568,9 +568,17 @@ def _prompt_sandbox() -> str | None:
     # said why, which is the whole reason it is printed before this returns
     # rather than instead of a question nobody was going to be asked.
     if offer is None or not offer.available:
-        # Only where there is something to install.  A platform with no
-        # backend at all has nothing to come back and turn on.
-        if offer is not None:
+        # Only where there is something to come back to.  A platform with no
+        # backend at all has nothing to turn on.
+        if offer is None:
+            return None
+        if offer.remedies:
+            # Nothing to install: what is missing is administrator rights, and
+            # this wizard has no way to ask for them.  The tray does.
+            print("Setting that up needs administrator rights, which this")
+            print("wizard cannot ask for. Run the OpenShrimp app on this")
+            print("computer and it will offer to.")
+        else:
             print("Install that, then turn the sandbox on from /context")
             print("in Telegram.")
         return None

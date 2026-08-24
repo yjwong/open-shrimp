@@ -71,6 +71,26 @@ def _check_hyperv_rights(config: Any) -> tuple[bool, str]:
     )
 
 
+def _check_vm_platform(config: Any) -> tuple[bool, str]:
+    """Whether the Host Compute Service is on this machine at all.
+
+    ``VirtualMachinePlatform`` is the Windows feature that installs it, and it
+    is off on a default install.  Checked by the service binary rather than by
+    the client library: ``computecore.dll``, which the backend calls through,
+    ships with Windows either way, so a host with the feature off loads every
+    DLL and then has nothing to serve the calls.
+    """
+    vmcompute = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "vmcompute.exe"
+    if vmcompute.exists():
+        return True, f"found at {vmcompute}"
+    return False, (
+        f"the Host Compute Service is not installed ({vmcompute} is missing) "
+        "\u2014 turn on the VirtualMachinePlatform Windows feature ("
+        "dism /online /enable-feature /featurename:VirtualMachinePlatform "
+        "/all) and restart"
+    )
+
+
 def _check_hcs_kernel(config: Any) -> tuple[bool, str]:
     from open_shrimp.sandbox.hcs import kernel_path
 
@@ -245,6 +265,28 @@ def _missing_freerdp_dlls(directory: Path) -> list[str]:
     ]
 
 
+#: The prerequisites an administrator can supply, against the check that
+#: reports each missing.  All three are absent on a Windows nobody has
+#: prepared, and none is fixable from the unelevated process that finds them.
+_REMEDIES = {
+    "Hyper-V rights": "hyperv-group",
+    "HCS platform": "vm-platform",
+    "HCS kernel": "wsl-kernel",
+}
+
+
+def _remedy(label: str) -> str | None:
+    """The elevated fix for one failed check, or ``None`` where there is none."""
+    from open_shrimp.sandbox.hcs import DEFAULT_KERNEL, kernel_path
+
+    if label == "HCS kernel" and kernel_path() != Path(DEFAULT_KERNEL):
+        # The WSL installer drops a kernel at the in-box path, which is not
+        # where an override points, so installing it would leave this check
+        # failing exactly as it was.
+        return None
+    return _REMEDIES.get(label)
+
+
 DECLARATION = SandboxBackendDeclaration(
     backend="hcs",
     label="Hyper-V",
@@ -253,6 +295,7 @@ DECLARATION = SandboxBackendDeclaration(
     checks=(
         ("win32more", _check_win32more),
         ("Hyper-V rights", _check_hyperv_rights),
+        ("HCS platform", _check_vm_platform),
         ("HCS kernel", _check_hcs_kernel),
         ("HCS control initramfs", _check_hcs_initrd),
         ("csc", _check_csc),
@@ -265,4 +308,5 @@ DECLARATION = SandboxBackendDeclaration(
         "phone_use",
         "the WSL-shipped kernel is built without binder and uhid",
     ),),
+    remedy=_remedy,
 )

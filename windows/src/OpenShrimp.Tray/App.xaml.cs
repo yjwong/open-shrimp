@@ -238,7 +238,13 @@ public partial class App : Application
             return;
         }
 
-        var window = new SetupWindow();
+        var window = new SetupWindow
+        {
+            // Only the tray holds the supervisor, and the wizard's restart —
+            // the step that makes a just-enabled sandbox startable — must not
+            // leave a core for Windows to terminate.
+            DrainCore = () => _supervisor!.StopAsync(),
+        };
         _setup = window;
         window.Closed += (_, _) => _setup = null;
         window.Completed += () =>

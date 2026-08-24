@@ -1023,6 +1023,19 @@ jobs:
             -p:VersionPrefix=${{ needs.version.outputs.version }} `
             -p:PublishDir=$(Join-Path $PWD 'publish')\
 
+      - name: Publish the elevated setup helper
+        # Its own directory, not the tray's: it is self-contained and
+        # single-file, so publishing it beside the tray would put a second copy
+        # of the .NET runtime's assemblies under the same names.
+        #
+        # `dotnet publish` rather than the VS MSBuild the tray needs — this is a
+        # plain console project with no Windows App SDK targets to resolve.
+        run: |
+          dotnet publish windows/src/OpenShrimp.Elevate/OpenShrimp.Elevate.csproj `
+            -c Release `
+            -p:VersionPrefix=${{ needs.version.outputs.version }} `
+            -o (Join-Path $PWD 'publish-elevate')
+
       - name: Build the MSI
         run: |
           dotnet tool install --global wix --version 7.*
@@ -1035,6 +1048,7 @@ jobs:
             -d ProductVersion="$version.0" `
             -d TrayPublishDir="$(Resolve-Path publish)" `
             -d CoreExe="$(Resolve-Path core/openshrimp-windows-x86_64.exe)" `
+            -d ElevateExe="$(Resolve-Path publish-elevate/OpenShrimp.Elevate.exe)" `
             -o "OpenShrimp-$version-x64.msi"
 
       - name: Generate the Sparkle appcast

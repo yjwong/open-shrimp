@@ -19,6 +19,14 @@ internal static class CorePaths
     public static string ConfigFile => Path.Combine(StateDirectory, "config.yaml");
 
     /// <summary>
+    /// Where the elevated sandbox-setup helper says what it did. Named here
+    /// because both sides of the elevation have to resolve it identically, and
+    /// the same user runs on each.
+    /// </summary>
+    public static string SandboxSetupReport =>
+        Path.Combine(StateDirectory, "sandbox-setup.json");
+
+    /// <summary>
     /// platformdirs user_log_path("openshrimp"), instance-scoped to match
     /// paths.log_dir() so two cores never share a rotating file.
     /// </summary>
@@ -64,6 +72,13 @@ internal static class CorePaths
             return onPath ?? beside;
         }
     }
+
+    /// <summary>
+    /// The elevated setup helper, beside the tray. Absent in a build that did
+    /// not publish it, which the wizard renders as no button.
+    /// </summary>
+    public static string ElevateExecutable =>
+        Path.Combine(AppContext.BaseDirectory, "OpenShrimp.Elevate.exe");
 
     public static string TrayExecutable =>
         Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "OpenShrimp.Tray.exe");

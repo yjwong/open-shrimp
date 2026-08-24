@@ -75,7 +75,12 @@ internal sealed record SandboxOffering(
     // be ticked, and Note says which.
     [property: JsonPropertyName("backend")] string? Backend,
     [property: JsonPropertyName("available")] bool Available,
-    [property: JsonPropertyName("note")] string Note);
+    [property: JsonPropertyName("note")] string Note,
+    // The privileged fixes that would make an unavailable sandbox available.
+    // Empty wherever the sandbox works, and wherever what it is missing is
+    // nobody's to elevate for. Normalised out of null on arrival; see
+    // GetSandboxOfferingAsync.
+    [property: JsonPropertyName("remedies")] IReadOnlyList<string> Remedies);
 
 /// <summary>The <c>sandboxes --json</c> payload.</summary>
 internal sealed record SandboxReport(
@@ -457,9 +462,20 @@ internal static class OpenShrimpCli
     /// drift from it.
     /// </summary>
     public static async Task<SandboxOffering?> GetSandboxOfferingAsync(
-        CancellationToken ct = default) =>
-        (await JsonAsync<SandboxReport>(new[] { "sandboxes", "--json" }, ct)
+        CancellationToken ct = default)
+    {
+        var offering = (await JsonAsync<SandboxReport>(new[] { "sandboxes", "--json" }, ct)
             .ConfigureAwait(false))?.Sandbox;
+        if (offering is null) return null;
+
+        // The deserializer honours no nullability, so a payload without the key
+        // lands as null however the record is declared. Normalised at the one
+        // place an offering enters, not at each place that asks what it can be
+        // fixed with.
+        return offering.Remedies is null
+            ? offering with { Remedies = Array.Empty<string>() }
+            : offering;
+    }
 
     /// <summary>
     /// What the core's config says about the settings a front end acts on, or

@@ -239,6 +239,33 @@
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
 
                         <!--
+                            The way past a prerequisite that is nobody's to
+                            install: what this PC is missing is administrator
+                            rights, and this button is the one place they can be
+                            asked for.  Hidden where the sandbox already works,
+                            and where what is missing is something no elevation
+                            supplies.
+                        -->
+                        <StackPanel x:Name="SandboxFixRow"
+                                    Margin="28,8,0,0"
+                                    Spacing="6"
+                                    Visibility="Collapsed">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button x:Name="SandboxFixButton"
+                                        Content="Set up now"
+                                        Click="OfferSandboxSetup" />
+                                <ProgressRing x:Name="SandboxFixSpinner"
+                                              IsActive="False"
+                                              Width="16" Height="16"
+                                              VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock x:Name="SandboxFixMessage"
+                                       TextWrapping="Wrap"
+                                       Visibility="Collapsed"
+                                       Style="{StaticResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+
+                        <!--
                             The download the note warned about, while it
                             happens.  Reserves no height until there is
                             something to say: a bar that appears is a bar

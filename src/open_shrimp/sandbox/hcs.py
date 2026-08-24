@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 
 # The WSL-shipped bzImage carries hv_vsock, hv_storvsc, hv_netvsc and 9p, all
 # the guest needs.  Overridable for hosts that stage it elsewhere.
-_DEFAULT_KERNEL = r"C:\Program Files\WSL\tools\kernel"
+DEFAULT_KERNEL = r"C:\Program Files\WSL\tools\kernel"
 _DEFAULT_INITRD = r"C:\ProgramData\openshrimp\hcs\initrd.img"
 
 #: Release assets carrying the prebuilt guest artifacts.  Each is a Linux
@@ -90,7 +90,7 @@ GUI_ROOTFS_ASSET = "openshrimp-hcs-gui-rootfs.vhdx.zst"
 
 
 def kernel_path() -> Path:
-    return Path(os.environ.get("OPENSHRIMP_HCS_KERNEL", _DEFAULT_KERNEL))
+    return Path(os.environ.get("OPENSHRIMP_HCS_KERNEL", DEFAULT_KERNEL))
 
 
 def initrd_path() -> Path:
