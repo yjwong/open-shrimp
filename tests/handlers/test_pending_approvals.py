@@ -18,6 +18,7 @@ from open_shrimp.db import ChatScope
 from open_shrimp.handlers.approval import retire_pending_approvals
 from open_shrimp.handlers.state import (
     _pending_approvals,
+    _scope_dispatch_locks,
     has_pending_approval,
     register_pending_approval,
     release_pending_approval,
@@ -30,12 +31,17 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture(autouse=True)
 def _clean_registry():
     _pending_approvals.clear()
+    _scope_dispatch_locks.clear()
     yield
     _pending_approvals.clear()
+    _scope_dispatch_locks.clear()
 
 
-def _session(idle_for: float) -> SimpleNamespace:
-    return SimpleNamespace(last_activity=time.monotonic() - idle_for)
+def _session(idle_for: float, *, in_turn: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        last_activity=time.monotonic() - idle_for,
+        in_turn=in_turn,
+    )
 
 
 async def test_idle_sweep_skips_scope_awaiting_approval(monkeypatch) -> None:
@@ -59,6 +65,35 @@ async def test_idle_sweep_skips_scope_awaiting_approval(monkeypatch) -> None:
 
     release_pending_approval(scope, entry)
     assert client_manager._stale_scopes(time.monotonic()) == [scope]
+
+
+async def test_idle_sweep_skips_scope_with_active_turn(monkeypatch) -> None:
+    scope = ChatScope(chat_id=1, thread_id=6)
+    session = _session(client_manager._IDLE_TIMEOUT + 60, in_turn=True)
+    monkeypatch.setattr(client_manager, "_active_sessions", {scope: session})
+
+    assert client_manager._stale_scopes(time.monotonic()) == []
+
+    session.in_turn = False
+    assert client_manager._stale_scopes(time.monotonic()) == [scope]
+
+
+async def test_idle_sweep_rechecks_after_waiting_for_dispatch(monkeypatch) -> None:
+    scope = ChatScope(chat_id=1, thread_id=7)
+    session = _session(client_manager._IDLE_TIMEOUT + 60)
+    monkeypatch.setattr(client_manager, "_active_sessions", {scope: session})
+    close_session = AsyncMock()
+    monkeypatch.setattr(client_manager, "close_session", close_session)
+    lock = _scope_dispatch_locks.setdefault(scope, asyncio.Lock())
+
+    await lock.acquire()
+    close_task = asyncio.create_task(client_manager._close_stale_scope(scope))
+    await asyncio.sleep(0)
+    session.in_turn = True
+    lock.release()
+    await close_task
+
+    close_session.assert_not_awaited()
 
 
 async def test_pending_approval_registry_is_per_scope() -> None:

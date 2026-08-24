@@ -29,6 +29,7 @@ from open_shrimp.client_manager import (
     get_or_create_session,
     receive_events,
     reconnect_session,
+    submit_query,
 )
 from open_shrimp.config import (
     Config,
@@ -875,7 +876,7 @@ async def _inject_message(
     _reinject_runtime_credentials(session)
 
     try:
-        await session.client.query(actual_prompt)
+        await submit_query(session, actual_prompt)
         logger.info(
             "Injected message into live session for scope %s: %s",
             scope, actual_prompt[:100],
@@ -1200,7 +1201,7 @@ async def _start_agent_task(
 
             # Send the primary query.
             _reinject_runtime_credentials(session)
-            await session.client.query(actual_prompt)
+            await submit_query(session, actual_prompt)
 
             await notify_agent_status(
                 context.bot_data, config, db, scope, "running",
@@ -1232,7 +1233,7 @@ async def _start_agent_task(
                 all_attachment_paths.extend(queued_paths)
                 try:
                     _reinject_runtime_credentials(session)
-                    await session.client.query(queued_actual)
+                    await submit_query(session, queued_actual)
                     logger.info(
                         "Injected setup-queued message for scope %s: %s",
                         scope, queued_actual[:100],

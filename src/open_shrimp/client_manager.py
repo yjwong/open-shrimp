@@ -104,6 +104,7 @@ class AgentSession:
     mcp_proxy: Any | None = None
     wrapper_cleanup_paths: list[str] = field(default_factory=list)
     last_activity: float = field(default_factory=time.monotonic)
+    in_turn: bool = False
     # Pinned at creation so a config edit mid-turn doesn't shift the policy.
     backend: Backend | None = None
 
@@ -1165,17 +1166,36 @@ async def close_sessions_for_context(context_name: str) -> int:
 def _stale_scopes(now: float) -> list[ChatScope]:
     """Scopes whose session has been idle past ``_IDLE_TIMEOUT``.
 
-    A session parked on an unanswered approval is never stale: an agent
-    blocked on a prompt streams no messages, so ``last_activity`` cannot
-    distinguish it from an abandoned session.
+    A session processing a turn or parked on an unanswered approval is never
+    stale: either can legitimately stream no messages for longer than the
+    idle timeout.
     """
     from open_shrimp.handlers.state import has_pending_approval
 
     return [
         scope for scope, session in _active_sessions.items()
         if now - session.last_activity > _IDLE_TIMEOUT
+        and not session.in_turn
         and not has_pending_approval(scope)
     ]
+
+
+async def _close_stale_scope(scope: ChatScope) -> None:
+    """Close *scope* only if it remains idle when dispatch is excluded."""
+    from open_shrimp.handlers.state import _scope_dispatch_locks
+
+    lock = _scope_dispatch_locks.setdefault(scope, asyncio.Lock())
+    async with lock:
+        now = time.monotonic()
+        if scope not in _stale_scopes(now):
+            return
+        session = _active_sessions[scope]
+        logger.info(
+            "Closing idle session for scope %s (idle %.0fs)",
+            scope,
+            now - session.last_activity,
+        )
+        await close_session(scope)
 
 
 async def _sweep_idle_sessions() -> None:
@@ -1185,12 +1205,7 @@ async def _sweep_idle_sessions() -> None:
         now = time.monotonic()
         stale = _stale_scopes(now)
         for scope in stale:
-            logger.info(
-                "Closing idle session for scope %s (idle %.0fs)",
-                scope,
-                now - _active_sessions[scope].last_activity,
-            )
-            await close_session(scope)
+            await _close_stale_scope(scope)
 
 
 def start_idle_sweep() -> None:
@@ -1259,12 +1274,23 @@ async def query_and_stream(
     prompt: str,
 ) -> AsyncIterator[AgentEvent]:
     """Send a query on an existing session and yield events."""
-    session.last_activity = time.monotonic()
     logger.info("Sending query on live client: %s", prompt[:200])
     _reinject_runtime_credentials(session)
-    await session.client.query(prompt)
+    await submit_query(session, prompt)
     async for message in receive_events(session):
         yield message
+
+
+async def submit_query(session: AgentSession, prompt: str) -> None:
+    """Submit a query and mark the session busy until its terminal result."""
+    was_in_turn = session.in_turn
+    session.in_turn = True
+    session.last_activity = time.monotonic()
+    try:
+        await session.client.query(prompt)
+    except BaseException:
+        session.in_turn = was_in_turn
+        raise
 
 
 async def receive_events(
@@ -1283,6 +1309,7 @@ async def receive_events(
         elif isinstance(message, ResultMessage):
             if message.session_id:
                 session.session_id = message.session_id
+            session.in_turn = False
         session.last_activity = time.monotonic()
         yield message
 
