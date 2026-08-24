@@ -14,8 +14,8 @@ The guests run under the calling user's libvirt session (`qemu:///session`).
 They use KVM, Q35, UEFI Secure Boot, an emulated TPM 2.0, 8 vCPUs, 12 GiB of
 RAM, and a 64 GiB qcow2 disk. QEMU user networking publishes guest SSH on the
 host loopback interface only, which still reaches other VMs on that host — see
-[From another VM on the same host](#from-another-vm-on-the-same-host). VNC also
-listens only on loopback.
+[From another VM on the same host](#from-another-vm-on-the-same-host). VNC
+listens only on loopback and is reachable the same way.
 
 The Pro guest is the tool-equipped development environment. The Home guest is
 the clean installation and acceptance-test environment. **Do not install build
@@ -75,6 +75,10 @@ and SHA-256:
 ```text
 768984706b909479417b2368438909440f2967ff05c6a9195ed2667254e465e3
 ```
+
+That media installs Windows 11 25H2, build 26200.8037. Its WinPE reports
+10.0.26100, which is the boot image's build rather than the installed system's,
+so read the version from the running guest.
 
 Obtain Windows media from Microsoft. A different release is acceptable, but
 record its hash: Windows build changes affect installer behaviour and the set of
@@ -182,11 +186,30 @@ Build the ISO from a directory containing the two files:
 
 ```bash
 xorriso -as mkisofs \
+  -J -r \
   -V UNATTEND \
   -o unattend.iso \
   autounattend.xml setup.ps1
 chmod 600 unattend.iso
 ```
+
+`-J` decides whether the installation runs unattended at all. `xorriso -as
+mkisofs` writes Rock Ridge by default and Joliet only when asked, and Windows
+CDFS reads Joliet or the primary ISO 9660 tree and ignores Rock Ridge. Omit
+`-J` and the only name Windows can see is the 8.3 form `AUTOUNAT.XML`, so Setup
+searches for `autounattend.xml`, finds nothing, and installs interactively: the
+guest stops on "Select keyboard settings" with the answer file mounted,
+readable, and never consumed. Confirm the Joliet tree carries the long name:
+
+```bash
+isoinfo -J -f -i unattend.iso
+# /autounattend.xml
+# /setup.ps1
+```
+
+Check that listing rather than `isoinfo -d | grep -i joliet`, which matches the
+words "NO Joliet present" as readily as "Joliet with UCS level 3 found" and so
+passes on exactly the media that fails.
 
 ## Create a VM
 
@@ -394,6 +417,29 @@ The loopback bind is therefore not a boundary between VMs on the host, only
 between the host and the outside. What keeps a guest private is `vm_key`, so
 every copy of it is another way in: give the guest that needs access its own
 copy at mode 600 and leave the rest of the host's VMs without one.
+
+The same mapping reaches the VNC console at `10.0.2.2:5900` upward, which is
+the only way to diagnose a guest that has no sshd yet. libvirt's `autoport`
+hands those ports out across every running domain, so identify the target by
+the name in the RFB handshake's ServerInit — `QEMU (win11-home-spike)` — rather
+than by position. An RFB client needs the None security type, `Raw` encoding,
+and one `FramebufferUpdateRequest` to grab the screen, and `KeyEvent` messages
+to type.
+
+Shift+F10 at any Windows Setup page opens a WinPE command prompt, which is the
+vantage point that shows what Windows sees rather than what the build host
+intended: `echo list volume | diskpart` for the mounted media and its
+filesystem, `echo list disk | diskpart` for a disk that is Online but
+unpartitioned and therefore absent from `list volume`, and `dir E:\` for the
+names on the unattended CD. Avoid `2>nul` in a console read through
+screenshots: a mistyped redirect target fails every iteration of a loop with
+"The system cannot find the path specified", which reads as a result rather
+than as a typo.
+
+QEMU reverse-maps an RFB keysym to a scancode and drops the shift state that
+keysym implies, so a shifted glyph arrives as its base key: `%` as `5`, `:` as
+`;`, `|` as `\`, `(` as `9`. Send Shift as its own press around the base key.
+A password or a path typed without that correction lands silently wrong.
 
 ### Quoting and transport
 
