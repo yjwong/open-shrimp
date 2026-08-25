@@ -62,10 +62,25 @@ openshrimp = "open_shrimp.main:main"
 path = "VERSION"
 pattern = "(?P<version>.+)"
 
+[tool.pytest.ini_options]
+# No test may leave the machine.  Several components download themselves on
+# first use, and a test that walks into one fetches tens of megabytes, writes
+# them into the developer's cache and still passes — the only symptom is
+# wall-clock.  Loopback stays open because tests serve real archives over it,
+# and Unix sockets because the control channel is one.  ``--allow-hosts``
+# guards ``connect`` rather than socket creation, so a test may still bind and
+# serve.  A test that genuinely needs the network marks itself
+# ``@pytest.mark.enable_socket``.
+addopts = "--allow-hosts=127.0.0.1,::1 --allow-unix-socket"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
+    # Several components download themselves on first use, and a test that
+    # walks into one fetches tens of megabytes and still passes.  Enforced in
+    # `addopts`, so the suite cannot leave the machine without saying so.
+    "pytest-socket>=0.7",
     "httpx",
     # Also in the `hcs` extra; here so the guest-image unpack is exercised on
     # a developer machine that is not the Windows host.
