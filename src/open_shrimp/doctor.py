@@ -23,6 +23,7 @@ from open_shrimp.binaries import managed_binary
 from open_shrimp.config import (
     Config,
     SandboxConfig,
+    effective_backend,
     load_config,
 )
 from open_shrimp.paths import init_paths
@@ -81,11 +82,42 @@ def _check_cloudflared(config: Config | None) -> tuple[bool, str]:
     return True, "not downloaded yet — fetched on first tunnel start"
 
 
+def _check_opencode(config: Config | None) -> tuple[bool, str]:
+    """The pinned opencode CLI, fetched on the first turn that needs it.
+
+    Read against the config rather than the host: an install running the Claude
+    backend has no opencode to be missing, and reporting on one would send its
+    operator looking for a fault in a component nothing here runs.
+    """
+    from open_shrimp.backend.opencode.binary import managed_opencode
+    from open_shrimp.backend.opencode.release import no_build_reason
+
+    if config is None or not _selects_opencode(config):
+        return True, "not selected by any context"
+    # ``OPENCODE_BIN`` is honoured, unlike the ``$PATH`` copies the other two
+    # checks look past: it is the one build this project runs without owning.
+    path = managed_opencode()
+    if path:
+        return True, f"found at {path}"
+    refusal = no_build_reason()
+    if refusal is not None:
+        return False, f"{refusal} — install it yourself and point OPENCODE_BIN at it"
+    return True, "not downloaded yet — fetched on first use"
+
+
+def _selects_opencode(config: Config) -> bool:
+    return any(
+        effective_backend(context, config) == "opencode"
+        for context in config.contexts.values()
+    )
+
+
 _Check = Callable[[Config | None], tuple[bool, str]]
 
 _CHECKS: list[tuple[str, _Check]] = [
     ("moonshine-stt", _check_moonshine_stt),
     ("cloudflared", _check_cloudflared),
+    ("opencode", _check_opencode),
 ]
 
 

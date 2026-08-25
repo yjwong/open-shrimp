@@ -7,9 +7,10 @@ was about to arrive on its own.
 
 The sandbox assets have always got this right (``_check_hcs_initrd``: "a
 check must not fetch anything, so an absent initramfs passes on the strength
-of that download").  These two did not.  The rule is pinned here because it
-reads as strictness while it is being written, and only reads as a bug from
-the far side of a fresh install.
+of that download").  moonshine-stt and cloudflared did not, and the opencode
+CLI is the third component to arrive under the same rule.  It is pinned here
+because it reads as strictness while it is being written, and only reads as a
+bug from the far side of a fresh install.
 """
 
 from __future__ import annotations
@@ -27,7 +28,30 @@ def _on(monkeypatch: pytest.MonkeyPatch, system: str, machine: str) -> None:
 @pytest.fixture
 def nothing_downloaded(monkeypatch: pytest.MonkeyPatch) -> None:
     """The state of every install that has never transcribed or tunnelled."""
+    import open_shrimp.backend.opencode.binary as opencode_binary
+
     monkeypatch.setattr(doctor, "managed_binary", lambda name: None)
+    monkeypatch.delenv("OPENCODE_BIN", raising=False)
+    monkeypatch.setattr(opencode_binary, "managed_binary", lambda name: None)
+
+
+def _opencode_config() -> doctor.Config:
+    """The smallest config that selects opencode somewhere."""
+    from open_shrimp.config import ContextConfig, TelegramConfig
+
+    return doctor.Config(
+        telegram=TelegramConfig(token="t"),
+        allowed_users=[1],
+        contexts={
+            "default": ContextConfig(
+                directory="/tmp",
+                description="d",
+                allowed_tools=[],
+                model="openai/gpt-5.5",
+            )
+        },
+        backend="opencode",
+    )
 
 
 @pytest.mark.parametrize(
@@ -106,4 +130,53 @@ def test_a_fresh_install_does_not_report_itself_broken(
     assert fetched, "the platform-agnostic checks are the subject of this test"
     assert all(outcome.ok for outcome in fetched), [
         (o.label, o.detail) for o in fetched if not o.ok
+    ]
+
+
+def test_opencode_is_silent_on_an_install_that_does_not_select_it(
+    nothing_downloaded: None,
+) -> None:
+    """Most installs run the Claude backend, and reporting on a CLI nothing
+    there runs sends their operator hunting a fault that isn't one."""
+    ok, detail = doctor._check_opencode(None)
+    assert ok
+    assert "not selected" in detail
+
+
+def test_opencode_selected_but_not_downloaded_passes(
+    monkeypatch: pytest.MonkeyPatch, nothing_downloaded: None
+) -> None:
+    _on(monkeypatch, "Linux", "x86_64")
+
+    ok, detail = doctor._check_opencode(_opencode_config())
+    assert ok, "the CLI is fetched on first use and must not fail the doctor"
+    assert "not downloaded yet" in detail
+
+
+def test_opencode_on_a_platform_with_no_published_build_fails(
+    monkeypatch: pytest.MonkeyPatch, nothing_downloaded: None
+) -> None:
+    # ``doctor.platform`` is the stdlib module itself, so patching it here is
+    # also what ``release.host_slug`` sees.
+    _on(monkeypatch, "Linux", "ppc64le")
+
+    ok, detail = doctor._check_opencode(_opencode_config())
+    assert not ok
+    assert "ppc64le" in detail
+
+
+def test_a_fresh_opencode_install_does_not_report_itself_broken(
+    monkeypatch: pytest.MonkeyPatch, nothing_downloaded: None
+) -> None:
+    """The same rule as the claude-backed case, with opencode selected: a
+    brand-new install has downloaded nothing and is entirely healthy."""
+    _on(monkeypatch, "Linux", "x86_64")
+    config = _opencode_config()
+
+    outcomes = [
+        doctor.run_check(label, check, config)
+        for label, check in doctor._CHECKS
+    ]
+    assert all(outcome.ok for outcome in outcomes), [
+        (o.label, o.detail) for o in outcomes if not o.ok
     ]

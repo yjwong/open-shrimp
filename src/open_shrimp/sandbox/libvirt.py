@@ -631,6 +631,7 @@ class LibvirtSandbox:
         if bundle is not None and bundle.libvirt_install is not None:
             bundle.libvirt_install(
                 self._sdir / "ssh_key", self._ssh_port, SANDBOX_USER,
+                log_file=log_file,
             )
 
         if self._runtime.provision_credentials is not None:

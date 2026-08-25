@@ -30,6 +30,7 @@ from open_shrimp.backend.protocol import (
     BackendCopy,
     BackendOptions,
     CanUseTool,
+    HostPrefetch,
     MCPConfigProvider,
     MCPOAuthProvider,
     ModelChoice,
@@ -201,6 +202,25 @@ class OpenCodeBackend:
             limit=limit,
             base_url=base_url,
             auth_header=auth_header,
+        )
+
+    def host_prefetch(self) -> "HostPrefetch | None":
+        """The pinned CLI, when this host has not downloaded it yet.
+
+        The archives are 46–61 MB, so nothing is vendored and the first turn on
+        an OpenCode context pays for one.  ``None`` once it is on disk at the
+        pin, which is every turn after the first.
+        """
+        from open_shrimp.backend.opencode.install import (
+            ensure_opencode_binary,
+            opencode_ready,
+        )
+
+        if opencode_ready():
+            return None
+        return HostPrefetch(
+            label="Downloading the opencode CLI",
+            fetch=lambda progress: ensure_opencode_binary(progress=progress),
         )
 
     def checklist_reader(

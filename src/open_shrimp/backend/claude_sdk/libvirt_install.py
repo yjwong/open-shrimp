@@ -23,12 +23,18 @@ def install_claude_cli_via_ssh(
     ssh_key: Path,
     ssh_port: int,
     ssh_user: str,
+    *,
+    log_file: Path | None = None,
 ) -> None:
     """Install the Claude CLI inside a libvirt VM if not already present.
 
     Silently skips when the host has no Claude binary — the operator's
     base image or ``provision:`` script must then supply
     ``/usr/local/bin/claude``.
+
+    *log_file* goes unused: the binary is already on the host, wheeled in as
+    a pinned ``claude-agent-sdk`` dependency, so there is no transfer to
+    report.
     """
     try:
         cli_binary = find_claude_binary()

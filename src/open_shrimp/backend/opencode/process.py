@@ -32,17 +32,17 @@ class OpenCodeEndpoint:
     owner: object | None = None
 
 
-def _find_binary() -> str:
-    # Single resolution policy lives in the backend's binary module; re-raise
-    # as the backend's error type for the served-process spawn path.
-    from open_shrimp.backend.opencode.binary import find_opencode_binary
+async def _find_binary() -> str:
+    # The fetch is sync and downloads ~60 MB on a first run, so it goes to a
+    # thread rather than stalling the loop this spawn is on.  Failure is
+    # re-raised as the backend's error type for the served-process spawn path.
+    from open_shrimp.backend.opencode.install import ensure_opencode_binary
 
     try:
-        return find_opencode_binary()
+        return await asyncio.to_thread(ensure_opencode_binary)
     except RuntimeError as exc:
         raise OpenCodeNotFoundError(
-            "Could not find the `opencode` binary. Set OPENCODE_BIN or install "
-            "it at ~/.opencode/bin/opencode."
+            f"Could not get hold of the `opencode` binary: {exc}"
         ) from exc
 
 
@@ -84,7 +84,7 @@ class OpenCodeServer:
 
     @classmethod
     async def _spawn(cls) -> "OpenCodeServer":
-        binary = _find_binary()
+        binary = await _find_binary()
         password = secrets.token_hex(32)
         env = _build_env(password)
 

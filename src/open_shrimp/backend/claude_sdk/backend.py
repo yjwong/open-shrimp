@@ -214,6 +214,12 @@ class ClaudeSdkBackend:
         rows = list_sessions(directory=directory, limit=limit, **kwargs)
         return [_to_session_info(r) for r in rows]
 
+    def host_prefetch(self) -> None:
+        """Nothing: the CLI arrives as a native ``_bundled/claude`` inside the
+        pinned ``claude-agent-sdk`` wheel, so ``uv sync`` has already paid for
+        it."""
+        return None
+
     def checklist_reader(
         self,
         *,

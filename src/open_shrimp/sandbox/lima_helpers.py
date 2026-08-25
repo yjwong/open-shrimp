@@ -940,42 +940,69 @@ def install_cli_in_linux_vm(
     inst_name: str,
     binary_name: str,
     *,
-    url_for: Callable[[str, str], str],
-    version_resolver: Callable[[], str],
     install_cmd_for: Callable[[str], str],
+    expected_version: str | None = None,
     timeout: int = 300,
 ) -> None:
     """Install a binary into ``/usr/local/bin/<binary_name>`` inside a Linux Lima VM.
 
     Combines the "already installed" probe with ``uname -m`` into one
-    ``limactl shell`` round-trip, resolves the download URL via *url_for*
-    (``url_for(version, arch_str)`` → ``str``; *arch_str* is ``"x64"`` or
-    ``"arm64"``), and runs the install command produced by *install_cmd_for*
-    (``install_cmd_for(download_url)`` → ``str`` — a single bash command).
+    ``limactl shell`` round-trip, then runs the bash command
+    *install_cmd_for* builds for the guest's architecture
+    (``install_cmd_for(arch_str)`` → ``str``; *arch_str* is ``"x64"`` or
+    ``"arm64"``).  The caller composes the whole command because everything
+    that varies with the asset — the URL, its version, its checksum — varies
+    together, and threading them through here separately only gave three
+    parameters two callers each had to discard half of.
 
-    *version_resolver* is only called when an install is actually needed.
+    It is called only when an install is actually needed, so a caller whose
+    version costs a subprocess to resolve pays nothing on the common path.
+
+    *expected_version* is the version the guest must already report for the
+    install to be skipped, for a caller whose version is pinned: without it a
+    guest provisioned before a bump keeps its old binary until somebody deletes
+    it by hand.  A caller that leaves it unset gets the presence-only probe,
+    which is all a caller whose version merely follows the host's can ask.
     """
+    # Three fields always, each echoed rather than run bare, so the reply is
+    # three lines whatever the guest has: a probe whose line count varies with
+    # what is installed cannot be indexed.  ``true`` stands in for the version
+    # when nobody asked for one.
+    binary = shlex.quote(binary_name)
+    version_probe = (
+        f"{binary} --version 2>/dev/null | head -n1"
+        if expected_version is not None
+        else "true"
+    )
     probe = _run_limactl(
         limactl,
         [
             "shell", inst_name, "--", "bash", "-c",
-            f"command -v {shlex.quote(binary_name)}; uname -m",
+            "; ".join(
+                f'echo "$({field})"'
+                for field in (f"command -v {binary}", version_probe, "uname -m")
+            ),
         ],
         check=False,
         timeout=10,
     )
-    lines = probe.stdout.strip().splitlines()
-    # ``command -v`` prints the path (then a blank line if missing); the
-    # final line is always ``uname -m``.  We need the last line for arch.
-    if not lines:
+    lines = probe.stdout.rstrip("\n").split("\n")
+    if len(lines) != 3:
         raise RuntimeError(
             f"Failed to probe Lima VM {inst_name} for {binary_name}"
         )
-    guest_arch = lines[-1].strip()
-    have_binary = len(lines) >= 2 and bool(lines[0].strip())
-    if have_binary:
-        logger.info("%s already installed in VM %s", binary_name, inst_name)
-        return
+    installed_at, reported, guest_arch = (line.strip() for line in lines)
+
+    if installed_at:
+        guest_version = version_token(reported)
+        if expected_version is None or guest_version == expected_version:
+            logger.info("%s already installed in VM %s", binary_name, inst_name)
+            return
+        logger.info(
+            "VM %s has %s %s, replacing it with %s",
+            inst_name, binary_name, guest_version or "an unknown version",
+            expected_version,
+        )
 
     if guest_arch == "aarch64":
         arch_str = "arm64"
@@ -984,19 +1011,26 @@ def install_cli_in_linux_vm(
     else:
         raise RuntimeError(f"Unsupported guest architecture: {guest_arch}")
 
-    version = version_resolver()
-    download_url = url_for(version, arch_str)
     logger.info(
-        "Downloading %s %s (linux-%s) into VM %s...",
-        binary_name, version, arch_str, inst_name,
+        "Installing %s (linux-%s) into VM %s...", binary_name, arch_str, inst_name,
     )
     _run_limactl(
         limactl,
-        ["shell", inst_name, "--", "bash", "-c", install_cmd_for(download_url)],
+        ["shell", inst_name, "--", "bash", "-c", install_cmd_for(arch_str)],
         check=True,
         timeout=timeout,
     )
-    logger.info("%s %s installed in VM %s", binary_name, version, inst_name)
+    logger.info("%s installed in VM %s", binary_name, inst_name)
+
+
+def version_token(line: str) -> str | None:
+    """The version out of a ``--version`` line, or ``None`` when there is none.
+
+    CLIs pad the number with their own name and parenthetical build details;
+    the number is always the first token, sometimes with a ``v`` on it.
+    """
+    parts = line.strip().split()
+    return parts[0].lstrip("v") if parts else None
 
 
 # ---------------------------------------------------------------------------

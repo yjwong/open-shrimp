@@ -409,9 +409,9 @@ class LimaSandbox:
             self._limactl,
             self._inst_name,
             SECURITY_KEY_HELPER_BINARY,
-            url_for=lambda _version, arch: download_url_for_linux_arch(arch),
-            version_resolver=lambda: "latest",
-            install_cmd_for=install_cmd_for_linux_guest,
+            install_cmd_for=lambda arch: install_cmd_for_linux_guest(
+                download_url_for_linux_arch(arch)
+            ),
             timeout=300,
         )
 

@@ -46,6 +46,8 @@ def _make_backend(name: str) -> Any:
     backend.policy = MagicMock(name=f"policy_{name}", spec=[])
     backend.policy.auto_approved_at_session_start = MagicMock(return_value=[])
     backend.make_can_use_tool = MagicMock(return_value=MagicMock())
+    # Nothing to fetch on the host, so no first-turn download message.
+    backend.host_prefetch = MagicMock(return_value=None)
     client = MagicMock(name=f"client_{name}", spec=[])
     client.is_alive = MagicMock(return_value=True)
     client.connect = AsyncMock()

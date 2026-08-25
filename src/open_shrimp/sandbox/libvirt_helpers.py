@@ -32,6 +32,7 @@ from open_shrimp.paths import data_dir as _data_dir
 from open_shrimp.sandbox.prefetch import (
     ProgressFn,
     exclusive,
+    file_sha256,
     staging_path,
     stream_to_file,
     sweep_staging,
@@ -243,9 +244,6 @@ _VIRTIOFSD_BINARY_MAP: dict[str, str] = {
 }
 
 
-#: Read size for the checksum, which covers a multi-gigabyte image end to end.
-_CHUNK = 8 * 1024 * 1024
-
 #: Room for a slow link on the checksum listing, which is small.
 _SUMS_TIMEOUT = 60
 
@@ -278,14 +276,6 @@ def _stream_download(
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(_CHUNK):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _verify_sha256(path: Path, *, sums_url: str, filename: str) -> None:
@@ -323,7 +313,7 @@ def _verify_sha256(path: Path, *, sums_url: str, filename: str) -> None:
             "it. The artifact is not the one this release expects; report it."
         )
 
-    actual = _file_sha256(path)
+    actual = file_sha256(path)
     if actual != expected:
         raise RuntimeError(
             f"Checksum mismatch on {filename}: expected {expected}, got "

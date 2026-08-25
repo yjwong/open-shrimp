@@ -28,7 +28,7 @@ import secrets
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 if TYPE_CHECKING:
     import subprocess
@@ -128,6 +128,26 @@ class ServedEndpoint:
 LaunchStrategy = WrappedCLI | ServedEndpoint
 
 
+class LibvirtInstall(Protocol):
+    """A libvirt in-guest installer.
+
+    Spelled as a Protocol rather than a ``Callable`` because the hook takes a
+    keyword-only argument, which ``Callable`` cannot express — and widening it
+    to ``Callable[..., None]`` instead would stop anything checking that a
+    bundle's installer accepts what ``provision_workspace`` passes, leaving a
+    wrong-arity hook to fail inside a booting VM.
+    """
+
+    def __call__(
+        self,
+        ssh_key: Path,
+        ssh_port: int,
+        ssh_user: str,
+        *,
+        log_file: Path | None = None,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class ImageBundle:
     """The guest image a runtime needs, carried as data.
@@ -155,7 +175,8 @@ class ImageBundle:
     for the VM sandboxes.  When set, the matching sandbox's
     ``provision_workspace`` calls them; otherwise the guest binary is the
     operator's precondition.  Each signature is backend-shaped: libvirt
-    passes SSH credentials, Lima passes the ``limactl`` instance handle.
+    passes SSH credentials and the build log to write any long step into,
+    Lima passes the ``limactl`` instance handle.
     Bodies live in the per-backend module under
     ``open_shrimp.backend.<agent>/``.
     """
@@ -164,7 +185,7 @@ class ImageBundle:
     guest_home: str
     guest_argv0: str = "claude"
     task_tmp_prefix: str = "claude"
-    libvirt_install: Callable[[Path, int, str], None] | None = None
+    libvirt_install: LibvirtInstall | None = None
     lima_install: Callable[[str, str, str], None] | None = None
     # HCS installs the CLI from npm inside the rootfs over the exec channel;
     # the hook receives the ``HcsSandbox`` (its ``guest_exec`` runs commands

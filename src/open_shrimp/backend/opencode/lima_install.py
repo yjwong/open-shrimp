@@ -1,31 +1,22 @@
-"""Lima in-VM installer for the OpenCode CLI binary.
+"""Lima in-VM installer for the opencode CLI binary.
 
-Downloads the right Linux binary inside the VM from the GitHub Releases
-archive, keyed on the guest's ``uname -m``.  Version selection and asset
-naming live in :mod:`open_shrimp.backend.opencode.release`, shared with the
-HCS installer.
+A Lima host is macOS and the guest is Linux, so the host's own build is not the
+one the guest wants: the pinned Linux archive is downloaded inside the VM
+instead, keyed on the guest's ``uname -m``.  The version and the checksum come
+from :mod:`open_shrimp.backend.opencode.release`, shared with the HCS
+installer, so what the guest verifies is what the host would have.
 """
 
 from __future__ import annotations
 
 import logging
-import shlex
 
 from open_shrimp.backend.opencode.release import (
-    opencode_download_url,
-    resolve_opencode_version,
+    OPENCODE_VERSION,
+    guest_install_script,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _opencode_install_cmd(download_url: str) -> str:
-    return (
-        f"curl -fsSL {shlex.quote(download_url)} -o /tmp/opencode.tar.gz "
-        f"&& tar -xzf /tmp/opencode.tar.gz -C /tmp/ "
-        f"&& sudo install -m 755 /tmp/opencode /usr/local/bin/opencode "
-        f"&& rm -f /tmp/opencode.tar.gz /tmp/opencode"
-    )
 
 
 def ensure_opencode_cli_in_vm(
@@ -33,7 +24,7 @@ def ensure_opencode_cli_in_vm(
     inst_name: str,
     guest_os: str = "linux",
 ) -> None:
-    """Ensure the OpenCode CLI binary is installed inside the Lima VM."""
+    """Ensure the pinned opencode CLI binary is installed inside the Lima VM."""
     if guest_os != "linux":
         logger.info(
             "OpenCode Lima install only supports linux guests; skipping "
@@ -47,8 +38,9 @@ def ensure_opencode_cli_in_vm(
         limactl,
         inst_name,
         "opencode",
-        url_for=opencode_download_url,
-        version_resolver=resolve_opencode_version,
-        install_cmd_for=_opencode_install_cmd,
+        install_cmd_for=lambda arch: guest_install_script(
+            f"linux-{arch}", sudo=True,
+        ),
+        expected_version=OPENCODE_VERSION,
         timeout=300,
     )

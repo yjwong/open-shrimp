@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from open_shrimp.config import Config, ContextConfig
     from open_shrimp.db import ChatScope
     from open_shrimp.sandbox.agent_runtime import AgentRuntime
+    from open_shrimp.sandbox.prefetch import ProgressFn
     from open_shrimp.stream import StreamResult
 
 # The callback the backend invokes before running a non-auto-approved tool.
@@ -86,6 +87,25 @@ class BackendCopy:
     login_mini_app_body: str | None = None
     auth_error_hint: str | None = None
     assistant_error_messages: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HostPrefetch:
+    """A download a backend must make on the host before its first turn.
+
+    ``label`` names it in the chat while the bytes move ("Downloading the
+    opencode CLI"); ``fetch`` performs it, and is sync because every fetcher in
+    this project is — the caller hands it a thread and a progress sink.
+
+    A backend returns ``None`` from :meth:`Backend.host_prefetch` when there is
+    nothing to fetch, which covers both "this backend ships its CLI" and "it is
+    already downloaded".  That keeps the orchestrator from asking whether a
+    particular agent is selected: it asks every backend the same question and
+    says nothing when the answer is nothing.
+    """
+
+    label: str
+    fetch: Callable[["ProgressFn | None"], None]
 
 
 @dataclass(frozen=True)
@@ -316,6 +336,16 @@ class Backend(Protocol):
         **kwargs: Any,
     ) -> list[SessionInfo]:
         """For /resume.  SDK: ``claude_agent_sdk.list_sessions``."""
+        ...
+
+    def host_prefetch(self) -> "HostPrefetch | None":
+        """What this backend must download on the host before a first turn.
+
+        ``None`` when there is nothing to fetch — because the backend's CLI
+        ships with it, or because a previous turn already fetched it.  Only a
+        non-sandboxed context asks: a sandboxed one provisions its guest, which
+        reports through the sandbox's own build log.
+        """
         ...
 
     def checklist_reader(

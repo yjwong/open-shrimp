@@ -170,8 +170,10 @@ default_context: default
 #     An unqualified model fails fast at startup.
 #   * The host must be pre-authenticated out-of-band — run `opencode auth login`
 #     so `~/.local/share/opencode/auth.json` exists.
-#   * The `opencode` binary must be discoverable (`$OPENCODE_BIN`, then
-#     `~/.opencode/bin/opencode`, then `PATH`); checked at startup.
+#
+# The CLI is not a precondition: a pinned build (~60 MB) is downloaded on the
+# first turn that needs it.  Only that copy runs — an opencode on `PATH` or at
+# `~/.opencode/bin/opencode` is ignored.  Set `$OPENCODE_BIN` to run your own.
 # backend: claude_sdk
 
 # Instance name (required when running multiple OpenShrimp instances on the

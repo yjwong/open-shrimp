@@ -106,11 +106,11 @@ def test_default_context_backend_omitted_from_serialized_dict():
 
 
 @pytest.fixture
-def _stub_opencode_binary(monkeypatch: pytest.MonkeyPatch):
-    """Stub the opencode binary discovery so validation can reach the rest."""
-    import open_shrimp.backend.opencode.binary as binary
+def _opencode_build_published(monkeypatch: pytest.MonkeyPatch):
+    """Pin the platform answer so these run the same on every host."""
+    import open_shrimp.backend.opencode.release as release
 
-    monkeypatch.setattr(binary, "find_opencode_binary", lambda: "/fake/opencode")
+    monkeypatch.setattr(release, "no_build_reason", lambda: None)
 
 
 def _opencode_raw(**ctx_extra):
@@ -120,7 +120,7 @@ def _opencode_raw(**ctx_extra):
 
 
 def test_opencode_per_context_requires_provider_qualified_model(
-    _stub_opencode_binary,
+    _opencode_build_published,
 ):
     """A bare ``model:`` value rejects only on opencode-backed contexts."""
     raw = _opencode_raw(backend="opencode", model="gpt-5.5")
@@ -129,14 +129,14 @@ def test_opencode_per_context_requires_provider_qualified_model(
 
 
 def test_opencode_per_context_accepts_provider_qualified_model(
-    _stub_opencode_binary,
+    _opencode_build_published,
 ):
     raw = _opencode_raw(backend="opencode", model="openai/gpt-5.5")
     _validate_raw(raw)  # no raise
 
 
 def test_claude_context_accepts_bare_model_when_opencode_is_another_context(
-    _stub_opencode_binary,
+    _opencode_build_published,
 ):
     """OpenCode model rules apply only to opencode-backed contexts."""
     raw = _base_raw()
@@ -157,7 +157,7 @@ def test_claude_context_accepts_bare_model_when_opencode_is_another_context(
     _validate_raw(raw)  # no raise
 
 
-def test_opencode_top_level_still_validates_each_context(_stub_opencode_binary):
+def test_opencode_top_level_still_validates_each_context(_opencode_build_published):
     """When the top-level backend is opencode, every context is checked."""
     raw = _base_raw(backend="opencode")
     raw["contexts"]["default"]["model"] = "openai/gpt-5.5"
@@ -171,7 +171,7 @@ def test_opencode_top_level_still_validates_each_context(_stub_opencode_binary):
         _validate_raw(raw)
 
 
-def test_opencode_per_context_allows_computer_use(_stub_opencode_binary):
+def test_opencode_per_context_allows_computer_use(_opencode_build_published):
     """OpenCode + computer_use validates: the guest desktop is agent-neutral."""
     raw = _opencode_raw(
         backend="opencode",
@@ -182,7 +182,7 @@ def test_opencode_per_context_allows_computer_use(_stub_opencode_binary):
 
 
 def test_claude_context_allows_computer_use_when_other_context_is_opencode(
-    _stub_opencode_binary,
+    _opencode_build_published,
 ):
     """Both Claude- and OpenCode-backed contexts may enable computer_use."""
     raw = _base_raw()
@@ -200,3 +200,39 @@ def test_claude_context_allows_computer_use_when_other_context_is_opencode(
         "model": "openai/gpt-5.5",
     }
     _validate_raw(raw)  # no raise
+
+
+def test_opencode_validates_with_no_binary_on_disk(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The CLI is fetched on first use, so its absence at startup is not a
+    config error — refusing to boot over it would tell the user to install
+    something that was about to arrive on its own.
+
+    The empty ``BIN_DIR`` is stubbed rather than assumed so that re-adding a
+    binary lookup to validation fails here instead of passing on whatever the
+    developer's machine happens to have downloaded."""
+    import open_shrimp.backend.opencode.binary as binary
+    import open_shrimp.backend.opencode.release as release
+
+    monkeypatch.delenv("OPENCODE_BIN", raising=False)
+    monkeypatch.setattr(binary, "managed_binary", lambda name: None)
+    monkeypatch.setattr(release, "no_build_reason", lambda: None)
+
+    _validate_raw(_opencode_raw(backend="opencode", model="openai/gpt-5.5"))
+
+
+def test_opencode_is_refused_where_no_build_is_published(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """There the fetch has nothing to fetch and no later moment recovers it."""
+    import open_shrimp.backend.opencode.release as release
+
+    monkeypatch.setattr(
+        release, "no_build_reason",
+        lambda: "no opencode build is published for Linux ppc64le",
+    )
+
+    raw = _opencode_raw(backend="opencode", model="openai/gpt-5.5")
+    with pytest.raises(ValueError, match="no opencode build is published"):
+        _validate_raw(raw)

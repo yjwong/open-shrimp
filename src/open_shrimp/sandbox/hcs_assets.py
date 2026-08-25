@@ -14,7 +14,6 @@ every context seeds its own copy from, so one download serves all of them.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import urllib.error
@@ -27,6 +26,7 @@ from platformdirs import user_data_path
 from open_shrimp.sandbox.prefetch import (
     ProgressFn,
     exclusive,
+    file_sha256,
     staging_path,
     stream_to_file,
     sweep_staging,
@@ -36,8 +36,9 @@ logger = logging.getLogger(__name__)
 
 _REPO = "yjwong/open-shrimp"
 
-#: The rootfs assets run to about a gigabyte, and every pass over one —
-#: download, checksum, unpack — reads it whole.
+#: The rootfs assets run to about a gigabyte, and both passes over one —
+#: download and unpack — read it whole.  The checksum's read size is
+#: ``prefetch``'s.
 _CHUNK = 8 * 1024 * 1024
 
 #: Room for a slow link on the largest asset the project ships.
@@ -186,11 +187,7 @@ def _verify_sha256(path: Path, asset: str) -> None:
     # `sha256sum` writes "<hex>  <filename>".
     fields = line.split()
     expected = fields[0] if fields else ""
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(_CHUNK):
-            digest.update(chunk)
-    actual = digest.hexdigest()
+    actual = file_sha256(path)
     if actual != expected:
         raise RuntimeError(
             f"Checksum mismatch on {asset}: expected {expected}, got {actual}. "

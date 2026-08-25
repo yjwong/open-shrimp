@@ -147,7 +147,7 @@ The installer is per-user (into `%LOCALAPPDATA%\Programs\OpenShrimp`) and needs 
 
 ### Prerequisites
 
-- Either the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated (via `claude` login or an [Anthropic API key](https://console.anthropic.com/)) for the default `claude_sdk` backend, **or** [OpenCode](https://github.com/sst/opencode) with `opencode auth login` if you choose the `opencode` backend (see [Agent Backends](#agent-backends))
+- Either the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated (via `claude` login or an [Anthropic API key](https://console.anthropic.com/)) for the default `claude_sdk` backend, **or** `opencode auth login` if you choose the `opencode` backend — the [OpenCode](https://github.com/sst/opencode) CLI itself is downloaded for you (see [Agent Backends](#agent-backends))
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) — we strongly recommend enabling **Threaded Mode** (Settings → Bot Settings → Threads Settings → Threaded Mode). This lets each conversation run in its own forum topic with an independent agent session.
 
 ### Option 1: Download Binary (recommended)
@@ -278,11 +278,12 @@ When a tool needs approval, you get three options: **Allow** (once), **Accept al
 
 The top-level `backend:` key picks the agent runtime that drives OpenShrimp. Two ship: `claude_sdk` (the default — the Claude Agent SDK) and `opencode` ([`sst/opencode`](https://github.com/sst/opencode) over its HTTP serve API, supporting OpenAI, Anthropic, and Google models). Any context can override the global choice with its own `backend:` key. Note this agent `backend:` is a different setting from the sandbox `backend:` (`libvirt`/`lima`/`hcs`) described under [Sandbox Isolation](#sandbox-isolation).
 
-OpenCode isn't bundled, so satisfy three preconditions on the host first:
+Two preconditions on the host:
 
 - **Provider-qualified models.** Every OpenCode context's `model:` must be `provider/model` (e.g. `openai/gpt-5.5`, `anthropic/claude-opus-4-7`, `google/gemini-2.5-pro`). An unqualified model fails fast at startup.
 - **Pre-authenticate.** Run `opencode auth login` on the host; OpenShrimp reuses the credentials.
-- **Discoverable binary.** Located via `$OPENCODE_BIN`, then `~/.opencode/bin/opencode`, then your `PATH`.
+
+The CLI is not something you install: the first turn on an OpenCode context downloads a pinned build (about 60 MB) and reports the transfer in the chat. Only that copy is run — an `opencode` on your `PATH` or at `~/.opencode/bin/opencode` is ignored, since the pin is what keeps host and guest on one build. Set `$OPENCODE_BIN` to run your own instead.
 
 ```yaml
 backend: opencode

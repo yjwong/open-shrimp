@@ -26,6 +26,7 @@ next serialises against whatever is still running through :func:`exclusive`.
 from __future__ import annotations
 
 import errno
+import hashlib
 import http.client
 import logging
 import os
@@ -53,6 +54,9 @@ ProgressFn = Callable[[int, "int | None"], None]
 #: fires the callback thousands of times a second, and a consumer parsing
 #: every one of those spends longer reading than the transfer spends moving.
 _MIN_INTERVAL = 0.25
+
+#: Read size for a checksum, which covers a multi-gigabyte image end to end.
+_HASH_CHUNK = 8 * 1024 * 1024
 
 #: How often a transfer writes a line to a build log.  Slower than the wire
 #: by three orders of magnitude, fast enough that a reader watching the log
@@ -180,6 +184,20 @@ def _amount(size: int, scale: int, *, unit: bool = True) -> str:
     return f"{text} MB" if unit else text
 
 
+def file_sha256(path: Path) -> str:
+    """*path*'s digest, read in chunks.
+
+    Chunked because the files this hashes run from a 60 MB CLI archive to a
+    multi-gigabyte guest image, and the one thing every caller agrees on is
+    that the file must not be held in memory to be checked.
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(_HASH_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def logged(
     label: str,
     log: Callable[[str], None],
@@ -207,6 +225,26 @@ def logged(
             downstream(done, total)
 
     return report
+
+
+def log_progress(
+    log_file: Path | None, label: str, downstream: ProgressFn | None = None,
+) -> ProgressFn | None:
+    """A sink writing *label*'s transfer into *log_file*, or ``None`` for none.
+
+    Absorbs the "only if there is a log" ternary every caller would otherwise
+    write around :func:`logged`, and keeps ``None`` meaning "count nothing"
+    all the way down to the fetchers, which already accept it.
+    """
+    if log_file is None:
+        return downstream
+    return logged(label, lambda line: append_log(log_file, line), downstream)
+
+
+def append_log(log_file: Path, message: str) -> None:
+    """Append one line to a build log."""
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(message + "\n")
 
 
 # ---------------------------------------------------------------------------

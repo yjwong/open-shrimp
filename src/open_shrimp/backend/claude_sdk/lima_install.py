@@ -61,13 +61,12 @@ def _get_host_claude_version() -> str:
     return result.stdout.strip().split()[0]
 
 
-def _claude_download_url(version: str, arch_str: str) -> str:
-    return f"{_CLAUDE_CLI_GCS_BASE}/{version}/linux-{arch_str}/claude"
-
-
-def _claude_install_cmd(download_url: str) -> str:
+def _claude_install_cmd(arch_str: str) -> str:
+    version = _get_host_claude_version()
+    url = f"{_CLAUDE_CLI_GCS_BASE}/{version}/linux-{arch_str}/claude"
+    logger.info("Installing Claude CLI %s into the VM", version)
     return (
-        f"curl -fsSL {shlex.quote(download_url)} -o /tmp/claude "
+        f"curl -fsSL {shlex.quote(url)} -o /tmp/claude "
         f"&& sudo mv /tmp/claude /usr/local/bin/claude "
         f"&& sudo chmod +x /usr/local/bin/claude"
     )
@@ -92,8 +91,6 @@ def ensure_claude_cli_in_vm(
         limactl,
         inst_name,
         "claude",
-        url_for=_claude_download_url,
-        version_resolver=_get_host_claude_version,
         install_cmd_for=_claude_install_cmd,
         timeout=120,
     )

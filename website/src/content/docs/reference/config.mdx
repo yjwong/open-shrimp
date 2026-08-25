@@ -92,7 +92,7 @@ contexts:
 | `sandbox` | object | No | `null` | Sandbox configuration (see below) |
 
 :::note
-The context-level `backend` (agent runtime) is unrelated to `sandbox.backend` (sandbox type). The `opencode` backend has extra preconditions: provider-qualified models (`provider/model`), out-of-band `opencode auth login`, and a discoverable `opencode` binary. See [Agent Backends](/guides/backends/).
+The context-level `backend` (agent runtime) is unrelated to `sandbox.backend` (sandbox type). The `opencode` backend has extra preconditions: provider-qualified models (`provider/model`) and an out-of-band `opencode auth login`. The CLI is downloaded on first use. See [Agent Backends](/guides/backends/).
 :::
 
 ### `allowed_tools`

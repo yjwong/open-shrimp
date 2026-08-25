@@ -528,16 +528,14 @@ def _validate_raw(raw: dict) -> None:
                     f"provider-qualified model (e.g. 'openai/gpt-5.5'): {exc}"
                 ) from exc
 
-        # Check the opencode binary exactly once across all opencode contexts.
-        from open_shrimp.backend.opencode.binary import find_opencode_binary
+        # An absent binary is not a config error: it is fetched on first use.
+        # A platform opencode publishes no build for is, because there the
+        # fetch has nothing to fetch and no later moment recovers it.
+        from open_shrimp.backend.opencode.release import no_build_reason
 
-        try:
-            find_opencode_binary()
-        except RuntimeError as exc:
-            raise ValueError(
-                f"backend 'opencode' selected but the opencode binary could "
-                f"not be found: {exc}"
-            ) from exc
+        refusal = no_build_reason()
+        if refusal is not None:
+            raise ValueError(f"backend 'opencode' selected but {refusal}")
 
     _validate_events(raw)
     _validate_meetings(raw)

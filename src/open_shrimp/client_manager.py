@@ -183,18 +183,31 @@ _context_locks: dict[str, asyncio.Lock] = {}
 _CHAT_PROGRESS_INTERVAL: float = 20.0
 
 
-def _first_turn_progress_text(done: int, total: int | None) -> str:
-    """What the chat says while a cold context downloads what it boots from."""
-    return (
-        "Starting your project for the first time — "
-        f"{describe_bytes(done, total)}. This only happens once."
-    )
+#: What the chat says while a cold sandboxed context downloads what it boots
+#: from.  Two of the four sandbox backends build no container and the wait is
+#: mostly a download, so it names neither.  A host CLI fetch supplies its own
+#: lead, which the backend owns — see ``Backend.host_prefetch``.
+_SANDBOX_BOOT_LEAD = "Starting your project for the first time"
+
+
+def _first_turn_text(
+    lead: str, done: int | None = None, total: int | None = None,
+) -> str:
+    """What the chat says while a first turn waits on a download.
+
+    The byte clause is left out until the first bytes land, because the opening
+    message is sent before the transfer has anything to report and "0%" reads
+    as stuck rather than as starting.
+    """
+    counted = "" if done is None else f" — {describe_bytes(done, total)}"
+    return f"{lead}{counted}. This only happens once."
 
 
 def _chat_progress_sink(
     bot: Bot,
     message: Any,
     keyboard: InlineKeyboardMarkup | None,
+    lead: str = _SANDBOX_BOOT_LEAD,
 ) -> ProgressFn:
     """A progress sink keeping *message* current with a first-turn download.
 
@@ -203,11 +216,14 @@ def _chat_progress_sink(
     none.  *keyboard* rides on every edit because an edit replaces the markup
     with whatever it carries, and a "View build log" button that disappears
     partway through a ten-minute wait takes the only detailed view with it.
+    Outside a sandbox there is no build log to link, so it is ``None`` there
+    and the markup is simply absent.
 
-    It is called from the worker thread the sandbox lifecycle runs on, so
-    each edit is handed back to the loop that owns *bot*.  Nothing waits on
-    the result: a rejected edit costs this message one update, and a download
-    is not the place to raise about it.
+    It is called from the worker thread a sandbox lifecycle — or a
+    ``to_thread``-wrapped CLI fetch — runs on, so each edit is handed back to
+    the loop that owns *bot*.  Nothing waits on the result: a rejected edit
+    costs this message one update, and a download is not the place to raise
+    about it.
     """
     loop = asyncio.get_running_loop()
 
@@ -226,7 +242,7 @@ def _chat_progress_sink(
             )
 
     def report(done: int, total: int | None) -> None:
-        text = escape_markdown(_first_turn_progress_text(done, total))
+        text = escape_markdown(_first_turn_text(lead, done, total))
         try:
             asyncio.run_coroutine_threadsafe(edit(text), loop)
         except RuntimeError:
@@ -297,6 +313,48 @@ async def _notify_backend_swapped(
             "Failed to send backend-swap notice to %s", scope,
             exc_info=True,
         )
+
+
+async def _run_host_prefetch(
+    backend: Backend, bot: Bot | None, scope: ChatScope,
+) -> None:
+    """Make the backend's host download, saying so while it waits.
+
+    A sandboxed context fetches whatever it needs inside
+    ``provision_workspace``, under a boot message that is already on screen and
+    counted into the build log.  This is the path with no sandbox to hide
+    behind, where tens of megabytes arriving with nothing in the chat is
+    indistinguishable from a hang.
+
+    Which download, and what to call it, is the backend's answer — this asks
+    every backend the same question so the orchestrator stays free of agent
+    names, the way it already is for ``make_runtime`` and ``make_tool_server``.
+
+    The fetch is sync, so it goes to a thread — which is also what makes the
+    sink's ``run_coroutine_threadsafe`` hand-back correct here.  A failure is
+    left to the client spawn that follows: it raises the backend's own error,
+    which says more about a missing CLI than this could.
+    """
+    pending = backend.host_prefetch()
+    if pending is None:
+        return
+
+    progress: ProgressFn | None = None
+    if bot is not None:
+        message = await bot.send_message(
+            chat_id=scope.chat_id,
+            message_thread_id=scope.thread_id,
+            text=escape_markdown(_first_turn_text(pending.label)),
+            parse_mode="MarkdownV2",
+        )
+        # No build log outside a sandbox, so no keyboard; the sink carries the
+        # markup on every edit precisely so it can be absent.
+        progress = _chat_progress_sink(bot, message, None, pending.label)
+
+    try:
+        await asyncio.to_thread(pending.fetch, progress)
+    except Exception:
+        logger.warning("%s failed", pending.label, exc_info=True)
 
 
 async def get_or_create_session(
@@ -639,13 +697,8 @@ async def get_or_create_session(
                 log_file = sandbox_manager.register_build(context_name)
 
                 if needs_build:
-                    # Two of the four backends build no container, and the wait
-                    # is mostly a download, so the opening text names neither;
-                    # the size arrives when the first bytes land and the
-                    # message is edited.
                     progress_text = escape_markdown(
-                        "Starting your project for the first time. "
-                        "This only happens once."
+                        _first_turn_text(_SANDBOX_BOOT_LEAD)
                     )
                 else:
                     progress_text = escape_markdown("Starting sandbox...")
@@ -707,6 +760,8 @@ async def get_or_create_session(
                     context_name,
                     cli_path,
                 )
+    else:
+        await _run_host_prefetch(backend, bot, scope)
 
     # Backend-specific overflow: the sandbox-provided served endpoint rides in
     # ``extra`` (it is not an honoured-intersection field).  When no sandbox

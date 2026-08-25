@@ -1,7 +1,7 @@
 """The OpenCode in-guest installer for the HCS backend.
 
-No guest: ``guest_exec`` is a scripted fake keyed on the argv it is given, and
-release resolution is stubbed (the real one calls GitHub).
+No guest: ``guest_exec`` is a scripted fake keyed on the argv it is given.  The
+release is a repo constant rather than a probe, so nothing here reaches GitHub.
 """
 
 from __future__ import annotations
@@ -9,6 +9,10 @@ from __future__ import annotations
 import pytest
 
 from open_shrimp.backend.opencode import hcs_install as I
+from open_shrimp.backend.opencode.release import (
+    OPENCODE_CHECKSUMS,
+    OPENCODE_VERSION,
+)
 from open_shrimp.backend.opencode.sandbox_bundle import opencode_image_bundle
 
 _MISSING = (127, "")
@@ -36,22 +40,32 @@ class _FakeSandbox:
         return results.pop(0) if len(results) > 1 else results[0]
 
 
-@pytest.fixture(autouse=True)
-def _pinned_release(monkeypatch):
-    monkeypatch.setattr(I, "resolve_opencode_version", lambda: "1.2.3")
-
-
-def test_an_image_that_already_ships_opencode_installs_nothing():
-    sandbox = _FakeSandbox(opencode=[(0, "opencode 1.2.3\n")])
+def test_an_image_that_already_ships_the_pinned_version_installs_nothing():
+    sandbox = _FakeSandbox(opencode=[(0, f"{OPENCODE_VERSION}\n")])
 
     I.install_opencode_cli_in_hcs(sandbox)
 
     assert sandbox.calls == [_PROBE]
 
 
+def test_a_guest_behind_the_pin_is_upgraded():
+    """Without this a guest provisioned before a bump keeps its old binary
+    until somebody deletes it by hand."""
+    sandbox = _FakeSandbox(
+        opencode=[(0, "1.0.0\n"), (0, f"{OPENCODE_VERSION}\n")],
+        uname=[(0, "x86_64\n")],
+        install=[(0, "")],
+    )
+
+    I.install_opencode_cli_in_hcs(sandbox)
+
+    assert sandbox.calls[1] == ["uname", "-m"]
+    assert sandbox.calls[2][:2] == ["/bin/sh", "-c"]
+
+
 def test_a_missing_binary_is_installed_from_the_linux_release():
     sandbox = _FakeSandbox(
-        opencode=[_MISSING, (0, "opencode 1.2.3\n")],
+        opencode=[_MISSING, (0, f"{OPENCODE_VERSION}\n")],
         uname=[(0, "x86_64\n")],
         install=[(0, "")],
     )
@@ -62,14 +76,30 @@ def test_a_missing_binary_is_installed_from_the_linux_release():
     assert sandbox.calls[1] == ["uname", "-m"]
     install = sandbox.calls[2]
     assert install[:2] == ["/bin/sh", "-c"]
-    assert install[-1] == (
+    assert (
         "https://github.com/anomalyco/opencode/releases/download/"
-        "v1.2.3/opencode-linux-x64.tar.gz"
-    )
-    # The host's own binary is never donated — a Windows host has no Linux one.
+        f"v{OPENCODE_VERSION}/opencode-linux-x64.tar.gz"
+    ) in install[2]
+    # The host's own binary is never donated — a Windows host has no Linux one,
+    # and the chroot is root, so no sudo.
     assert "install -m 755 /tmp/opencode /usr/local/bin/opencode" in install[2]
+    assert "sudo" not in install[2]
     # The probe repeats after the install, so a silent failure cannot pass.
     assert sandbox.calls[3] == _PROBE
+
+
+def test_the_guest_verifies_the_archive_before_unpacking_it():
+    sandbox = _FakeSandbox(
+        opencode=[_MISSING, (0, f"{OPENCODE_VERSION}\n")],
+        uname=[(0, "x86_64\n")],
+        install=[(0, "")],
+    )
+
+    I.install_opencode_cli_in_hcs(sandbox)
+
+    script = sandbox.calls[2][2]
+    assert OPENCODE_CHECKSUMS["linux-x64"] in script
+    assert script.index("sha256sum -c") < script.index("tar -xzf")
 
 
 def test_an_arm_guest_gets_the_arm_asset():
@@ -83,7 +113,8 @@ def test_an_arm_guest_gets_the_arm_asset():
     with pytest.raises(RuntimeError, match="still not runnable"):
         I.install_opencode_cli_in_hcs(sandbox)
 
-    assert sandbox.calls[2][-1].endswith("opencode-linux-arm64.tar.gz")
+    assert "opencode-linux-arm64.tar.gz" in sandbox.calls[2][2]
+    assert OPENCODE_CHECKSUMS["linux-arm64"] in sandbox.calls[2][2]
 
 
 def test_an_unknown_guest_architecture_is_refused():
