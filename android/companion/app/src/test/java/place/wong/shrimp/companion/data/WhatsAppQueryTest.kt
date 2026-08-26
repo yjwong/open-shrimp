@@ -94,47 +94,6 @@ class WhatsAppQueryTest {
     }
 
     @Test
-    fun `a handover within both bounds carries everything it read`() {
-        val window = WhatsAppQuery.handoverWindow(listOf(10, 10, 10), limit = 5, budget = 100)
-        assertEquals(3, window.kept)
-        assertTrue(!window.truncated)
-    }
-
-    @Test
-    fun `the row past the limit is what says older messages exist`() {
-        // The caller scans one row more than it may send; that row is dropped
-        // and reported, rather than counted by walking the whole chat.
-        val window = WhatsAppQuery.handoverWindow(listOf(10, 10, 10, 10), limit = 3, budget = 100)
-        assertEquals(3, window.kept)
-        assertTrue(window.truncated)
-    }
-
-    @Test
-    fun `the budget drops the oldest, because the read is newest first`() {
-        // Costs are newest first, so keeping a prefix keeps the newest — the
-        // 40 at the end is the oldest message and is the one left behind.
-        val window = WhatsAppQuery.handoverWindow(listOf(30, 30, 40), limit = 10, budget = 70)
-        assertEquals(2, window.kept)
-        assertTrue(window.truncated)
-    }
-
-    @Test
-    fun `the newest message is carried whatever it costs`() {
-        // Otherwise a chat whose last message overruns the budget would hand
-        // over nothing and describe itself as entirely older messages.
-        val window = WhatsAppQuery.handoverWindow(listOf(5_000), limit = 10, budget = 100)
-        assertEquals(1, window.kept)
-        assertTrue(!window.truncated)
-    }
-
-    @Test
-    fun `a chat with nothing to send is not reported as truncated`() {
-        val window = WhatsAppQuery.handoverWindow(emptyList(), limit = 10, budget = 100)
-        assertEquals(0, window.kept)
-        assertTrue(!window.truncated)
-    }
-
-    @Test
     fun `the chat listing offers only chats WhatsApp itself lists`() {
         val sql = WhatsAppQuery.chats(recentFrom = 0)
         assertTrue(sql.contains("COALESCE(c.hidden, 0) = 0"))

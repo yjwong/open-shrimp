@@ -19,14 +19,14 @@ import place.wong.shrimp.companion.data.WhatsAppBatch
 import place.wong.shrimp.companion.data.WhatsAppChat
 import place.wong.shrimp.companion.data.WhatsAppChats
 import place.wong.shrimp.companion.data.FileDelta
+import place.wong.shrimp.companion.data.HandoverWindow
 import place.wong.shrimp.companion.data.WhatsAppContacts
 import place.wong.shrimp.companion.data.WhatsAppHandover
 import place.wong.shrimp.companion.data.WhatsAppIdentity
+import place.wong.shrimp.companion.data.WalCopy
 import place.wong.shrimp.companion.data.WhatsAppMessage
 import place.wong.shrimp.companion.data.WhatsAppQuery
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
 
@@ -214,7 +214,7 @@ class WhatsAppReaderService : RootService() {
                 return
             }
             this.watcher = watcher
-            log = LogWatch(File(LIVE_STORE + WAL_SUFFIX), ::logSettled).also { it.start() }
+            log = LogWatch(File(LIVE_STORE + WalCopy.WAL_SUFFIX), ::logSettled).also { it.start() }
             Log.i(TAG, "Watching the message log")
         }
 
@@ -321,11 +321,7 @@ class WhatsAppReaderService : RootService() {
                     while (c.moveToNext()) scanned.add(columns.read(c, names))
                 }
             }
-            val window = WhatsAppQuery.handoverWindow(
-                costs = scanned.map { it.parcelChars() },
-                limit = capped,
-                budget = MAX_HANDOVER_CHARS,
-            )
+            val window = HandoverWindow.of(scanned.map { it.parcelChars() }, capped)
             // Read newest first so the rows dropped are the oldest; turned the
             // right way round here, because a transcript is read forwards.
             val messages = scanned.take(window.kept).asReversed()
@@ -481,15 +477,16 @@ class WhatsAppReaderService : RootService() {
      * A private copy of one live database, and a record of what the live file
      * looked like when the copy was taken.
      *
-     * Both databases this service reads are held under one discipline: never
-     * open the live file, bring the copy and its log into line as a pair, open
-     * the copy read-write in WAL mode, and discard a copy that failed
-     * part-way. That discipline is written once, here.
+     * The rules about never touching the live file live in [WalCopy], which
+     * both root readers share. What is here is the part that is this store's
+     * own: a copy too large to retake, kept up to date in place by writing
+     * only the pages that differ, and the marks that say whether it is already
+     * current.
      *
-     * Policy is deliberately not here. How stale a copy has to be before it is
-     * worth syncing, and which call is allowed to pay for it, differ between
-     * the two databases and belong to [Reader], which is the side that knows
-     * what each copy costs.
+     * Policy is deliberately not here either. How stale a copy has to be
+     * before it is worth syncing, and which call is allowed to pay for it,
+     * differ between the two databases and belong to [Reader], which is the
+     * side that knows what each copy costs.
      */
     private class Snapshot(private val live: File, private val held: File) {
         private var db: SQLiteDatabase? = null
@@ -558,7 +555,7 @@ class WhatsAppReaderService : RootService() {
                 requireSpace(mark, log)
                 var written = writeDelta()
                 written += syncLog(log)
-                db = open()
+                db = WalCopy.open(held)
                 storeMark = mark
                 logMark = log
                 return written
@@ -582,7 +579,7 @@ class WhatsAppReaderService : RootService() {
                 if (!held.isFile || held.length() == 0L) {
                     copyFile(live, held)
                 } else {
-                    FileDelta.write(live, held, pageSize(), COPY_BUFFER)
+                    FileDelta.write(live, held, pageSize(), WalCopy.BUFFER)
                 }
             } catch (e: IOException) {
                 throw IllegalStateException("Could not update the copy of ${live.name}: ${e.message}")
@@ -633,32 +630,9 @@ class WhatsAppReaderService : RootService() {
             heldShm.delete()
         }
 
-        private val liveLog: File get() = File(live.path + WAL_SUFFIX)
-        private val heldLog: File get() = File(held.path + WAL_SUFFIX)
-        private val heldShm: File get() = File(held.path + SHM_SUFFIX)
-
-        /**
-         * Open the copy, read-write and in WAL mode.
-         *
-         * Write-ahead logging is asked for rather than left to the platform
-         * default, which would set the connection's journal mode on open and
-         * convert the copy to a rollback journal — checkpointing it away from
-         * WAL mode, so that the next log dropped beside it would have nothing
-         * to replay onto.
-         */
-        private fun open(): SQLiteDatabase =
-            try {
-                SQLiteDatabase.openDatabase(
-                    held.path,
-                    null,
-                    SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING,
-                )
-            } catch (e: SQLiteException) {
-                // A live database is copied while its owner is writing to it,
-                // so a torn copy is a real outcome rather than a broken
-                // invariant. Retrying takes a fresh one.
-                throw IllegalStateException("Snapshot is unreadable: ${e.message}")
-            }
+        private val liveLog: File get() = File(live.path + WalCopy.WAL_SUFFIX)
+        private val heldLog: File get() = File(held.path + WalCopy.WAL_SUFFIX)
+        private val heldShm: File get() = File(held.path + WalCopy.SHM_SUFFIX)
 
         /**
          * Stop unless there is room for what this sync will add.
@@ -679,12 +653,10 @@ class WhatsAppReaderService : RootService() {
             }
         }
 
-        /** Copy *from* to *to*, returning the bytes moved. */
+        /** Copy *from* to *to*, saying which file it was if it fails. */
         private fun copyFile(from: File, to: File): Long =
             try {
-                FileInputStream(from).use { input ->
-                    FileOutputStream(to).use { output -> input.copyTo(output, COPY_BUFFER) }
-                }
+                WalCopy.copy(from, to)
             } catch (e: IOException) {
                 throw IllegalStateException("Could not copy ${from.name}: ${e.message}")
             }
@@ -919,13 +891,10 @@ class WhatsAppReaderService : RootService() {
          */
         private const val LIVE_CONTACTS = "/data/data/com.whatsapp/databases/wa.db"
 
-        private const val WAL_SUFFIX = "-wal"
-        private const val SHM_SUFFIX = "-shm"
         private const val SNAPSHOT_DIR = "whatsapp-snapshot"
         private const val SNAPSHOT_STORE = "msgstore.db"
         private const val SNAPSHOT_CONTACTS = "wa.db"
 
-        private const val COPY_BUFFER = 1 shl 20
         private const val MB = 1024L * 1024L
 
         /** Offsets into the SQLite header, which is the first 100 bytes of a database. */
@@ -950,16 +919,6 @@ class WhatsAppReaderService : RootService() {
          * cost two bytes each, so this leaves room for concurrent calls.
          */
         private const val MAX_BATCH_CHARS = 200_000
-
-        /**
-         * Ceiling on the text one handover carries, in the same currency.
-         *
-         * Half a batch's, and an order of magnitude under both the transaction
-         * buffer and the host's own byte cap, because the whole chat travels
-         * as one request that has to arrive rather than as a stream that can
-         * be resumed.
-         */
-        private const val MAX_HANDOVER_CHARS = 100_000
 
         /** Per row, what the parcel costs beyond the strings counted against the budget. */
         private const val ROW_OVERHEAD_CHARS = 64

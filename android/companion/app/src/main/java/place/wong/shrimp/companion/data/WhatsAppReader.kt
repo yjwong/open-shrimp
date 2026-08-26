@@ -7,8 +7,6 @@ import android.content.ServiceConnection
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import com.topjohnwu.superuser.NoShellException
-import com.topjohnwu.superuser.Shell
 import com.topjohnwu.superuser.ipc.RootService
 import place.wong.shrimp.companion.WhatsAppReaderService
 import java.util.concurrent.CountDownLatch
@@ -28,12 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object WhatsAppReader {
     private const val CONNECT_TIMEOUT_SECONDS = 60L
-    private const val SHELL_TIMEOUT_SECONDS = 20L
 
-    private const val ROOT_DENIED =
-        "WhatsApp reader: root access denied — grant it in your root manager, then reopen this app"
-
-    private val shellConfigured = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
 
     /**
@@ -99,8 +92,7 @@ object WhatsAppReader {
         }
         live()?.let { return it }
 
-        configureShell()
-        requireRoot()
+        RootShell.unavailable()?.let { fail("WhatsApp reader: $it") }
 
         val latch = CountDownLatch(1)
         var bound: IWhatsAppReader? = null
@@ -158,29 +150,6 @@ object WhatsAppReader {
         LogStore.add("WhatsApp reader disconnected")
     }
 
-    /**
-     * Stop unless this app can run as root.
-     *
-     * Checked before the bind rather than after: a denial that is not caught
-     * here becomes a bind that never completes and reports itself only as a
-     * timeout a minute later.
-     *
-     * A refusal lasts as long as the process. Dropping libsu's cached shell so
-     * a fresh one is built does not lift it, and neither does avoiding
-     * `isAppGrantedRoot`, which memoises its first answer — a process that has
-     * been refused keeps being refused, while a newly started one is granted
-     * immediately. So root given to a running app cannot reach it until the
-     * app is restarted, which is what [ROOT_DENIED] asks the user to do.
-     */
-    private fun requireRoot() {
-        val rooted = try {
-            Shell.getShell().isRoot
-        } catch (e: NoShellException) {
-            fail("WhatsApp reader: this device has no usable shell")
-        }
-        if (!rooted) fail(ROOT_DENIED)
-    }
-
     /** Report *message* where the user can see it, then raise it to the caller. */
     private fun fail(message: String): Nothing {
         LogStore.add(message)
@@ -199,18 +168,5 @@ object WhatsAppReader {
     private fun clear() {
         reader = null
         connection = null
-    }
-
-    private fun configureShell() {
-        // setDefaultBuilder throws once the main shell exists, so it runs once.
-        if (shellConfigured.compareAndSet(false, true)) {
-            Shell.setDefaultBuilder(
-                Shell.Builder.create()
-                    // The message store lives outside the app's mount
-                    // namespace; the global one is where it is visible.
-                    .setFlags(Shell.FLAG_MOUNT_MASTER)
-                    .setTimeout(SHELL_TIMEOUT_SECONDS),
-            )
-        }
     }
 }

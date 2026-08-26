@@ -23,6 +23,7 @@ import place.wong.shrimp.companion.data.LinkedInHandover
 import place.wong.shrimp.companion.data.LinkedInIdMissing
 import place.wong.shrimp.companion.data.HandoverText
 import place.wong.shrimp.companion.data.LinkedInNode
+import place.wong.shrimp.companion.data.LinkedInReader
 import place.wong.shrimp.companion.data.LogStore
 import place.wong.shrimp.companion.data.Prefs
 import place.wong.shrimp.companion.data.ServerApi
@@ -188,7 +189,7 @@ class LinkedInAccessibilityService : AccessibilityService() {
      */
     private fun onBubbleTapped() {
         if (sending) return
-        val handover = try {
+        val screen = try {
             capture()
         } catch (e: LinkedInIdMissing) {
             reportBreakage(e.resourceId)
@@ -201,13 +202,21 @@ class LinkedInAccessibilityService : AccessibilityService() {
         bubble?.setBusy(true)
         io.launch {
             try {
+                // Asked before the store read, which is a root grant and a
+                // copy of a database: an unpaired phone has nowhere to send
+                // the answer, so paying for one would be work done to throw
+                // away.
                 val baseUrl = prefs.baseUrl
                 val deviceId = prefs.deviceId
                 check(baseUrl.isNotEmpty() && deviceId != null) { HandoverText.NOT_PAIRED }
+                val handover = enrich(screen)
                 val result = api.sendLinkedInHandover(baseUrl, deviceId, handover)
                 prefs.linkedInBrokenId = null
-                // A count, never content.
-                LogStore.add("Handed over ${handover.messages.size} LinkedIn messages")
+                // A count and a fidelity, never content.
+                LogStore.add(
+                    "Handed over ${handover.messages.size} LinkedIn messages" +
+                        if (handover.storeRead) " from the store" else " from the screen",
+                )
                 report(HandoverText.SENT, result.deepLink)
             } catch (e: Exception) {
                 report(e.message ?: "The conversation could not be sent", null)
@@ -219,6 +228,27 @@ class LinkedInAccessibilityService : AccessibilityService() {
             }
         }
     }
+
+    /**
+     * *screen* with what only LinkedIn's own store holds, or *screen* itself.
+     *
+     * The two halves fail independently on purpose. A bind that is refused,
+     * a store that has been signed out and cleared, or a thread whose text
+     * nothing in the store matches all leave the capture that was already
+     * made: the same conversation without profile links, message ids, the
+     * InMail flag, or anything that was above the viewport, which the card
+     * says for itself through `store_read`.
+     *
+     * The reason is logged as the reader wrote it, which is a count or a file
+     * name. Nothing the store holds may reach a log.
+     */
+    private fun enrich(screen: LinkedInHandover): LinkedInHandover =
+        try {
+            LinkedInReader.handover(this, screen)
+        } catch (e: Exception) {
+            LogStore.add("LinkedIn store not read — ${e.message}")
+            screen
+        }
 
     /**
      * The thread on screen, as the host's endpoint takes it.

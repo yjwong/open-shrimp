@@ -308,8 +308,12 @@ class ServerApi(private val http: OkHttpClient = defaultClient()) {
         for (message in handover.messages) rows.put(message.toJson())
         val people = JSONArray()
         for (participant in handover.participants) people.put(participant.toJson())
+        val conversation = JSONObject()
+            .put("title", handover.title)
+            .put("entity_urn", handover.entityUrn)
+            .put("category", handover.category)
         val body = JSONObject()
-            .put("conversation", JSONObject().put("title", handover.title))
+            .put("conversation", conversation)
             .put("participants", people)
             .put("messages", rows)
             .put("truncated", handover.truncated)
@@ -483,19 +487,28 @@ class ServerApi(private val http: OkHttpClient = defaultClient()) {
         /**
          * One captured line, under the host's wire names.
          *
-         * No id and no `from_me`: a screen capture has neither, and the host
-         * reads both with a default.
+         * A null drops the key, so a screen capture sends the three fields it
+         * has and the host reads the rest with a default. `from_me` is never
+         * one of them: it is a boolean the host gates attribution on, and an
+         * absent key would be indistinguishable from a message the user did
+         * not write.
          */
         private fun LinkedInMessage.toJson(): JSONObject = JSONObject()
             .put("text", text)
             .put("author", author)
             .put("time_text", timeText)
+            .put("timestamp", timestamp)
+            .put("sender_urn", senderUrn)
+            .put("origin_token", originToken)
+            .put("from_me", fromMe)
 
-        /** One participant, with no urn and no profile URL to put in it. */
+        /** One participant, with the urn and profile URL only the store has. */
         private fun LinkedInParticipant.toJson(): JSONObject = JSONObject()
             .put("name", name)
             .put("pronouns", pronouns)
             .put("headline", headline)
+            .put("entity_urn", entityUrn)
+            .put("profile_url", profileUrl)
 
         private fun urlEncode(value: String): String =
             URLEncoder.encode(value, StandardCharsets.UTF_8.name())

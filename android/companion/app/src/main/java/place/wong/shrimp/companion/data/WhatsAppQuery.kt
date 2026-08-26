@@ -273,35 +273,6 @@ object WhatsAppQuery {
         LIMIT 1
     """
 
-    /** How much of one handover fits, and whether anything older was left out. */
-    data class Window(val kept: Int, val truncated: Boolean)
-
-    /**
-     * How many rows of a newest-first read a handover may carry.
-     *
-     * *costs* is what each row will write into the transaction, newest first —
-     * the order [recentMessages] returns them in, which is what makes the rows
-     * that are dropped the oldest ones rather than the newest. The caller
-     * scans one row past *limit*, so a row beyond it is how the phone learns
-     * that older messages exist without counting them: an exact total needs a
-     * walk of the whole chat, which runs to seconds on a real store.
-     *
-     * The newest row is kept whatever it costs. The per-field text cap is what
-     * bounds it, and a handover that carried nothing at all would report
-     * itself as a chat consisting entirely of older messages.
-     */
-    fun handoverWindow(costs: List<Int>, limit: Int, budget: Int): Window {
-        var spent = 0
-        var kept = 0
-        for (cost in costs) {
-            if (kept == limit) break
-            if (kept > 0 && spent + cost > budget) break
-            spent += cost
-            kept += 1
-        }
-        return Window(kept, kept < costs.size)
-    }
-
     /**
      * The id the caller may advance its cursor to after a batch.
      *

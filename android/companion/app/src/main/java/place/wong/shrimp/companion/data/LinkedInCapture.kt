@@ -1,5 +1,8 @@
 package place.wong.shrimp.companion.data
 
+import android.os.Parcelable
+import kotlinx.parcelize.Parcelize
+
 /**
  * One node the capture cared about: the resource id that named it, and the
  * text it held.
@@ -14,38 +17,68 @@ data class LinkedInNode(val id: String, val text: String)
 /**
  * One captured message, under the host's wire names.
  *
- * [timeText] is what the screen showed — a localised clock time under a
- * separate date header, joined here because neither half means much alone. It
- * is carried through verbatim rather than guessed into an absolute instant;
- * the epoch milliseconds the host would rather have live in the store, which
- * this path does not read.
- *
- * There is no id and no `from_me`. The tree carries neither: LinkedIn lays a
- * thread out as a flat list where every message is labelled with its sender's
- * name, the user's own included, so the name is the only thing that says who
- * wrote a line and there is nothing to gate on.
+ * The last four fields are what the store holds and the screen does not, so
+ * they are set on the store path and left at their defaults on the screen one.
+ * The tree carries no urn and no id at all: LinkedIn lays a thread out as a
+ * flat list where every message is labelled with its sender's name, the user's
+ * own included, so the name is the only thing that says who wrote a line.
  */
+@Parcelize
 data class LinkedInMessage(
     val text: String,
-    /** Who the screen attributed it to; null before the first `sender_name`. */
+    /** Who the message is attributed to; null when nothing named a sender. */
     val author: String?,
+    /**
+     * What the screen showed — a localised clock time under a separate date
+     * header, joined here because neither half means much alone. Carried
+     * verbatim rather than guessed into an absolute instant, and null on the
+     * store path, which has [timestamp] instead.
+     */
     val timeText: String?,
-)
+    /** `MessagesData.deliveredAt`, the only form the host can order or range. */
+    val timestamp: Long? = null,
+    /** Which participant wrote it, the key the host puts profiles on the card by. */
+    val senderUrn: String? = null,
+    /** `MessagesData.originToken`, half of what makes a repeated handover idempotent. */
+    val originToken: String? = null,
+    /**
+     * Whether the user wrote it, which only the store can say.
+     *
+     * False on the screen path — not because everything there is inbound, but
+     * because a flat list labelled with names carries nothing to decide it
+     * with, and the host falls back to attributing by name.
+     */
+    val fromMe: Boolean = false,
+) : Parcelable
 
 /**
- * The counterpart in a one-to-one thread, as much of them as the screen said.
+ * Someone in the thread, at whichever fidelity built the handover.
  *
- * No urn and no profile URL: the tree holds neither, which is the whole reason
- * the store reader exists. What is here is the name in the toolbar, the
- * pronouns beside it in the transcript, and the headline under it.
+ * A screen capture describes one person — the counterpart of a one-to-one
+ * thread, named by the toolbar and described by the headline under it — and
+ * has no urn or profile URL to give them, which is the whole reason the store
+ * reader exists. The store gives everyone in the conversation, and the host
+ * puts on the card only those who sent one of the captured messages.
  */
+@Parcelize
 data class LinkedInParticipant(
     val name: String,
     val pronouns: String?,
     val headline: String?,
-)
+    /** `ParticipantsData.entityUrn`, matched against a message's [LinkedInMessage.senderUrn]. */
+    val entityUrn: String? = null,
+    /** A complete `https://www.linkedin.com/in/ACoAA…`, or null. */
+    val profileUrl: String? = null,
+) : Parcelable
 
-/** One thread, as the host's handover endpoint takes it. */
+/**
+ * One thread, as the host's handover endpoint takes it.
+ *
+ * Not Parcelable, and deliberately: this is what leaves the phone, built on
+ * the app side out of a screen capture and — when the store could be read —
+ * the [LinkedInThread] that came back from uid 0. Nothing about the whole
+ * handover is the root process's business.
+ */
 data class LinkedInHandover(
     val title: String,
     val participants: List<LinkedInParticipant>,
@@ -62,7 +95,30 @@ data class LinkedInHandover(
      * thing that knows how much it managed to read.
      */
     val storeRead: Boolean,
+    /** `ConversationsData.entityUrn`; the other half of the idempotency key. */
+    val entityUrn: String? = null,
+    /** `INMAIL` against `PRIMARY_INBOX` and the rest, which lives nowhere on screen. */
+    val category: String? = null,
 )
+
+/**
+ * What LinkedIn's own store holds about one conversation.
+ *
+ * This is the whole of what crosses the Binder boundary back from uid 0, and
+ * it is only what was read — no title, no fidelity flag, nothing carried in
+ * from the screen and handed back unchanged. Folding it into the capture is
+ * [LinkedInStore.merge], which runs in the app process where the capture it
+ * has to be reconciled with was made.
+ */
+@Parcelize
+data class LinkedInThread(
+    val entityUrn: String,
+    val category: String?,
+    val participants: List<LinkedInParticipant>,
+    val messages: List<LinkedInMessage>,
+    /** Whether messages older than these exist, in the store or on LinkedIn. */
+    val truncated: Boolean,
+) : Parcelable
 
 /**
  * A resource id the thread screen no longer has.
@@ -131,6 +187,18 @@ object LinkedInCapture {
     /** Per-message cap on free text, matching the host's own. */
     const val MAX_TEXT_CHARS = 16_000
 
+    /**
+     * A message body, trimmed and capped, or null if it carries nothing to
+     * read.
+     *
+     * Both readers put a body through this, and the store reader's
+     * conversation match depends on it: it compares what the screen rendered
+     * against what LinkedIn stored, so the two are only comparable if they are
+     * treated identically. Written once here rather than agreed twice by
+     * comment.
+     */
+    fun body(text: String?): String? = text?.trim()?.take(MAX_TEXT_CHARS)?.ifEmpty { null }
+
     /** What separates the name from the time inside a `sender_name`. */
     private const val BULLET = '•'
 
@@ -186,13 +254,15 @@ object LinkedInCapture {
                     // the only participant this capture can describe.
                     if (pronouns == null && sender.name == title) pronouns = sender.pronouns
                 }
-                BODY -> messages.add(
-                    LinkedInMessage(
-                        text = text.take(MAX_TEXT_CHARS),
-                        author = sender?.name,
-                        timeText = stamp(date, sender?.time),
-                    ),
-                )
+                BODY -> body(text)?.let {
+                    messages.add(
+                        LinkedInMessage(
+                            text = it,
+                            author = sender?.name,
+                            timeText = stamp(date, sender?.time),
+                        ),
+                    )
+                }
             }
         }
 

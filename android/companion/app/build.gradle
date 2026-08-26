@@ -128,4 +128,8 @@ dependencies {
     implementation "com.github.topjohnwu.libsu:service:6.0.0"
 
     testImplementation "junit:junit:4.13.2"
+    // android.jar's org.json is a stub that throws; the reference
+    // implementation on the unit-test classpath is what makes the store
+    // parsers testable without a device.
+    testImplementation "org.json:json:20231013"
 }
