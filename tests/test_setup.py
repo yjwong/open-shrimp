@@ -44,6 +44,19 @@ _PROJECT_PROMPTS = (
 # suggests, continue, the CLI's own model.
 PROJECT_ANSWERS = ("a", "/tmp", "", "", "1")
 
+# "Enter a custom model name" is the entry one past the end of the menu, so it
+# is counted rather than written down: adding a model to the shortlist must not
+# be a test edit.
+CUSTOM_MODEL = str(len(setup_mod._MODELS) + 1)
+
+
+def _model_choice(alias: str) -> str:
+    """What to type to pick *alias*, found in the menu rather than counted off
+    it — the order is the wizard's to change."""
+    aliases = [entry[0] for entry in setup_mod._MODELS]
+    return str(aliases.index(alias) + 1)
+
+
 # What enabling the sandbox would mean on this host, decided by the test rather
 # than by the machine it runs on.  Setup names one backend per platform, so
 # this is one offer and not a list — a test that wants the other shape passes
@@ -88,22 +101,23 @@ def _typed(text: str, *, after: int = 1) -> Callable[[_Wizard], str]:
 class _Wizard:
     """Drives ``run_setup_wizard`` against a fake Telegram.
 
-    ``answers`` are consumed in order for every prompt except six: the
+    ``answers`` are consumed in order for every prompt except seven: the
     token, which comes from ``tokens``; the code, which comes from ``codes``;
-    the sandbox, sign-in and autostart offers of the closing steps, which come
-    from ``sandbox``, ``sign_in`` and ``autostart``; and the project step,
-    which comes from ``projects`` — so that a test saying nothing about any of
-    them is not made to.  ``codes`` defaults to answering every prompt with the
-    code the operator actually received — the handshake is exercised, not
-    stubbed.
+    the sandbox, sign-in, provider-connect and autostart offers of the closing
+    steps, which come from ``sandbox``, ``sign_in``, ``connect`` and
+    ``autostart``; and the project step, which comes from ``projects`` — so
+    that a test saying nothing about any of them is not made to.  ``codes``
+    defaults to answering every prompt with the code the operator actually
+    received — the handshake is exercised, not stubbed.
 
     What the project step discovers, what enabling the sandbox would mean
-    here, and whether Claude is already signed in are all decided here.  None
-    of them may come from the machine the tests run on: the developer's own
-    ``~/.claude.json`` would otherwise change what the wizard imports, whether
-    libvirt happens to be installed would change whether the sandbox is asked
-    about at all, and their own Claude credentials would decide whether the
-    sign-in step appears.
+    here, whether Claude is already signed in and which OpenCode providers are
+    already connected are all decided here.  None of them may come from the
+    machine the tests run on: the developer's own ``~/.claude.json`` would
+    otherwise change what the wizard imports, whether libvirt happens to be
+    installed would change whether the sandbox is asked about at all, and their
+    own credentials — Claude's, or an ``auth.json`` from an opencode they use
+    themselves — would decide which credential step appears.
     """
 
     def __init__(
@@ -116,6 +130,8 @@ class _Wizard:
         clients: tuple[Callable[[], object], ...] = (),
         sandbox: str = "n",
         autostart: str = "n",
+        connected: tuple[str, ...] = (),
+        connect: str = "n",
         installed: bool = False,
         projects: tuple[str, ...] = PROJECT_ANSWERS,
         discovered: tuple[ClaudeProject, ...] = (),
@@ -134,6 +150,8 @@ class _Wizard:
         self._clients = list(clients)
         self._sandbox = sandbox
         self._autostart = autostart
+        self._connected = list(connected)
+        self._connect = connect
         self._installed = installed
         self._projects = list(projects)
         self._discovered = list(discovered)
@@ -142,6 +160,7 @@ class _Wizard:
         self._sign_in = sign_in
         self._login_works = login_works
         self.logins = 0
+        self.provider_logins: list[str] = []
 
     def __call__(self, prompt: str = "") -> str:
         self.prompts.append(prompt)
@@ -151,6 +170,8 @@ class _Wizard:
             return self._sandbox
         if prompt.startswith("Sign in now"):
             return self._sign_in
+        if prompt.startswith("Connect "):
+            return self._connect
         if prompt.startswith("Keep OpenShrimp running"):
             return self._autostart
         if prompt.startswith("Setup code"):
@@ -171,6 +192,16 @@ class _Wizard:
         self.logins += 1
         self._signed_in = self._login_works
         return self._signed_in
+
+    def _connected_providers(self) -> dict[str, str | None]:
+        # Membership is the whole question the wizard asks of this, so the
+        # values are not invented: a fabricated "api" would be a fact no
+        # assertion mentions and no caller reads.
+        return dict.fromkeys(self._connected)
+
+    def _provider_login(self, provider_id: str) -> bool:
+        self.provider_logins.append(provider_id)
+        return self._login_works
 
     def run(self, config_path: Path) -> None:
         # Whether autostart is already registered decides whether the wizard
@@ -197,6 +228,14 @@ class _Wizard:
                             "open_shrimp.backend.claude_sdk.login."
                             "run_interactive_login",
                             self._login,
+                        ), patch(
+                            "open_shrimp.backend.opencode.auth."
+                            "connected_providers",
+                            self._connected_providers,
+                        ), patch(
+                            "open_shrimp.backend.opencode.login."
+                            "run_provider_login",
+                            self._provider_login,
                         ):
                             run_setup_wizard(config_path)
 
@@ -425,7 +464,7 @@ class TestRunSetupWizard:
         wizard = _Wizard(
             _fake_with_operator(),
             "y",
-            projects=("a", "/tmp", "myproject", "", "4"),
+            projects=("a", "/tmp", "myproject", "", _model_choice("sonnet")),
         )
         wizard.run(config_path)
 
@@ -457,7 +496,7 @@ class TestRunSetupWizard:
         _Wizard(
             _fake_with_operator(),
             "y",
-            projects=("a", "/tmp", "", "", "6", "claude-custom-model"),
+            projects=("a", "/tmp", "", "", CUSTOM_MODEL, "claude-custom-model"),
         ).run(config_path)
 
         raw = yaml.safe_load(config_path.read_text())
@@ -877,6 +916,247 @@ class TestSignInOffer:
         wizard._login = _missing  # type: ignore[method-assign]
         wizard.run(config_path)
 
+        assert yaml.safe_load(config_path.read_text())["allowed_users"] == [OPERATOR]
+
+
+class TestModelMenu:
+    """What the picker offers, and what picking one of them writes.
+
+    The backend is never a question: it follows from the model, so what is
+    asserted is that the menu says which lab a model belongs to and never says
+    "backend", and that the config that comes out routes the turn.
+    """
+
+    def test_every_row_names_a_lab_and_none_names_a_backend(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """"gpt-5.6-sol" without "OpenAI" does not tell somebody which account
+        they are about to be asked to log into.  "opencode" would tell them
+        about a decision that is not theirs to make."""
+        _Wizard(_fake_with_operator(), "y").run(tmp_path / "config.yaml")
+
+        out = capsys.readouterr().out
+        menu = out.split("Which model should they use?")[1].split("Model [1]")[0]
+        # The split has to have cut something, or the assertions below would be
+        # about the whole transcript.
+        assert "Enter a custom model name" in menu
+        for lab in ("Anthropic", "OpenAI", "Google", "xAI", "DeepSeek"):
+            assert lab in menu
+        assert "backend" not in menu.lower()
+
+    def test_an_opencode_model_routes_every_imported_project(
+        self, tmp_path: Path
+    ) -> None:
+        """Per context, not top level, so a later project on Claude needs no
+        second answer to a question this wizard asks once."""
+        (tmp_path / "second").mkdir()
+        config_path = tmp_path / "config.yaml"
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            projects=(
+                "a", "/tmp", "",
+                "a", str(tmp_path / "second"), "",
+                "", _model_choice("openai/gpt-5.6-sol"),
+            ),
+        ).run(config_path)
+
+        contexts = yaml.safe_load(config_path.read_text())["contexts"]
+        assert len(contexts) == 2
+        for context in contexts.values():
+            assert context["model"] == "openai/gpt-5.6-sol"
+            assert context["backend"] == "opencode"
+
+    def test_a_claude_model_writes_no_backend_key_at_all(
+        self, tmp_path: Path
+    ) -> None:
+        """A Claude-only config comes out byte-identical to the one this
+        wizard wrote before it could offer anything else."""
+        config_path = tmp_path / "config.yaml"
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            projects=("a", "/tmp", "", "", _model_choice("sonnet")),
+        ).run(config_path)
+
+        assert "backend" not in yaml.safe_load(config_path.read_text())["contexts"]["tmp"]
+
+    @pytest.mark.parametrize(
+        ("typed", "backend"),
+        [("openai/o5-preview", "opencode"), ("claude-custom-model", None)],
+    )
+    def test_a_custom_name_is_routed_by_its_shape(
+        self, tmp_path: Path, typed: str, backend: str | None
+    ) -> None:
+        """The one rule for a model no shortlist contains: a name carrying a
+        slash is provider-qualified, so it is OpenCode's, and a bare one is
+        not — which is what OpenCode itself enforces at runtime."""
+        config_path = tmp_path / "config.yaml"
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            connected=("openai",),
+            projects=("a", "/tmp", "", "", CUSTOM_MODEL, typed),
+        ).run(config_path)
+
+        context = yaml.safe_load(config_path.read_text())["contexts"]["tmp"]
+        assert context["model"] == typed
+        assert context.get("backend") == backend
+
+
+class TestUnbuildablePlatform:
+    """A host opencode publishes no build for is offered none of its models.
+
+    The check is in the shared catalog, so this holds for all three wizards at
+    once: without it the picker offers an entry whose config ``_validate_raw``
+    then refuses, and the wizard writes a first config the core will not start
+    from.
+    """
+
+    @pytest.fixture
+    def no_build(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "open_shrimp.backend.opencode.release.no_build_reason",
+            lambda: "no opencode build is published for Linux ppc64le",
+        )
+
+    def _labs(self) -> set[str]:
+        from open_shrimp.backend.setup_models import menu_provider, setup_models
+
+        return {menu_provider(choice.alias) for choice in setup_models()}
+
+    def test_the_menu_offers_claude_alone(self, no_build: None) -> None:
+        assert self._labs() == {"Anthropic"}
+
+    def test_a_host_with_a_build_is_offered_the_shortlist(self) -> None:
+        assert self._labs() > {"Anthropic"}
+
+
+class TestProviderConnect:
+    """The credential step for a model that is not Claude's.
+
+    Which credential is offered follows from the model and nothing else, so
+    what is asserted is that nobody is asked for both — and that none of the
+    ways this step can fail costs the config, which is the artifact the wizard
+    exists to produce.
+    """
+
+    def _picked(self, alias: str) -> tuple[str, ...]:
+        return ("a", "/tmp", "", "", _model_choice(alias))
+
+    def test_an_opencode_model_is_never_offered_the_claude_sign_in(
+        self, tmp_path: Path
+    ) -> None:
+        wizard = _Wizard(
+            _fake_with_operator(),
+            "y",
+            signed_in=False,
+            projects=self._picked("openai/gpt-5.6-sol"),
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        assert not [p for p in wizard.prompts if p.startswith("Sign in now")]
+        assert wizard.logins == 0
+        assert "Connect OpenAI now?" in "".join(wizard.prompts)
+
+    def test_a_claude_model_never_reaches_for_the_opencode_binary(
+        self, tmp_path: Path
+    ) -> None:
+        """The fetch is 50 MB, and a Claude context has nothing to do with
+        it."""
+        wizard = _Wizard(
+            _fake_with_operator(), "y", signed_in=True, projects=self._picked("sonnet")
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        assert wizard.provider_logins == []
+        assert not [p for p in wizard.prompts if p.startswith("Connect ")]
+
+    def test_a_provider_already_connected_is_asked_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Matching what the Claude branch does for a host already signed in:
+        the credential is there, so there is nothing to offer."""
+        wizard = _Wizard(
+            _fake_with_operator(),
+            "y",
+            connected=("openai",),
+            projects=self._picked("openai/gpt-5.6-sol"),
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        assert wizard.provider_logins == []
+        assert not [p for p in wizard.prompts if p.startswith("Connect ")]
+        assert "connecting OpenAI" not in capsys.readouterr().out
+
+    def test_accepting_runs_the_login_for_that_provider_alone(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        wizard = _Wizard(
+            _fake_with_operator(),
+            "y",
+            connect="y",
+            projects=self._picked("google/gemini-3.7-flash"),
+        )
+        wizard.run(tmp_path / "config.yaml")
+
+        assert wizard.provider_logins == ["google"]
+        assert "Connected." in capsys.readouterr().out
+
+    def test_declining_names_the_command_and_still_writes_the_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A bare ``opencode`` on $PATH is deliberately not the binary
+        OpenShrimp runs, so the sentence names the one that is."""
+        config_path = tmp_path / "config.yaml"
+        wizard = _Wizard(
+            _fake_with_operator(),
+            "y",
+            connect="n",
+            projects=self._picked("xai/grok-4.6"),
+        )
+        wizard.run(config_path)
+
+        assert wizard.provider_logins == []
+        out = capsys.readouterr().out
+        assert "auth login --provider xai" in out
+        assert yaml.safe_load(config_path.read_text())["allowed_users"] == [OPERATOR]
+
+    def test_a_login_that_did_not_take_still_writes_the_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        _Wizard(
+            _fake_with_operator(),
+            "y",
+            connect="y",
+            login_works=False,
+            projects=self._picked("deepseek/deepseek-v4-pro"),
+        ).run(config_path)
+
+        assert "auth login --provider deepseek" in capsys.readouterr().out
+        assert yaml.safe_load(config_path.read_text())["allowed_users"] == [OPERATOR]
+
+    def test_a_fetch_that_could_not_run_does_not_lose_the_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A platform opencode publishes no build for raises out of the fetch,
+        and the config is the irreplaceable artifact."""
+
+        def _no_build(provider_id: str) -> bool:
+            raise RuntimeError("no opencode build is published for this platform")
+
+        config_path = tmp_path / "config.yaml"
+        wizard = _Wizard(
+            _fake_with_operator(),
+            "y",
+            connect="y",
+            projects=self._picked("openai/gpt-5.6-sol"),
+        )
+        wizard._provider_login = _no_build  # type: ignore[method-assign]
+        wizard.run(config_path)
+
+        assert "no opencode build is published" in capsys.readouterr().out
         assert yaml.safe_load(config_path.read_text())["allowed_users"] == [OPERATOR]
 
 

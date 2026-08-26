@@ -28,9 +28,13 @@ try:
 except ImportError:
     readline = None  # type: ignore[assignment]
 
-from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
-from open_shrimp.backend.factory import default_model_label
+from open_shrimp.backend.factory import default_model_label, provider_id_for_model
 from open_shrimp.backend.claude_sdk.projects import name_directory
+from open_shrimp.backend.setup_models import (
+    connect_copy,
+    menu_provider,
+    setup_models,
+)
 from open_shrimp.config import (
     RESERVED_CONTEXT_NAME,
     _validate_context_name,
@@ -83,11 +87,13 @@ def _path_completion() -> Iterator[bool]:
         readline.set_completer_delims(old_delims)
 
 
-# The wizard writes a Claude SDK config, so it offers that backend's catalog.
-# "Custom model name" is the entry one past the end of this tuple.
-_MODELS: tuple[tuple[str | None, str], ...] = (
-    (None, "pin nothing, and let Claude Code decide — recommended"),
-    *((c.alias, c.description) for c in MODEL_CHOICES),
+# The menu, with the entry that pins nothing at its head — that one names
+# whichever agent's default it defers to rather than a model, so it is not one
+# of the rows the shared catalog carries.  "Custom model name" is the entry one
+# past the end of this tuple.
+_MODELS: tuple[tuple[str | None, str | None, str], ...] = (
+    (None, None, "pin nothing, and let Claude Code decide — recommended"),
+    *((m.alias, menu_provider(m.alias), m.description) for m in setup_models()),
 )
 
 
@@ -590,6 +596,73 @@ def _prompt_sandbox() -> str | None:
     return offer.backend if _prompt_yes_no("Enable sandbox") else None
 
 
+def _offer_credentials(model: str | None) -> None:
+    """Offer whatever credential the picked model needs, where it is missing.
+
+    Which one that is follows from the model and nothing else: a Claude alias,
+    or nothing pinned, is the Claude Code sign-in, and a provider-qualified
+    name is a login with that provider.  Nobody is asked both.
+    """
+    provider_id = provider_id_for_model(model)
+    if provider_id is None:
+        _offer_sign_in()
+    else:
+        _offer_provider_login(provider_id)
+
+
+def _offer_provider_login(provider_id: str) -> None:
+    """Offer to connect *provider_id* to opencode, where it is not already.
+
+    A provider already in the credential file is asked nothing and told
+    nothing, matching what the Claude branch does for a host already signed in.
+
+    Nothing here is fatal.  A download that failed, a login declined, or a CLI
+    that would not start all leave the config written and the wizard finishing
+    normally: the user finds out on their first message, and the login is one
+    command away by then.
+    """
+    from open_shrimp.backend.opencode.auth import connected_providers
+    from open_shrimp.backend.opencode.login import relogin_hint, run_provider_login
+    from open_shrimp.backend.opencode.models import provider_label
+
+    if provider_id in connected_providers():
+        return
+
+    # The intro is said in this wizard's own voice rather than read off
+    # ``connect_copy``: that copy is what the two GUIs render, and they speak
+    # about OpenShrimp while everything printed here speaks as it.  The outcome
+    # lines are the shared ones, because there is nothing to say differently
+    # about a login that worked.
+    copy = connect_copy(provider_id)
+    name = provider_label(provider_id)
+
+    print()
+    print(f"Now, connecting {name}.")
+    print(f"I answer your messages by running that model through OpenCode on")
+    print(f"this computer, under your own {name} account. OpenCode asks for")
+    print(f"whatever {name} accepts — an API key, or a sign-in in your browser")
+    print("— and keeps it; I never see it.")
+    print()
+    if not _prompt_yes_no(f"Connect {name} now?"):
+        print(f"  Skipped. Run this when you want it: {relogin_hint(provider_id)}")
+        return
+
+    print()
+    try:
+        connected = run_provider_login(provider_id)
+    except Exception as e:
+        logger.warning("Could not start the %s login", provider_id, exc_info=True)
+        print(f"\n  I couldn't start the login: {e}")
+        connected = False
+
+    print()
+    if connected:
+        print(f"  {copy.done}")
+    else:
+        print("  Not connected yet. Run this to try again:")
+        print(f"  {relogin_hint(provider_id)}")
+
+
 def _offer_sign_in() -> None:
     """Offer to sign Claude in, where it is not signed in already.
 
@@ -618,8 +691,8 @@ def _offer_sign_in() -> None:
     print("under your own Claude Code login. Signing in happens in your")
     print("browser; you'll choose there between a Claude subscription and")
     print("API billing.")
-    print("Say no only if you mean to run me on a different backend, like")
-    print("OpenCode.")
+    print("Say no only if you'd rather set ANTHROPIC_API_KEY in my")
+    print("environment, which signs me in just as well.")
     print()
     if not _prompt_yes_no("Sign in now?"):
         print("  Skipped. Send /login in Telegram if you want it later.")
@@ -641,12 +714,19 @@ def _offer_sign_in() -> None:
 
 
 def _prompt_model() -> str | None:
-    """Ask which model the imported projects run on, once for all of them."""
+    """Ask which model the imported projects run on, once for all of them.
+
+    Every row names its lab, because "gpt-5.6-sol" without "OpenAI" does not
+    tell somebody which account they are about to be asked to log into.  No row
+    names a backend: which one serves the turn follows from the model, and
+    nobody choosing a model is choosing it.
+    """
     print()
     print("Which model should they use?")
-    for i, (model_name, model_desc) in enumerate(_MODELS, 1):
+    for i, (model_name, provider, model_desc) in enumerate(_MODELS, 1):
         display = model_name or default_model_label()
-        print(f"  {i}. {display} ({model_desc})")
+        lab = f" — {provider}" if provider else ""
+        print(f"  {i}. {display}{lab} ({model_desc})")
     print(f"  {len(_MODELS) + 1}. Enter a custom model name")
 
     choice = _prompt_choice("Model", len(_MODELS) + 1, default="1")
@@ -816,7 +896,7 @@ def run_setup_wizard(config_path: Path) -> None:
 
     # Before the config is written, so a wizard that runs to its last line
     # leaves nothing for the first readiness card to report.
-    _offer_sign_in()
+    _offer_credentials(model)
 
     config_dict = build_config_dict(token, enrolled.user_id, contexts)
 

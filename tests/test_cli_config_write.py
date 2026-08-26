@@ -53,14 +53,20 @@ def test_config_flag_is_honoured_on_either_side_of_the_subcommand(argv, monkeypa
 
 
 def test_models_json_is_parsable(capsys, tmp_path):
-    # No config: falls back to the default backend's catalog, which is the
-    # first-run case a setup UI hits.
+    # No config: the cross-backend setup menu, which is the first-run case a
+    # setup UI hits and the only one either GUI wizard exists in.
     assert _run_models(json_output=True, config_path=str(tmp_path / "none.yaml")) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["models"]
     assert payload["default_label"] == "Claude Code default"
     for entry in payload["models"]:
-        assert set(entry) == {"alias", "model_id", "description"}
+        assert set(entry) == {
+            "alias",
+            "model_id",
+            "description",
+            "provider",
+            "provider_id",
+        }
 
 
 def test_models_follows_the_configured_backend(capsys, tmp_path, monkeypatch):

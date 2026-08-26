@@ -17,10 +17,10 @@ namespace OpenShrimp.Tray.Setup;
 /// The wizard's steps, in the order they are asked.
 ///
 /// Named rather than counted, because one of them is conditional:
-/// <see cref="SignIn"/> is not asked on a PC where Claude Code is already
-/// signed in, and everything that reads a step position — the dots, the button
-/// labels, whether this is the last one — has to agree about which step comes
-/// fourth on a machine where it is missing.
+/// <see cref="SignIn"/> is not asked on a PC that already holds the credential
+/// the picked model needs, and everything that reads a step position — the
+/// dots, the button labels, whether this is the last one — has to agree about
+/// which step comes fourth on a machine where it is missing.
 /// </summary>
 internal enum SetupStep
 {
@@ -32,20 +32,20 @@ internal enum SetupStep
 }
 
 /// <summary>
-/// Where the sign-in step is.
+/// Where the credential step is.
 ///
 /// The sign-in happens in a console window this app opens and does not own, so
 /// the step has no progress to show — only what it is waiting for.
 /// </summary>
 internal enum SignInStage
 {
-    /// <summary>Not signed in, and no sign-in window opened yet.</summary>
+    /// <summary>No credential yet, and no sign-in window opened.</summary>
     Offering,
 
-    /// <summary>A console is open; waiting for the credentials to appear.</summary>
+    /// <summary>A console is open; waiting for the credential to appear.</summary>
     Waiting,
 
-    /// <summary>Signed in. Nothing left for this step to ask.</summary>
+    /// <summary>Held. Nothing left for this step to ask.</summary>
     Done,
 }
 
@@ -117,7 +117,7 @@ internal abstract record PrefetchState
 }
 
 /// <summary>
-/// First-run wizard: bot token, enrollment, projects, the Claude sign-in.
+/// First-run wizard: bot token, enrollment, projects, the model's credential.
 ///
 /// The reason the core grew a non-interactive "config write": the terminal
 /// wizard needs a tty, which a tray app launched from Explorer or a logon task
@@ -130,12 +130,18 @@ public sealed partial class SetupWindow : Window
     /// <summary>
     /// The steps this run will ask, in order.
     ///
-    /// The sign-in starts present and is dropped only on a core that reports it
-    /// already signed in. That way round because the answer can be slow — a
-    /// cold machine unpacks a Python runtime first — and the two mistakes cost
-    /// different amounts: a step shown to somebody already signed in costs a
-    /// click, and a step dropped because the answer had not arrived costs a
-    /// first turn that fails in Telegram with no wizard left to fix it in.
+    /// The sign-in starts present and is dropped only on a core that reports
+    /// the credential already held. That way round because the answer can be
+    /// slow — a cold machine unpacks a Python runtime first — and the two
+    /// mistakes cost different amounts: a step shown to somebody already signed
+    /// in costs a click, and a step dropped because the answer had not arrived
+    /// costs a first turn that fails in Telegram with no wizard left to fix it
+    /// in.
+    ///
+    /// Which credential it is follows from the model, so the check runs on the
+    /// way out of the import step rather than at bootstrap. Both moves happen
+    /// while Finish is still ahead of the user, so no position in flight ever
+    /// shifts under anybody.
     /// </summary>
     private readonly List<SetupStep> _steps = new()
     {
@@ -176,11 +182,22 @@ public sealed partial class SetupWindow : Window
     // RPC_E_WRONG_THREAD. Read once, here, where the UI thread is the caller.
     private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher;
 
-    // Whether Claude Code is signed in on this PC. Sticky once Done: the step
-    // is dropped, drawn and left on the strength of it, and a later check that
-    // could not run must not take a signed-in wizard back to asking for a
-    // sign-in it already has.
+    // Whether this PC holds the credential the picked model needs. Done
+    // survives a check that could not run, because the step is dropped, drawn
+    // and left on the strength of it and an unanswered question is not a no —
+    // but never survives a change of credential, which is a different question
+    // with an answer of its own.
     private SignInStage _signInStage = SignInStage.Offering;
+    // The OpenCode provider the credential step's stage and copy were settled
+    // for, or null for the Claude Code sign-in. Read off the catalog rather
+    // than parsed out of the model id, which is the core's to spell. Held
+    // rather than re-read because the poll and the console spawn have to ask
+    // about the same credential the step was drawn for, and because a change of
+    // it is what makes the step unanswered again.
+    private string? _settledFor;
+    // Every sentence the credential step shows, keyed by that credential. From
+    // the core, so the terminal wizard and the Mac's say the same things.
+    private ConnectCopy _connect = ConnectCopy.Unread;
     private CancellationTokenSource? _signIn;
     // The console the sign-in runs in. Held to be disposed, never to be waited
     // on and never to be killed: it outlives this window on purpose, because a
@@ -351,19 +368,25 @@ public sealed partial class SetupWindow : Window
     private void GoToStep(SetupStep step) => ShowStep(_steps.IndexOf(step));
 
     /// <summary>
-    /// Take the sign-in step out, for a PC that is already signed in.
+    /// Have the sign-in step exactly when the credential is still owed.
     ///
-    /// Dropped rather than shown and skipped past, so the dots do not count it.
-    /// Only while the wizard is still in front of it, so no position in flight
-    /// moves under anybody: a user who has already reached the step keeps it,
-    /// and its own poll settles it into the signed-in reading within a tick.
+    /// Dropped rather than shown and skipped past, so the dots never count a
+    /// step nobody will see; put back rather than left out, because a user who
+    /// goes back and picks a different model changes which credential is owed
+    /// and a step dropped for the model before must not answer for the one
+    /// after.
+    ///
+    /// Its one caller runs while the user is on the import step, so the step
+    /// being added or removed is always ahead of them and no position in flight
+    /// moves under anybody.
     /// </summary>
-    private void DropSignInStep()
+    private void SyncSignInStep(bool needed)
     {
-        var index = _steps.IndexOf(SetupStep.SignIn);
-        if (index < 0 || _step >= index) return;
+        if (needed == _steps.Contains(SetupStep.SignIn)) return;
 
-        _steps.RemoveAt(index);
+        if (needed) _steps.Insert(_steps.IndexOf(SetupStep.Finish), SetupStep.SignIn);
+        else _steps.Remove(SetupStep.SignIn);
+
         BuildDots();
         ShowStep(_step);
     }
@@ -387,10 +410,7 @@ public sealed partial class SetupWindow : Window
                 ("Your projects",
                  "The folders you already work in. Untick anything you'd rather "
                  + "not reach from Telegram."),
-            SetupStep.SignIn =>
-                ("Sign in to Claude",
-                 "OpenShrimp answers your messages by running Claude Code on "
-                 + "this PC, under your own Claude Code login."),
+            SetupStep.SignIn => (_connect.Title, _connect.Subtitle),
             // Says what the step is about, which depends on what it is showing:
             // the sandbox row is absent when nothing was imported, and naming
             // it anyway would promise a question the step does not ask.
@@ -499,7 +519,7 @@ public sealed partial class SetupWindow : Window
     {
         SetupStep.Token => await ValidateTokenAsync(),
         SetupStep.Enroll => await LeaveEnrollmentStepAsync(),
-        SetupStep.Projects => ValidateContexts() is not null,
+        SetupStep.Projects => await LeaveProjectsStepAsync(),
         // Neither of the last two has anything to check. The sign-in step's
         // Next is enabled only once the core reports it signed in, and its skip
         // link goes round rather than through; the autostart step's checkboxes
@@ -881,7 +901,7 @@ public sealed partial class SetupWindow : Window
             }
         }
 
-        var model = (ModelBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        var model = SelectedModel()?.Alias;
 
         SetMessage(ContextMessage, "", error: false);
         return chosen
@@ -892,6 +912,74 @@ public sealed partial class SetupWindow : Window
                 Model: model,
                 Sandbox: ChosenBackend()))
             .ToList();
+    }
+
+    /// <summary>
+    /// The catalog row the picker is on, or null for the entry that pins
+    /// nothing.
+    ///
+    /// The row rather than its name: what the credential step asks for follows
+    /// from the model, and the core already said which provider that is — so
+    /// nothing here parses a model id.
+    /// </summary>
+    private ModelChoice? SelectedModel() =>
+        (ModelBox.SelectedItem as ComboBoxItem)?.Tag as ModelChoice;
+
+    /// <summary>
+    /// Leave the import step: check its answers, then find out whether this PC
+    /// holds the credential the model they were pinned to needs.
+    ///
+    /// The check is here and not at bootstrap because the model is not known
+    /// until now, and it decides both whether the credential step is asked at
+    /// all and every sentence it says. Leaving this step is always while
+    /// Finish is ahead of the user, which is the one condition
+    /// <see cref="SyncSignInStep"/> needs.
+    ///
+    /// A check that could not run leaves the step standing: a step that is
+    /// there can be skipped in one click, and one that was dropped cannot be
+    /// brought back without starting the wizard again.
+    /// </summary>
+    private async Task<bool> LeaveProjectsStepAsync()
+    {
+        if (ValidateContexts() is null) return false;
+
+        var picked = SelectedModel()?.ProviderId;
+        // Already settled, and a credential does not un-land: a Back and a
+        // Next over an unchanged model would otherwise spawn a core to confirm
+        // what this session has already seen.
+        if (picked == _settledFor && _signInStage == SignInStage.Done) return true;
+        // A new question is an unanswered one, whatever the last one settled.
+        if (picked != _settledFor) _signInStage = SignInStage.Offering;
+        _settledFor = picked;
+
+        // The core is a spawn away and a cold one unpacks a Python runtime
+        // first, so the click that starts it says so — every other awaiting
+        // handler in this file does the same.
+        NextButton.IsEnabled = false;
+        SetMessage(ContextMessage, "Checking your sign-in…", error: false);
+        AuthStatus? status;
+        try
+        {
+            status = await OpenShrimpCli.GetAuthStatusAsync(picked);
+        }
+        finally
+        {
+            SetMessage(ContextMessage, "", error: false);
+            NextButton.IsEnabled = true;
+        }
+
+        // Never carried over from the model picked before this one: a step that
+        // says "Connect OpenAI" for a Google model is worse than one that names
+        // neither, which is what Unread is.
+        _connect = status?.Connect ?? ConnectCopy.Unread;
+        // A check that could not run answers neither way, so it leaves a
+        // sign-in this session already landed standing rather than sending the
+        // user back to a step they have finished.
+        if (status is not null)
+            _signInStage = status.SignedIn ? SignInStage.Done : SignInStage.Offering;
+
+        SyncSignInStep(_signInStage != SignInStage.Done);
+        return true;
     }
 
     /// <summary>
@@ -953,20 +1041,20 @@ public sealed partial class SetupWindow : Window
     // -- Step 2 helpers -----------------------------------------------------
 
     /// <summary>
-    /// Everything the wizard needs from the core: the model catalog, the
-    /// projects worth offering, what this PC can isolate them with, and whether
-    /// Claude Code is already signed in here.
+    /// Everything the wizard needs from the core before it asks anything: the
+    /// model catalog, the projects worth offering, and what this PC can isolate
+    /// them with.
     ///
-    /// None of the four blocks the wizard. A catalog that could not be read
-    /// leaves the unpinned entry standing alone; a discovery that failed reads
-    /// the same as "none found", which is a screen this step already has; an
-    /// unanswered sign-in check leaves the sign-in step standing, which costs
-    /// a click.
+    /// Not the credential check, which asks about a model nobody has picked
+    /// yet; that runs on the way out of this step. Nothing here blocks the
+    /// wizard either: a catalog that could not be read leaves the unpinned
+    /// entry standing alone, and a discovery that failed reads the same as
+    /// "none found", which is a screen this step already has.
     ///
     /// This is the first thing in the app that runs the core at all when there
     /// is no config — a core with no config is never started — so the unpack
-    /// is forced first and waited for. Four spawns launched at a
-    /// self-installing binary that has never run would be four racing
+    /// is forced first and waited for. Three spawns launched at a
+    /// self-installing binary that has never run would be three racing
     /// installs of it, and the directory a lost race leaves behind is one the
     /// launcher then skips installing into forever.
     /// </summary>
@@ -975,39 +1063,30 @@ public sealed partial class SetupWindow : Window
         if (await OpenShrimpCli.EnsureRuntimeAsync() is string reason)
             TrayLog.Write($"The core is not ready to run: {reason}");
 
-        // Together, not one after another: none of the four depends on the
+        // Together, not one after another: none of the three depends on the
         // others, and each is a separate spawn that re-pays interpreter and
         // import startup.
         var models = OpenShrimpCli.GetModelsAsync();
         var projects = OpenShrimpCli.GetProjectsAsync();
         var sandbox = OpenShrimpCli.GetSandboxOfferingAsync();
-        var auth = OpenShrimpCli.GetAuthStatusAsync();
-        await Task.WhenAll(models, projects, sandbox, auth);
+        await Task.WhenAll(models, projects, sandbox);
         _catalog = await models;
 
         ModelBox.Items.Clear();
         ModelBox.Items.Add(new ComboBoxItem { Content = $"{_catalog.DefaultLabel} (recommended)", Tag = null });
+        // Flat, and the lab rather than the blurb: nine rows a provider column
+        // already tells apart do not need a CollectionViewSource, and a name
+        // without its lab does not say which account the next step will ask
+        // for. Order is the core's, so the three wizards cannot disagree about
+        // which model is recommended.
         foreach (var model in _catalog.Choices)
-            ModelBox.Items.Add(new ComboBoxItem { Content = $"{model.Alias} — {model.Description}", Tag = model.Alias });
+            ModelBox.Items.Add(new ComboBoxItem { Content = $"{model.Alias} — {model.Provider}", Tag = model });
         ModelBox.SelectedIndex = 0;
 
         foreach (var project in await projects)
             AddProjectRow(project.ContextName, project.Directory, project.Name);
 
         _sandbox = await sandbox;
-
-        // A PC that is already signed in is never asked to, and its wizard is
-        // four steps rather than five. Only a positive answer drops the step:
-        // an unanswerable check, or one that lands after the user has walked
-        // past where the step would have been, leaves it where it is.
-        if ((await auth) is { SignedIn: true })
-        {
-            // Recorded even when the drop below finds the user already past
-            // where the step would have been: the step they reach then draws
-            // as answered rather than asking again.
-            _signInStage = SignInStage.Done;
-            DropSignInStep();
-        }
 
         DiscoverySpinner.IsActive = false;
         DiscoveryLabel.Visibility = Visibility.Collapsed;
@@ -1389,7 +1468,7 @@ public sealed partial class SetupWindow : Window
         if (named is not null && box.Text == folder.Name) box.Text = named;
     }
 
-    // -- Sign in to Claude --------------------------------------------------
+    // -- The model's credential ---------------------------------------------
 
     /// <summary>Draw the step for this visit, and start watching for the credential.</summary>
     private void EnterSignInStep()
@@ -1417,7 +1496,7 @@ public sealed partial class SetupWindow : Window
         System.Diagnostics.Process? console;
         try
         {
-            console = OpenShrimpCli.StartLoginConsole();
+            console = OpenShrimpCli.StartLoginConsole(_settledFor);
         }
         catch (Exception ex)
         {
@@ -1450,7 +1529,9 @@ public sealed partial class SetupWindow : Window
         // Nothing left to skip once it has landed.
         SignInSkip.Visibility = stage == SignInStage.Done ? Visibility.Collapsed : Visibility.Visible;
 
-        SignInDone.Text = "Signed in. Claude Code is ready on this PC.";
+        SignInBody.Text = _connect.Body;
+        SignInWaitingNote.Text = _connect.Waiting;
+        SignInDone.Text = _connect.Done;
 
         UpdateChrome();
     }
@@ -1487,21 +1568,26 @@ public sealed partial class SetupWindow : Window
         {
             while (!ct.IsCancellationRequested)
             {
-                var status = await OpenShrimpCli.GetAuthStatusAsync(ct);
+                // Before the first check rather than only between them. The
+                // step is reached through LeaveProjectsStepAsync, which just
+                // asked this exact question, so checking on arrival would spawn
+                // a core to re-answer something answered milliseconds ago. It
+                // also keeps a check that took four seconds from being followed
+                // two seconds later by another.
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
                 if (ct.IsCancellationRequested) return;
 
+                var status = await OpenShrimpCli.GetAuthStatusAsync(_settledFor, ct);
+                if (ct.IsCancellationRequested) return;
+
+                // A check that could not run reads the same as "not yet" and
+                // says nothing: setup cannot fail on this step, so a core that
+                // will not answer costs a click on the skip link.
                 if (status is { SignedIn: true })
                 {
                     ShowSignInStage(SignInStage.Done);
                     return;
                 }
-
-                // Between checks rather than around them, so a check that took
-                // four seconds is not followed two seconds later by another.
-                // A check that could not run reads the same as "not yet" and
-                // says nothing: setup cannot fail on this step, so a core that
-                // will not answer costs a click on the skip link.
-                await Task.Delay(TimeSpan.FromSeconds(2), ct);
             }
         }
         catch (OperationCanceledException)

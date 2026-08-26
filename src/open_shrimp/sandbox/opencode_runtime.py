@@ -11,7 +11,8 @@ Public surface:
 - ``OPENCODE_GUEST_PORT`` — fixed in-guest port for sandbox-owned servers.
 - ``get_opencode_home_dir`` — per-context host dir mounted as the served home.
 - ``get_openshrimp_data_dir`` — per-context host dir for the managed plugin config.
-- ``_sync_opencode_auth`` — inject provider-filtered host auth into the sandbox.
+- ``_sync_opencode_auth`` — inject provider-filtered host auth into the
+  sandbox, from the file ``backend.opencode.auth`` locates.
 - ``_wait_for_opencode_ready`` — block until ``opencode serve`` is listening.
 - ``_drain_opencode_output`` — background drain of serve stdout to a log.
 """
@@ -20,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import queue
 import stat
 import subprocess
@@ -60,17 +60,14 @@ def get_openshrimp_data_dir(context_name: str) -> Path:
     return path
 
 
-def _host_opencode_auth_path() -> Path:
-    data_home = os.environ.get("XDG_DATA_HOME")
-    if data_home:
-        return Path(data_home) / "opencode" / "auth.json"
-    return Path.home() / ".local" / "share" / "opencode" / "auth.json"
-
-
 def _sync_opencode_auth(provider_id: str | None, opencode_home: Path) -> None:
     if not provider_id:
         return
-    host_auth = _host_opencode_auth_path()
+    # Located by the module the setup wizards ask "is this provider connected",
+    # so a login the wizard confirmed lands where a sandbox start looks.
+    from open_shrimp.backend.opencode.auth import host_auth_path
+
+    host_auth = host_auth_path()
     if not host_auth.is_file():
         logger.debug("No host OpenCode auth file found at %s", host_auth)
         return

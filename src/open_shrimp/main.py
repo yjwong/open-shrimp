@@ -236,29 +236,31 @@ def _parse_args() -> argparse.Namespace:
     sub_auth = subparsers.add_parser(
         "auth",
         parents=[common],
-        help="Ask whether Claude Code is signed in here, or sign it in",
+        help="Ask whether a model's credential is held here, or go and get it",
     )
     auth_subs = sub_auth.add_subparsers(dest="auth_command")
     sub_auth_status = auth_subs.add_parser(
         "status",
         parents=[common],
-        help="Report whether Claude Code can authenticate on this host",
+        help="Report whether this host holds the credential a model needs",
     )
     sub_auth_status.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON (for a setup UI)",
     )
+    _add_provider_arg(sub_auth_status)
     sub_auth_login = auth_subs.add_parser(
         "login",
         parents=[common],
-        help="Run the Claude Code sign-in on this terminal (for a setup UI)",
+        help="Run a sign-in on this terminal (for a setup UI)",
     )
     sub_auth_login.add_argument(
         "--hold",
         action="store_true",
         help="Wait for Enter before exiting, so a spawned console can be read",
     )
+    _add_provider_arg(sub_auth_login)
 
     sub_projects = subparsers.add_parser(
         "projects",
@@ -371,6 +373,24 @@ def _parse_args() -> argparse.Namespace:
     )
 
     return parser.parse_args()
+
+
+def _add_provider_arg(parser: argparse.ArgumentParser) -> None:
+    """The one flag that switches ``auth`` from Claude to an OpenCode provider.
+
+    Written once because ``status`` and ``login`` are two halves of one step: a
+    wizard that polls one and spawns the other must pass the same id to both,
+    and two spellings of the flag is how it comes to poll for a credential it
+    never asked for.
+    """
+    parser.add_argument(
+        "--provider",
+        metavar="ID",
+        help=(
+            "An OpenCode provider id (openai, google, xai, …); omit for the "
+            "Claude Code credential"
+        ),
+    )
 
 
 def _add_config_arg(parser: argparse.ArgumentParser, *, default: object) -> None:
@@ -706,27 +726,31 @@ def _run_models(*, json_output: bool, config_path: str) -> int:
     Exists so a setup UI outside Python can populate its model picker without
     hardcoding the catalog or importing the package.
 
-    Resolved through the configured backend rather than a fixed catalog:
-    OpenCode wants provider-qualified ids, so offering Claude aliases there
-    would let a setup UI write a config the backend rejects on every turn.
-    Falls back to the default backend's catalog when there is no config yet,
-    which is the first-run case.
+    With no config, the cross-backend setup menu — which is every first run,
+    the only time the two GUI wizards exist.  With one, the configured
+    backend's own catalog, because ``/model`` and the config Mini App act on a
+    context that already has a backend and OpenCode rejects a Claude alias on
+    every turn.
 
-    ``default_label`` travels with the catalog for the same reason: the entry
-    that pins no model names the agent whose default it defers to, and which
-    agent that is follows from the backend the catalog came from.
+    ``provider`` and ``provider_id`` travel with each row so neither GUI ever
+    parses a model id: the first is what the row says beside the name, and the
+    second is what its credential step passes to ``auth status`` and ``auth
+    login``.  ``default_label`` travels with the catalog for the same reason:
+    the entry that pins no model names the agent whose default it defers to,
+    and which agent that is follows from the backend.
     """
     from open_shrimp.backend import default_model_label, get_backend
+    from open_shrimp.backend.factory import provider_id_for_model
+    from open_shrimp.backend.setup_models import menu_provider, setup_models
     from open_shrimp.config import load_config
 
     try:
         backend = get_backend(load_config(config_path))
     except Exception:
-        from open_shrimp.backend.claude_sdk.models import MODEL_CHOICES
-
+        choices = setup_models()
         default_label = default_model_label()
     else:
-        MODEL_CHOICES = tuple(backend.model_catalog())
+        choices = tuple(backend.model_catalog())
         default_label = default_model_label(backend.name)
 
     if json_output:
@@ -738,16 +762,21 @@ def _run_models(*, json_output: bool, config_path: str) -> int:
                         "alias": choice.alias,
                         "model_id": choice.model_id,
                         "description": choice.description,
+                        "provider": menu_provider(choice.alias),
+                        "provider_id": provider_id_for_model(choice.alias),
                     }
-                    for choice in MODEL_CHOICES
+                    for choice in choices
                 ],
             },
             sys.stdout,
         )
         sys.stdout.write("\n")
     else:
-        for choice in MODEL_CHOICES:
-            print(f"{choice.alias:<8} {choice.model_id:<20} {choice.description}")
+        for choice in choices:
+            print(
+                f"{choice.alias:<26} {menu_provider(choice.alias):<10} "
+                f"{choice.model_id:<26} {choice.description}"
+            )
     return 0
 
 
@@ -777,55 +806,111 @@ _HOW_SAID = {
 }
 
 
-def _run_auth_status(*, json_output: bool) -> int:
-    """Report whether the Claude CLI on this host can authenticate.
+def _run_auth_status(*, json_output: bool, provider: str | None = None) -> int:
+    """Report whether this host holds the credential a context would run on.
 
-    The two GUI wizards cannot call Python, so their sign-in step reads the
-    answer from here.
+    The two GUI wizards cannot call Python, so their credential step reads the
+    answer from here.  One shape for both credentials — ``{ok, signed_in,
+    how}`` — so a wizard that switched its picker to an OpenCode model keeps
+    the poll loop and the decoder it already had.
+
+    *provider* names an OpenCode provider, and is answered out of the CLI's own
+    ``auth.json``; omitting it keeps the Claude answer.  ``how`` is then
+    ``api`` or ``oauth`` — what the provider's login wrote.
+
+    ``connect`` is the step's own copy, keyed by the credential being asked
+    for, so neither GUI hardcodes a sentence naming Claude.
 
     Only a check that could not run at all exits non-zero, so a caller can
     tell "no credentials" from "I could not look".  A wizard renders the first
     as the step it is about to offer.
     """
-    from open_shrimp.backend.claude_sdk.login import auth_status
+    from open_shrimp.backend.setup_models import connect_copy
 
-    try:
-        status = auth_status()
-    except Exception as exc:
-        logger.debug("The sign-in check could not run", exc_info=True)
-        return _fail(str(exc), json_output=json_output)
+    copy = connect_copy(provider)
+
+    if provider is None:
+        from open_shrimp.backend.claude_sdk.login import auth_status
+
+        try:
+            status = auth_status()
+        except Exception as exc:
+            logger.debug("The sign-in check could not run", exc_info=True)
+            return _fail(str(exc), json_output=json_output)
+        signed_in, how = status.signed_in, status.how
+    else:
+        from open_shrimp.backend.opencode.auth import connected_providers
+
+        connected = connected_providers()
+        signed_in = provider in connected
+        how = connected.get(provider)
 
     if json_output:
+        # ``asdict`` rather than five keys written out: the GUIs decode every
+        # field, so a sixth added to ``ConnectCopy`` has to reach the wire or
+        # it reaches nobody.
+        from dataclasses import asdict
+
         json.dump(
-            {"ok": True, "signed_in": status.signed_in, "how": status.how},
+            {
+                "ok": True,
+                "signed_in": signed_in,
+                "how": how,
+                "connect": asdict(copy),
+            },
             sys.stdout,
         )
         sys.stdout.write("\n")
+    elif signed_in:
+        print(_HOW_SAID[how] if provider is None else copy.done)
     else:
-        print(_HOW_SAID[status.how])
+        print(
+            _HOW_SAID[None]
+            if provider is None
+            else f"{copy.title} — run "
+            f"'openshrimp auth login --provider {provider}'."
+        )
     return 0
 
 
-def _run_auth_login(*, hold: bool) -> int:
-    """Run the Claude sign-in on whatever terminal this was started from.
+def _run_auth_login(*, hold: bool, provider: str | None = None) -> int:
+    """Run a sign-in on whatever terminal this was started from.
 
-    The CLI draws a prompt, a browser opens, and a person finishes it, so the
-    output is written for a reader.  A GUI wizard spawns a console for it and
-    reads the exit code.
+    The CLI draws a prompt, a browser or an editor opens, and a person finishes
+    it, so the output is written for a reader.  A GUI wizard spawns a console
+    for it and reads the exit code.
+
+    *provider* names an OpenCode provider, and dispatches to that CLI's own
+    login; omitting it runs the Claude sign-in.
 
     *hold* is for that console.  A window that closes the instant the child
     exits takes the last line with it, including the one saying the sign-in
     did not work.
     """
-    from open_shrimp.backend.claude_sdk.login import run_interactive_login
     from open_shrimp.doctor import _load_config
 
-    # The sign-in runs under the managed data directory, which is only
-    # locatable once the instance name has been read off the config — or
-    # settled as the unscoped one, which is the case a wizard hits: it signs
-    # in before there is a config to read.
+    # The login runs under the managed data directory — where the Claude
+    # sign-in writes its workspace, and where the pinned opencode is fetched to
+    # — which is only locatable once the instance name has been read off the
+    # config, or settled as the unscoped one.  That is the case a wizard hits:
+    # it signs in before there is a config to read.
     config = _load_config(None)
     init_paths(config.instance_name if config is not None else None)
+
+    signed_in = (
+        _claude_login() if provider is None else _provider_login(provider)
+    )
+
+    if hold:
+        try:
+            input("Press Enter to close this window. ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return 0 if signed_in else 1
+
+
+def _claude_login() -> bool:
+    from open_shrimp.backend.claude_sdk.login import run_interactive_login
 
     try:
         signed_in = run_interactive_login()
@@ -834,21 +919,38 @@ def _run_auth_login(*, hold: bool) -> int:
         # what a reader of this console needs; the traceback goes to the log.
         logger.debug("The Claude sign-in could not start", exc_info=True)
         print(f"{exc}", file=sys.stderr)
-        signed_in = False
-    else:
-        print()
-        print(
-            "Signed in to Claude."
-            if signed_in
-            else "Not signed in. You can try again with /login in Telegram."
-        )
+        return False
 
-    if hold:
-        try:
-            input("Press Enter to close this window. ")
-        except (EOFError, KeyboardInterrupt):
-            pass
-    return 0 if signed_in else 1
+    print()
+    print(
+        "Signed in to Claude."
+        if signed_in
+        else "Not signed in. You can try again with /login in Telegram."
+    )
+    return signed_in
+
+
+def _provider_login(provider: str) -> bool:
+    from open_shrimp.backend.opencode.login import relogin_hint, run_provider_login
+    from open_shrimp.backend.setup_models import connect_copy
+
+    copy = connect_copy(provider)
+    try:
+        connected = run_provider_login(provider)
+    except (RuntimeError, OSError) as exc:
+        # A platform opencode publishes no build for names itself here, which
+        # is what a reader of this console needs; the traceback goes to the log.
+        logger.debug("The %s login could not start", provider, exc_info=True)
+        print(f"{exc}", file=sys.stderr)
+        return False
+
+    print()
+    if connected:
+        print(copy.done)
+    else:
+        print(f"Not connected yet. To try again:")
+        print(f"  {relogin_hint(provider)}")
+    return connected
 
 
 def _emit_projects(projects: list[ClaudeProject], *, json_output: bool) -> int:
@@ -1274,11 +1376,14 @@ def main() -> None:
 
     if args.subcommand == "auth":
         if args.auth_command == "status":
-            sys.exit(_run_auth_status(json_output=args.json))
+            sys.exit(
+                _run_auth_status(json_output=args.json, provider=args.provider)
+            )
         if args.auth_command == "login":
-            sys.exit(_run_auth_login(hold=args.hold))
+            sys.exit(_run_auth_login(hold=args.hold, provider=args.provider))
         print(
-            "usage: openshrimp auth (status [--json] | login [--hold])",
+            "usage: openshrimp auth (status [--json] | login [--hold]) "
+            "[--provider ID]",
             file=sys.stderr,
         )
         sys.exit(2)

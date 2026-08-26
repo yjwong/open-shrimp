@@ -1,10 +1,21 @@
 import AppKit
 import Foundation
 
-struct ModelChoice: Sendable {
+/// One model a context may be pinned to.
+///
+/// `provider` is the lab the row names, because "gpt-5.6-sol" without "OpenAI"
+/// does not tell somebody which account they are about to be asked to log
+/// into.  `providerID` is the same lab on a wire — what `auth status` and
+/// `auth login` take — and is nil for a model whose credential is the Claude
+/// Code sign-in.  The core derives both, so this wizard never parses a model
+/// id.  Which backend serves the model is not here: nothing on this side
+/// decides it, and `config write` reads it back off the model name.
+struct ModelChoice: Sendable, Hashable {
     let alias: String
     let modelID: String
     let description: String
+    let provider: String
+    let providerID: String?
 }
 
 /// The models a context may be pinned to, and what to call the entry that pins
@@ -41,14 +52,48 @@ struct ConfigWriteRequest: Sendable {
     let contexts: [ConfigContext]
 }
 
-/// What the core says about Claude Code's credentials on this Mac.
+/// What the credential step says, for whichever credential it is asking for.
+///
+/// Read off the core rather than written here: "Sign in to Claude" and
+/// "Connect OpenAI" are the same step asking for different things, and a
+/// sentence that only exists in Swift is one CI cannot check — the `.app` job
+/// builds, signs and notarizes the bundle without ever running it.
+struct ConnectCopy: Sendable, Equatable {
+    let title: String
+    let subtitle: String
+    let body: String
+    let waiting: String
+    let done: String
+
+    /// What the step says where the core could not say.
+    ///
+    /// Names no agent and no lab: this shows only when the check that would
+    /// have named one failed, and the wizard has just been told a model whose
+    /// credential is not the one this would guess at.  Everything the user has
+    /// to do next is still here — the terminal opens, the poll runs, and the
+    /// skip link is a click away.
+    static let unread = ConnectCopy(
+        title: "One sign-in",
+        subtitle: "OpenShrimp runs your model on this Mac, under your own account.",
+        body: "The sign-in happens in a terminal window this app opens.",
+        waiting: "Finish in that window. This step notices on its own.",
+        done: "Signed in."
+    )
+}
+
+/// What the core says about the credential the picked model needs on this Mac.
+///
+/// One shape for both — the Claude Code sign-in, and an OpenCode provider
+/// login — so the poll below reads either without branching.
 struct AuthStatus: Sendable {
     let signedIn: Bool
     /// Which credential it is signed in with — `oauth`, `api_key` or
-    /// `env_token` — and nil when it is signed in with none.  Carried
-    /// separately from the flag because the sign-in step can only ever create
-    /// the first.
+    /// `env_token` for Claude, `api` or `oauth` for a provider — and nil when
+    /// it is signed in with none.  Carried separately from the flag because
+    /// the sign-in step can only ever create some of them.
     let how: String?
+    /// Every sentence the step shows, keyed by that credential.
+    let connect: ConnectCopy
 }
 
 /// The settings the core's config holds that this app acts on.
@@ -421,7 +466,9 @@ enum OpenShrimpCLI {
             return ModelChoice(
                 alias: alias,
                 modelID: entry["model_id"] as? String ?? "",
-                description: entry["description"] as? String ?? ""
+                description: entry["description"] as? String ?? "",
+                provider: entry["provider"] as? String ?? "",
+                providerID: entry["provider_id"] as? String
             )
         }
         return ModelCatalog(
@@ -521,8 +568,11 @@ enum OpenShrimpCLI {
         return CoreSettings(autoUpdate: autoUpdate)
     }
 
-    /// Whether Claude Code is signed in on this Mac, or nil where the check
-    /// could not be made at all.
+    /// Whether this Mac holds the credential a model needs, or nil where the
+    /// check could not be made at all.
+    ///
+    /// *provider* names an OpenCode provider; nil asks about Claude Code,
+    /// which is what a context pinned to a Claude alias or to nothing runs on.
     ///
     /// Asked of the core rather than read off `~/.claude/`: where the
     /// credential lives, and which of an OAuth token, an API key and an
@@ -532,13 +582,41 @@ enum OpenShrimpCLI {
     /// A core that could not run the check exits non-zero, which `jsonObject`
     /// already turns into nil, so "not signed in" and "could not tell" stay
     /// apart.
-    static func authStatus() async -> AuthStatus? {
+    static func authStatus(provider: String? = nil) async -> AuthStatus? {
+        var arguments = ["auth", "status", "--json"]
+        if let provider { arguments += ["--provider", provider] }
         guard
-            let parsed = await jsonObject(["auth", "status", "--json"]),
+            let parsed = await jsonObject(arguments),
             parsed["ok"] as? Bool == true,
             let signedIn = parsed["signed_in"] as? Bool
         else { return nil }
-        return AuthStatus(signedIn: signedIn, how: parsed["how"] as? String)
+        return AuthStatus(
+            signedIn: signedIn,
+            how: parsed["how"] as? String,
+            connect: connectCopy(parsed["connect"] as? [String: Any])
+        )
+    }
+
+    /// The step's own copy, or the sentences that name nothing where the core
+    /// sent none.
+    ///
+    /// All five or none.  The core writes every key or omits the object, so a
+    /// field-by-field merge could only ever produce a mixture it never emits —
+    /// four of its sentences and one generic one, in a step whose whole point
+    /// is that the three wizards say the same thing.
+    private static func connectCopy(_ entry: [String: Any]?) -> ConnectCopy {
+        guard
+            let entry,
+            let title = entry["title"] as? String,
+            let subtitle = entry["subtitle"] as? String,
+            let body = entry["body"] as? String,
+            let waiting = entry["waiting"] as? String,
+            let done = entry["done"] as? String
+        else { return .unread }
+        return ConnectCopy(
+            title: title, subtitle: subtitle, body: body,
+            waiting: waiting, done: done
+        )
     }
 
     /// The script the sign-in window runs.
@@ -546,11 +624,15 @@ enum OpenShrimpCLI {
     /// Terminal titles a window after the file it opened, so this filename is
     /// what the user sees in their window list while they are signing in.
     static var signInScript: URL {
-        CorePaths.dataDirectory.appendingPathComponent("claude-sign-in.command")
+        CorePaths.dataDirectory.appendingPathComponent("sign-in.command")
     }
 
     /// Open a terminal window running the core's sign-in.  Returns nil once
     /// one has been asked for, else the reason there is none.
+    ///
+    /// *provider* names an OpenCode provider; nil runs the Claude Code
+    /// sign-in.  Either way the core is the one that knows how, and the
+    /// terminal window is the one thing this app has to supply.
     ///
     /// A written-out `.command` opened by Launch Services, rather than
     /// `osascript`'s `tell application "Terminal" to do script`.  Driving
@@ -564,13 +646,15 @@ enum OpenShrimpCLI {
     /// Rewritten on every open, so the path baked into it is where the core is
     /// and not where an install that has since moved left it.
     @MainActor
-    static func openSignInWindow() -> String? {
+    static func openSignInWindow(provider: String? = nil) -> String? {
         let script = signInScript
         // Quoted because the core sits under a home directory, whose name may
-        // hold a space or a quote.
+        // hold a space or a quote.  The provider id needs none: it is a key out
+        // of the core's own catalog, never anything typed into a field.
+        let flag = provider.map { " --provider \($0)" } ?? ""
         let body = """
             #!/bin/sh
-            exec \(shellQuoted(CorePaths.coreExecutable.path)) auth login --hold
+            exec \(shellQuoted(CorePaths.coreExecutable.path)) auth login --hold\(flag)
             """
 
         let manager = FileManager.default

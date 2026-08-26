@@ -7,18 +7,31 @@ enum ModelOption: Hashable {
     /// it is follows from the backend the catalog came from — so the entry
     /// cannot be spelled before the catalog is read.
     case unpinned(label: String)
-    case alias(name: String, description: String)
+    /// The whole catalog row, not just its name: what the credential step asks
+    /// for follows from the model, and the core already said which provider
+    /// that is — so nothing here parses a model id.
+    case alias(ModelChoice)
     case custom
 
     /// The unpinned entry is not composed the way an alias is.  Its text
     /// already reads as a recommendation, and pairing it with a name renders
     /// "Claude Code default — Claude Code default (recommended)".
+    ///
+    /// An alias is named beside its lab rather than its blurb: a name without
+    /// one does not say which account the next step is about to ask for.
     var title: String {
         switch self {
         case .unpinned(let label): return "\(label) (recommended)"
-        case .alias(let name, let description): return "\(name) — \(description)"
+        case .alias(let choice): return "\(choice.alias) — \(choice.provider)"
         case .custom: return "Custom…"
         }
+    }
+
+    /// The OpenCode provider a context pinned to this entry needs a login
+    /// with, or nil where the credential is the Claude Code sign-in.
+    var providerID: String? {
+        guard case .alias(let choice) = self else { return nil }
+        return choice.providerID
     }
 }
 
@@ -110,7 +123,7 @@ enum EnrollStage: Equatable {
     case manual
 }
 
-/// Where the sign-in step is.
+/// Where the credential step is.
 ///
 /// The sign-in does not happen in this window, so all the step can say is what
 /// it is waiting for.
@@ -119,15 +132,15 @@ enum SignInStage: Equatable {
     case ready
     /// A terminal is open, and the poll is watching for the credential.
     case waiting
-    /// The core reports Claude Code signed in.
+    /// The core reports the credential held.
     case signedIn
 }
 
 /// The steps a run of the wizard can ask, in order.
 ///
-/// Named rather than counted, because a position is not a step: the sign-in is
-/// only there on a Mac that needs it, and the slot it would have taken is
-/// Finish's everywhere else.
+/// Named rather than counted, because a position is not a step: the credential
+/// step is only there on a Mac that does not already hold what the picked model
+/// needs, and the slot it would have taken is Finish's everywhere else.
 enum WizardStep {
     case token
     case enroll
@@ -146,14 +159,14 @@ enum WizardStep {
 final class SetupWizardModel: ObservableObject {
     /// The steps this run will ask, in order.
     ///
-    /// The sign-in joins them only where the check taken as the wizard opened
-    /// says this Mac still needs it, so a Mac that is already signed in never
+    /// The credential step joins them only where this Mac does not already
+    /// hold what the picked model needs, so a Mac that is signed in never
     /// draws a fifth dot the wizard then takes away.  It joins before Finish:
-    /// after the projects are settled, and the last thing asked before anything
-    /// is written.
+    /// after the projects are settled, which is also when the model — and so
+    /// which credential is owed — is known at all.
     @Published private(set) var steps: [WizardStep] = [.token, .enroll, .projects, .finish]
 
-    /// Four steps, or five where Claude Code still has to be signed in.
+    /// Four steps, or five where a credential still has to be collected.
     var stepCount: Int { steps.count }
 
     @Published private(set) var step = 0 { didSet { syncAuthPoll() } }
@@ -223,6 +236,19 @@ final class SetupWizardModel: ObservableObject {
 
     @Published private(set) var signInStage: SignInStage = .ready
 
+    /// The OpenCode provider the credential step's stage and copy were settled
+    /// for, or nil for the Claude Code sign-in.  Settled on the way out of the
+    /// import step, which is the first moment there is a model to read it off,
+    /// and held because the poll and the terminal window have to ask about the
+    /// same credential the step was drawn for — and because a change of it is
+    /// what makes the step unanswered again.
+    private(set) var settledFor: String?
+
+    /// Every sentence the credential step shows, keyed by that credential.
+    /// From the core, so the terminal wizard and the Windows tray's say the
+    /// same things.
+    @Published private(set) var connect: ConnectCopy = .unread
+
     /// The poll that watches for the credential the sign-in window writes.
     /// Held so it ends with the step, and with the wizard.
     private var authPollTask: Task<Void, Never>?
@@ -257,9 +283,9 @@ final class SetupWizardModel: ObservableObject {
     private var warmup: Task<Void, Never>?
 
     /// Everything the wizard reads off the core before it asks anything.  Held
-    /// because one of its answers — whether Claude Code is signed in — decides
-    /// how many steps there are, and the projects step may not hand over to a
-    /// step count that has not settled.
+    /// because the import step's picker is filled from one of its answers, and
+    /// that step decides which credential is owed by reading its own
+    /// selection — so it may not hand over to a catalog that has not landed.
     private var discovery: Task<Void, Never>?
 
     /// Called once the config has been written, with the bot the token belongs
@@ -278,10 +304,10 @@ final class SetupWizardModel: ObservableObject {
     /// added by chat afterwards.  A tick list with no visible way past it is
     /// the one shape this step must not have.
     ///
-    /// On the sign-in step it says "Open sign-in window" until the core reports
-    /// the credential, because that is what the click does: the sign-in happens
-    /// in a terminal, and there is nothing else on the step to press.  It
-    /// becomes "Next" once the credential lands, so the step cannot be left
+    /// On the credential step it says "Open sign-in window" until the core
+    /// reports the credential, because that is what the click does: the sign-in
+    /// happens in a terminal, and there is nothing else on the step to press.
+    /// It becomes "Next" once the credential lands, so the step cannot be left
     /// before it has.
     var primaryTitle: String {
         if isLastStep { return "Finish" }
@@ -305,14 +331,17 @@ final class SetupWizardModel: ObservableObject {
     // -- Setup ----------------------------------------------------------------
 
     /// Warm the core binary, then read off it everything the wizard needs
-    /// before it asks anything: the model catalog, the projects to offer, what
-    /// isolation is available, and whether Claude Code is signed in.
+    /// before it asks anything: the model catalog, the projects to offer, and
+    /// what isolation is available.
+    ///
+    /// Not the credential check, which asks about a model nobody has picked
+    /// yet; that runs on the way out of the import step.
     ///
     /// This is the first thing in the app that runs the core at all — a core
     /// with no config is never started — so it also absorbs the launcher's
     /// first-run unpack, which takes minutes on a fresh machine.  Everything
     /// after that unpack is one spawn each and depends on none of the others,
-    /// so they run together rather than paying interpreter startup four times
+    /// so they run together rather than paying interpreter startup three times
     /// in a row.
     func prepare() {
         let warmup = Task {
@@ -328,14 +357,12 @@ final class SetupWizardModel: ObservableObject {
         // Discovered here rather than when the step is reached: the answer
         // decides what that step asks — a list to prune, or a folder to pick —
         // and a step that renders empty and then fills itself has already
-        // asked the wrong question once.  The sign-in check is here for a
-        // stronger reason: its answer decides whether the step exists at all.
+        // asked the wrong question once.
         discovery = Task {
             await warmup.value
             async let choices = OpenShrimpCLI.models()
             async let found = OpenShrimpCLI.projects()
             async let isolation = OpenShrimpCLI.blessedSandbox()
-            async let authCheck = OpenShrimpCLI.authStatus()
 
             // A catalog that could not be read is a convenience the wizard does
             // without.  Blocking setup on it would make a core that cannot run
@@ -346,9 +373,10 @@ final class SetupWizardModel: ObservableObject {
             // spelling matches nothing in the list that replaces it.
             let unpinned = ModelOption.unpinned(label: catalog.defaultLabel)
             if case .unpinned = selection { selection = unpinned }
-            options = [unpinned]
-                + catalog.choices.map { .alias(name: $0.alias, description: $0.description) }
-                + [.custom]
+            // Flat, and in the core's order: nine rows a lab column already
+            // tells apart do not need Sections, and three wizards disagreeing
+            // about which model is recommended is the same bug three times.
+            options = [unpinned] + catalog.choices.map { .alias($0) } + [.custom]
             catalogLoaded = true
 
             rows = await found.map {
@@ -360,20 +388,6 @@ final class SetupWizardModel: ObservableObject {
             // switch drawn in the on position promises isolation the config
             // about to be written will not carry.
             if sandbox?.available != true { sandboxEnabled = false }
-
-            // A check that could not run offers the step too: a step that is
-            // there can be skipped in one click, and a step that was dropped
-            // cannot be brought back without starting the wizard again.
-            //
-            // Added only while Finish is still ahead of the user, so an answer
-            // that arrives late cannot swap the screen they are reading for the
-            // one after it.  The projects step waits this check out before
-            // handing over, so a user who needs the step cannot walk past it on
-            // a machine slow enough that the answer had not landed.
-            let credential = await authCheck
-            if currentStep != .finish, credential?.signedIn != true {
-                steps.insert(.signIn, at: steps.count - 1)
-            }
 
             discoveryFinished = true
         }
@@ -794,7 +808,47 @@ final class SetupWizardModel: ObservableObject {
         botLink = nil
     }
 
-    // -- Sign-in --------------------------------------------------------------
+    // -- The model's credential -----------------------------------------------
+
+    /// Find out whether this Mac holds what the picked model needs, and put the
+    /// step in or take it out accordingly.
+    ///
+    /// A check that could not run offers the step: a step that is there can be
+    /// skipped in one click, and one that was dropped cannot be brought back
+    /// without starting the wizard again.  Its copy then names no agent and no
+    /// lab, because the answer that would have named one is the answer that did
+    /// not arrive.
+    ///
+    /// Both directions, not just the insert: a user who goes back and picks a
+    /// different model changes which credential is owed, and a step dropped for
+    /// the model before must not answer for the model after.
+    private func settleCredentialStep() async {
+        let picked = selection.providerID
+        // Already settled, and a credential does not un-land: a Back and a Next
+        // over an unchanged model would otherwise spawn a core to confirm what
+        // this session has already seen.
+        if picked == settledFor, signInStage == .signedIn { return }
+        // A new question is an unanswered one, whatever the last one settled.
+        if picked != settledFor { signInStage = .ready }
+        settledFor = picked
+
+        let status = await OpenShrimpCLI.authStatus(provider: picked)
+        // Never carried over from the model picked before this one: a step
+        // saying "Connect OpenAI" for a Google model is worse than one that
+        // names neither, which is what `unread` is.
+        connect = status?.connect ?? .unread
+        // A check that could not run answers neither way, so it leaves a
+        // sign-in this session already landed standing rather than sending the
+        // user back to a step they have finished.
+        if let status { signInStage = status.signedIn ? .signedIn : .ready }
+
+        let needed = signInStage != .signedIn
+        if needed, !steps.contains(.signIn) {
+            steps.insert(.signIn, at: steps.count - 1)
+        } else if !needed {
+            steps.removeAll { $0 == .signIn }
+        }
+    }
 
     /// The step's primary opens the sign-in window until the core reports the
     /// credential, and only then leaves.  Two jobs behind one button because
@@ -815,12 +869,12 @@ final class SetupWizardModel: ObservableObject {
     /// the window too early needs to reopen it, and running the sign-in twice
     /// is harmless.
     func openSignInWindow() {
-        if let reason = OpenShrimpCLI.openSignInWindow() {
+        if let reason = OpenShrimpCLI.openSignInWindow(provider: settledFor) {
             AppLog.write("could not open the sign-in window: \(reason)")
             message = WizardMessage(tone: .failure, text: reason)
             return
         }
-        AppLog.write("opened the Claude sign-in window")
+        AppLog.write("opened the sign-in window for \(settledFor ?? "Claude Code")")
         message = nil
         signInStage = .waiting
     }
@@ -858,17 +912,23 @@ final class SetupWizardModel: ObservableObject {
     ///
     /// Runs for as long as the step is on screen and no longer, so a wizard
     /// abandoned on a desk is not spawning a core every two seconds all night.
+    ///
+    /// It sleeps before its first check rather than after: the step is only
+    /// reached through `settleCredentialStep`, which just asked this exact
+    /// question, so checking on arrival would spawn a core to re-answer
+    /// something answered milliseconds ago.
     private func startAuthPoll() {
         guard authPollTask == nil, signInStage != .signedIn else { return }
         authPollTask = Task { [weak self] in
             while !Task.isCancelled {
-                let status = await OpenShrimpCLI.authStatus()
+                try? await Task.sleep(nanoseconds: Self.authPollNanoseconds)
+                if Task.isCancelled { return }
+                let status = await OpenShrimpCLI.authStatus(provider: self?.settledFor)
                 if Task.isCancelled { return }
                 if status?.signedIn == true {
                     self?.reportSignedIn()
                     return
                 }
-                try? await Task.sleep(nanoseconds: Self.authPollNanoseconds)
             }
         }
     }
@@ -882,7 +942,7 @@ final class SetupWizardModel: ObservableObject {
         // task, which returns on the next line.
         authPollTask = nil
         signInStage = .signedIn
-        message = WizardMessage(tone: .success, text: "Claude Code is signed in.")
+        message = WizardMessage(tone: .success, text: connect.done)
     }
 
     private func stopAuthPoll() {
@@ -933,8 +993,8 @@ final class SetupWizardModel: ObservableObject {
         switch selection {
         case .unpinned:
             model = nil
-        case .alias(let alias, _):
-            model = alias
+        case .alias(let choice):
+            model = choice.alias
         case .custom:
             let custom = trimmed(customModel)
             guard !custom.isEmpty else {
@@ -958,21 +1018,25 @@ final class SetupWizardModel: ObservableObject {
         }
     }
 
-    /// The import step is left on its answers alone.  Nothing is written here:
-    /// the config write belongs to the last step, so that a wizard abandoned on
-    /// the autostart question leaves no config behind.
+    /// The import step is left on its answers alone, and on one question they
+    /// settle: which credential the model they were pinned to needs, and
+    /// whether this Mac already holds it.  Nothing is written here — the config
+    /// write belongs to the last step, so that a wizard abandoned on the
+    /// autostart question leaves no config behind.
+    ///
+    /// The check runs here and not at `prepare` because the model is not known
+    /// until now, and it decides both whether the credential step exists and
+    /// every sentence it says.  Leaving this step is always while Finish is
+    /// ahead of the user, which is the one condition inserting a step needs.
     private func leaveContextStep() async {
         guard validatedContexts() != nil else { return }
 
-        // Whether there is a sign-in step at all is one of this batch's
-        // answers, and stepping past it before that answer lands is how a user
-        // who needs signing in never gets asked.  Normally already settled: the
-        // list this step just validated came out of the same batch, behind a
-        // spinner.
-        if !discoveryFinished {
-            message = WizardMessage(tone: .progress, text: "Checking Claude Code…")
-            await discovery?.value
-        }
+        // The catalog this step's picker was filled from came out of the same
+        // batch, behind a spinner, so this is normally already settled.
+        if !discoveryFinished { await discovery?.value }
+
+        message = WizardMessage(tone: .progress, text: "Checking your sign-in…")
+        await settleCredentialStep()
         message = nil
 
         step += 1

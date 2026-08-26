@@ -236,3 +236,36 @@ def test_opencode_is_refused_where_no_build_is_published(
     raw = _opencode_raw(backend="opencode", model="openai/gpt-5.5")
     with pytest.raises(ValueError, match="no opencode build is published"):
         _validate_raw(raw)
+
+
+# ── what a wizard writes ──
+
+
+def test_a_wizard_pinning_an_opencode_model_writes_a_context_that_resolves_to_it(
+    _opencode_build_published,
+):
+    """The whole point of deriving the backend in ``build_context_dict``: a
+    first config naming ``openai/gpt-5.6-sol`` has to reach the turn through
+    OpenCode, and the only thing between the wizard and that turn is this."""
+    from open_shrimp.config import build_context_dict
+
+    raw = _base_raw()
+    raw["contexts"] = {
+        "gpt": build_context_dict("/tmp", "gpt", "openai/gpt-5.6-sol"),
+        "default": build_context_dict("/tmp", "claude", "sonnet"),
+    }
+
+    _validate_raw(raw)
+    cfg = _parse(raw)
+
+    assert effective_backend(cfg.contexts["gpt"], cfg) == "opencode"
+    assert effective_backend(cfg.contexts["default"], cfg) == "claude_sdk"
+
+
+def test_a_claude_only_config_carries_no_backend_key_at_all():
+    """Byte-identical to what the wizard wrote before any of this existed, so
+    the derivation costs nothing on the configs that do not need it."""
+    from open_shrimp.config import build_context_dict
+
+    assert "backend" not in build_context_dict("/tmp", "d", "sonnet")
+    assert "backend" not in build_context_dict("/tmp", "d", None)

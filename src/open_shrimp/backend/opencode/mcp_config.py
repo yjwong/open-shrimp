@@ -98,10 +98,9 @@ def _get_existing_opencode_config_path() -> Path:
 
 
 def _opencode_mcp_auth_path() -> Path:
-    data_home = os.environ.get("XDG_DATA_HOME")
-    if data_home:
-        return Path(data_home) / "opencode" / "mcp-auth.json"
-    return Path.home() / ".local" / "share" / "opencode" / "mcp-auth.json"
+    from open_shrimp.backend.opencode.auth import host_data_dir
+
+    return host_data_dir() / "mcp-auth.json"
 
 
 def _parse_opencode_stdio_servers(

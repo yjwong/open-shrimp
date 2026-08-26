@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The wizard's steps — four, or five where Claude Code still has to be signed
-/// in, which is the model's answer and never this view's.
+/// The wizard's steps — four, or five where a credential still has to be
+/// collected, which is the model's answer and never this view's.
 ///
 /// Laid out in a stack rather than at hand-computed offsets: the feedback line
 /// sits in the flow between the fields and the buttons, so it cannot end up
@@ -44,7 +44,7 @@ struct SetupWizardView: View {
             if case .confirming = model.stage { return "Is this you?" }
             return "Who may use it?"
         case .projects: return "Your projects"
-        case .signIn: return "Sign in to Claude"
+        case .signIn: return model.connect.title
         case .finish: return "One last thing"
         }
     }
@@ -67,9 +67,7 @@ struct SetupWizardView: View {
         case .projects:
             return "The folders you already work in. Untick anything you'd "
                 + "rather not reach from Telegram."
-        case .signIn:
-            return "OpenShrimp answers your messages by running Claude Code on this "
-                + "Mac, under your own Claude Code login."
+        case .signIn: return model.connect.subtitle
         case .finish: return lastStepSubtitle
         }
     }
@@ -418,27 +416,25 @@ struct SetupWizardView: View {
         }
     }
 
-    /// Signing Claude Code in, in a terminal window this step opens.
+    /// Collecting the credential the picked model needs, in a terminal window
+    /// this step opens.
     ///
     /// The step exists because the alternative is finding out from the bot's
-    /// readiness card, after the wizard has closed, that there is a `/login`
-    /// still to run.
+    /// readiness card, after the wizard has closed, that there is a login still
+    /// to run.  Every sentence comes from the core, because which credential
+    /// this is follows from the model: a Claude alias signs Claude Code in, and
+    /// `openai/…` connects a provider to OpenCode.
     private var signInStep: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Signing in happens in a terminal window and then in your "
-                 + "browser — this step opens the window for you, and you'll "
-                 + "choose there between a Claude subscription and API billing. "
-                 + "Skip it only if you mean to run OpenShrimp on a different "
-                 + "backend, like OpenCode.")
+            Text(model.connect.body)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 
             signInProgress
 
-            // Nothing left to skip once it has landed.  /login is there for
-            // whoever wants it, and a Mac whose contexts all run on another
-            // backend is never asked again, so the label promises neither a
-            // later step nor a reminder.
+            // Nothing left to skip once it has landed.  The login runs from a
+            // terminal afterwards, and nothing reminds a Mac that skipped it,
+            // so the label promises neither a later step nor a reminder.
             if model.signInStage != .signedIn {
                 Button("Skip this step") { model.skipSignIn() }
                     .buttonStyle(.link)
@@ -458,9 +454,7 @@ struct SetupWizardView: View {
             EmptyView()
         case .waiting:
             VStack(alignment: .leading, spacing: 8) {
-                Text("A terminal window is open. Follow the prompt in your browser "
-                     + "to sign in. When the window says Login successful you can "
-                     + "type /exit, or just close it.")
+                Text(model.connect.waiting)
                     .font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -472,7 +466,7 @@ struct SetupWizardView: View {
                 }
             }
         case .signedIn:
-            Text("Signed in. You can close the terminal window if it is still open.")
+            Text(model.connect.done)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
         }

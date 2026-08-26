@@ -5,10 +5,24 @@ using System.Text.Json.Serialization;
 
 namespace OpenShrimp.Tray.Core;
 
+/// <summary>
+/// One model a context may be pinned to.
+///
+/// <c>Provider</c> is the lab the row names, because "gpt-5.6-sol" without
+/// "OpenAI" does not tell somebody which account they are about to be asked to
+/// log into. <c>ProviderId</c> is the same lab on a wire — what
+/// <c>auth status</c> and <c>auth login</c> take — and is null for a model
+/// whose credential is the Claude Code sign-in. The core derives both, so this
+/// wizard never parses a model id. Which backend serves the model is not here:
+/// nothing on this side decides it, and <c>config write</c> reads it back off
+/// the model name.
+/// </summary>
 internal sealed record ModelChoice(
     [property: JsonPropertyName("alias")] string Alias,
     [property: JsonPropertyName("model_id")] string ModelId,
-    [property: JsonPropertyName("description")] string Description);
+    [property: JsonPropertyName("description")] string Description,
+    [property: JsonPropertyName("provider")] string Provider,
+    [property: JsonPropertyName("provider_id")] string? ProviderId);
 
 /// <summary>
 /// The models a context may be pinned to, and what to call the entry that pins
@@ -103,18 +117,53 @@ internal sealed record CoreSettingsReport(
     [property: JsonPropertyName("config")] CoreSettings? Config);
 
 /// <summary>
-/// The <c>auth status --json</c> payload: whether Claude Code is signed in on
-/// this machine, and with which credential.
+/// What the credential step says, for whichever credential it is asking for.
 ///
-/// <c>How</c> is <c>oauth</c>, <c>api_key</c> or <c>env_token</c> when signed
-/// in and null when not. The last two are set in the environment, which no
-/// wizard step can arrange. <c>Ok</c> is false only where the check itself
-/// could not run, which is a different answer from "not signed in".
+/// Read off the core rather than written here: "Sign in to Claude" and
+/// "Connect OpenAI" are the same step asking for different things, and a
+/// sentence baked into this file is one the terminal wizard and the Mac's
+/// cannot say too.
+/// </summary>
+internal sealed record ConnectCopy(
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("subtitle")] string Subtitle,
+    [property: JsonPropertyName("body")] string Body,
+    [property: JsonPropertyName("waiting")] string Waiting,
+    [property: JsonPropertyName("done")] string Done)
+{
+    /// <summary>
+    /// What the step says where the core could not say.
+    ///
+    /// Names no agent and no lab: this shows only when the check that would
+    /// have named one failed, and the wizard has just been told a model whose
+    /// credential is not the one this would guess at. Everything a user has to
+    /// do next is still here — the console opens, the poll runs, and the skip
+    /// link is a click away.
+    /// </summary>
+    public static readonly ConnectCopy Unread = new(
+        "One sign-in",
+        "OpenShrimp runs your model on this PC, under your own account.",
+        "The sign-in happens in a console window this app opens.",
+        "Finish in that window. This step notices on its own.",
+        "Signed in.");
+}
+
+/// <summary>
+/// The <c>auth status --json</c> payload: whether this PC holds the credential
+/// the picked model needs, and which one it is.
+///
+/// One shape for both credentials — the Claude Code sign-in, and an OpenCode
+/// provider login — so the poll loop below reads either without branching.
+/// <c>How</c> is <c>oauth</c>, <c>api_key</c> or <c>env_token</c> for Claude
+/// and <c>api</c> or <c>oauth</c> for a provider, and null when there is no
+/// credential. <c>Ok</c> is false only where the check itself could not run,
+/// which is a different answer from "not signed in".
 /// </summary>
 internal sealed record AuthStatus(
     [property: JsonPropertyName("ok")] bool Ok,
     [property: JsonPropertyName("signed_in")] bool SignedIn,
-    [property: JsonPropertyName("how")] string? How);
+    [property: JsonPropertyName("how")] string? How,
+    [property: JsonPropertyName("connect")] ConnectCopy? Connect);
 
 /// <summary>
 /// One line of the core's prefetch NDJSON, as it arrives.
@@ -500,23 +549,38 @@ internal static class OpenShrimpCli
     }
 
     /// <summary>
-    /// Whether Claude Code is signed in on this machine, or null where the core
-    /// could not say.
+    /// Whether this machine holds the credential a model needs, or null where
+    /// the core could not say.
+    ///
+    /// <paramref name="providerId"/> names an OpenCode provider; null asks
+    /// about Claude Code, which is what a context pinned to a Claude alias or
+    /// to nothing runs on.
     ///
     /// Asked of the core rather than read off disk: credentials live in a
     /// different place for each way of signing in, and which of them counts is
-    /// Claude Code's rule to state. A check that could not run is null and
-    /// never false, because false costs the user a sign-in they may not need.
+    /// the agent's rule to state. A check that could not run is null and never
+    /// false, because false costs the user a sign-in they may not need.
     /// </summary>
-    public static async Task<AuthStatus?> GetAuthStatusAsync(CancellationToken ct = default)
+    public static async Task<AuthStatus?> GetAuthStatusAsync(
+        string? providerId = null, CancellationToken ct = default)
     {
-        var status = await JsonAsync<AuthStatus>(new[] { "auth", "status", "--json" }, ct)
-            .ConfigureAwait(false);
+        var arguments = new List<string> { "auth", "status", "--json" };
+        if (providerId is not null)
+        {
+            arguments.Add("--provider");
+            arguments.Add(providerId);
+        }
+
+        var status = await JsonAsync<AuthStatus>(arguments, ct).ConfigureAwait(false);
         return status is { Ok: true } ? status : null;
     }
 
     /// <summary>
-    /// Open Claude Code's interactive sign-in in a console window of its own.
+    /// Open the interactive sign-in in a console window of its own.
+    ///
+    /// <paramref name="providerId"/> names an OpenCode provider; null runs the
+    /// Claude Code sign-in. Either way the core is the one that knows how, and
+    /// the console is the one thing this app has to supply.
     ///
     /// The one spawn in this file that is neither hidden nor redirected. The
     /// core is a console-subsystem binary, which is why every other call here
@@ -539,19 +603,23 @@ internal static class OpenShrimpCli
     /// releases the handle, never the console. Throws if no console could be
     /// started at all.
     /// </summary>
-    public static Process? StartLoginConsole()
+    public static Process? StartLoginConsole(string? providerId = null)
     {
+        // One string rather than an ArgumentList, which shell-execute would
+        // flatten into one anyway. Every other spawn here is built argument by
+        // argument because it carries folders the user picked; nothing in this
+        // one comes from a text field — the provider id is a key out of the
+        // core's own catalog.
+        //
+        // --hold keeps the window up after the CLI is done with it, so a
+        // sign-in that failed says why instead of vanishing.
+        var arguments = "auth login --hold";
+        if (providerId is not null) arguments += $" --provider {providerId}";
+
         var psi = new ProcessStartInfo
         {
             FileName = CorePaths.CoreExecutable,
-            // One string rather than an ArgumentList, which shell-execute would
-            // flatten into one anyway. Every other spawn here is built argument
-            // by argument because it carries folders the user picked; this argv
-            // is a constant with nothing in it to quote.
-            //
-            // --hold keeps the window up after the CLI is done with it, so a
-            // sign-in that failed says why instead of vanishing.
-            Arguments = "auth login --hold",
+            Arguments = arguments,
             UseShellExecute = true,
             CreateNoWindow = false,
         };

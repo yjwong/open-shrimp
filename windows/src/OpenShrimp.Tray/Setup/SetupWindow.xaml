@@ -164,18 +164,20 @@
                 </StackPanel>
 
                 <!--
-                    Step 3: the Claude sign-in, and the only step that is not
-                    always there — a PC that is already signed in is never
-                    asked, and its wizard is four steps long.  The sign-in
-                    happens in a console window this app opens and does not
-                    own, so the step polls the core for the answer rather than
-                    reading the window it opened.
+                    Step 3: the credential the picked model needs, and the only
+                    step that is not always there — a PC that already holds it
+                    is never asked, and its wizard is four steps long.  Every
+                    sentence comes from the core, because which credential this
+                    is follows from the model: a Claude alias signs Claude Code
+                    in, and openai/… connects a provider to OpenCode.  The
+                    login happens in a console window this app opens and does
+                    not own, so the step polls the core for the answer rather
+                    than reading the window it opened.
                 -->
                 <StackPanel x:Name="StepSignIn" Spacing="10" Visibility="Collapsed">
 
                     <StackPanel x:Name="SignInOffering" Spacing="10">
-                        <TextBlock TextWrapping="Wrap"
-                                   Text="Signing in happens in a console window and then in your browser; you'll choose there between a Claude subscription and API billing. It's once per computer. Skip it only if you mean to run OpenShrimp on a different backend, like OpenCode." />
+                        <TextBlock x:Name="SignInBody" TextWrapping="Wrap" />
                         <Button Content="Open sign-in window"
                                 Style="{StaticResource AccentButtonStyle}"
                                 Click="OpenSignInConsole" />
@@ -184,16 +186,16 @@
                     <StackPanel x:Name="SignInWaiting" Spacing="10" Visibility="Collapsed">
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <ProgressRing x:Name="SignInSpinner" IsActive="False" Width="16" Height="16" />
-                            <TextBlock Text="A sign-in window opened — finish in your browser."
+                            <TextBlock Text="A sign-in window opened."
                                        VerticalAlignment="Center" />
                         </StackPanel>
                         <!-- Says how it ends, because it does not end by
-                             itself: the CLI stays at its prompt once the
-                             browser is done. -->
-                        <TextBlock TextWrapping="Wrap"
+                             itself: both CLIs sit at a prompt once the
+                             credential is written. -->
+                        <TextBlock x:Name="SignInWaitingNote"
+                                   TextWrapping="Wrap"
                                    Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                   Text="When it says Login successful, type /exit or just close that window. This step notices on its own — you don't have to tell it." />
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         <HyperlinkButton Content="Open the sign-in window again" Click="OpenSignInConsole" />
                     </StackPanel>
 
@@ -202,10 +204,9 @@
                                Visibility="Collapsed"
                                Style="{StaticResource BodyStrongTextBlockStyle}" />
 
-                    <!-- /login works from Telegram afterwards, and a PC whose
-                         contexts all run on another backend is never asked
-                         again, so the label promises neither a later step nor
-                         a reminder. -->
+                    <!-- The login runs from a terminal afterwards, and nothing
+                         reminds a PC that skipped it, so the label promises
+                         neither a later step nor a reminder. -->
                     <HyperlinkButton x:Name="SignInSkip"
                                      Content="Skip this step"
                                      Click="SkipSignIn" />

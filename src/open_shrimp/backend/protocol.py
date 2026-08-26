@@ -410,10 +410,15 @@ class Backend(Protocol):
         ...
 
     def is_known_model(self, model: str) -> bool:
-        """Whether this backend recognises *model*, gating presentation only.
+        """Whether this backend recognises *model*.
 
-        A false answer never blocks the model — it only lets a caller warn
-        that the value was not recognised.
+        Two callers, and the stricter one decides how loosely this may answer.
+        ``/model`` uses it to warn that a value was not recognised, and a false
+        answer there never blocks the model.  ``factory.backend_for_model``
+        uses it to route: a model claimed here is one this backend will be
+        asked to serve, and a first config is written naming it.  So claim only
+        what this backend can address — a backend that answered ``True``
+        broadly would take every other backend's models with it.
         """
         ...
 

@@ -1225,6 +1225,14 @@ def build_context_dict(
     Shared by every front end that can create a first config, so the shape
     cannot drift between them.
 
+    *model* decides the backend, per context rather than at the top level.  A
+    config mixing one project on Claude with one on GPT then comes out right
+    without the wizard asking twice, and ``openshrimp config write`` is fixed
+    at the same seam: a GUI handing over ``"model": "openai/gpt-5.6-sol"``
+    otherwise gets a config that runs that string through ``claude_sdk`` on
+    every turn.  A Claude-only config comes out with no ``backend:`` key at
+    all.
+
     *sandbox* names a backend, and a sandboxed context gets a desktop.  The
     rest of a sandbox block — ``allow_host_escape``, ``persistent_paths`` — is
     chosen later in the config Mini App, because the question a first config
@@ -1246,7 +1254,12 @@ def build_context_dict(
         "allowed_tools": ["LSP", "AskUserQuestion"],
     }
     if model is not None:
+        from open_shrimp.backend.factory import DEFAULT_BACKEND, backend_for_model
+
         context["model"] = model
+        backend = backend_for_model(model)
+        if backend != DEFAULT_BACKEND:
+            context["backend"] = backend
     if sandbox is not None:
         context["sandbox"] = {"backend": sandbox, "computer_use": True}
     return context

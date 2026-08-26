@@ -73,6 +73,42 @@ def default_model_label(name: str | None = None) -> str:
     return f"{get_backend_by_name(name or DEFAULT_BACKEND).display_name} default"
 
 
+def backend_for_model(model: str | None) -> str:
+    """Which backend serves a context pinned to *model*.
+
+    Asked of the registry rather than pattern-matched, so a third backend routes
+    its own models by shipping an ``is_known_model`` and nothing here changes.
+    A model no backend claims — including pinning nothing — is the default's,
+    which is also what makes an unpinned context Claude's: OpenCode addresses
+    models as ``provider/model`` and ``split_provider_model`` raises on a bare
+    name, so it can never be the one to serve a turn with no model at all.
+
+    The routing rule for a *first* config, and the reason it lives here rather
+    than with the wizards that call it: ``config.build_context_dict`` writes the
+    ``backend:`` key from this, and every front end that can create a config
+    shares that function.
+    """
+    if not model:
+        return DEFAULT_BACKEND
+    for name in known_backends():
+        if name != DEFAULT_BACKEND and get_backend_by_name(name).is_known_model(model):
+            return name
+    return DEFAULT_BACKEND
+
+
+def provider_id_for_model(model: str | None) -> str | None:
+    """The provider a context pinned to *model* needs a credential for.
+
+    ``None`` wherever the credential is not a provider login — an unpinned
+    context, or a Claude alias, both of which are signed in as Claude Code.
+    """
+    if backend_for_model(model) == DEFAULT_BACKEND:
+        return None
+    from open_shrimp.backend.opencode.options import split_provider_model
+
+    return split_provider_model(model)[0]
+
+
 def get_backend(config: Any) -> Backend:
     """Resolve the backend named by ``config['backend']`` (default ``claude_sdk``).
 

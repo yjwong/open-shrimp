@@ -1,10 +1,15 @@
-"""The one answer to "is Claude signed in here", and the CLI that hands it out.
+"""The one answer to "does this host hold the credential", and its CLI.
 
 Three wizards and the boot-time readiness card ask this question, and only one
 of them can call Python directly.  What is pinned here is the wire contract the
 two GUI wizards decode and the precedence behind it: an operator whose
 environment holds a key is signed in whatever the credential file says, because
 that key is what the CLI would actually use.
+
+Two credentials, one shape.  A context pinned to a Claude model runs on the
+Claude Code sign-in and one pinned to ``openai/…`` runs on an opencode provider
+login, and ``auth status`` answers for both in the same object — so a wizard
+that switched its picker keeps the poll loop and the decoder it already had.
 """
 
 from __future__ import annotations
@@ -20,6 +25,9 @@ from open_shrimp.backend.claude_sdk.login import (
     auth_status,
     run_interactive_login,
 )
+from open_shrimp.backend.opencode import login as opencode_login
+from open_shrimp.backend.opencode.auth import connected_providers
+from open_shrimp.backend.opencode.login import run_provider_login
 from open_shrimp.main import _run_auth_login, _run_auth_status
 
 
@@ -201,7 +209,11 @@ class TestInteractiveLogin:
 
 class TestAuthStatusCommand:
     def _emitted(self, capsys: pytest.CaptureFixture[str]) -> dict:
-        return json.loads(capsys.readouterr().out)
+        """The payload without its copy block, which every answer carries and
+        which :class:`TestConnectCopy` is what pins."""
+        payload = json.loads(capsys.readouterr().out)
+        payload.pop("connect", None)
+        return payload
 
     def test_signed_in_is_the_documented_object(
         self, no_env: None, monkeypatch: pytest.MonkeyPatch, capsys
@@ -308,3 +320,231 @@ class TestAuthLoginCommand:
         monkeypatch.setattr("builtins.input", _closed)
 
         assert _run_auth_login(hold=True) == 0
+
+
+# -- The other credential the same CLI hands out -----------------------------
+
+
+@pytest.fixture
+def auth_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """An opencode credential file of this test's own.
+
+    The developer's machine may have a real one, and reading it would make
+    "is OpenAI connected" a question about them rather than about the fixture.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    path = tmp_path / "opencode" / "auth.json"
+    path.parent.mkdir(parents=True)
+    return path
+
+
+class TestConnectedProviders:
+    def test_a_provider_in_the_file_is_named_with_how_it_authenticates(
+        self, auth_file: Path
+    ) -> None:
+        auth_file.write_text(
+            json.dumps({"openai": {"type": "api", "key": "sk-…"}}), encoding="utf-8"
+        )
+
+        assert connected_providers() == {"openai": "api"}
+
+    def test_a_host_that_never_logged_in_has_none(self, auth_file: Path) -> None:
+        """No file is an answer a wizard renders as the step it is about to
+        offer, not a failure it reports."""
+        assert connected_providers() == {}
+
+    def test_an_unreadable_file_authenticates_nothing(self, auth_file: Path) -> None:
+        """The caller's next move — offer the login — is the same for a file
+        that is not there and one nobody can parse."""
+        auth_file.write_text("{ not json", encoding="utf-8")
+
+        assert connected_providers() == {}
+
+    def test_an_entry_with_no_type_is_still_a_credential(
+        self, auth_file: Path
+    ) -> None:
+        """Only its type went unrecognised, and a UI that shows nothing beside
+        the provider is a smaller wrong than one that offers a login for a
+        credential already there."""
+        auth_file.write_text(json.dumps({"xai": {}}), encoding="utf-8")
+
+        assert connected_providers() == {"xai": None}
+
+
+class TestProviderInteractiveLogin:
+    @pytest.fixture
+    def cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A host that already has the pinned binary, so nothing here
+        downloads 50 MB to find out what argv it would have run."""
+        monkeypatch.setattr(
+            "open_shrimp.backend.opencode.install.opencode_ready", lambda: True
+        )
+        monkeypatch.setattr(
+            "open_shrimp.backend.opencode.install.ensure_opencode_binary",
+            lambda **kwargs: "/opt/opencode",
+        )
+
+    def test_the_child_gets_this_terminal_and_only_the_provider_flag(
+        self, cached: None, auth_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No ``--method``: which methods a provider offers differs per
+        provider, and that is a choice the user should see."""
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            opencode_login.subprocess,
+            "run",
+            lambda argv, **kwargs: calls.append((argv, kwargs)),
+        )
+
+        run_provider_login("openai")
+
+        (argv, _), = calls
+        assert argv == ["/opt/opencode", "auth", "login", "--provider", "openai"]
+
+    def test_the_answer_is_the_credential_file_after_the_child_exits(
+        self, cached: None, auth_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not the exit code: the CLI exits zero on a login backed out of."""
+        def _writes(argv: list[str], **kwargs: object) -> None:
+            auth_file.write_text(
+                json.dumps({"openai": {"type": "api"}}), encoding="utf-8"
+            )
+
+        monkeypatch.setattr(opencode_login.subprocess, "run", _writes)
+
+        assert run_provider_login("openai") is True
+
+    def test_a_login_that_wrote_nothing_is_not_connected(
+        self, cached: None, auth_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(opencode_login.subprocess, "run", lambda a, **k: None)
+
+        assert run_provider_login("openai") is False
+
+    def test_ctrl_c_is_giving_up_not_a_crash(
+        self, cached: None, auth_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The wizard calls this before its config is written, so unwinding out
+        of an abandoned login would cost a whole setup."""
+
+        def _interrupted(argv: list[str], **kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(opencode_login.subprocess, "run", _interrupted)
+
+        assert run_provider_login("openai") is False
+
+    def test_a_host_that_already_has_the_binary_says_nothing_about_fetching(
+        self, cached: None, auth_file: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """The line exists to explain a wait, so a host with no wait to explain
+        prints nothing at all."""
+        monkeypatch.setattr(opencode_login.subprocess, "run", lambda a, **k: None)
+
+        run_provider_login("openai")
+
+        assert capsys.readouterr().out == ""
+
+
+class TestProviderStatusCommand:
+    def _emitted(self, capsys: pytest.CaptureFixture[str]) -> dict:
+        return json.loads(capsys.readouterr().out)
+
+    def test_a_connected_provider_is_the_same_object_the_claude_answer_is(
+        self, auth_file: Path, capsys
+    ) -> None:
+        """One shape for both credentials, so a wizard that switched its picker
+        to an OpenCode model keeps the poll loop it already had."""
+        auth_file.write_text(
+            json.dumps({"openai": {"type": "oauth"}}), encoding="utf-8"
+        )
+
+        assert _run_auth_status(json_output=True, provider="openai") == 0
+        emitted = self._emitted(capsys)
+        assert emitted["ok"] is True
+        assert emitted["signed_in"] is True
+        assert emitted["how"] == "oauth"
+
+    def test_a_provider_absent_from_the_file_is_not_connected(
+        self, auth_file: Path, capsys
+    ) -> None:
+        auth_file.write_text(
+            json.dumps({"google": {"type": "api"}}), encoding="utf-8"
+        )
+
+        assert _run_auth_status(json_output=True, provider="openai") == 0
+        emitted = self._emitted(capsys)
+        assert emitted["signed_in"] is False
+        assert emitted["how"] is None
+
+    def test_omitting_the_provider_keeps_the_claude_answer(
+        self, no_env: None, auth_file: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _on_disk(monkeypatch, True)
+
+        assert _run_auth_status(json_output=True) == 0
+        assert self._emitted(capsys)["how"] == "oauth"
+
+    def test_the_step_copy_travels_with_the_answer_and_names_the_lab(
+        self, auth_file: Path, capsys
+    ) -> None:
+        """Neither GUI wizard can call Python, and the ``.app`` CI job never
+        runs the bundle it builds, so a sentence that only exists in Swift is
+        one nothing checks."""
+        assert _run_auth_status(json_output=True, provider="openai") == 0
+        connect = self._emitted(capsys)["connect"]
+
+        assert connect["title"] == "Connect OpenAI"
+        assert "OpenAI" in connect["body"]
+        assert "Claude" not in connect["subtitle"]
+
+    def test_the_claude_copy_is_what_no_provider_gets(
+        self, no_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _on_disk(monkeypatch, False)
+
+        assert _run_auth_status(json_output=True) == 0
+        assert self._emitted(capsys)["connect"]["title"] == "Sign in to Claude"
+
+
+class TestProviderLoginCommand:
+    def test_a_provider_dispatches_to_the_opencode_login(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Not the Claude sign-in, which is what a wizard reaches for when the
+        flag is absent."""
+        asked: list[str] = []
+        monkeypatch.setattr(
+            opencode_login,
+            "run_provider_login",
+            lambda provider: asked.append(provider) or True,
+        )
+        monkeypatch.setattr(
+            login_mod, "run_interactive_login", lambda: pytest.fail("wrong login")
+        )
+
+        assert _run_auth_login(hold=False, provider="openai") == 0
+        assert asked == ["openai"]
+        assert "OpenAI" in capsys.readouterr().out
+
+    def test_a_login_that_did_not_take_exits_one_and_names_the_binary(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A bare ``opencode`` on $PATH is deliberately not the binary
+        OpenShrimp runs, so telling somebody to type it points them at the
+        wrong credential store."""
+        monkeypatch.setattr(opencode_login, "run_provider_login", lambda p: False)
+
+        assert _run_auth_login(hold=False, provider="openai") == 1
+        assert "auth login --provider openai" in capsys.readouterr().out
+
+    def test_a_platform_with_no_build_is_a_sentence_not_a_traceback(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        def _no_build(provider: str) -> bool:
+            raise RuntimeError("no opencode build is published for Linux ppc64le")
+
+        monkeypatch.setattr(opencode_login, "run_provider_login", _no_build)
+
+        assert _run_auth_login(hold=False, provider="openai") == 1
+        assert "ppc64le" in capsys.readouterr().err
