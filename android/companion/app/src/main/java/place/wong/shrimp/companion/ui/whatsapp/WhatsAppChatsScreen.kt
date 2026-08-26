@@ -55,6 +55,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import java.text.DateFormat
 import java.util.Date
 import place.wong.shrimp.companion.data.LogStore
+import place.wong.shrimp.companion.data.HandoverText
 import place.wong.shrimp.companion.data.WhatsAppChat
 import place.wong.shrimp.companion.data.WhatsAppChats
 import place.wong.shrimp.companion.data.WhatsAppQuery
@@ -280,7 +281,7 @@ private fun ColumnScope.Picker(
                 "Tick a chat to read it continuously. Send ➤ sends one chat to Telegram now."
             } else {
                 "Tick a chat to read it continuously. " +
-                    "${WhatsAppChatsViewModel.NOT_PAIRED}, so nothing can be sent."
+                    "${HandoverText.NOT_PAIRED}, so nothing can be sent."
             },
             style = MaterialTheme.typography.bodySmall,
         )

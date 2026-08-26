@@ -57,10 +57,14 @@ fun SettingsScreen(
     var selectedChats by remember { mutableIntStateOf(0) }
     var watching by remember { mutableStateOf(false) }
     var stalled by remember { mutableStateOf(false) }
+    // Both LinkedIn grants are made in system screens this one is left for, so
+    // coming back is the only moment either can have changed.
+    var linkedIn by remember { mutableStateOf(LinkedInCaptureState(false, false, null)) }
     LifecycleResumeEffect(Unit) {
         selectedChats = vm.whatsappChatCount()
         watching = vm.whatsappWatching()
         stalled = vm.whatsappStalled()
+        linkedIn = vm.linkedInCapture()
         onPauseOrDispose { }
     }
 
@@ -146,6 +150,48 @@ fun SettingsScreen(
                             stalled = false
                         },
                     ) { Text("Restart reading from now") }
+                }
+            }
+
+            Section("LinkedIn") {
+                Text(
+                    when {
+                        !linkedIn.serviceOn ->
+                            "Off. Turning it on puts a bubble over LinkedIn conversations; " +
+                                "tapping it sends the conversation on screen to OpenShrimp, " +
+                                "where it waits until you pick it up."
+                        !linkedIn.canDrawOverlay ->
+                            "The bubble cannot be drawn over LinkedIn until this app is " +
+                                "allowed to appear on top of other apps."
+                        else ->
+                            "On. Open a LinkedIn conversation and tap the bubble to send it. " +
+                                "Drag the bubble to move it out of the way."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedButton(onClick = vm::openAccessibilitySettings) {
+                    Text(if (linkedIn.serviceOn) "Turn the bubble off" else "Turn the bubble on")
+                }
+                // Offered only while it is the thing standing in the way. The
+                // accessibility toggle does not imply it, so a service that is
+                // on with no overlay is a bubble that never appears and says
+                // nothing about why.
+                if (linkedIn.serviceOn && !linkedIn.canDrawOverlay) {
+                    OutlinedButton(onClick = vm::openOverlaySettings) {
+                        Text("Allow drawing over other apps")
+                    }
+                }
+                // The one failure a person cannot work out from the screen:
+                // the bubble is there, the tap does nothing, and the reason is
+                // that LinkedIn renamed something. Naming the id is what turns
+                // that into a report someone can act on.
+                linkedIn.brokenId?.let { id ->
+                    Text(
+                        "The last capture found nothing: LinkedIn's layout changed and " +
+                            "$id is gone from its conversation screen. Taps will keep " +
+                            "failing until the app is updated to match.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             }
 

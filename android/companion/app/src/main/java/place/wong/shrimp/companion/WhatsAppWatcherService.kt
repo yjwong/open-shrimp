@@ -19,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import place.wong.shrimp.companion.data.IWhatsAppReader
+import place.wong.shrimp.companion.data.HandoverText
 import place.wong.shrimp.companion.data.IWhatsAppWatcher
 import place.wong.shrimp.companion.data.LogStore
 import place.wong.shrimp.companion.data.Prefs
@@ -266,7 +267,7 @@ class WhatsAppWatcherService : Service() {
         val baseUrl = prefs.baseUrl
         val deviceId = prefs.deviceId
         if (baseUrl.isEmpty() || deviceId == null) {
-            publish("Not paired with a server")
+            publish(HandoverText.NOT_PAIRED)
             return
         }
         val selection = floored(reader, prefs, selected)

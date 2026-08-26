@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import place.wong.shrimp.companion.data.LogStore
+import place.wong.shrimp.companion.data.HandoverText
 import place.wong.shrimp.companion.data.Prefs
 import place.wong.shrimp.companion.data.ServerApi
 import place.wong.shrimp.companion.data.WhatsAppChat
@@ -191,7 +192,7 @@ class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val baseUrl = prefs.baseUrl
                 val deviceId = prefs.deviceId
-                check(baseUrl.isNotEmpty() && deviceId != null) { NOT_PAIRED }
+                check(baseUrl.isNotEmpty() && deviceId != null) { HandoverText.NOT_PAIRED }
                 val reader = lease.reader()
                 // The snapshot is as old as the screen otherwise, and the
                 // messages worth sending are usually the ones that just
@@ -202,7 +203,7 @@ class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
                 // A count, never content — the same rule the message path
                 // follows, and for the same reason.
                 LogStore.add("Handed over ${handover.messages.size} messages from a chat")
-                _outcomes.send(SendOutcome("Sent — pick it up in Telegram", result.deepLink))
+                _outcomes.send(SendOutcome(HandoverText.SENT, result.deepLink))
             } catch (e: Exception) {
                 _outcomes.send(SendOutcome(e.message ?: "The chat could not be sent", null))
             } finally {
@@ -229,8 +230,6 @@ class WhatsAppChatsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
-        /** What the watcher says in the same situation, said where a tap is. */
-        const val NOT_PAIRED = "Not paired with a server"
 
         private const val STEP_CONNECT = "Starting the root reader"
         private const val STEP_SNAPSHOT = "Copying the message store"

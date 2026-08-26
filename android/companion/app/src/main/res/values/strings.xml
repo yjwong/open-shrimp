@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="linkedin_service_label">OpenShrimp: LinkedIn handover</string>
+    <!-- Shown in Settings under the accessibility toggle, where it is the only
+         account of what turning this on lets the app see. -->
+    <string name="linkedin_service_description">Puts a bubble over LinkedIn conversations. Tapping it reads the conversation on screen and sends it to your paired OpenShrimp, where it waits until you pick it up. Nothing is read unless you tap.</string>
+</resources>

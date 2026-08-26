@@ -94,7 +94,9 @@ def _author(message: dict) -> str:
     return _field(message.get("author")) or "unknown"
 
 
-def linked_profiles(participants: list[dict], messages: list[dict]) -> list[dict]:
+def linked_profiles(
+    participants: list[dict], messages: list[dict], store_read: bool
+) -> list[dict]:
     """The participants who sent one of the captured messages.
 
     Those are the people the agent has something to reason about, and a
@@ -102,8 +104,19 @@ def linked_profiles(participants: list[dict], messages: list[dict]) -> list[dict
     ``raw`` for an agent that asks.
 
     Matched on ``sender_urn``, which both sides carry because both come out of
-    the store; a capture without the store carries no participants to match.
+    the store.  A capture read from the screen alone has neither, so the match
+    would drop every participant it was given, and what is left is whoever the
+    screen named: the counterpart of a one-to-one thread and their headline.
+
+    Which of the two it is comes from *store_read*, the same flag the header
+    and the summary say it with, rather than from whether any urn turned up.
+    Those two answers agree until a schema rename empties ``senderUrn`` on the
+    store path, and then the guess reads a high-fidelity capture as a screen
+    one and puts every participant it holds on the card — up to
+    ``MAX_PARTICIPANTS`` of them, with a profile URL each.
     """
+    if not store_read:
+        return participants
     senders = {
         urn
         for message in messages
@@ -183,7 +196,7 @@ def read_capture(
         stamps=stamps,
         profiles=[
             line
-            for participant in linked_profiles(participants, messages)
+            for participant in linked_profiles(participants, messages, store_read)
             if (line := _profile_line(participant))
         ],
         inmail=_field(conversation.get("category")) == _INMAIL,

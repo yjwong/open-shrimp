@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  flagReportViewIds is load-bearing: without it getViewIdResourceName() is null
+  on every node and findAccessibilityNodeInfosByViewId finds nothing, so the
+  whole capture addresses the screen by position instead — which is the thing
+  it exists not to do.
+
+  flagIncludeNotImportantViews reaches the containers. The gate on whether a
+  bubble may appear is message_list_fragment, which holds the thread rather
+  than saying anything itself, and a container with nothing to announce is
+  exactly what an accessibility tree leaves out.
+
+  There is no packageNames filter. It would look like the narrower setting and
+  is in fact the leakier one: no event would ever arrive from the app the user
+  switched to, so the bubble would stay up over every other screen on the
+  phone. The service drops everything that is not LinkedIn before reading
+  anything but a package name.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/linkedin_service_description"
+    android:notificationTimeout="200"
+    android:settingsActivity="place.wong.shrimp.companion.MainActivity" />

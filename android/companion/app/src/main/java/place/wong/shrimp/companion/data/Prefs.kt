@@ -141,6 +141,40 @@ class Prefs(context: Context) {
             .commit()
     }
 
+    /**
+     * Where the LinkedIn bubble was last dragged to, or [NO_POSITION].
+     *
+     * Remembered because the Telegram bubble already competes for the same
+     * corner, and a target that returned to it on every thread would have to
+     * be moved out of the way again every time.
+     */
+    val linkedInBubbleX: Int
+        get() = sp.getInt(KEY_LINKEDIN_BUBBLE_X, NO_POSITION)
+
+    val linkedInBubbleY: Int
+        get() = sp.getInt(KEY_LINKEDIN_BUBBLE_Y, NO_POSITION)
+
+    /**
+     * The resource id LinkedIn's thread screen stopped having, or null.
+     *
+     * A capture that cannot address the screen sends nothing, and saying so
+     * only in a toast leaves a feature that quietly stopped working. This is
+     * what the Settings screen reads to explain it later, and the next capture
+     * that succeeds clears it.
+     */
+    var linkedInBrokenId: String?
+        get() = sp.getString(KEY_LINKEDIN_BROKEN_ID, null)
+        set(value) {
+            sp.edit().putString(KEY_LINKEDIN_BROKEN_ID, value).apply()
+        }
+
+    fun saveLinkedInBubblePosition(x: Int, y: Int) {
+        sp.edit()
+            .putInt(KEY_LINKEDIN_BUBBLE_X, x)
+            .putInt(KEY_LINKEDIN_BUBBLE_Y, y)
+            .apply()
+    }
+
     fun savePairing(baseUrl: String, deviceId: String, deviceName: String, serverId: String) {
         sp.edit()
             .putString(KEY_BASE_URL, baseUrl)
@@ -154,6 +188,9 @@ class Prefs(context: Context) {
         /** No message has been delivered yet, so there is no id to resume from. */
         const val NO_CURSOR = -1L
 
+        /** The bubble has never been dragged, so it starts where it is put. */
+        const val NO_POSITION = -1
+
         const val NAME = "security_key_companion"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_DEVICE_ID = "device_id"
@@ -164,5 +201,8 @@ class Prefs(context: Context) {
         private const val KEY_WHATSAPP_WATCH = "whatsapp_watch"
         private const val KEY_WHATSAPP_CURSOR = "whatsapp_cursor"
         private const val KEY_WHATSAPP_STALLED = "whatsapp_stalled"
+        private const val KEY_LINKEDIN_BROKEN_ID = "linkedin_broken_id"
+        private const val KEY_LINKEDIN_BUBBLE_X = "linkedin_bubble_x"
+        private const val KEY_LINKEDIN_BUBBLE_Y = "linkedin_bubble_y"
     }
 }

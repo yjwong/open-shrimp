@@ -345,7 +345,7 @@ private fun pairedServer(context: Context): Pair<String, String> {
     val prefs = Prefs(context)
     val baseUrl = prefs.baseUrl.trimEnd('/')
     val deviceId = prefs.deviceId
-    check(baseUrl.isNotEmpty() && deviceId != null) { "Not paired with a server" }
+    check(baseUrl.isNotEmpty() && deviceId != null) { HandoverText.NOT_PAIRED }
     return baseUrl to deviceId
 }
 

@@ -49,6 +49,20 @@ data class HandoverResult(
     val deepLink: String?,
 )
 
+/**
+ * What a handover says to the person who asked for one.
+ *
+ * Every source that hands a conversation over says these two things, and the
+ * user meets them in different places — a screen, a toast over another app, a
+ * notification — so the sentences live here rather than beside any one of
+ * them.  Two paths wording the same outcome differently is how a user learns
+ * that one of them is a different feature.
+ */
+object HandoverText {
+    const val NOT_PAIRED = "Not paired with a server"
+    const val SENT = "Sent — pick it up in Telegram"
+}
+
 /** Thin coroutine wrapper over the OpenShrimp HTTP endpoints used by the companion app. */
 class ServerApi(private val http: OkHttpClient = defaultClient()) {
 
@@ -268,13 +282,46 @@ class ServerApi(private val http: OkHttpClient = defaultClient()) {
             "WhatsApp handover failed",
             body,
         )
-        val json = JSONObject(text)
-        HandoverResult(
-            eventId = (json.opt("event_id") as? Number)?.toLong(),
-            threadId = (json.opt("thread_id") as? Number)?.toLong(),
-            // opt, not optString: optString renders an explicit JSON null as
-            // the four characters "null", which would pass for a link.
-            deepLink = (json.opt("deep_link") as? String)?.takeIf { it.isNotEmpty() },
+        handoverResult(text)
+    }
+
+    /**
+     * Push one LinkedIn thread, and say where its card landed.
+     *
+     * The same shape as [sendWhatsAppHandover] and for the same reasons:
+     * atomic, retiring nothing, answered with the topic to go and look in.
+     * There is no messages counterpart on this source at all — the store the
+     * app keeps holds one message for most conversations until the user opens
+     * them, so a cursor over it would deliver previews rather than threads.
+     *
+     * `store_read` is the fidelity claim the host renders, and it rides on the
+     * handover because the reader that built it is the only thing that knows
+     * which fidelity it managed. Claiming more than was read would let a
+     * window onto a conversation pass for the whole of it.
+     */
+    suspend fun sendLinkedInHandover(
+        baseUrl: String,
+        deviceId: String,
+        handover: LinkedInHandover,
+    ): HandoverResult = withContext(Dispatchers.IO) {
+        val rows = JSONArray()
+        for (message in handover.messages) rows.put(message.toJson())
+        val people = JSONArray()
+        for (participant in handover.participants) people.put(participant.toJson())
+        val body = JSONObject()
+            .put("conversation", JSONObject().put("title", handover.title))
+            .put("participants", people)
+            .put("messages", rows)
+            .put("truncated", handover.truncated)
+            .put("store_read", handover.storeRead)
+            .toString()
+        handoverResult(
+            signedPost(
+                "$baseUrl/api/linkedin/handovers",
+                deviceId,
+                "LinkedIn handover failed",
+                body,
+            ),
         )
     }
 
@@ -339,6 +386,24 @@ class ServerApi(private val http: OkHttpClient = defaultClient()) {
             }
             return text
         }
+    }
+
+    /**
+     * Where a handover landed, out of the host's answer.
+     *
+     * Every handover route answers with the same three fields, so they are
+     * read in one place: the `deep_link` line below is the kind of thing that
+     * gets "cleaned up" into `optString` by whichever copy is read without it.
+     */
+    private fun handoverResult(text: String): HandoverResult {
+        val json = JSONObject(text)
+        return HandoverResult(
+            eventId = (json.opt("event_id") as? Number)?.toLong(),
+            threadId = (json.opt("thread_id") as? Number)?.toLong(),
+            // opt, not optString: optString renders an explicit JSON null as
+            // the four characters "null", which would pass for a link.
+            deepLink = (json.opt("deep_link") as? String)?.takeIf { it.isNotEmpty() },
+        )
     }
 
     companion object {
@@ -414,6 +479,23 @@ class ServerApi(private val http: OkHttpClient = defaultClient()) {
             .put("mime_type", mimeType)
             .put("caption", caption)
             .put("file_path", filePath)
+
+        /**
+         * One captured line, under the host's wire names.
+         *
+         * No id and no `from_me`: a screen capture has neither, and the host
+         * reads both with a default.
+         */
+        private fun LinkedInMessage.toJson(): JSONObject = JSONObject()
+            .put("text", text)
+            .put("author", author)
+            .put("time_text", timeText)
+
+        /** One participant, with no urn and no profile URL to put in it. */
+        private fun LinkedInParticipant.toJson(): JSONObject = JSONObject()
+            .put("name", name)
+            .put("pronouns", pronouns)
+            .put("headline", headline)
 
         private fun urlEncode(value: String): String =
             URLEncoder.encode(value, StandardCharsets.UTF_8.name())

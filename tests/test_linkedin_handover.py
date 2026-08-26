@@ -232,6 +232,17 @@ def test_profiles_cover_only_the_senders_of_captured_messages():
     assert "Quiet Colleague" not in transcript
 
 
+def test_a_screen_capture_still_names_who_the_thread_is_with():
+    """The tree carries a name and a headline and no urn on anything, so a
+    match on sender urns would drop the one participant the screen knew."""
+    transcript = _transcript(
+        [make_message(sender_urn=None, origin_token=None, author="Jane Tan")],
+        participants=[{"name": "Jane Tan", "headline": "Talent Partner at Acme"}],
+        store_read=False,
+    )
+    assert "- Jane Tan, Talent Partner at Acme" in transcript
+
+
 def test_the_users_own_profile_is_not_linked():
     messages = [make_message(from_me=True, sender_urn=ME_URN, author="Yu Jing")]
     assert "ACoAAme" not in _transcript(messages)

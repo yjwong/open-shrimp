@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- The LinkedIn handover bubble, which has to float over another app. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <queries>
         <intent>
@@ -79,6 +81,24 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Reads new WhatsApp messages from the selected chats and forwards them to the paired OpenShrimp host" />
+        </service>
+
+        <!--
+          Bound by the system once the user turns it on in Accessibility
+          settings; there is no way for the app to start it. The permission
+          below is what makes the system the only thing that may bind it.
+        -->
+        <service
+            android:name=".LinkedInAccessibilityService"
+            android:exported="false"
+            android:label="@string/linkedin_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/linkedin_accessibility_service" />
         </service>
 
         <service
