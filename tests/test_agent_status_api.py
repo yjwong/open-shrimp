@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import json
@@ -9,9 +8,11 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
+
+from tests.android_signing import android_headers, b64url
 
 from open_shrimp.config import Config, ContextConfig, ReviewConfig, TelegramConfig
 from open_shrimp.db import init_db
@@ -38,10 +39,6 @@ def _make_config() -> Config:
     )
 
 
-def _b64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
 def _build_init_data() -> str:
     user_obj = json.dumps(
         {"id": ALLOWED_USER_ID, "first_name": "Test"}, separators=(",", ":")
@@ -65,27 +62,6 @@ def _auth_header() -> dict[str, str]:
     return {"authorization": f"tg-init-data {_build_init_data()}"}
 
 
-def _android_headers(
-    private_key: ec.EllipticCurvePrivateKey,
-    *,
-    device_id: str,
-    method: str,
-    path: str,
-    body: bytes = b"",
-    nonce: str = "nonce-1",
-) -> dict[str, str]:
-    timestamp = str(int(time.time()))
-    body_hash = _b64url(hashlib.sha256(body).digest())
-    payload = "\n".join([method, path, timestamp, nonce, body_hash]).encode("utf-8")
-    signature = private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
-    return {
-        "X-OpenShrimp-Device-Id": device_id,
-        "X-OpenShrimp-Timestamp": timestamp,
-        "X-OpenShrimp-Nonce": nonce,
-        "X-OpenShrimp-Signature": _b64url(signature),
-    }
-
-
 def _pair(client: TestClient, private_key: ec.EllipticCurvePrivateKey, device_id: str) -> None:
     public_key = private_key.public_key().public_bytes(
         serialization.Encoding.DER,
@@ -100,7 +76,7 @@ def _pair(client: TestClient, private_key: ec.EllipticCurvePrivateKey, device_id
             "code": code,
             "device_id": device_id,
             "display_name": "Pixel",
-            "public_key": _b64url(public_key),
+            "public_key": b64url(public_key),
         },
     )
 
@@ -150,7 +126,7 @@ def test_android_approval_resolves_pending_future(tmp_path: Path) -> None:
             content=body,
             headers={
                 "content-type": "application/json",
-                **_android_headers(
+                **android_headers(
                     private_key,
                     device_id=device_id,
                     method="POST",
@@ -192,7 +168,7 @@ def test_android_approval_resolves_host_escape_future(tmp_path: Path) -> None:
             content=body,
             headers={
                 "content-type": "application/json",
-                **_android_headers(
+                **android_headers(
                     private_key,
                     device_id=device_id,
                     method="POST",
@@ -242,7 +218,7 @@ def test_android_approval_resolves_config_write_future(tmp_path: Path) -> None:
             content=body,
             headers={
                 "content-type": "application/json",
-                **_android_headers(
+                **android_headers(
                     private_key,
                     device_id=device_id,
                     method="POST",
@@ -278,7 +254,7 @@ def test_android_approval_noops_when_future_missing(tmp_path: Path) -> None:
             content=body,
             headers={
                 "content-type": "application/json",
-                **_android_headers(
+                **android_headers(
                     private_key,
                     device_id=device_id,
                     method="POST",

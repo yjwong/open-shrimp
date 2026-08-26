@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import json
@@ -10,9 +9,11 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
+
+from tests.android_signing import android_headers, b64url
 
 from open_shrimp.config import (
     Config,
@@ -89,31 +90,6 @@ def _build_init_data() -> str:
 
 def _auth_header() -> dict[str, str]:
     return {"authorization": f"tg-init-data {_build_init_data()}"}
-
-
-def _b64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def _android_headers(
-    private_key: ec.EllipticCurvePrivateKey,
-    *,
-    device_id: str,
-    method: str,
-    path: str,
-    body: bytes = b"",
-    nonce: str = "nonce-1",
-) -> dict[str, str]:
-    timestamp = str(int(time.time()))
-    body_hash = _b64url(hashlib.sha256(body).digest())
-    payload = "\n".join([method, path, timestamp, nonce, body_hash]).encode("utf-8")
-    signature = private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
-    return {
-        "X-OpenShrimp-Device-Id": device_id,
-        "X-OpenShrimp-Timestamp": timestamp,
-        "X-OpenShrimp-Nonce": nonce,
-        "X-OpenShrimp-Signature": _b64url(signature),
-    }
 
 
 def _make_client(tmp_path: Path) -> tuple[TestClient, object]:
@@ -246,7 +222,7 @@ def test_android_pair_poll_and_claim_session(tmp_path: Path) -> None:
                 "code": code_response.json()["code"],
                 "device_id": device_id,
                 "display_name": "Pixel Test",
-                "public_key": _b64url(public_key),
+                "public_key": b64url(public_key),
             },
         )
         assert pair_response.status_code == 201
@@ -262,7 +238,7 @@ def test_android_pair_poll_and_claim_session(tmp_path: Path) -> None:
         pending_path = "/api/security-key/android/pending-sessions"
         pending_response = client.get(
             pending_path,
-            headers=_android_headers(
+            headers=android_headers(
                 private_key,
                 device_id=device_id,
                 method="GET",
@@ -282,7 +258,7 @@ def test_android_pair_poll_and_claim_session(tmp_path: Path) -> None:
             content=b"{}",
             headers={
                 "content-type": "application/json",
-                **_android_headers(
+                **android_headers(
                     private_key,
                     device_id=device_id,
                     method="POST",
@@ -327,7 +303,7 @@ def test_security_key_session_sends_minimal_android_push(tmp_path: Path) -> None
                 "code": code_response.json()["code"],
                 "device_id": device_id,
                 "display_name": "Pixel Push",
-                "public_key": _b64url(public_key),
+                "public_key": b64url(public_key),
                 "push_provider": "fcm",
                 "push_token": "fcm-token",
             },
@@ -379,7 +355,7 @@ def test_android_signed_push_registration_update(tmp_path: Path) -> None:
                 "code": code_response.json()["code"],
                 "device_id": device_id,
                 "display_name": "Pixel Refresh",
-                "public_key": _b64url(public_key),
+                "public_key": b64url(public_key),
             },
         )
 
@@ -390,7 +366,7 @@ def test_android_signed_push_registration_update(tmp_path: Path) -> None:
             content=body,
             headers={
                 "content-type": "application/json",
-                **_android_headers(
+                **android_headers(
                     private_key,
                     device_id=device_id,
                     method="POST",
@@ -451,12 +427,12 @@ def test_android_signed_request_rejects_nonce_replay(tmp_path: Path) -> None:
                 "code": code_response.json()["code"],
                 "device_id": device_id,
                 "display_name": "Pixel Test",
-                "public_key": _b64url(public_key),
+                "public_key": b64url(public_key),
             },
         )
 
         path = "/api/security-key/android/pending-sessions"
-        headers = _android_headers(
+        headers = android_headers(
             private_key,
             device_id=device_id,
             method="GET",

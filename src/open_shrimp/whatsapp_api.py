@@ -29,7 +29,11 @@ from starlette.routing import Route
 from open_shrimp.android_companion import authenticate_android_request
 from open_shrimp.events.base import Delivery, SupportsHandover, SupportsIngest
 from open_shrimp.events.manager import get_active_adapter_of_type
-from open_shrimp.review.auth import AuthError, read_json_body
+from open_shrimp.review.auth import (
+    AuthError,
+    read_json_body,
+    reject_oversized_body,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +46,7 @@ MAX_BATCH_ROWS = 50
 # sits above the phone's own limit deliberately: a bound changed on one side
 # then surfaces as a rejection rather than as a silently shortened chat.
 MAX_HANDOVER_ROWS = 200
-# The signature covers the raw body, so the body is buffered and hashed before
-# anything can reject it.  Checking the declared length first turns an
-# oversized push into a header read rather than a buffer, a hash, and a parse.
+# Bounds the declared body of both routes, checked before the body is read.
 MAX_BATCH_BYTES = 4_000_000
 
 
@@ -90,11 +92,8 @@ def _validated_handover(body: dict) -> dict:
 
 async def upload_whatsapp_messages_endpoint(request: Request) -> JSONResponse:
     """POST /api/whatsapp/messages — ingest a batch, return the new cursor."""
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > MAX_BATCH_BYTES:
-        return JSONResponse({"error": "batch is too large"}, status_code=413)
-
     try:
+        reject_oversized_body(request, MAX_BATCH_BYTES)
         device = await authenticate_android_request(request)
         body = await read_json_body(request)
         adapter = get_active_adapter_of_type("whatsapp")
@@ -117,11 +116,8 @@ async def upload_whatsapp_messages_endpoint(request: Request) -> JSONResponse:
 
 async def upload_whatsapp_handover_endpoint(request: Request) -> JSONResponse:
     """POST /api/whatsapp/handovers — take one chat straight to a topic."""
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > MAX_BATCH_BYTES:
-        return JSONResponse({"error": "handover is too large"}, status_code=413)
-
     try:
+        reject_oversized_body(request, MAX_BATCH_BYTES)
         device = await authenticate_android_request(request)
         body = await read_json_body(request)
         adapter = get_active_adapter_of_type("whatsapp")

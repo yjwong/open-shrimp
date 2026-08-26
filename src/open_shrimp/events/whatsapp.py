@@ -25,11 +25,11 @@ that failed to reach a topic is not, and acknowledging it loses the message.
 """
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from open_shrimp.config import EventSourceConfig
 from open_shrimp.events.base import Delivery, DeliveryOutcome, EmitFn
+from open_shrimp.events.format import DATE_CHARS, plural, stamp_millis
 from open_shrimp.events.types import Event
 
 logger = logging.getLogger(__name__)
@@ -196,10 +196,6 @@ def build_event(source_name: str, row: dict) -> Event:
 # phone would let the two drift; so the transcript is drawn here and the
 # companion stays a transport.
 
-_STAMP_FORMAT = "%Y-%m-%d %H:%M"
-_DATE_CHARS = len("2026-08-14")
-
-
 def is_group_chat(chat: dict) -> bool:
     return _jid_server(_text(chat.get("jid"))) == "g.us"
 
@@ -214,20 +210,6 @@ def chat_label(chat: dict) -> str:
     jid = _text(chat.get("jid"))
     name = _text(chat.get("subject")) or _text(chat.get("name")) or jid or "unknown"
     return f"group {name}" if is_group_chat(chat) else name
-
-
-def _stamp(value: object) -> str | None:
-    """A row's timestamp as local wall-clock text, or None if it has none."""
-    try:
-        millis = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if millis <= 0:
-        return None
-    try:
-        return datetime.fromtimestamp(millis / 1000).strftime(_STAMP_FORMAT)
-    except (OverflowError, OSError, ValueError):
-        return None
 
 
 def _author(row: dict, chat: dict) -> str:
@@ -262,16 +244,12 @@ def _drawn_rows(chat: dict, rows: list[dict]) -> list[tuple[str | None, str]]:
         body = message_text(row)
         if body is None:
             continue
-        stamp = _stamp(row.get("timestamp"))
+        stamp = stamp_millis(row.get("timestamp"))
         author = _author(row, chat)
         drawn.append(
             (stamp, f"[{stamp}] {author}: {body}" if stamp else f"{author}: {body}")
         )
     return drawn
-
-
-def _plural(count: int) -> str:
-    return f"{count} message" if count == 1 else f"{count} messages"
 
 
 def _header_line(
@@ -289,7 +267,7 @@ def _header_line(
     """
     jid = _text(chat.get("jid")) or "unknown"
     stamps = [stamp for stamp, _ in drawn if stamp]
-    line = f"WhatsApp chat with {chat_label(chat)} ({jid}) — {_plural(len(drawn))}"
+    line = f"WhatsApp chat with {chat_label(chat)} ({jid}) — {plural(len(drawn))}"
     if stamps:
         line += f", {stamps[0]} to {stamps[-1]}"
     line += "."
@@ -322,9 +300,9 @@ def render_summary(chat: dict, rows: list[dict], truncated: bool) -> str:
     """
     drawn = _drawn_rows(chat, rows)
     stamps = [stamp for stamp, _ in drawn if stamp]
-    line = f"Handed over — {_plural(len(drawn))}"
+    line = f"Handed over — {plural(len(drawn))}"
     if stamps:
-        first, last = stamps[0][:_DATE_CHARS], stamps[-1][:_DATE_CHARS]
+        first, last = stamps[0][:DATE_CHARS], stamps[-1][:DATE_CHARS]
         line += f", {first}" + (f" → {last}" if last != first else "")
     if truncated:
         line += ", older messages not included"

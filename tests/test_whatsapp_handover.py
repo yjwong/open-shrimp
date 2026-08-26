@@ -11,18 +11,16 @@ context.  The invariant test at the bottom of this file is what pins down the
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
+
+from tests.android_signing import android_headers, public_key_b64
 
 from open_shrimp.config import (
     Config,
@@ -524,31 +522,6 @@ async def test_a_context_directive_in_the_transcript_is_never_honoured(db, dispa
 # --- the endpoint ----------------------------------------------------------
 
 
-def _b64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def _android_headers(
-    private_key: ec.EllipticCurvePrivateKey,
-    *,
-    device_id: str,
-    path: str,
-    body: bytes,
-    nonce: str,
-) -> dict[str, str]:
-    timestamp = str(int(time.time()))
-    body_hash = _b64url(hashlib.sha256(body).digest())
-    payload = "\n".join(["POST", path, timestamp, nonce, body_hash]).encode("utf-8")
-    return {
-        "X-OpenShrimp-Device-Id": device_id,
-        "X-OpenShrimp-Timestamp": timestamp,
-        "X-OpenShrimp-Nonce": nonce,
-        "X-OpenShrimp-Signature": _b64url(
-            private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
-        ),
-    }
-
-
 HANDOVER_PATH = "/api/whatsapp/handovers"
 
 
@@ -602,13 +575,9 @@ def _paired_client(tmp_path: Path) -> tuple[TestClient, object, ec.EllipticCurve
     db = asyncio.run(init_db(tmp_path / "openshrimp.sqlite3"))
     client = TestClient(create_review_app(_make_config(), db))
     private_key = ec.generate_private_key(ec.SECP256R1())
-    public_key = private_key.public_key().public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
     device_id = "pixel-handover"
     asyncio.run(
-        _pair(db, device_id=device_id, public_key=_b64url(public_key))
+        _pair(db, device_id=device_id, public_key=public_key_b64(private_key))
     )
     return client, db, private_key, device_id
 
@@ -632,7 +601,7 @@ def _post(client, private_key, device_id, body: bytes, nonce: str):
         content=body,
         headers={
             "content-type": "application/json",
-            **_android_headers(
+            **android_headers(
                 private_key,
                 device_id=device_id,
                 path=HANDOVER_PATH,
@@ -798,7 +767,7 @@ def test_handovers_are_a_separate_route_from_messages(endpoint):
         content=body,
         headers={
             "content-type": "application/json",
-            **_android_headers(
+            **android_headers(
                 endpoint.private_key,
                 device_id=endpoint.device_id,
                 path=path,

@@ -257,6 +257,23 @@ async def read_json_body(request: Request) -> dict[str, Any]:
     return body
 
 
+def reject_oversized_body(request: Request, max_bytes: int) -> None:
+    """Raise ``AuthError`` if *request* declares a body over *max_bytes*.
+
+    Call this before reading the body.  A companion request is authenticated
+    over a signature that covers the raw bytes, so the body is buffered and
+    hashed before any other check can reject it; reading the declared length
+    first turns an oversized push into a header read rather than a buffer, a
+    hash, and a parse.
+
+    A missing or non-numeric ``content-length`` passes: this bounds what a
+    client admits to sending, and the server's own body limits bound the rest.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+        raise AuthError(413, f"request body exceeds {max_bytes} bytes")
+
+
 def bounded_int(
     raw: object, *, default: int, minimum: int, maximum: int, field: str
 ) -> int:

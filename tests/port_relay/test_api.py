@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import json
@@ -10,9 +9,11 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
+
+from tests.android_signing import android_headers, b64url
 
 from open_shrimp.config import (
     Config,
@@ -240,31 +241,6 @@ def _auth_header() -> dict[str, str]:
     return {"authorization": f"tg-init-data {_build_init_data()}"}
 
 
-def _b64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def _android_headers(
-    private_key: ec.EllipticCurvePrivateKey,
-    *,
-    device_id: str,
-    method: str,
-    path: str,
-    body: bytes = b"",
-    nonce: str,
-) -> dict[str, str]:
-    timestamp = str(int(time.time()))
-    body_hash = _b64url(hashlib.sha256(body).digest())
-    payload = "\n".join([method, path, timestamp, nonce, body_hash]).encode()
-    signature = private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
-    return {
-        "X-OpenShrimp-Device-Id": device_id,
-        "X-OpenShrimp-Timestamp": timestamp,
-        "X-OpenShrimp-Nonce": nonce,
-        "X-OpenShrimp-Signature": _b64url(signature),
-    }
-
-
 def _make_client(tmp_path: Path) -> tuple[TestClient, object]:
     db = asyncio.run(init_db(tmp_path / "openshrimp.sqlite3"))
     app = create_review_app(_make_config(), db)
@@ -356,7 +332,7 @@ def test_create_session_pushes_to_paired_device(tmp_path: Path) -> None:
                 "code": code_response.json()["code"],
                 "device_id": "android-pf-push",
                 "display_name": "Pixel PF Push",
-                "public_key": _b64url(public_key),
+                "public_key": b64url(public_key),
                 "push_provider": "fcm",
                 "push_token": "fcm-token",
             },
@@ -411,7 +387,7 @@ def test_android_poll_and_claim(tmp_path: Path) -> None:
                 "code": code_response.json()["code"],
                 "device_id": device_id,
                 "display_name": "Pixel PF",
-                "public_key": _b64url(public_key),
+                "public_key": b64url(public_key),
             },
         )
 
@@ -425,7 +401,7 @@ def test_android_poll_and_claim(tmp_path: Path) -> None:
         pending_path = "/api/port-forward/android/pending-sessions"
         pending = client.get(
             pending_path,
-            headers=_android_headers(
+            headers=android_headers(
                 private_key,
                 device_id=device_id,
                 method="GET",
@@ -445,7 +421,7 @@ def test_android_poll_and_claim(tmp_path: Path) -> None:
             content=b"{}",
             headers={
                 "content-type": "application/json",
-                **_android_headers(
+                **android_headers(
                     private_key,
                     device_id=device_id,
                     method="POST",
