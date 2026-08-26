@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from open_shrimp.backend.opencode.auth import connected_providers
 from open_shrimp.backend.opencode.release import OPENCODE_VERSION
@@ -73,6 +75,11 @@ def _fetch_cli() -> str:
     Said before the wait rather than during it, and only on a host that has
     nothing cached: a machine that already has the binary says nothing, and one
     that does not is looking at a bar with no idea why.
+
+    Neither a size nor a duration in that line.  ``describe_bytes`` prints the
+    size the server declares as soon as the first chunk lands, which is a figure
+    that cannot drift against the release it describes — and how long 60 MB
+    takes is the link's answer, not this module's.
     """
     from open_shrimp.backend.opencode.install import (
         ensure_opencode_binary,
@@ -83,10 +90,7 @@ def _fetch_cli() -> str:
     if opencode_ready():
         return ensure_opencode_binary()
 
-    # No size in this line.  ``describe_bytes`` prints the one the server
-    # declares as soon as the first chunk lands, and a figure written down here
-    # is one that drifts against the release it claims to describe.
-    print(f"  Fetching the OpenCode CLI ({OPENCODE_VERSION}). This takes a minute.")
+    print(f"  Fetching the OpenCode CLI ({OPENCODE_VERSION})…")
 
     def report(done: int, total: int | None) -> None:
         # Redrawn in place: the throttle fires a few times a second, and a line
@@ -94,9 +98,34 @@ def _fetch_cli() -> str:
         # Padded, because a shrinking string leaves the tail of the last one.
         print(f"\r  {describe_bytes(done, total):<40}", end="", flush=True)
 
-    binary = ensure_opencode_binary(progress=throttled(report))
+    with _terminal_to_ourselves():
+        binary = ensure_opencode_binary(progress=throttled(report))
     print()
     return binary
+
+
+@contextmanager
+def _terminal_to_ourselves() -> Iterator[None]:
+    """Keep the fetch's own log records off the line it is redrawing.
+
+    ``install`` logs the URL and the landing path at INFO, and the root handler
+    writes those to stderr — the same console this is drawing a carriage-
+    returned progress line on.  The two then land on top of each other: a
+    console the tray spawned showed ``68% (42 of 61 MB)`` with a log line pasted
+    after it and the next one wrapped through it.
+
+    Raised rather than routed elsewhere, because those records say what the
+    line above already says.  Scoped to the fetch, so the chat-side prefetch —
+    which draws no line and does want them in the log file — is untouched.
+    """
+    logger_name = "open_shrimp.backend.opencode.install"
+    fetch_log = logging.getLogger(logger_name)
+    previous = fetch_log.level
+    fetch_log.setLevel(logging.WARNING)
+    try:
+        yield
+    finally:
+        fetch_log.setLevel(previous)
 
 
 __all__ = ["relogin_hint", "run_provider_login"]

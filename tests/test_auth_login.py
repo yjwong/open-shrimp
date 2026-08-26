@@ -15,6 +15,8 @@ that switched its picker keeps the poll loop and the decoder it already had.
 from __future__ import annotations
 
 import json
+import logging
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,24 @@ from open_shrimp.backend.opencode import login as opencode_login
 from open_shrimp.backend.opencode.auth import connected_providers
 from open_shrimp.backend.opencode.login import run_provider_login
 from open_shrimp.main import _run_auth_login, _run_auth_status
+
+
+@contextmanager
+def caplog_at(logger):
+    """Every record *logger* actually emits, as pytest's caplog cannot see past
+    a level this code raises on purpose."""
+    seen: list[str] = []
+
+    class _Catch(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record.getMessage())
+
+    handler = _Catch()
+    logger.addHandler(handler)
+    try:
+        yield seen
+    finally:
+        logger.removeHandler(handler)
 
 
 @pytest.fixture
@@ -433,6 +453,62 @@ class TestProviderInteractiveLogin:
         monkeypatch.setattr(opencode_login.subprocess, "run", _interrupted)
 
         assert run_provider_login("openai") is False
+
+    def test_the_fetch_keeps_its_own_log_records_off_the_progress_line(
+        self, auth_file: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """The console the tray spawns shows stdout and stderr together, so an
+        INFO record lands on top of the carriage-returned line — measured, as
+        ``68% (42 of 61 MB)`` with a log line pasted after it."""
+        import logging
+
+        fetch_log = logging.getLogger("open_shrimp.backend.opencode.install")
+        fetch_log.setLevel(logging.INFO)
+        seen: list[str] = []
+
+        def _fetch(**kwargs: object) -> str:
+            fetch_log.info("Downloading opencode from %s ...", "https://example/x.zip")
+            seen.append("fetched")
+            return "/opt/opencode"
+
+        monkeypatch.setattr(
+            "open_shrimp.backend.opencode.install.opencode_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "open_shrimp.backend.opencode.install.ensure_opencode_binary", _fetch
+        )
+        monkeypatch.setattr(opencode_login.subprocess, "run", lambda a, **k: None)
+
+        with caplog_at(fetch_log) as records:
+            run_provider_login("openai")
+
+        assert seen == ["fetched"]
+        assert records == [], f"records reached the terminal: {records}"
+        # Restored afterwards: the chat-side prefetch draws no line and does
+        # want these in the log file.
+        assert fetch_log.level == logging.INFO
+
+    def test_the_fetch_line_promises_no_duration_it_cannot_keep(
+        self, auth_file: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """It said "This takes a minute" over a download measured at two
+        seconds. What the size and the wait actually are is the server's answer
+        and the link's, and ``describe_bytes`` prints the first of them."""
+        monkeypatch.setattr(
+            "open_shrimp.backend.opencode.install.opencode_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "open_shrimp.backend.opencode.install.ensure_opencode_binary",
+            lambda **kwargs: "/opt/opencode",
+        )
+        monkeypatch.setattr(opencode_login.subprocess, "run", lambda a, **k: None)
+
+        run_provider_login("openai")
+
+        said = capsys.readouterr().out
+        assert "Fetching the OpenCode CLI" in said
+        assert "minute" not in said
+        assert "MB" not in said
 
     def test_a_host_that_already_has_the_binary_says_nothing_about_fetching(
         self, cached: None, auth_file: Path, monkeypatch: pytest.MonkeyPatch, capsys
