@@ -951,6 +951,11 @@ def create_review_app(
 
     routes.extend(create_whatsapp_routes())
 
+    # Android companion LinkedIn conversation handover endpoint.
+    from open_shrimp.linkedin_api import create_linkedin_routes
+
+    routes.extend(create_linkedin_routes())
+
     app = Starlette(routes=routes)
     app.state.config = config
     app.state.db = db

@@ -173,6 +173,45 @@ def test_whatsapp_source_rejects_trusted_senders():
         _validate_raw(_base_raw(events))
 
 
+def test_linkedin_source_needs_no_extra_fields():
+    """The conversation is chosen by tapping a bubble over the LinkedIn app."""
+    events = {
+        "chat_id": 1,
+        "sources": [{"name": "linkedin", "type": "linkedin"}],
+    }
+    _validate_raw(_base_raw(events))
+
+
+def test_second_linkedin_source_rejected():
+    events = {
+        "chat_id": 1,
+        "sources": [
+            {"name": "li-personal", "type": "linkedin"},
+            {"name": "li-work", "type": "linkedin"},
+        ],
+    }
+    with pytest.raises(ValueError, match="only one 'linkedin' source"):
+        _validate_raw(_base_raw(events))
+
+
+def test_linkedin_source_rejects_trusted_senders():
+    """Recruiters and strangers are the normal case, and their messages are
+    addressed to the user rather than to the bot, so a /context: directive in
+    one is never a command."""
+    events = {
+        "chat_id": 1,
+        "sources": [
+            {
+                "name": "linkedin",
+                "type": "linkedin",
+                "trusted_senders": ["urn:li:msg_messagingParticipant:ACoAAjane"],
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="does not accept 'trusted_senders'"):
+        _validate_raw(_base_raw(events))
+
+
 def test_multiline_source_name_rejected():
     events = {
         "chat_id": 1,

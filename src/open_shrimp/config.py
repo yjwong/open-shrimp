@@ -195,7 +195,7 @@ class AndroidCompanionConfig:
 @dataclass
 class EventSourceConfig:
     name: str
-    type: str  # "telegram", "lark", or "whatsapp"
+    type: str  # "telegram", "lark", "whatsapp", or "linkedin"
     # type: telegram
     token: str | None = None
     allowed_chats: list[int] = field(default_factory=list)
@@ -229,7 +229,12 @@ class EventsConfig:
     timezone: str | None = None
 
 
-_EVENT_SOURCE_TYPES = {"telegram", "lark", "whatsapp"}
+_EVENT_SOURCE_TYPES = {"telegram", "lark", "whatsapp", "linkedin"}
+
+# Types the companion pushes into over an endpoint that carries no source
+# name: the adapter is found by type, so a second source of one would be
+# unreachable.
+_SINGLE_SOURCE_TYPES = {"whatsapp", "linkedin"}
 
 
 @dataclass
@@ -630,7 +635,9 @@ def _validate_events(raw: dict) -> None:
 
     main_token = raw["telegram"]["token"]
     seen_names: set[str] = set()
-    whatsapp_name: str | None = None
+    # The name already configured for each single-instance type, so a second
+    # one can name the first in its error.
+    singletons: dict[str, str] = {}
     for i, source in enumerate(sources):
         if not isinstance(source, dict):
             raise ValueError(f"events.sources[{i}] must be a mapping")
@@ -657,6 +664,16 @@ def _validate_events(raw: dict) -> None:
                 f"events source '{name}': type must be one of "
                 f"{sorted(_EVENT_SOURCE_TYPES)}, got: {stype!r}"
             )
+
+        if stype in _SINGLE_SOURCE_TYPES:
+            first = singletons.get(stype)
+            if first is not None:
+                raise ValueError(
+                    f"events.sources: only one {stype!r} source is supported "
+                    f"(the companion's push endpoint carries no source name), "
+                    f"got {first!r} and {name!r}"
+                )
+            singletons[stype] = name
 
         ctx = source.get("context")
         if ctx is not None:
@@ -743,15 +760,8 @@ def _validate_events(raw: dict) -> None:
         elif stype == "whatsapp":
             # Chat selection lives in the companion app, so that messages from
             # unselected chats never leave the phone; nothing to configure
-            # here.  The upload endpoint carries no source name and finds the
-            # adapter by type, so a second source would be unreachable.
-            if whatsapp_name is not None:
-                raise ValueError(
-                    f"events.sources: only one 'whatsapp' source is supported "
-                    f"(the companion's upload endpoint carries no source "
-                    f"name), got {whatsapp_name!r} and {name!r}"
-                )
-            whatsapp_name = name
+            # here.
+            #
             # A /context: directive is honored because the message was
             # addressed to the bot.  Nothing on WhatsApp is: the feed carries
             # conversations between other people, where the bot is an observer
@@ -765,6 +775,22 @@ def _validate_events(raw: dict) -> None:
                     f"person and not to the bot, so a /context: directive in "
                     f"one is never a command. Set 'context' to choose where "
                     f"handovers land."
+                )
+        elif stype == "linkedin":
+            # The conversation is chosen by tapping a bubble over the LinkedIn
+            # app, so there is nothing to select here.
+            #
+            # Recruiters and strangers are the normal case on LinkedIn, and a
+            # message from one is addressed to the user rather than to the
+            # bot, so no string in it is ever a command.  A handover takes its
+            # context from a person tapping Pick up.
+            if source.get("trusted_senders"):
+                raise ValueError(
+                    f"events source '{name}': type 'linkedin' does not accept "
+                    f"'trusted_senders' — its messages are addressed to a "
+                    f"person and not to the bot, so a /context: directive in "
+                    f"one is never a command. Set 'context' to preselect where "
+                    f"handovers are picked up."
                 )
 
 

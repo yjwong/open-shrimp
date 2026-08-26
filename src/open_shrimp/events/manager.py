@@ -53,6 +53,10 @@ def _build_adapter(source: EventSourceConfig) -> EventSourceAdapter:
         from open_shrimp.events.whatsapp import WhatsAppAdapter
 
         return WhatsAppAdapter(source)
+    if source.type == "linkedin":
+        from open_shrimp.events.linkedin import LinkedInAdapter
+
+        return LinkedInAdapter(source)
     raise ValueError(f"Unknown event source type: {source.type!r}")
 
 

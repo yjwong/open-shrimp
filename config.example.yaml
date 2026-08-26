@@ -270,6 +270,22 @@ default_context: default
 #       # Read-only — WhatsApp events carry no reply route, so picked-up
 #       # topics get no reply_inbound_event tool. Only one whatsapp source
 #       # may be configured.
+#     - name: linkedin            # requires the paired Android companion
+#       type: linkedin
+#       context: default          # pre-selected default in the pick-up context
+#                                 # picker; omit for default_context.
+#       # Nothing here talks to LinkedIn and nothing polls. A bubble floating
+#       # over the LinkedIn app captures the conversation on screen when you
+#       # tap it, and the companion POSTs that one conversation to
+#       # /api/linkedin/handovers. It lands as an inert card like any other
+#       # event, so a thread reaches a context only when you tap Pick up.
+#       # No trusted_senders here, and it is rejected if you add it:
+#       # recruiters and strangers are the normal case, and their messages are
+#       # addressed to you rather than to the bot, so a /context: directive in
+#       # one is never a command.
+#       # Read-only — LinkedIn events carry no reply route, so picked-up
+#       # topics get no reply_inbound_event tool. Only one linkedin source
+#       # may be configured.
 
 # Optional: meeting transcription (Android companion). The phone records and
 # transcribes meetings fully on-device, then uploads the diarized transcript
