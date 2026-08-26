@@ -619,6 +619,52 @@ async def test_read_tool_neutralizes_context_closing_tag(db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_read_tool_marks_pages_behind_links_as_data(db):
+    event_id = await _persist_event(
+        db, text="my profile: https://www.linkedin.com/in/ACoAAjane",
+    )
+    tool = _read_tool(db)
+
+    result = await tool.handler({"event_id": event_id})
+
+    text = result["content"][0]["text"]
+    warning = next(
+        line for line in text.splitlines() if line.startswith("A URL inside")
+    )
+    assert "untrusted data too" in warning
+    # Trusted, so above the envelope, and read before the link rather than
+    # after having followed one.
+    assert warning in text.split("<inbound-event")[0]
+
+
+@pytest.mark.asyncio
+async def test_read_tool_omits_the_link_warning_without_a_link(db):
+    event_id = await _persist_event(db)  # "deploy failed on host-3"
+    tool = _read_tool(db)
+
+    result = await tool.handler({"event_id": event_id})
+
+    assert "A URL inside" not in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_read_tool_marks_a_link_that_only_fetched_context_carries(
+    db, monkeypatch
+):
+    event_id = await _persist_event(db, context_ref='{"chat_id": "oc_1"}')
+    adapter = SimpleNamespace(
+        name="lark",
+        fetch_context=AsyncMock(return_value="Alice: see www.example.com/spec"),
+    )
+    _install_manager(monkeypatch, adapter)
+    tool = _read_tool(db)
+
+    result = await tool.handler({"event_id": event_id})
+
+    assert "A URL inside" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_read_tool_missing_event_errors(db):
     tool = _read_tool(db)
     result = await tool.handler({"event_id": 424242})

@@ -851,6 +851,7 @@ def create_openshrimp_tools(
         from open_shrimp.events.pickup import (
             context_envelope as _context_envelope,
             event_envelope as _event_envelope,
+            followed_link_warning as _followed_link_warning,
             routing_summary as _routing_summary,
         )
 
@@ -922,6 +923,11 @@ def create_openshrimp_tools(
             routing = _routing_summary(row)
             if routing:
                 header += f"\nProvider routing ids: {routing}."
+            # Above the envelope, where the agent reads it before the link
+            # rather than after having followed one.
+            links = _followed_link_warning(body)
+            if links:
+                header += f"\n{links}"
             return _text_result(f"{header}\n\n{body}")
 
         tools_list.append(OpenShrimpTool(
