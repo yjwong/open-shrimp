@@ -17,7 +17,7 @@ from open_shrimp.backend.protocol import ModelChoice
 MODEL_CHOICES: tuple[ModelChoice, ...] = (
     ModelChoice(
         "fable",
-        "claude-fable-5",
+        "claude-fable-5-1",
         "Most capable for your hardest and longest-running tasks",
     ),
     ModelChoice("opus", "claude-opus-5", "Best for everyday, complex tasks"),
@@ -34,6 +34,8 @@ _BY_ALIAS: dict[str, str] = {c.alias: c.model_id for c in MODEL_CHOICES}
 # IDs accepted without a warning beyond the ones the aliases already name.
 _ALSO_KNOWN: frozenset[str] = frozenset(
     {
+        "claude-fable-5",
+        "claude-mythos-5-1",
         "claude-mythos-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
