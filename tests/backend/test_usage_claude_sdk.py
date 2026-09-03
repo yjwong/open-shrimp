@@ -2,6 +2,11 @@
 
 Asserted here:
 
+* The ``limits`` array drives the tiers, including the per-model weekly
+  window that names its model only in ``scope.model.display_name``.
+* An unrecognised ``kind`` still renders instead of being dropped.
+* The top-level per-window keys are read only when ``limits`` is absent
+  or empty.
 * Anthropic-shaped JSON projects into a :class:`UsageReport` with the
   expected tier labels, percentages, and ``resets_at`` timestamps.
 * Missing tiers and missing ``utilization`` keys are omitted.
@@ -108,6 +113,102 @@ class TestToReport:
         data = {"five_hour": {"utilization": 1.0, "resets_at": "not-a-date"}}
         rep = _to_report(data)
         assert rep.tiers[0].resets_at is None
+
+
+class TestLimitsArray:
+    def test_live_shape_keeps_the_scoped_model_window(self) -> None:
+        # Abridged from a real response: every top-level per-model key is
+        # null and the Fable window exists only inside ``limits``.
+        data: dict[str, Any] = {
+            "five_hour": {"utilization": 22.0, "resets_at": None},
+            "seven_day": {"utilization": 38.0, "resets_at": None},
+            "seven_day_opus": None,
+            "seven_day_sonnet": None,
+            "limits": [
+                {
+                    "kind": "session",
+                    "group": "session",
+                    "percent": 22,
+                    "resets_at": "2026-09-03T23:19:59+00:00",
+                    "scope": None,
+                },
+                {
+                    "kind": "weekly_all",
+                    "group": "weekly",
+                    "percent": 38,
+                    "resets_at": "2026-09-06T19:59:59+00:00",
+                    "scope": None,
+                },
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 38,
+                    "resets_at": "2026-09-06T19:59:59+00:00",
+                    "scope": {
+                        "model": {"id": None, "display_name": "Fable"},
+                        "surface": None,
+                    },
+                },
+            ],
+        }
+        rep = _to_report(data)
+        assert [t.name for t in rep.tiers] == [
+            "5-hour session",
+            "7-day overall",
+            "7-day Fable",
+        ]
+        assert rep.tiers[2].used_pct == pytest.approx(38.0)
+        assert rep.tiers[2].resets_at == datetime(
+            2026, 9, 6, 19, 59, 59, tzinfo=timezone.utc
+        )
+
+    def test_limits_take_precedence_over_top_level_keys(self) -> None:
+        data: dict[str, Any] = {
+            "five_hour": {"utilization": 99.0},
+            "seven_day_sonnet": {"utilization": 50.0},
+            "limits": [{"kind": "session", "percent": 22, "scope": None}],
+        }
+        assert _to_report(data).tiers == [
+            UsageTier(name="5-hour session", used_pct=22.0)
+        ]
+
+    def test_empty_limits_falls_back_to_top_level_keys(self) -> None:
+        data: dict[str, Any] = {
+            "five_hour": {"utilization": 99.0},
+            "limits": [],
+        }
+        assert [t.name for t in _to_report(data).tiers] == ["5-hour session"]
+
+    def test_unknown_kind_is_labelled_not_dropped(self) -> None:
+        data: dict[str, Any] = {
+            "limits": [
+                {"kind": "monthly_all", "percent": 4, "scope": None},
+                {
+                    "kind": "monthly_scoped",
+                    "percent": 5,
+                    "scope": {"model": {"display_name": "Opus"}},
+                },
+            ]
+        }
+        assert [t.name for t in _to_report(data).tiers] == [
+            "monthly all",
+            "monthly scoped (Opus)",
+        ]
+
+    def test_scoped_window_without_a_model_name(self) -> None:
+        data: dict[str, Any] = {
+            "limits": [{"kind": "weekly_scoped", "percent": 5, "scope": None}]
+        }
+        assert [t.name for t in _to_report(data).tiers] == ["7-day scoped"]
+
+    def test_null_percent_entries_are_skipped(self) -> None:
+        data: dict[str, Any] = {
+            "limits": [
+                {"kind": "session", "percent": None},
+                {"kind": "weekly_all", "percent": 0},
+            ]
+        }
+        assert [t.name for t in _to_report(data).tiers] == ["7-day overall"]
 
 
 # ---------------------------------------------------------------------------

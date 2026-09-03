@@ -4,6 +4,15 @@ Reads ``~/.claude/.credentials.json``, calls the
 ``api.anthropic.com/api/oauth/usage`` endpoint, and projects the
 Anthropic-shaped response into the backend-neutral :class:`UsageReport`.
 
+The windows come from the response's ``limits`` array, which names a
+per-model weekly window through ``scope.model.display_name`` rather than
+through a top-level key: the Fable weekly limit arrives as ``{"kind":
+"weekly_scoped", "scope": {"model": {"display_name": "Fable"}}}`` while
+the top-level ``seven_day_opus``/``seven_day_sonnet`` keys are ``null``.
+Reading only those keys therefore drops every window the account has
+beyond the session and all-model ones. The keys are still the fallback
+for a response that carries no ``limits``.
+
 A 60-second module-level cache spares the rate-limited endpoint when the
 operator hits ``/usage`` repeatedly in quick succession.
 """
@@ -24,11 +33,16 @@ _CACHE_TTL = 60.0
 _cache: tuple[float, UsageReport | None] | None = None
 
 
-_TIER_LABELS: list[tuple[str, str]] = [
+_LEGACY_TIER_LABELS: list[tuple[str, str]] = [
     ("five_hour", "5-hour session"),
     ("seven_day", "7-day overall"),
     ("seven_day_sonnet", "7-day Sonnet"),
 ]
+
+_LIMIT_KIND_LABELS: dict[str, str] = {
+    "session": "5-hour session",
+    "weekly_all": "7-day overall",
+}
 
 
 async def fetch() -> UsageReport | None:
@@ -84,19 +98,7 @@ async def _fetch_uncached() -> UsageReport | None:
 
 
 def _to_report(data: dict[str, Any]) -> UsageReport:
-    tiers: list[UsageTier] = []
-    for key, label in _TIER_LABELS:
-        raw = data.get(key)
-        if not raw or raw.get("utilization") is None:
-            continue
-        resets_at = _parse_iso(raw.get("resets_at"))
-        tiers.append(
-            UsageTier(
-                name=label,
-                used_pct=float(raw["utilization"]),
-                resets_at=resets_at,
-            )
-        )
+    tiers = _tiers_from_limits(data.get("limits")) or _tiers_from_keys(data)
 
     extra_raw = data.get("extra_usage")
     extra: ExtraUsage | None = None
@@ -106,6 +108,57 @@ def _to_report(data: dict[str, Any]) -> UsageReport:
         if limit > 0:
             extra = ExtraUsage(used_usd=used, limit_usd=limit)
     return UsageReport(tiers=tiers, extra=extra)
+
+
+def _tiers_from_limits(limits: Any) -> list[UsageTier]:
+    """Project the ``limits`` array, preserving the server's order."""
+    if not isinstance(limits, list):
+        return []
+    tiers: list[UsageTier] = []
+    for entry in limits:
+        if not isinstance(entry, dict) or entry.get("percent") is None:
+            continue
+        tiers.append(
+            UsageTier(
+                name=_limit_label(entry),
+                used_pct=float(entry["percent"]),
+                resets_at=_parse_iso(entry.get("resets_at")),
+            )
+        )
+    return tiers
+
+
+def _limit_label(entry: dict[str, Any]) -> str:
+    """Name one ``limits`` entry from its ``kind`` and scoped model.
+
+    An unrecognised ``kind`` is labelled from its own fields rather than
+    dropped, so a window the account gains later still shows up.
+    """
+    kind = str(entry.get("kind") or "limit")
+    scope = entry.get("scope") or {}
+    model = (scope.get("model") or {}).get("display_name")
+    if kind == "weekly_scoped":
+        return f"7-day {model}" if model else "7-day scoped"
+    base = _LIMIT_KIND_LABELS.get(kind, kind.replace("_", " "))
+    return f"{base} ({model})" if model else base
+
+
+def _tiers_from_keys(data: dict[str, Any]) -> list[UsageTier]:
+    """Project the top-level per-window keys, for a response with no
+    ``limits`` array."""
+    tiers: list[UsageTier] = []
+    for key, label in _LEGACY_TIER_LABELS:
+        raw = data.get(key)
+        if not raw or raw.get("utilization") is None:
+            continue
+        tiers.append(
+            UsageTier(
+                name=label,
+                used_pct=float(raw["utilization"]),
+                resets_at=_parse_iso(raw.get("resets_at")),
+            )
+        )
+    return tiers
 
 
 def _parse_iso(value: str | None) -> datetime | None:
