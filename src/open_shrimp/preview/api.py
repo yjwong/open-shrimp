@@ -22,6 +22,7 @@ from starlette.staticfiles import StaticFiles
 
 from open_shrimp.config import Config
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
+from open_shrimp.rich_message import edit_rich
 
 logger = logging.getLogger(__name__)
 
@@ -462,7 +463,7 @@ async def submit_review_endpoint(request: Request) -> JSONResponse:
     try:
         await dispatch_to_agent(
             prompt, chat_id, thread_id,
-            placeholder="Reviewing feedback\\.\\.\\.",
+            placeholder="Reviewing feedback...",
         )
     except RuntimeError as e:
         logger.error("submit_review_endpoint: %s", e)
@@ -519,14 +520,14 @@ async def _auto_deny_plan_approval(
             bot = Bot(token=config.telegram.token)
             async with bot:
                 status = (
-                    "\n\n\u274c *Denied\\.* "
-                    "_Review comments submitted\\._"
+                    "\n\n\u274c **Denied.** "
+                    "*Review comments submitted.*"
                 )
-                await bot.edit_message_text(
-                    chat_id=approval_chat_id,
-                    message_id=message_id,
-                    text="\U0001f4cb *Plan*" + status,
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    bot,
+                    approval_chat_id,
+                    message_id,
+                    "\U0001f4cb **Plan**" + status,
                 )
         except Exception:
             logger.exception(

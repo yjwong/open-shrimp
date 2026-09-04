@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.rich_stub import rich_sends
+
 import open_shrimp.client_manager as cm
 from open_shrimp.db import ChatScope
 
@@ -179,7 +181,7 @@ async def test_backend_swap_notifies_user(
 
     ctx = _FakeCtx(backend="opencode")
     cb = MagicMock(spec=[])
-    bot = MagicMock(name="bot", spec=[])
+    bot = MagicMock(name="bot", spec=["do_api_request"])
     bot.send_message = AsyncMock()
 
     await cm.get_or_create_session(
@@ -193,10 +195,9 @@ async def test_backend_swap_notifies_user(
     )
 
     swap_notices = [
-        call for call in bot.send_message.call_args_list
-        if "Backend changed" in call.kwargs.get("text", "")
+        call for call in rich_sends(bot) if "Backend changed" in call.text
     ]
     assert len(swap_notices) == 1
-    text = swap_notices[0].kwargs["text"]
-    assert "claude_sdk" in text and "opencode" in text
-    assert swap_notices[0].kwargs["chat_id"] == 9
+    assert "claude_sdk" in swap_notices[0].text
+    assert "opencode" in swap_notices[0].text
+    assert swap_notices[0].chat_id == 9

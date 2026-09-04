@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 
+from tests.rich_stub import RichMessage
+
 from open_shrimp import dispatch_registry, host_monitor
 from open_shrimp.config import (
     Config,
@@ -46,17 +48,9 @@ def _config() -> Config:
     )
 
 
-class _StubMessage:
+class _StubMessage(RichMessage):
     def __init__(self, text: str) -> None:
-        self.chat_id = CHAT_ID
-        self.message_thread_id = None
-        self.text = text
-        self.replies: list[str] = []
-
-    async def reply_text(
-        self, text: str, parse_mode: str | None = None, **_: Any
-    ) -> None:
-        self.replies.append(text)
+        super().__init__(text, chat_id=CHAT_ID)
 
 
 class _StubUpdate:

@@ -17,6 +17,7 @@ from open_shrimp.db import get_event_topic, init_db, set_event_topic
 from open_shrimp.events import sink as sink_module
 from open_shrimp.events.sink import EventSink
 from open_shrimp.events.types import Event
+from open_shrimp.markdown import RICH_MAX_LENGTH
 
 CHAT_ID = -1001234
 
@@ -29,6 +30,13 @@ def db(tmp_path):
 
 
 def _make_bot(thread_ids: list[int] | None = None) -> AsyncMock:
+    """A bot whose rich sends land on the ``send_message`` mock.
+
+    ``sendRichMessage`` has no python-telegram-bot method, so the sink calls
+    ``do_api_request``; unpacking it back onto ``send_message`` here keeps the
+    assertions written against the arguments that matter — body, thread and
+    keyboard — rather than against the envelope.
+    """
     bot = AsyncMock()
     ids = iter(thread_ids or [111, 222, 333])
     bot.create_forum_topic.side_effect = lambda *a, **kw: SimpleNamespace(
@@ -38,6 +46,17 @@ def _make_bot(thread_ids: list[int] | None = None) -> AsyncMock:
     bot.send_message.side_effect = lambda *a, **kw: SimpleNamespace(
         message_id=next(message_ids)
     )
+
+    async def api(endpoint, api_kwargs=None, **_):
+        if endpoint != "sendRichMessage":
+            return None
+        kwargs = dict(api_kwargs or {})
+        body = kwargs.pop("rich_message")
+        return await bot.send_message(
+            kwargs.pop("chat_id"), body["markdown"], **kwargs,
+        )
+
+    bot.do_api_request.side_effect = api
     return bot
 
 
@@ -66,9 +85,8 @@ async def test_text_event_renders_bold_header_with_sender(db):
     bot.send_message.assert_called_once()
     args, kwargs = bot.send_message.call_args
     assert args[0] == CHAT_ID
-    assert args[1].startswith("*📥 lark · Alice*")
+    assert args[1].startswith("**📥 lark · Alice**")
     assert "hello world" in args[1]
-    assert kwargs["parse_mode"] == "MarkdownV2"
     assert kwargs["message_thread_id"] == 111
 
 
@@ -80,7 +98,7 @@ async def test_text_event_without_sender_omits_separator(db):
     await sink.emit(_event(sender=None))
 
     text = bot.send_message.call_args.args[1]
-    assert text.startswith("*📥 lark*")
+    assert text.startswith("**📥 lark**")
     assert "·" not in text
 
 
@@ -89,12 +107,12 @@ async def test_long_text_is_chunked_into_multiple_messages(db):
     bot = _make_bot()
     sink = EventSink(bot, db, CHAT_ID)
 
-    long_text = "\n\n".join(f"paragraph {i} " + "x" * 200 for i in range(40))
+    long_text = "\n\n".join(f"paragraph {i} " + "x" * 200 for i in range(300))
     await sink.emit(_event(text=long_text))
 
     assert bot.send_message.call_count > 1
     for call in bot.send_message.call_args_list:
-        assert len(call.args[1]) <= 4096
+        assert len(call.args[1]) <= RICH_MAX_LENGTH
 
 
 @pytest.mark.asyncio
@@ -105,7 +123,7 @@ async def test_json_fallback_renders_code_block(db):
     await sink.emit(_event(text=None, raw={"key": "value", "n": 1}))
 
     text = bot.send_message.call_args.args[1]
-    assert text.startswith("*📥 lark · Alice*")
+    assert text.startswith("**📥 lark · Alice**")
     assert "```json" in text
     assert '"key": "value"' in text
     assert text.endswith("```")
@@ -116,11 +134,11 @@ async def test_json_fallback_truncated_to_single_message(db):
     bot = _make_bot()
     sink = EventSink(bot, db, CHAT_ID)
 
-    await sink.emit(_event(text=None, raw={"blob": "y" * 10000}))
+    await sink.emit(_event(text=None, raw={"blob": "y" * 60000}))
 
     bot.send_message.assert_called_once()
     text = bot.send_message.call_args.args[1]
-    assert len(text) <= 4096
+    assert len(text) <= RICH_MAX_LENGTH
     assert "… truncated" in text
     # The note must be inside the fenced block.
     assert text.index("… truncated") < text.rindex("```")
@@ -324,14 +342,16 @@ async def test_chunked_event_gets_button_on_last_chunk_only(db):
     bot = _make_bot()
     sink = _pickup_sink(bot, db)
 
-    long_text = "\n\n".join(f"paragraph {i} " + "x" * 200 for i in range(40))
+    long_text = "\n\n".join(f"paragraph {i} " + "x" * 200 for i in range(300))
     await sink.emit(_event(text=long_text))
 
     calls = bot.send_message.call_args_list
     assert len(calls) > 1
+    # The keyboard is omitted rather than sent as null, so an absent key
+    # and an explicit None mean the same thing here.
     for call in calls[:-1]:
-        assert call.kwargs["reply_markup"] is None
-    assert calls[-1].kwargs["reply_markup"] is not None
+        assert call.kwargs.get("reply_markup") is None
+    assert calls[-1].kwargs.get("reply_markup") is not None
 
     # The stored message_id is the button host (the last chunk).
     last_message_id = 1000 + len(calls) - 1
@@ -348,7 +368,7 @@ async def test_non_pickup_source_gets_no_button_but_is_persisted(db):
 
     await sink.emit(_event(text="hello world"))
 
-    assert bot.send_message.call_args.kwargs["reply_markup"] is None
+    assert bot.send_message.call_args.kwargs.get("reply_markup") is None
     # Still persisted: the reply path quotes provider content from this row.
     row = await get_inbound_event_by_message(db, CHAT_ID, 1000)
     assert row is not None

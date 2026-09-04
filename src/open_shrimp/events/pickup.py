@@ -33,7 +33,7 @@ from open_shrimp.db import (
     set_inbound_event_pickup_thread,
 )
 from open_shrimp.handlers.utils import no_context_answer
-from open_shrimp.markdown import escape
+from open_shrimp.markdown import escape_rich
 
 logger = logging.getLogger(__name__)
 
@@ -399,9 +399,9 @@ async def spawn_pickup_topic(
     if len(body) > _BRIEF_DISPLAY_MAX:
         body = body[:_BRIEF_DISPLAY_MAX] + "…"
     placeholder = (
-        f"*{escape(header)}*\n"
-        "_the agent reads this via read\\_inbound\\_event_\n\n"
-        f"{escape(body)}"
+        f"**{escape_rich(header)}**\n"
+        "*the agent reads this via `read_inbound_event`*\n\n"
+        f"{escape_rich(body)}"
     )
 
     from open_shrimp.dispatch_registry import dispatch

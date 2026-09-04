@@ -134,11 +134,10 @@ async def diagnose(
 async def failure_reply(error: SandboxStartupError, config: Config | None) -> str:
     """The whole reply for a scope whose message never ran.
 
-    Plain text, never MarkdownV2 and with nothing in it that only renders as
-    markup: the remedies carry Windows paths, shell variables and parentheses,
-    and a message Telegram rejects for a bad entity is worse than the generic
-    sentence it replaces — the same reason ``mini_app._unavailable_text`` is
-    plain.
+    Plain text, carrying no markup of its own: the remedies are Windows
+    paths, shell variables and parentheses, and the caller escapes the whole
+    thing so a backslash cannot rewrite the path being prescribed — the same
+    reason ``mini_app._unavailable_text`` is plain.
     """
     what, prerequisite = await diagnose(error, config)
     lead = (

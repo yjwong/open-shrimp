@@ -32,7 +32,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from telegram import Bot, InlineKeyboardMarkup
 
-from open_shrimp.markdown import escape, escape_code
+from open_shrimp.markdown import escape_rich, escape_rich_inline
+from open_shrimp.rich_message import (
+    body_of,
+    edit_message_rich,
+    edit_rich,
+    send_rich,
+)
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox.launch import start_sandboxed_agent
@@ -507,12 +513,12 @@ async def _request_outer_approval(
     deny_data = f"{_HANDOFF_DENY_PREFIX}{tool_use_id}"
 
     header = (
-        f"🔎 *Ask {escape(target)}?*" if include_inline
-        else f"↗️ *Hand off to {escape(target)}?*"
+        f"🔎 **Ask {escape_rich_inline(target)}?**" if include_inline
+        else f"↗️ **Hand off to {escape_rich_inline(target)}?**"
     )
     text = (
         f"{header}\n"
-        f"> {escape(_summary_line(question, limit=300))}"
+        f"> {escape_rich_inline(_summary_line(question, limit=300))}"
     )
     buttons = []
     if include_inline:
@@ -523,16 +529,8 @@ async def _request_outer_approval(
     buttons.append(InlineKeyboardButton("Deny", callback_data=deny_data))
     keyboard = InlineKeyboardMarkup([buttons])
 
-    thread_kwargs: dict[str, Any] = {}
-    if thread_id is not None:
-        thread_kwargs["message_thread_id"] = thread_id
-
-    sent = await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
-        **thread_kwargs,
+    sent = await send_rich(
+        bot, chat_id, text, thread_id=thread_id, reply_markup=keyboard,
     )
 
     _approval_tool_names[tool_use_id] = "ask_context"
@@ -566,15 +564,14 @@ async def _request_outer_approval(
     return _OuterApproval(outcome=outcome, message_id=sent.message_id)
 
 
-# (outcome, toast-answer, MarkdownV2 card note) per handoff button. Notes use a
-# real ellipsis so no MarkdownV2 escaping is needed.
+# (outcome, toast-answer, card note) per handoff button.
 _HANDOFF_BUTTONS: dict[str, tuple[HandoffOutcome, str, str]] = {
-    _HANDOFF_INLINE_PREFIX: ("inline", "Running inline.", "🔎 *Running inline…*"),
+    _HANDOFF_INLINE_PREFIX: ("inline", "Running inline.", "🔎 **Running inline…**"),
     _HANDOFF_TOPIC_PREFIX: (
         "new_topic", "Handing off to a new topic.",
-        "↗️ *Handing off to a new topic…*",
+        "↗️ **Handing off to a new topic…**",
     ),
-    _HANDOFF_DENY_PREFIX: ("deny", "Denied.", "❌ *Denied*"),
+    _HANDOFF_DENY_PREFIX: ("deny", "Denied.", "❌ **Denied**"),
 }
 
 
@@ -606,12 +603,9 @@ async def handle_handoff_callback(query: Any, data: str) -> bool:
     # exists; this interim note gives immediate feedback.
     if query.message:
         try:
-            original_md = (
-                query.message.text_markdown_v2 or query.message.text or ""
-            )
-            await query.message.edit_text(
-                text=f"{original_md}\n\n{note}",
-                parse_mode="MarkdownV2",
+            await edit_message_rich(
+                query.message,
+                f"{body_of(query.message)}\n\n{note}",
                 reply_markup=None,
             )
         except Exception:
@@ -643,7 +637,7 @@ def _make_parent_routed_approval(
     """
     from open_shrimp.handlers.approval import _send_approval_keyboard
 
-    provenance = f"🔎 *{escape(target)}* sub\\-query wants to:"
+    provenance = f"🔎 **{escape_rich_inline(target)}** sub-query wants to:"
 
     async def _request_approval(
         tool_name: str,
@@ -832,18 +826,13 @@ class _StatusMessage:
 
         # The question is already shown on the approval card above this
         # message, so don't echo it again here.
-        text = f"🔎 *Asking {escape(self._target)}…*"
-        kwargs: dict[str, Any] = {}
-        if self._thread_id is not None:
-            kwargs["message_thread_id"] = self._thread_id
+        text = f"🔎 **Asking {escape_rich_inline(self._target)}…**"
         try:
-            msg = await self._bot.send_message(
-                chat_id=self._chat_id,
-                text=text,
-                parse_mode="MarkdownV2",
+            msg = await send_rich(
+                self._bot, self._chat_id, text,
+                thread_id=self._thread_id,
                 reply_markup=keyboard,
                 disable_notification=True,
-                **kwargs,
             )
             self._message_id = msg.message_id
         except Exception:
@@ -854,28 +843,25 @@ class _StatusMessage:
         if self._message_id is None:
             return
 
-        target = escape(self._target)
+        target = escape_rich_inline(self._target)
         if result.outcome == "ok":
             tools = (
                 "1 tool" if result.tool_count == 1
                 else f"{result.tool_count} tools"
             )
             text = (
-                f"✅ *{target} answered* · {int(result.elapsed)}s · {tools}"
+                f"✅ **{target} answered** · {int(result.elapsed)}s · {tools}"
             )
         elif result.outcome == "timeout":
             text = (
-                f"⏱️ *{target}* — query timed out after "
+                f"⏱️ **{target}** — query timed out after "
                 f"{int(_DEFAULT_TIMEOUT_SECONDS)}s"
             )
         else:
-            text = f"❌ *{target}* — query failed"
+            text = f"❌ **{target}** — query failed"
         try:
-            await self._bot.edit_message_text(
-                chat_id=self._chat_id,
-                message_id=self._message_id,
-                text=text,
-                parse_mode="MarkdownV2",
+            await edit_rich(
+                self._bot, self._chat_id, self._message_id, text,
                 reply_markup=None,
             )
         except Exception:
@@ -930,13 +916,7 @@ async def _edit_outer_card(
     if message_id is None:
         return
     try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            parse_mode="MarkdownV2",
-            reply_markup=None,
-        )
+        await edit_rich(bot, chat_id, message_id, text, reply_markup=None)
     except Exception:
         logger.debug("Failed to edit ask_context handoff card", exc_info=True)
 
@@ -1037,8 +1017,8 @@ async def _run_handoff(
     if len(brief) > 3000:
         brief = brief[:3000] + "…"
     placeholder = (
-        "↗️ *Handoff brief* \\(injected as the first turn\\)\n\n"
-        f"{escape(brief)}"
+        "↗️ **Handoff brief** (injected as the first turn)\n\n"
+        f"{escape_rich(brief)}"
     )
     try:
         await dispatch(
@@ -1055,8 +1035,7 @@ async def _run_handoff(
     # 4. Note the source, return fire-and-forget.
     await _edit_outer_card(
         bot, chat_id, card_message_id,
-        f"↗️ *Handed off to new topic* — running under "
-        f"`{escape_code(target)}`",
+        f"↗️ **Handed off to new topic** — running under `{target}`",
     )
     return _text_result(
         f"Handed off to a new topic (thread {new_thread_id}) running under "

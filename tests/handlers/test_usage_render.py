@@ -2,12 +2,12 @@
 
 Asserted here:
 
-* Single report → flat list with no section header (today's output).
+* Single report → one table with no section header.
 * Multiple reports → one section header per backend, blank-separated.
-* Empty ``tiers`` + present ``extra`` → just the extra line.
-* ``resets_at`` in the past → no "resets in" suffix.
-* MarkdownV2 special characters in backend / tier / extra labels are
-  escaped — Telegram's parser would otherwise reject the message.
+* Empty ``tiers`` + present ``extra`` → just the extra row.
+* ``resets_at`` in the past → an empty Resets cell.
+* Markup characters in backend / tier / extra labels are escaped, so a
+  name containing ``_`` cannot italicise the rest of the row.
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ class TestSingleReport:
         text = render_usage_reports([("claude_sdk", report)])
         # No backend name should appear in single-report output.
         assert "claude_sdk" not in text
-        assert "5\\-hour session" in text
-        assert "42% used" in text
+        assert "5-hour session" in text
+        assert "42%" in text
 
     def test_tier_with_future_resets_at_includes_suffix(self) -> None:
         report = UsageReport(
@@ -48,7 +48,7 @@ class TestSingleReport:
             ],
         )
         text = render_usage_reports([("claude_sdk", report)])
-        assert "resets in 1h" in text
+        assert "| 1h1m |" in text
 
     def test_tier_with_minutes_only_resets_at(self) -> None:
         # Use seconds well under an hour so the "hours" branch is never
@@ -64,8 +64,8 @@ class TestSingleReport:
             ],
         )
         text = render_usage_reports([("claude_sdk", report)])
-        assert "resets in 1" in text  # 14m or 15m, both fine
-        assert "h" not in text.split("resets in")[1]
+        resets = text.rstrip().rsplit("|", 2)[1].strip()
+        assert resets in {"14m", "15m"}
 
     def test_past_resets_at_omits_suffix(self) -> None:
         report = UsageReport(
@@ -78,7 +78,7 @@ class TestSingleReport:
             ],
         )
         text = render_usage_reports([("claude_sdk", report)])
-        assert "resets in" not in text
+        assert text.rstrip().endswith("|  |")
 
     def test_extra_usage_line(self) -> None:
         report = UsageReport(
@@ -88,15 +88,15 @@ class TestSingleReport:
         text = render_usage_reports([("claude_sdk", report)])
         # Empty tiers means the only line is the extra-usage line.
         assert "Extra usage" in text
-        assert "12\\.34" in text
-        assert "100\\.00" in text
+        assert "12.34" in text
+        assert "100.00" in text
 
     def test_used_pct_above_100_is_clamped(self) -> None:
         report = UsageReport(
             tiers=[UsageTier(name="5-hour session", used_pct=140.0)],
         )
         text = render_usage_reports([("claude_sdk", report)])
-        assert "100% used" in text
+        assert "100%" in text
 
 
 class TestMultipleReports:
@@ -106,12 +106,12 @@ class TestMultipleReports:
         text = render_usage_reports([("claude_sdk", r1), ("opencode", r2)])
         # Sections separated by a blank line.
         assert "\n\n" in text
-        # Header is the backend name in bold; ``_`` is MarkdownV2-escaped.
-        assert "*claude\\_sdk*" in text
-        assert "*opencode*" in text
+        # Header is the backend name in bold; ``_`` is escaped so it cannot
+        # open an emphasis run.
+        assert "**claude\\_sdk**" in text
+        assert "**opencode**" in text
 
     def test_special_chars_in_backend_name_escaped(self) -> None:
         report = UsageReport(tiers=[UsageTier(name="A", used_pct=10.0)])
         text = render_usage_reports([("claude.sdk_v2", report), ("opencode", report)])
-        # MarkdownV2 escapes ``.`` and ``_`` — both must appear escaped.
-        assert "claude\\.sdk\\_v2" in text
+        assert "claude.sdk\\_v2" in text

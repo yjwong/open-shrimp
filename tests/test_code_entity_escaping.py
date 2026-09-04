@@ -1,26 +1,21 @@
-"""A backslash reaches Telegram doubled, whichever escaper ran.
-
-Measured against the live Bot API, because the documented rule and the
-observed behaviour differ, and only one of the two differences matters.
-
-Telegram is *lenient* about over-escaping inside a ``pre``/``code``
-entity: ``\\+``, ``\\-`` and ``\\.`` are stripped and render correctly, so
-reaching for the prose escaper inside a code span costs bytes, not
-meaning.  It is an escaper that omits ``\\`` from its set that bites —
-Telegram reads the lone backslash as an escape and consumes it:
-
-    doubled  ->  directory: C:\\\\Users\\\\ada\\\\my-project   (correct)
-    lone     ->  directory: C:Usersadamy-project    (wrong)
+"""A Windows path renders as written, on both message formats.
 
 An approval card exists to show a person exactly what they are agreeing
 to, so a path that renders as something other than the path being used is
 the one failure it cannot have.  Every Windows context directory is such
-a path.
+a path, and the two formats need opposite treatment to get there.
+
+MarkdownV2 consumes a lone backslash as an escape character, so every one
+has to leave doubled:
+
+    doubled  ->  directory: C:\\\\Users\\\\ada\\\\my-project   (correct)
+    lone     ->  directory: C:Usersadamy-project    (wrong)
+
+A rich message takes a fenced block literally, so the same doubling would
+show the user two backslashes where the path has one.
 """
 
 from __future__ import annotations
-
-import re
 
 import pytest
 
@@ -67,6 +62,11 @@ def test_a_diff_survives_escape_code_unchanged_apart_from_backslashes():
     ],
 )
 def test_an_approval_card_shows_a_windows_path_as_written(render: str):
+    """A rich fence is taken literally, so the path goes in undoubled.
+
+    The MarkdownV2 requirement inverts here: doubling a backslash for a rich
+    message shows the user two of them.
+    """
     from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
 
     policy = ClaudeSdkPolicy()
@@ -88,14 +88,11 @@ def test_an_approval_card_shows_a_windows_path_as_written(render: str):
         )
     else:
         text = policy.format_approval_text(
-            "Bash", {"command": r"copy C:\a\b D:\c"}, None,
+            "Bash", {"command": rf"copy {WINDOWS_PATH} D:\c"}, None,
         )
 
-    # Inside the fence every backslash must be doubled: a lone one is the
-    # form Telegram eats.
-    fenced = text.split("```")[-2]
-    assert "\\\\" in fenced
-    assert not re.search(r"(?<!\\)\\(?!\\)", fenced)
+    assert "\\\\" not in text
+    assert WINDOWS_PATH in text
 
 
 def test_an_opencode_card_shows_a_windows_path_as_written():
@@ -110,7 +107,8 @@ def test_an_opencode_card_shows_a_windows_path_as_written():
         },
         None,
     )
-    assert "\\\\" in text
+    assert WINDOWS_PATH in text
+    assert "\\\\" not in text
 
 
 def test_an_inbound_payload_cannot_break_out_of_its_code_block():
@@ -127,10 +125,11 @@ def test_an_inbound_payload_cannot_break_out_of_its_code_block():
         raw={"note": "```\n*not bold*\n```", "win": r"C:\tmp"},
     )
     body = _render(event)[0]
-    # The payload's own backticks are escaped, so the only unescaped pair
-    # is the fence the sink opened and closed.
-    assert body.count("```") == 2
-    assert "*not bold*" in body
-    # json.dumps already doubled the backslash to represent one; escape_code
-    # doubles each of those again, so Telegram renders the JSON as written.
-    assert r"C:\\\\tmp" in body
+    # The fence outgrows the longest backtick run in the payload, so the
+    # payload's own triple cannot close it.
+    assert body.startswith("**📥 lark · someone**\n````json\n")
+    assert body.endswith("\n````")
+    assert "```\\n*not bold*\\n```" in body
+    # json.dumps doubles the backslash to represent one, and the fence takes
+    # what it is given, so the JSON reads as json.dumps wrote it.
+    assert r"C:\\tmp" in body

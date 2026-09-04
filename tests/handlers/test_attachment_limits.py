@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from tests.rich_stub import wire_rich
 from telegram.error import BadRequest, NetworkError
 
 from open_shrimp.db import ChatScope
@@ -122,7 +124,7 @@ async def test_healthy_download_reports_nothing_skipped() -> None:
 
 
 async def test_warning_names_each_skipped_file() -> None:
-    bot = SimpleNamespace(send_message=AsyncMock())
+    bot = wire_rich(SimpleNamespace(send_message=AsyncMock()))
     scope = ChatScope(chat_id=7, thread_id=3)
 
     await _warn_skipped_attachments(bot, scope, ["huge.zip — 41.0 MB, over the 20 MB limit"])
@@ -131,9 +133,11 @@ async def test_warning_names_each_skipped_file() -> None:
     kwargs = bot.send_message.await_args.kwargs
     assert kwargs["chat_id"] == 7
     assert kwargs["message_thread_id"] == 3
-    # MarkdownV2 would reject the bare '.' in a filename or a size.
-    assert "huge\\.zip" in kwargs["text"]
-    assert "41\\.0 MB" in kwargs["text"]
+    # A filename is a name, not markup: an underscore in it must not open
+    # an emphasis run, and a dot must not leave a backslash on screen.
+    assert "huge.zip" in kwargs["text"]
+    assert "41.0 MB" in kwargs["text"]
+    assert "\\" not in kwargs["text"]
 
 
 async def test_nothing_skipped_sends_no_message() -> None:

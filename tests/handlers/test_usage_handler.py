@@ -18,6 +18,8 @@ from typing import Any
 
 import pytest
 
+from tests.rich_stub import RichMessage
+
 from open_shrimp.backend.usage import UsageReport, UsageTier
 from open_shrimp.config import (
     Config,
@@ -47,19 +49,15 @@ def _config() -> Config:
 @dataclass
 class _CapturedReply:
     text: str
-    parse_mode: str | None = None
 
 
-class _StubMessage:
+class _StubMessage(RichMessage):
     def __init__(self) -> None:
-        self.chat_id = 100
-        self.message_thread_id = None
-        self.replies: list[_CapturedReply] = []
+        super().__init__(chat_id=100)
 
-    async def reply_text(
-        self, text: str, parse_mode: str | None = None, **_: Any
-    ) -> None:
-        self.replies.append(_CapturedReply(text=text, parse_mode=parse_mode))
+    @property
+    def replies(self) -> list[_CapturedReply]:
+        return [_CapturedReply(call.text) for call in self.bot.sends]
 
 
 class _StubUser:
@@ -110,7 +108,6 @@ async def test_no_capable_backend_replies_not_available() -> None:
     [reply] = update.effective_message.replies
     assert "not available" in reply.text
     assert "`opencode`" in reply.text
-    assert reply.parse_mode == "MarkdownV2"
 
 
 @pytest.mark.asyncio

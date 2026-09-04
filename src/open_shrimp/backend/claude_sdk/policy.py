@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING, Any
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
-from open_shrimp.markdown import escape, escape_code
+from open_shrimp.markdown import (
+    RICH_MAX_LENGTH,
+    escape_rich,
+    escape_rich_inline,
+    rich_code_block,
+)
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.supervisor import SUPERVISOR_WRITE_TOOL_NAMES
 
@@ -212,8 +217,10 @@ def _is_single_subcommand_safe(
     return True
 
 
-# Escape function for MarkdownV2 (the SDK rendering uses MarkdownV2).  Kept
-# private to this module so the policy doesn't reach into handlers/utils.
+# The headroom covers the header and the fence around whatever body is being
+# clipped to fit.
+_MAX_BODY_CHARS = RICH_MAX_LENGTH - 500
+
 # ---------------------------------------------------------------------------
 # Per-tool summary renderers
 # ---------------------------------------------------------------------------
@@ -317,10 +324,9 @@ def _format_edit_approval(
         "new_source", "",
     )
 
-    escaped_path = escape_code(file_path)
     is_notebook = "notebook_path" in tool_input
     label = "NotebookEdit" if is_notebook else "Edit"
-    header = f"✏️ *{label}:* `{escaped_path}`"
+    header = f"✏️ **{label}:** `{file_path}`"
 
     old_lines = old_string.splitlines()
     new_lines = new_string.splitlines()
@@ -333,12 +339,10 @@ def _format_edit_approval(
     else:
         diff_body = "(no diff)"
 
-    max_diff_len = 4096 - 200
-    if len(diff_body) > max_diff_len:
-        diff_body = diff_body[:max_diff_len] + "\n..."
+    if len(diff_body) > _MAX_BODY_CHARS:
+        diff_body = diff_body[:_MAX_BODY_CHARS] + "\n..."
 
-    escaped_diff = escape_code(diff_body)
-    return f"{header}\n\n```diff\n{escaped_diff}\n```"
+    return f"{header}\n\n{rich_code_block(diff_body, 'diff')}"
 
 
 def _format_bash_approval(tool_input: dict[str, Any]) -> str:
@@ -348,15 +352,13 @@ def _format_bash_approval(tool_input: dict[str, Any]) -> str:
 
     parts: list[str] = []
     if description:
-        parts.append(f"\U0001f4bb *Bash:* {escape(description)}")
+        parts.append(f"\U0001f4bb **Bash:** {escape_rich_inline(description)}")
     else:
-        parts.append("\U0001f4bb *Bash*")
+        parts.append("\U0001f4bb **Bash**")
 
-    max_cmd_len = 4096 - 200
-    if len(command) > max_cmd_len:
-        command = command[:max_cmd_len] + "\n..."
-    escaped_cmd = escape_code(command)
-    parts.append(f"```bash\n{escaped_cmd}\n```")
+    if len(command) > _MAX_BODY_CHARS:
+        command = command[:_MAX_BODY_CHARS] + "\n..."
+    parts.append(rich_code_block(command, "bash"))
 
     return "\n\n".join(parts)
 
@@ -368,17 +370,16 @@ def _format_monitor_approval(tool_input: dict[str, Any]) -> str:
     persistent = tool_input.get("persistent", False)
 
     parts: list[str] = []
-    header = "\U0001f4e1 *Monitor*"
+    header = "\U0001f4e1 **Monitor**"
     if description:
-        header = f"{header}: {escape(description)}"
+        header = f"{header}: {escape_rich_inline(description)}"
     if persistent:
-        header = f"{header} _\\(persistent\\)_"
+        header = f"{header} *(persistent)*"
     parts.append(header)
 
-    max_cmd_len = 4096 - 200
-    if len(command) > max_cmd_len:
-        command = command[:max_cmd_len] + "\n..."
-    parts.append(f"```bash\n{escape_code(command)}\n```")
+    if len(command) > _MAX_BODY_CHARS:
+        command = command[:_MAX_BODY_CHARS] + "\n..."
+    parts.append(rich_code_block(command, "bash"))
 
     return "\n\n".join(parts)
 
@@ -390,15 +391,12 @@ def _format_write_approval(
     file_path = _relative_path(tool_input.get("file_path", "unknown"), cwd)
     content = tool_input.get("content", "")
 
-    escaped_path = escape_code(file_path)
-    header = f"\U0001f4dd *Write:* `{escaped_path}`"
+    header = f"\U0001f4dd **Write:** `{file_path}`"
 
-    max_content_len = 4096 - 200
-    if len(content) > max_content_len:
-        content = content[:max_content_len] + "\n..."
+    if len(content) > _MAX_BODY_CHARS:
+        content = content[:_MAX_BODY_CHARS] + "\n..."
 
-    escaped_content = escape_code(content)
-    return f"{header}\n\n```\n{escaped_content}\n```"
+    return f"{header}\n\n{rich_code_block(content)}"
 
 
 def _format_agent_approval(
@@ -413,20 +411,19 @@ def _format_agent_approval(
 
     if subagent_type:
         parts.append(
-            f"\U0001f916 *Agent* \\({escape(subagent_type)}\\)",
+            f"\U0001f916 **Agent** ({escape_rich_inline(subagent_type)})",
         )
     else:
-        parts.append("\U0001f916 *Agent*")
+        parts.append("\U0001f916 **Agent**")
 
     if description:
-        parts.append(escape(description))
+        parts.append(escape_rich(description))
 
     if expanded and prompt:
-        max_prompt_len = 4096 - 300
         display_prompt = prompt
-        if len(display_prompt) > max_prompt_len:
-            display_prompt = display_prompt[:max_prompt_len] + "\n..."
-        parts.append(f"```\n{escape_code(display_prompt)}\n```")
+        if len(display_prompt) > _MAX_BODY_CHARS:
+            display_prompt = display_prompt[:_MAX_BODY_CHARS] + "\n..."
+        parts.append(rich_code_block(display_prompt))
 
     return "\n\n".join(parts)
 
@@ -442,9 +439,9 @@ def _format_plan_approval(tool_input: dict[str, Any]) -> str:
             break
     if len(preview) > 80:
         preview = preview[:77] + "..."
-    header = "\U0001f4cb *Plan*"
+    header = "\U0001f4cb **Plan**"
     if preview:
-        header += f": {escape(preview)}"
+        header += f": {escape_rich_inline(preview)}"
     return header
 
 
@@ -452,15 +449,15 @@ def _format_generic_approval(
     tool_name: str, tool_input: dict[str, Any],
 ) -> str:
     """Format a generic tool call for the approval prompt."""
-    summary_parts = [f"*Tool:* `{tool_name}`"]
+    summary_parts = [f"**Tool:** `{tool_name}`"]
     for key, val in tool_input.items():
         val_str = str(val)
         if len(val_str) > 200:
             val_str = val_str[:200] + "..."
-        key_escaped = escape(key)
-        val_escaped = escape(val_str)
-        summary_parts.append(f"*{key_escaped}:* {val_escaped}")
-    return "\n".join(summary_parts)
+        summary_parts.append(
+            f"**{escape_rich_inline(key)}:** {escape_rich(val_str)}"
+        )
+    return "<br>".join(summary_parts)
 
 
 # ---------------------------------------------------------------------------

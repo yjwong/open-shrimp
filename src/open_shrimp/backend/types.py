@@ -146,6 +146,17 @@ class TextDeltaEvent(StreamEvent):
     text: str = ""
 
 
+@dataclass
+class ThinkingDeltaEvent(StreamEvent):
+    """Reasoning text, which only ever reaches a draft.
+
+    Telegram's ``<tg-thinking>`` block renders in a rich draft and is dropped
+    from the message that replaces it, so this never lands in the transcript.
+    """
+
+    text: str = ""
+
+
 # Task* mirror the SDK inheritance (decision 4) so stream.py's nested
 # isinstance dispatch — Task* checks live *inside* the isinstance(SystemMessage)
 # branch — is untouched.  Added fields carry defaults so the dataclass-generated
@@ -217,6 +228,7 @@ Message = Union[
     ResultMessage,
     StreamEvent,
     TextDeltaEvent,
+    ThinkingDeltaEvent,
     TaskStartedMessage,
     TaskProgressMessage,
     TaskNotificationMessage,
@@ -243,6 +255,7 @@ __all__ = [
     "TaskUpdatedMessage",
     "TextBlock",
     "TextDeltaEvent",
+    "ThinkingDeltaEvent",
     "ToolPermissionContext",
     "ToolResultBlock",
     "ToolUseBlock",

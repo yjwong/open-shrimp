@@ -26,7 +26,13 @@ from open_shrimp.handlers.state import (
     _question_states,
 )
 from open_shrimp.handlers.utils import _is_authorized
-from open_shrimp.markdown import escape
+from open_shrimp.markdown import escape_rich, escape_rich_inline
+from open_shrimp.rich_message import (
+    body_of,
+    edit_message_rich,
+    edit_rich,
+    send_rich,
+)
 from open_shrimp.stream import _DraftState, finalize_and_reset
 
 logger = logging.getLogger(__name__)
@@ -110,14 +116,17 @@ def _format_question_text(question: dict[str, Any]) -> str:
 
     parts: list[str] = []
     if header:
-        parts.append(f"\u2753 *{escape(header)}*")
-    parts.append(escape(question_text))
+        parts.append(f"\u2753 **{escape_rich_inline(header)}**")
+    parts.append(escape_rich(question_text))
 
     for opt in options:
         label = opt.get("label", "")
         desc = opt.get("description", "")
         if desc:
-            parts.append(f"\u2022 *{escape(label)}* \u2014 {escape(desc)}")
+            parts.append(
+                f"- **{escape_rich_inline(label)}** \u2014 "
+                f"{escape_rich_inline(desc)}"
+            )
 
     return "\n".join(parts)
 
@@ -152,16 +161,10 @@ async def _send_question_keyboard(
     keyboard = _build_question_keyboard(state)
     text = _format_question_text(question)
 
-    thread_kwargs: dict[str, Any] = {}
-    if scope.thread_id is not None:
-        thread_kwargs["message_thread_id"] = scope.thread_id
-
-    msg = await bot.send_message(
-        chat_id=scope.chat_id,
-        text=text,
-        parse_mode="MarkdownV2",
+    msg = await send_rich(
+        bot, scope.chat_id, text,
+        thread_id=scope.thread_id,
         reply_markup=keyboard,
-        **thread_kwargs,
     )
     state.message_id = msg.message_id
     state.original_text_md = text
@@ -245,7 +248,7 @@ async def resolve_question_from_device(
             state.bot,
             state.scope.chat_id,
             state.message_id,
-            state.original_text_md + f"\n\n✅ *Answer:* {escape(answer)}",
+            state.original_text_md + f"\n\n✅ **Answer:** {escape_rich(answer)}",
         )
     return answer
 
@@ -272,9 +275,8 @@ async def _complete_other_input(
         keyboard = _build_question_keyboard(state)
         if query and query.message:
             try:
-                await query.message.edit_text(
-                    text=original_md,
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    original_md,
                     reply_markup=keyboard,
                 )
             except Exception:
@@ -284,9 +286,9 @@ async def _complete_other_input(
         state.future.set_result(custom_text)
         if query and query.message:
             try:
-                await query.message.edit_text(
-                    text=original_md + f"\n\n\u2705 *Answer:* {escape(custom_text)}",
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    original_md
+                    + f"\n\n\u2705 **Answer:** {escape_rich(custom_text)}",
                     reply_markup=None,
                 )
             except Exception:
@@ -338,10 +340,10 @@ async def _handle_question_callback(
             # Update message to show selection, remove keyboard
             if query.message:
                 try:
-                    original_md = query.message.text_markdown_v2 or query.message.text or ""
-                    await query.message.edit_text(
-                        text=original_md + f"\n\n\u2705 *Selected:* {escape(label)}",
-                        parse_mode="MarkdownV2",
+                    await edit_message_rich(
+                        query.message,
+                        body_of(query.message)
+                        + f"\n\n\u2705 **Selected:** {escape_rich(label)}",
                         reply_markup=None,
                     )
                 except Exception:
@@ -362,7 +364,6 @@ async def _handle_question_callback(
             await query.answer()
             if query.message:
                 try:
-                    original_md = query.message.text_markdown_v2 or query.message.text or ""
                     await query.message.edit_reply_markup(reply_markup=keyboard)
                 except Exception:
                     logger.exception("Failed to update question keyboard")
@@ -377,10 +378,9 @@ async def _handle_question_callback(
         # Update message to show selections, remove keyboard
         if query.message:
             try:
-                original_md = query.message.text_markdown_v2 or query.message.text or ""
-                await query.message.edit_text(
-                    text=original_md + f"\n\n\u2705 *Selected:* {escape(result)}",
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    body_of(query.message)
+                    + f"\n\n\u2705 **Selected:** {escape_rich(result)}",
                     reply_markup=None,
                 )
             except Exception:
@@ -401,10 +401,9 @@ async def _handle_question_callback(
         # Hide the keyboard and prompt the user to type their answer.
         if query.message:
             try:
-                original_md = query.message.text_markdown_v2 or query.message.text or ""
-                await query.message.edit_text(
-                    text=original_md + "\n\n\u270f\ufe0f _Type your answer below:_",
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    body_of(query.message)
+                    + "\n\n\u270f\ufe0f *Type your answer below:*",
                     reply_markup=None,
                 )
             except Exception:

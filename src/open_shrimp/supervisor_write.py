@@ -93,8 +93,8 @@ WITHHELD_FIELDS: dict[str, str] = {
     "backend": "which agent backend it runs on",
 }
 
-# Long enough for a whole context, short enough for one Telegram message
-# once the card's own text and MarkdownV2 escaping are accounted for.
+# Long enough for a whole context, short enough to read in one screen: the
+# 32768-character message ceiling is nowhere near the binding constraint.
 _MAX_DIFF_CHARS = 2800
 
 # A diff renders three lines of unchanged context around each change, so a

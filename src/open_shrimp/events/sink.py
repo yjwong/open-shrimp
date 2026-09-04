@@ -34,11 +34,12 @@ from open_shrimp.events.pickup import (
 )
 from open_shrimp.events.types import Event
 from open_shrimp.markdown import (
-    TELEGRAM_MAX_LENGTH,
-    escape,
-    escape_code,
-    gfm_to_telegram,
+    RICH_MAX_LENGTH,
+    escape_rich_inline,
+    gfm_to_rich,
+    rich_code_block,
 )
+from open_shrimp.rich_message import send_rich
 from open_shrimp.telegram_topics import is_topic_gone, resolve_or_create_topic
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def _header(event: Event) -> str:
 
 
 def _render(event: Event) -> list[str]:
-    """Render an event into MarkdownV2 message chunks (each <= 4096 chars).
+    """Render an event into rich message chunks (each <= 32768 chars).
 
     A ``summary`` stands in for the body when the source gave one: the card is
     a notification, and a bulky payload would otherwise arrive as a run of
@@ -71,21 +72,19 @@ def _render(event: Event) -> list[str]:
     header = _header(event)
     body = event.summary or event.text
     if body is not None:
-        return gfm_to_telegram(f"**{header}**\n\n{body}")
+        return gfm_to_rich(f"**{header}**\n\n{body}")
 
-    bold = f"*{escape(header)}*"
-    # Escaped before it is measured, and escaped at all: this is a
-    # provider's payload, so it is the one string here nobody vetted.  A
-    # backtick in it would close the fence and let the remainder render as
-    # markup, and a backslash Telegram would silently eat.  Truncating
-    # after escaping also keeps the budget honest — escaping only grows
-    # the string.
-    payload = escape_code(json.dumps(event.raw, indent=2, ensure_ascii=False))
-    budget = TELEGRAM_MAX_LENGTH - len(bold) - len("\n```json\n") - len("\n```")
+    bold = f"**{escape_rich_inline(header)}**"
+    # A fence takes its body literally, which is what a provider's own
+    # payload needs: it is the one string here nobody vetted, and escaping
+    # it would show the escapes.  ``rich_code_block`` widens the fence past
+    # any backtick run in the payload, so it cannot close the block early.
+    payload = json.dumps(event.raw, indent=2, ensure_ascii=False)
+    budget = RICH_MAX_LENGTH - len(bold) - len("\n```json\n") - len("\n```")
     if len(payload) > budget:
         note = "\n… truncated"
         payload = payload[: budget - len(note)] + note
-    return [f"{bold}\n```json\n{payload}\n```"]
+    return [f"{bold}\n{rich_code_block(payload, 'json')}"]
 
 
 class EventSink:
@@ -204,11 +203,11 @@ class EventSink:
             markup = None
             if event_id is not None and i == len(chunks) - 1:
                 markup = pickup_keyboard(event_id)
-            message = await self._bot.send_message(
+            message = await send_rich(
+                self._bot,
                 self._chat_id,
                 chunk,
-                message_thread_id=thread_id,
-                parse_mode="MarkdownV2",
+                thread_id=thread_id,
                 reply_markup=markup,
             )
         return getattr(message, "message_id", None)

@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.rich_stub import wire_rich
+
 import open_shrimp.client_manager as cm
 from open_shrimp.db import ChatScope
 
@@ -25,7 +27,7 @@ def _reset_warned_set():
 
 
 async def test_warns_once_per_scope() -> None:
-    bot = AsyncMock()
+    bot = wire_rich(AsyncMock())
     scope = ChatScope(chat_id=42, thread_id=None)
 
     await cm._warn_tools_degraded_once(bot, scope)
@@ -38,21 +40,21 @@ async def test_warns_once_per_scope() -> None:
 
 
 async def test_warns_per_distinct_scope() -> None:
-    bot = AsyncMock()
+    bot = wire_rich(AsyncMock())
     await cm._warn_tools_degraded_once(bot, ChatScope(chat_id=1, thread_id=None))
     await cm._warn_tools_degraded_once(bot, ChatScope(chat_id=2, thread_id=None))
     assert bot.send_message.await_count == 2
 
 
 async def test_thread_id_passed_for_forum_scope() -> None:
-    bot = AsyncMock()
+    bot = wire_rich(AsyncMock())
     await cm._warn_tools_degraded_once(bot, ChatScope(chat_id=5, thread_id=9))
     args = bot.send_message.await_args.kwargs
     assert args["message_thread_id"] == 9
 
 
 async def test_send_failure_is_swallowed() -> None:
-    bot = AsyncMock()
+    bot = wire_rich(AsyncMock())
     bot.send_message.side_effect = RuntimeError("telegram down")
     scope = ChatScope(chat_id=7, thread_id=None)
 

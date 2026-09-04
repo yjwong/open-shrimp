@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from tests.rich_stub import RichMessage, rendered
 import pytest_asyncio
 from telegram import InlineKeyboardMarkup
 
@@ -74,20 +76,13 @@ def _config(*, public_url: str | None = None) -> Config:
     )
 
 
-class _StubMessage:
+class _StubMessage(RichMessage):
     def __init__(self) -> None:
-        self.chat_id = CHAT_ID
-        self.message_thread_id = None
-        self.replies: list[tuple[str, InlineKeyboardMarkup | None]] = []
+        super().__init__(chat_id=CHAT_ID)
 
-    async def reply_text(
-        self,
-        text: str,
-        parse_mode: str | None = None,
-        reply_markup: InlineKeyboardMarkup | None = None,
-        **_: Any,
-    ) -> None:
-        self.replies.append((text, reply_markup))
+    @property
+    def replies(self) -> list[tuple[str, InlineKeyboardMarkup | None]]:
+        return [(call.text, call.reply_markup) for call in self.bot.sends]
 
 
 class _StubUpdate:
@@ -276,7 +271,7 @@ class TestReplyMiniApp:
 
         text, markup = message.replies[0]
         assert markup is None
-        assert text == _unavailable_text(
+        assert rendered(text) == _unavailable_text(
             "the sign-in page", "Chatting with me here still works."
         )
 
@@ -308,6 +303,7 @@ class TestCommandsAreGuarded:
         await handler(update, _StubContext(_config(), db))
 
         text, markup = _only_reply(update)
+        text = rendered(text)
         assert markup is None
         assert "Mini App" in text
         assert "review.public_url" in text
@@ -324,6 +320,7 @@ class TestCommandsAreGuarded:
         await review_handler(update, _StubContext(config, db))
 
         text, markup = _only_reply(update)
+        text = rendered(text)
         assert markup is None
         assert "Mini App" in text
 

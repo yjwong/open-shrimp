@@ -26,7 +26,12 @@ from typing import TYPE_CHECKING, Any
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
-from open_shrimp.markdown import escape, escape_code
+from open_shrimp.markdown import (
+    RICH_MAX_LENGTH,
+    escape_rich,
+    escape_rich_inline,
+    rich_code_block,
+)
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.supervisor import SUPERVISOR_WRITE_TOOL_NAMES
 
@@ -299,6 +304,11 @@ def _summarize(
     return ""
 
 
+# The headroom covers the header and the fence around whatever body is being
+# clipped to fit.
+_MAX_BODY_CHARS = RICH_MAX_LENGTH - 500
+
+
 # ---------------------------------------------------------------------------
 # Per-tool approval renderers
 # ---------------------------------------------------------------------------
@@ -314,8 +324,7 @@ def _format_edit_approval(
     old_string = tool_input.get("oldString", "")
     new_string = tool_input.get("newString", "")
 
-    escaped_path = escape_code(file_path)
-    header = f"✏️ *Edit:* `{escaped_path}`"
+    header = f"✏️ **Edit:** `{file_path}`"
 
     old_lines = old_string.splitlines()
     new_lines = new_string.splitlines()
@@ -328,12 +337,10 @@ def _format_edit_approval(
     else:
         diff_body = "(no diff)"
 
-    max_diff_len = 4096 - 200
-    if len(diff_body) > max_diff_len:
-        diff_body = diff_body[:max_diff_len] + "\n..."
+    if len(diff_body) > _MAX_BODY_CHARS:
+        diff_body = diff_body[:_MAX_BODY_CHARS] + "\n..."
 
-    escaped_diff = escape_code(diff_body)
-    return f"{header}\n\n```diff\n{escaped_diff}\n```"
+    return f"{header}\n\n{rich_code_block(diff_body, 'diff')}"
 
 
 def _format_bash_approval(tool_input: dict[str, Any]) -> str:
@@ -342,15 +349,13 @@ def _format_bash_approval(tool_input: dict[str, Any]) -> str:
 
     parts: list[str] = []
     if description:
-        parts.append(f"\U0001f4bb *Bash:* {escape(description)}")
+        parts.append(f"\U0001f4bb **Bash:** {escape_rich_inline(description)}")
     else:
-        parts.append("\U0001f4bb *Bash*")
+        parts.append("\U0001f4bb **Bash**")
 
-    max_cmd_len = 4096 - 200
-    if len(command) > max_cmd_len:
-        command = command[:max_cmd_len] + "\n..."
-    escaped_cmd = escape_code(command)
-    parts.append(f"```bash\n{escaped_cmd}\n```")
+    if len(command) > _MAX_BODY_CHARS:
+        command = command[:_MAX_BODY_CHARS] + "\n..."
+    parts.append(rich_code_block(command, "bash"))
 
     return "\n\n".join(parts)
 
@@ -361,15 +366,12 @@ def _format_write_approval(
     file_path = _relative_path(tool_input.get("filePath", "unknown"), cwd)
     content = tool_input.get("content", "")
 
-    escaped_path = escape_code(file_path)
-    header = f"\U0001f4dd *Write:* `{escaped_path}`"
+    header = f"\U0001f4dd **Write:** `{file_path}`"
 
-    max_content_len = 4096 - 200
-    if len(content) > max_content_len:
-        content = content[:max_content_len] + "\n..."
+    if len(content) > _MAX_BODY_CHARS:
+        content = content[:_MAX_BODY_CHARS] + "\n..."
 
-    escaped_content = escape_code(content)
-    return f"{header}\n\n```\n{escaped_content}\n```"
+    return f"{header}\n\n{rich_code_block(content)}"
 
 
 def _format_apply_patch_approval(
@@ -382,16 +384,15 @@ def _format_apply_patch_approval(
     parts: list[str] = []
 
     if file_count == 0:
-        parts.append("\U0001fa84 *ApplyPatch*")
-        max_body_len = 4096 - 400
+        parts.append("\U0001fa84 **ApplyPatch**")
         body = patch_text
-        if len(body) > max_body_len:
-            body = body[:max_body_len] + "\n..."
-        parts.append(f"```diff\n{escape_code(body)}\n```")
+        if len(body) > _MAX_BODY_CHARS:
+            body = body[:_MAX_BODY_CHARS] + "\n..."
+        parts.append(rich_code_block(body, "diff"))
         return "\n\n".join(parts)
 
     plural = "" if file_count == 1 else "s"
-    parts.append(f"\U0001fa84 *ApplyPatch* \\({file_count} file{plural}\\)")
+    parts.append(f"\U0001fa84 **ApplyPatch** ({file_count} file{plural})")
 
     if file_count > 1:
         summary_lines: list[str] = []
@@ -409,24 +410,20 @@ def _format_apply_patch_approval(
                 )
             else:
                 summary_lines.append(f"{icon} {_relative_path(f.path, cwd)}")
-        parts.append(
-            f"```\n{escape_code(chr(10).join(summary_lines))}\n```",
-        )
+        parts.append(rich_code_block(chr(10).join(summary_lines)))
 
-    max_body_len = 4096 - 400
     rendered = 0
     omitted = 0
     for f in files:
         fragment = _render_apply_patch_file(f, cwd)
-        block = f"```diff\n{escape_code(fragment)}\n```"
+        block = rich_code_block(fragment, "diff")
         used = sum(len(p) for p in parts) + 2 * len(parts)
-        if used + len(block) > max_body_len:
+        if used + len(block) > _MAX_BODY_CHARS:
             if rendered == 0:
                 budget = max(
-                    0, max_body_len - used - len("```diff\n\n```\n..."),
+                    0, _MAX_BODY_CHARS - used - len("```diff\n\n```\n..."),
                 )
-                truncated = escape_code(fragment)[:budget] + "\n..."
-                parts.append(f"```diff\n{truncated}\n```")
+                parts.append(rich_code_block(fragment[:budget] + "\n...", "diff"))
                 rendered += 1
             omitted = file_count - rendered
             break
@@ -435,9 +432,7 @@ def _format_apply_patch_approval(
 
     if omitted > 0:
         more_plural = "" if omitted == 1 else "s"
-        parts.append(
-            f"_\\.\\.\\. {omitted} more file{more_plural} omitted_",
-        )
+        parts.append(f"*... {omitted} more file{more_plural} omitted*")
 
     return "\n\n".join(parts)
 
@@ -453,20 +448,19 @@ def _format_agent_approval(
 
     if subagent_type:
         parts.append(
-            f"\U0001f916 *Agent* \\({escape(subagent_type)}\\)",
+            f"\U0001f916 **Agent** ({escape_rich_inline(subagent_type)})",
         )
     else:
-        parts.append("\U0001f916 *Agent*")
+        parts.append("\U0001f916 **Agent**")
 
     if description:
-        parts.append(escape(description))
+        parts.append(escape_rich(description))
 
     if expanded and prompt:
-        max_prompt_len = 4096 - 300
         display_prompt = prompt
-        if len(display_prompt) > max_prompt_len:
-            display_prompt = display_prompt[:max_prompt_len] + "\n..."
-        parts.append(f"```\n{escape_code(display_prompt)}\n```")
+        if len(display_prompt) > _MAX_BODY_CHARS:
+            display_prompt = display_prompt[:_MAX_BODY_CHARS] + "\n..."
+        parts.append(rich_code_block(display_prompt))
 
     return "\n\n".join(parts)
 
@@ -474,15 +468,15 @@ def _format_agent_approval(
 def _format_generic_approval(
     tool_name: str, tool_input: dict[str, Any],
 ) -> str:
-    summary_parts = [f"*Tool:* `{tool_name}`"]
+    summary_parts = [f"**Tool:** `{tool_name}`"]
     for key, val in tool_input.items():
         val_str = str(val)
         if len(val_str) > 200:
             val_str = val_str[:200] + "..."
-        key_escaped = escape(key)
-        val_escaped = escape(val_str)
-        summary_parts.append(f"*{key_escaped}:* {val_escaped}")
-    return "\n".join(summary_parts)
+        summary_parts.append(
+            f"**{escape_rich_inline(key)}:** {escape_rich(val_str)}"
+        )
+    return "<br>".join(summary_parts)
 
 
 # ---------------------------------------------------------------------------

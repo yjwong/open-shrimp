@@ -78,7 +78,7 @@ class BackendCopy:
 
     ``assistant_error_messages`` keys are the neutral error codes from
     ``AssistantMessage.error``; the value is the rendered message body
-    (GFM, will be converted to MarkdownV2 by ``gfm_to_telegram``).
+    (GFM, converted by ``gfm_to_rich``).
     Missing keys fall back to the shared neutral defaults in
     ``stream.py``, then to a generic ``⚠️ Error: <code>``.
     """

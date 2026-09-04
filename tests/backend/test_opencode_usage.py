@@ -90,9 +90,9 @@ async def test_usage_is_normalised_for_status_rendering() -> None:
     status = _build_status_text(
         "default", ctx, config, result.model_usage, assistant.usage
     )
-    assert "32\\.0k / 400\\.0k" in status
+    assert "32.0k / 400.0k" in status
     assert "8%" in status
-    assert "$0\\.1234" in status
+    assert "$0.1234" in status
 
 
 def test_context_window_matches_provider_and_model_id() -> None:

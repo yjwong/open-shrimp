@@ -18,6 +18,7 @@ from typing import Any
 import aiosqlite
 
 from open_shrimp.db import ChatScope, InboundEvent
+from open_shrimp.rich_message import send_rich
 
 logger = logging.getLogger(__name__)
 
@@ -64,27 +65,24 @@ async def echo_reply_to_topic(
     sender: str | None,
     body: str,
 ) -> None:
-    """Echo an outbound reply into a forum topic as truncated MarkdownV2.
+    """Echo an outbound reply into a forum topic, truncated.
 
     Lets the operator see exactly what left for the source without opening
     the source app. Shared by ``reply_inbound_event`` and the lifecycle
     notices below.
     """
-    from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, escape
+    from open_shrimp.markdown import RICH_MAX_LENGTH, escape_rich
 
     if sender:
         header = f"{header} · {sender}"
-    budget = TELEGRAM_MAX_LENGTH // 2
+    budget = RICH_MAX_LENGTH // 2
     if len(body) > budget:
         body = body[:budget] + "…"
-    thread_kwargs: dict[str, Any] = {}
-    if thread_id is not None:
-        thread_kwargs["message_thread_id"] = thread_id
-    await bot.send_message(
+    await send_rich(
+        bot,
         chat_id,
-        f"*{escape(header)}*\n\n{escape(body)}",
-        parse_mode="MarkdownV2",
-        **thread_kwargs,
+        f"**{escape_rich(header)}**\n\n{escape_rich(body)}",
+        thread_id=thread_id,
     )
 
 

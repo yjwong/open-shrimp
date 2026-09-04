@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.rich_stub import unwrap
+
 from open_shrimp import client_manager as CM
 from open_shrimp.backend.protocol import HostPrefetch
 from open_shrimp.db import ChatScope
@@ -25,16 +27,20 @@ def _backend(prefetch: HostPrefetch | None):
 
 
 class _FakeBot:
+    """Records the rich sends and edits the progress sink makes."""
+
     def __init__(self):
         self.sent: list[dict] = []
         self.edits: list[dict] = []
 
-    async def send_message(self, **kwargs):
-        self.sent.append(kwargs)
-        return SimpleNamespace(chat_id=kwargs["chat_id"], message_id=7)
-
-    async def edit_message_text(self, **kwargs):
-        self.edits.append(kwargs)
+    async def do_api_request(self, endpoint, api_kwargs=None, **_):
+        call = unwrap(api_kwargs or {}).__dict__
+        if endpoint == "sendRichMessage":
+            self.sent.append(call)
+            return SimpleNamespace(chat_id=call["chat_id"], message_id=7)
+        if endpoint == "editMessageText":
+            self.edits.append(call)
+        return None
 
 
 def test_the_lead_sentence_follows_the_caller():
@@ -102,7 +108,7 @@ async def test_a_pending_fetch_is_reported_as_it_moves():
     )
     await asyncio.sleep(0.05)
 
-    assert bot.sent[0]["message_thread_id"] == 9
+    assert bot.sent[0]["thread_id"] == 9
     assert "Downloading the opencode CLI" in bot.sent[0]["text"]
     assert "50%" in bot.edits[0]["text"]
 

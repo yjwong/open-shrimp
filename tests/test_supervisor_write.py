@@ -450,13 +450,21 @@ class _CardBot:
         self.message_id = 42
         self.markup = None
 
-    async def send_message(self, chat_id, text, **kwargs):
-        self.sent.append(text)
-        self.markup = kwargs.get("reply_markup")
-        return type("_Msg", (), {"message_id": self.message_id})()
+    async def do_api_request(self, endpoint, api_kwargs=None, **_):
+        """Both sends and edits arrive here.
 
-    async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+        ``sendRichMessage`` and ``editMessageText(rich_message=...)`` have no
+        python-telegram-bot method, so the card reaches Telegram through the
+        raw API.
+        """
+        kwargs = dict(api_kwargs or {})
+        text = kwargs.pop("rich_message")["markdown"]
+        if endpoint == "sendRichMessage":
+            self.sent.append(text)
+            self.markup = kwargs.get("reply_markup")
+            return type("_Msg", (), {"message_id": self.message_id})()
         self.edits.append(text)
+        return None
 
     async def edit_message_reply_markup(self, **kwargs):
         pass
@@ -527,17 +535,17 @@ async def test_the_card_carries_no_way_to_stop_being_asked(
 
 
 def test_a_windows_directory_survives_the_card_intact():
-    # Verified against the live Bot API: the prose escaper does not escape
-    # a backslash, and Telegram then eats it — 'C:\\Users\\ada' is shown as
-    # 'C:Usersada'.  On a card whose whole job is to show the user the
-    # path they are approving, a silently altered path is the one thing it
-    # must not do.
+    # The diff goes in a fence, which a rich message takes literally, so the
+    # path lands in the card exactly as it will land on disk.  On a card whose
+    # whole job is to show the user the path they are approving, a silently
+    # altered path is the one thing it must not do.
     from open_shrimp.handlers.approval import _format_config_write
 
     card = _format_config_write(
         "Add the project 'win'", r"+    directory: C:\Users\ada\my-project",
     )
-    assert r"C:\\Users\\ada\\my-project" in card
+    assert r"C:\Users\ada\my-project" in card
+    assert "\\\\" not in card
 
 
 @pytest.mark.asyncio

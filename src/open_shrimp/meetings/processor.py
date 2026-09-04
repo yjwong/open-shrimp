@@ -41,7 +41,8 @@ from open_shrimp.db import (
     get_unfinished_meeting_jobs,
     set_meeting_job_state,
 )
-from open_shrimp.markdown import gfm_to_telegram
+from open_shrimp.rich_message import send_rich
+from open_shrimp.markdown import gfm_to_rich
 from open_shrimp.telegram_topics import is_topic_gone, resolve_or_create_topic
 
 logger = logging.getLogger(__name__)
@@ -283,13 +284,10 @@ class MeetingProcessor:
         meta = _header_line(job)
         if meta:
             header += f"\n{meta}"
-        chunks = gfm_to_telegram(f"{header}\n\n{notes}")
-        for chunk in chunks:
-            await self._bot.send_message(
-                self._meetings.chat_id,
-                chunk,
-                message_thread_id=thread_id,
-                parse_mode="MarkdownV2",
+        for chunk in gfm_to_rich(f"{header}\n\n{notes}"):
+            await send_rich(
+                self._bot, self._meetings.chat_id, chunk,
+                thread_id=thread_id,
             )
         await self._bot.send_document(
             self._meetings.chat_id,

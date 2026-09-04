@@ -29,7 +29,12 @@ from open_shrimp.config import (
     is_sandboxed,
     sandbox_backend,
 )
-from open_shrimp.markdown import escape, escape_code
+from open_shrimp.markdown import escape_rich, escape_rich_inline
+from open_shrimp.rich_message import (
+    edit_message_rich,
+    reply_rich,
+    send_rich,
+)
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
 from open_shrimp.backend.factory import default_model_label, get_backend_by_name
 from open_shrimp.android_companion import (
@@ -55,7 +60,6 @@ from open_shrimp.handlers.state import (
 )
 from open_shrimp.handlers.utils import (
     _cancel_running,
-    escape,
     _get_context,
     _get_context_name,
     _get_locked_context,
@@ -115,30 +119,28 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Setup writes no default_context, so an install with projects reaches
         # this card unbound; "none set up" would deny the project it has.
         working_in = (
-            "*No project picked yet.* Choose one with /context."
+            "**No project picked yet.** Choose one with /context."
             if config.contexts
-            else "*No project set up yet.* Add one with /context."
+            else "**No project set up yet.** Add one with /context."
         )
     else:
         ctx_name, ctx = resolved
-        working_in = f"*Working in:* `{ctx_name}` → `{ctx.directory}`"
+        working_in = f"**Working in:** `{ctx_name}` → `{ctx.directory}`"
 
     lines = [
-        "👋 *Welcome to OpenShrimp*",
+        "👋 **Welcome to OpenShrimp**",
         "",
         "You're connected to Claude. Just send a message (or voice note) — no command needed.",
         "",
         working_in,
         "",
-        "*Commands worth knowing:*",
+        "**Commands worth knowing:**",
         "• /context — switch working directory",
         "• /clear — start a fresh session",
         "• /status — show current state",
     ]
     text = "\n".join(lines)
-    for ch in ".-()!>#+={|}~[]":
-        text = text.replace(ch, f"\\{ch}")
-    await message.reply_text(text, parse_mode="MarkdownV2")
+    await reply_rich(message, text)
 
 
 # ── /context ──
@@ -179,7 +181,7 @@ def _build_context_page(
             nav.append(InlineKeyboardButton("Next ▶", callback_data=f"ctx_page:{page + 1}"))
         buttons.append(nav)
 
-    text = "*Select a context:*"
+    text = "**Select a context:**"
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -202,7 +204,7 @@ async def handle_context_callback(
         current = await _get_context_name(scope, config, db)
         text, markup = _build_context_page(config, current, page)
         try:
-            await query.message.edit_text(text, parse_mode="MarkdownV2", reply_markup=markup)
+            await edit_message_rich(query.message, text, reply_markup=markup)
         except Exception:
             pass
         await query.answer()
@@ -223,14 +225,10 @@ async def handle_context_callback(
             await reset_scope(scope, ctx_name, db)
 
         ctx = resolve_context(config, target)
-        desc = escape(ctx.description) if ctx else ""
-        target_escaped = escape_code(target)
+        desc = escape_rich(ctx.description) if ctx else ""
+        target_escaped = target
         try:
-            await query.message.edit_text(
-                f"Switched to context `{target_escaped}` \\- {desc}\n_Started fresh session\\._",
-                parse_mode="MarkdownV2",
-                reply_markup=None,
-            )
+            await edit_message_rich(query.message, f"Switched to context `{target_escaped}` - {desc}\n_Started fresh session._", reply_markup=None)
         except Exception:
             logger.exception("Failed to update context message")
 
@@ -273,25 +271,21 @@ async def handle_context_callback(
         from open_shrimp.db import set_active_context
 
         await set_active_context(db, scope, target)
-        desc = escape(ctx.description)
-        target_escaped = escape_code(target)
+        desc = escape_rich(ctx.description)
+        target_escaped = target
 
         existing_session = await get_session_id(db, scope, target)
         if existing_session:
-            text = f"Switched to context `{target_escaped}` \\- {desc}\n_Resuming existing session\\._"
+            text = f"Switched to context `{target_escaped}` - {desc}\n_Resuming existing session._"
             markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("Clear session", callback_data=f"ctx_clear:{target}"),
             ]])
         else:
-            text = f"Switched to context `{target_escaped}` \\- {desc}"
+            text = f"Switched to context `{target_escaped}` - {desc}"
             markup = None
 
         try:
-            await query.message.edit_text(
-                text,
-                parse_mode="MarkdownV2",
-                reply_markup=markup,
-            )
+            await edit_message_rich(query.message, text, reply_markup=markup)
         except Exception:
             logger.exception("Failed to update context message")
 
@@ -319,15 +313,12 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         locked = _get_locked_context(scope.chat_id, config)
         if locked:
             ctx = config.contexts[locked]
-            escaped_name = escape_code(locked)
-            escaped_desc = escape(ctx.description)
-            await message.reply_text(
-                f"This chat is locked to context `{escaped_name}` \\- {escaped_desc}",
-                parse_mode="MarkdownV2",
-            )
+            escaped_name = locked
+            escaped_desc = escape_rich(ctx.description)
+            await reply_rich(message, f"This chat is locked to context `{escaped_name}` - {escaped_desc}")
         else:
             text, markup = _build_context_page(config, current, page=0)
-            await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=markup)
+            await reply_rich(message, text, reply_markup=markup)
         return
 
     # Switch context.  The supervisor is offered alongside the projects, so
@@ -336,18 +327,12 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     target = args[1]
     if target not in selectable:
         names = ", ".join(f"`{n}`" for n in selectable)
-        await message.reply_text(
-            f"Unknown context: `{target}`\\. Available: {names}",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"Unknown context: `{target}`. Available: {names}")
         return
 
     locked = _get_locked_context(scope.chat_id, config)
     if locked:
-        await message.reply_text(
-            f"This chat is locked to context `{locked}`\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"This chat is locked to context `{locked}`.")
         return
 
     old_ctx_name = await _get_context_name(scope, config, db)
@@ -363,20 +348,20 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     await set_active_context(db, scope, target)
     ctx = selectable[target]
-    desc = escape(ctx.description)
-    target_escaped = escape_code(target)
+    desc = escape_rich(ctx.description)
+    target_escaped = target
 
     existing_session = await get_session_id(db, scope, target)
     if existing_session:
-        text = f"Switched to context `{target_escaped}` \\- {desc}\n_Resuming existing session\\._"
+        text = f"Switched to context `{target_escaped}` - {desc}\n_Resuming existing session._"
         markup = InlineKeyboardMarkup([[
             InlineKeyboardButton("Clear session", callback_data=f"ctx_clear:{target}"),
         ]])
     else:
-        text = f"Switched to context `{target_escaped}` \\- {desc}"
+        text = f"Switched to context `{target_escaped}` - {desc}"
         markup = None
 
-    await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=markup)
+    await reply_rich(message, text, reply_markup=markup)
     await _update_pinned_status(context.bot, scope, target, ctx, db, config)
 
 
@@ -416,7 +401,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         ctx_name,
                     )
 
-    await message.reply_text(f"Started fresh session in context `{ctx_name}`\\.", parse_mode="MarkdownV2")
+    await reply_rich(message, f"Started fresh session in context `{ctx_name}`.")
     await _update_pinned_status(context.bot, scope, ctx_name, ctx, db, config)
 
 
@@ -442,37 +427,42 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     setup_queued = len(_setup_queues.get(scope, []))
 
     backend_name = effective_backend(ctx, config)
-    lines = [
-        f"*Context:* `{ctx_name}`",
-        f"*Directory:* `{ctx.directory}`",
-        f"*Backend:* `{backend_name}`",
-        f"*Model:* `{ctx.model or default_model_label(backend_name)}`" + (" (override)" if scope in _model_overrides else ""),
-        f"*Effort:* `{ctx.effort or 'default'}`" + (" (override)" if scope in _effort_overrides else ""),
-        f"*Session:* {'`' + session_id[:12] + '...' + '`' if session_id else 'None'}",
-        f"*Running:* {'Yes' if running else 'No'}",
-        f"*Injectable:* {'Yes' if injectable else 'No'}",
-        f"*Setup queued:* {setup_queued}",
+    model = ctx.model or default_model_label(backend_name)
+    rows = [
+        ("Context", f"`{ctx_name}`"),
+        ("Directory", f"`{ctx.directory}`"),
+        ("Backend", f"`{backend_name}`"),
+        ("Model", f"`{model}`"
+                  + (" (override)" if scope in _model_overrides else "")),
+        ("Effort", f"`{ctx.effort or 'default'}`"
+                   + (" (override)" if scope in _effort_overrides else "")),
+        ("Session", f"`{session_id[:12]}...`" if session_id else "None"),
+        ("Running", "Yes" if running else "No"),
+        ("Injectable", "Yes" if injectable else "No"),
+        ("Setup queued", str(setup_queued)),
     ]
-    # Background tasks.
+    lines = ["| | |", "| :--- | :--- |"]
+    lines.extend(f"| **{key}** | {value} |" for key, value in rows)
+
     scope_tasks = _active_bg_tasks.get(scope, {})
     if scope_tasks:
-        lines.append(f"*Background tasks:* {len(scope_tasks)}")
         now = time.monotonic()
+        lines.append("")
+        lines.append(f"**Background tasks ({len(scope_tasks)})**")
+        lines.append("")
+        lines.append("| Id | Type | Description | Elapsed |")
+        lines.append("| :--- | :--- | :--- | ---: |")
         for task in scope_tasks.values():
             elapsed = int(now - task.started_at)
             minutes, seconds = divmod(elapsed, 60)
             duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
-            tid_short = escape_code(task.task_id[:12])
-            ttype = task.task_type or "unknown"
             lines.append(
-                f"  • `{tid_short}` {ttype}: "
-                f"{task.description or 'N/A'} ({duration})"
+                f"| `{task.task_id[:12]}` "
+                f"| {escape_rich_inline(task.task_type or 'unknown')} "
+                f"| {escape_rich_inline(task.description or 'N/A')} "
+                f"| {duration} |"
             )
-    # Escape reserved MarkdownV2 characters (outside * and ` markup)
-    text = "\n".join(lines)
-    for ch in ".-/()!>#+={|}~[]":
-        text = text.replace(ch, f"\\{ch}")
-    await message.reply_text(text, parse_mode="MarkdownV2")
+    await reply_rich(message, "\n".join(lines))
 
 
 # ── /cancel ──
@@ -497,10 +487,10 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parts = ["Cancelled running task"]
         if setup_queued:
             parts.append(f"cleared {setup_queued} queued message{'s' if setup_queued != 1 else ''}")
-        text = "\\. ".join(parts) + "\\."
-        await message.reply_text(text, parse_mode="MarkdownV2")
+        text = ". ".join(parts) + "."
+        await reply_rich(message, text)
     else:
-        await message.reply_text("Nothing running\\.", parse_mode="MarkdownV2")
+        await reply_rich(message, "Nothing running.")
 
 
 # ── /model ──
@@ -517,17 +507,17 @@ def _build_model_page(
     unpinned = default_model_label(backend.name)
     in_effect = current_override or ctx_default_model or unpinned
     label = "override" if current_override else "context default"
-    lines = [f"*Model:* `{escape_code(in_effect)}` \\({label}\\)"]
+    lines = [f"**Model:** `{in_effect}` ({label})"]
     if current_override:
         lines.append(
-            "*Context default:* "
-            f"`{escape_code(ctx_default_model or unpinned)}`"
+            "**Context default:** "
+            f"`{ctx_default_model or unpinned}`"
         )
 
     catalog = backend.model_catalog()
     if not catalog:
         lines.append("")
-        lines.append("`/model <id>` to override, `/model reset` to revert\\.")
+        lines.append("`/model <id>` to override, `/model reset` to revert.")
         return "\n".join(lines), None
 
     buttons: list[list[InlineKeyboardButton]] = []
@@ -547,7 +537,7 @@ def _build_model_page(
         ])
 
     lines.append("")
-    lines.append("_Pick a model, or `/model <id>` for one not listed\\._")
+    lines.append("_Pick a model, or `/model <id>` for one not listed._")
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
@@ -586,9 +576,7 @@ async def handle_model_callback(
         backend, ctx.model, _model_overrides.get(scope)
     )
     try:
-        await query.message.edit_text(
-            text, parse_mode="MarkdownV2", reply_markup=markup
-        )
+        await edit_message_rich(query.message, text, reply_markup=markup)
     except Exception:
         logger.exception("Failed to update model message")
 
@@ -611,7 +599,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if not _is_private_chat(update):
-        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        await reply_rich(message, "This command can only be used in private chats.")
         return
 
     scope = chat_scope_from_message(message)
@@ -632,9 +620,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         text, markup = _build_model_page(
             backend, ctx_default_model, current_override
         )
-        await message.reply_text(
-            text, parse_mode="MarkdownV2", reply_markup=markup
-        )
+        await reply_rich(message, text, reply_markup=markup)
         return
 
     target = args[1]
@@ -643,18 +629,10 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if current_override:
             del _model_overrides[scope]
             await close_session(scope)
-            model_escaped = escape_code(
-                ctx_default_model or default_model_label(backend.name)
-            )
-            await message.reply_text(
-                f"Model override cleared\\. Using context default: `{model_escaped}`",
-                parse_mode="MarkdownV2",
-            )
+            model_escaped = ctx_default_model or default_model_label(backend.name)
+            await reply_rich(message, f"Model override cleared. Using context default: `{model_escaped}`")
         else:
-            await message.reply_text(
-                "No model override active\\.",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, "No model override active.")
         return
 
     # Store the canonical name so the serving binary's own alias table never
@@ -664,20 +642,17 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _model_overrides[scope] = resolved
     await close_session(scope)
 
-    shown = escape_code(resolved)
+    shown = resolved
     if resolved != target:
-        shown = f"`{escape_code(target)}` → `{shown}`"
+        shown = f"`{target}` → `{shown}`"
     else:
         shown = f"`{shown}`"
     warning = (
         ""
         if backend.is_known_model(target)
-        else "\n⚠️ Not a known alias or model ID — passing through as\\-is\\."
+        else "\n⚠️ Not a known alias or model ID — passing through as-is."
     )
-    await message.reply_text(
-        f"Model overridden to {shown}\\.{warning} Use `/model reset` to revert\\.",
-        parse_mode="MarkdownV2",
-    )
+    await reply_rich(message, f"Model overridden to {shown}.{warning} Use `/model reset` to revert.")
 
 
 # ── /effort ──
@@ -701,7 +676,7 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not _is_private_chat(update):
-        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        await reply_rich(message, "This command can only be used in private chats.")
         return
 
     scope = chat_scope_from_message(message)
@@ -720,16 +695,14 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Show current effort
         if current_override:
             text = (
-                f"*Effort:* `{current_override}` \\(override\\)\n"
-                f"*Context default:* `{ctx_default_effort or 'default'}`\n\n"
-                f"Use `/effort reset` to revert\\."
+                f"**Effort:** `{current_override}` (override)\n"
+                f"**Context default:** `{ctx_default_effort or 'default'}`\n\n"
+                f"Use `/effort reset` to revert."
             )
         else:
-            text = f"*Effort:* `{ctx_default_effort or 'default'}` \\(context default\\)"
+            text = f"**Effort:** `{ctx_default_effort or 'default'}` (context default)"
         text += "\n\nLevels: `low`, `medium`, `high`, `xhigh`, `max`"
-        for ch in ".-/":
-            text = text.replace(ch, f"\\{ch}")
-        await message.reply_text(text, parse_mode="MarkdownV2")
+        await reply_rich(message, text)
         return
 
     target = args[1].lower()
@@ -738,35 +711,23 @@ async def effort_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if current_override:
             del _effort_overrides[scope]
             await close_session(scope)
-            effort_escaped = escape_code(ctx_default_effort or "default")
-            await message.reply_text(
-                f"Effort override cleared\\. Using context default: `{effort_escaped}`",
-                parse_mode="MarkdownV2",
-            )
+            effort_escaped = ctx_default_effort or "default"
+            await reply_rich(message, f"Effort override cleared. Using context default: `{effort_escaped}`")
         else:
-            await message.reply_text(
-                "No effort override active\\.",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, "No effort override active.")
         return
 
     if target not in _VALID_EFFORT_LEVELS:
         levels = ", ".join(f"`{lvl}`" for lvl in _VALID_EFFORT_LEVELS)
-        await message.reply_text(
-            f"Invalid effort level: `{escape_code(target)}`\\. Valid: {levels}",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"Invalid effort level: `{target}`. Valid: {levels}")
         return
 
     # Set override
     _effort_overrides[scope] = target
     await close_session(scope)
-    effort_escaped = escape_code(target)
-    await message.reply_text(
-        f"Effort overridden to `{effort_escaped}`\\. "
-        f"Use `/effort reset` to revert\\.",
-        parse_mode="MarkdownV2",
-    )
+    effort_escaped = target
+    await reply_rich(message, f"Effort overridden to `{effort_escaped}`. "
+        f"Use `/effort reset` to revert.")
 
 
 # ── /add_dir ──
@@ -797,7 +758,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if not _is_private_chat(update):
-        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        await reply_rich(message, "This command can only be used in private chats.")
         return
 
     scope = chat_scope_from_message(message)
@@ -822,22 +783,22 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         lines: list[str] = []
         if base_dirs:
-            lines.append("*Config directories:*")
+            lines.append("**Config directories:**")
             for d in base_dirs:
-                lines.append(f"  `{escape_code(d)}`")
+                lines.append(f"  `{d}`")
         if runtime_dirs:
             if lines:
                 lines.append("")
-            lines.append("*Runtime directories \\(/add\\_dir\\):*")
+            lines.append("**Runtime directories (/add_dir):**")
             for d in runtime_dirs:
-                lines.append(f"  `{escape_code(d)}`")
+                lines.append(f"  `{d}`")
         if not lines:
-            lines.append("No additional directories configured\\.")
+            lines.append("No additional directories configured.")
         else:
             lines.append("")
-            lines.append("Use `/add_dir <path>` to add, `/add_dir remove <path>` to remove\\.")
+            lines.append("Use `/add_dir <path>` to add, `/add_dir remove <path>` to remove.")
 
-        await message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+        await reply_rich(message, "\n".join(lines))
         return
 
     # Check for "remove" subcommand
@@ -845,18 +806,12 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if rest_parts[0] == "remove":
         remove_path = rest_parts[1].strip() if len(rest_parts) > 1 else ""
         if not remove_path:
-            await message.reply_text(
-                "Usage: `/add_dir remove <path>`",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, "Usage: `/add_dir remove <path>`")
             return
         target = os.path.expanduser(remove_path)
         removed = await remove_additional_directory(db, scope, ctx_name, target)
         if not removed:
-            await message.reply_text(
-                f"Directory not found in runtime list: `{escape_code(target)}`",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, f"Directory not found in runtime list: `{target}`")
             return
 
         # Update cache
@@ -865,10 +820,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Reconnect session and invalidate sandbox
         await _reconnect_after_dir_change(scope, ctx_name, ctx, context)
 
-        await message.reply_text(
-            f"Removed `{escape_code(target)}`\\. Session will reconnect on next message\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"Removed `{target}`. Session will reconnect on next message.")
         return
 
     # Add directory — resolve relative paths against the context directory.
@@ -878,10 +830,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     target = os.path.realpath(target)
 
     if not os.path.isdir(target):
-        await message.reply_text(
-            f"Directory does not exist: `{escape_code(target)}`",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"Directory does not exist: `{target}`")
         return
 
     # Check for duplicates against context dir, config dirs, and runtime dirs.
@@ -889,10 +838,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     canonical_existing = {os.path.realpath(d) for d in ctx.additional_directories}
     canonical_existing.add(os.path.realpath(ctx_dir))
     if target in canonical_existing:
-        await message.reply_text(
-            f"`{escape_code(target)}` is already included\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"`{target}` is already included.")
         return
 
     # Store pending add and show inline keyboard with short callback keys.
@@ -909,11 +855,7 @@ async def add_dir_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             InlineKeyboardButton("Remember", callback_data=f"adddir_r:{key}"),
         ],
     ])
-    await message.reply_text(
-        f"Add `{escape_code(target)}` to *{escape(ctx_name)}*?",
-        parse_mode="MarkdownV2",
-        reply_markup=markup,
-    )
+    await reply_rich(message, f"Add `{target}` to *{escape_rich(ctx_name)}*?", reply_markup=markup)
 
 
 async def handle_add_dir_callback(
@@ -953,13 +895,9 @@ async def handle_add_dir_callback(
         await _reconnect_after_dir_change(scope, ctx_name, ctx, context)
 
         try:
-            await query.message.edit_text(
-                f"Added `{escape_code(target)}` to *{escape(ctx_name)}* "
-                f"\\(this session\\)\\.\n"
-                f"Session will reconnect on next message\\.",
-                parse_mode="MarkdownV2",
-                reply_markup=None,
-            )
+            await edit_message_rich(query.message, f"Added `{target}` to *{escape_rich(ctx_name)}* "
+                f"(this session).\n"
+                f"Session will reconnect on next message.", reply_markup=None)
         except Exception:
             pass
         await query.answer()
@@ -996,13 +934,9 @@ async def handle_add_dir_callback(
         await _reconnect_after_dir_change(scope, ctx_name, updated_ctx, context)
 
         try:
-            await query.message.edit_text(
-                f"Added `{escape_code(target)}` to *{escape(ctx_name)}* "
-                f"\\(saved to config\\)\\.\n"
-                f"Session will reconnect on next message\\.",
-                parse_mode="MarkdownV2",
-                reply_markup=None,
-            )
+            await edit_message_rich(query.message, f"Added `{target}` to *{escape_rich(ctx_name)}* "
+                f"(saved to config).\n"
+                f"Session will reconnect on next message.", reply_markup=None)
         except Exception:
             pass
         await query.answer()
@@ -1084,7 +1018,7 @@ async def _build_resume_page(
     if not sessions:
         if page == 0:
             return (
-                f"No sessions found for context `{escape_code(ctx_name)}`\\.",
+                f"No sessions found for context `{ctx_name}`.",
                 None,
             )
         # Edge case: page beyond last – go back.
@@ -1132,8 +1066,8 @@ async def _build_resume_page(
     if nav:
         buttons.append(nav)
 
-    page_label = f" \\(page {page + 1}\\)" if page > 0 or has_next else ""
-    text = f"*Recent sessions for* `{escape_code(ctx_name)}`*:*{page_label}"
+    page_label = f" (page {page + 1})" if page > 0 or has_next else ""
+    text = f"**Recent sessions for** `{ctx_name}`**:**{page_label}"
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -1145,28 +1079,28 @@ def _build_resume_detail(
     """Build the detail view for a single session."""
     s = _resume_session_cache.get(session_id)
     if not s:
-        text = "Session info has expired\\. Use /resume to list again\\."
+        text = "Session info has expired. Use /resume to list again."
         keyboard = InlineKeyboardMarkup([])
         return text, keyboard
 
     lines: list[str] = []
-    lines.append(f"*Session details*\n")
+    lines.append(f"**Session details**\n")
 
     if s.custom_title:
-        lines.append(f"*Title:* {escape(s.custom_title)}")
-    lines.append(f"*Summary:* {escape(s.summary or 'No summary')}")
+        lines.append(f"**Title:** {escape_rich(s.custom_title)}")
+    lines.append(f"**Summary:** {escape_rich(s.summary or 'No summary')}")
 
     if s.first_prompt:
         prompt = s.first_prompt
         if len(prompt) > 200:
             prompt = prompt[:197] + "..."
-        lines.append(f"*First prompt:* {escape(prompt)}")
+        lines.append(f"**First prompt:** {escape_rich(prompt)}")
 
     if s.git_branch:
-        lines.append(f"*Branch:* `{escape_code(s.git_branch)}`")
+        lines.append(f"**Branch:** `{s.git_branch}`")
 
-    lines.append(f"*Created:* {escape(_relative_time(s.created_at))}")
-    lines.append(f"*Last active:* {escape(_relative_time(s.last_modified))}")
+    lines.append(f"**Created:** {escape_rich(_relative_time(s.created_at))}")
+    lines.append(f"**Last active:** {escape_rich(_relative_time(s.last_modified))}")
 
     if s.file_size:
         size_kb = s.file_size / 1024
@@ -1174,12 +1108,12 @@ def _build_resume_detail(
             size_str = f"{size_kb / 1024:.1f} MB"
         else:
             size_str = f"{size_kb:.0f} KB"
-        lines.append(f"*Size:* {escape(size_str)}")
+        lines.append(f"**Size:** {escape_rich(size_str)}")
 
-    lines.append(f"*ID:* `{escape_code(s.session_id)}`")
+    lines.append(f"**ID:** `{s.session_id}`")
 
     if s.session_id == current_session_id:
-        lines.append("\n_This is the current session\\._")
+        lines.append("\n_This is the current session._")
 
     text = "\n".join(lines)
 
@@ -1236,19 +1170,13 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 break
 
         if not match:
-            await message.reply_text(
-                f"No session matching `{escape_code(target)}` found in context `{escape_code(ctx_name)}`\\.",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, f"No session matching `{target}` found in context `{ctx_name}`.")
             return
 
         await close_session(scope)
         await set_session_id(db, scope, ctx_name, match.session_id)
-        summary = escape(match.summary or "No summary")
-        await message.reply_text(
-            f"Resumed session `{escape_code(match.session_id[:12])}...`\n_{summary}_",
-            parse_mode="MarkdownV2",
-        )
+        summary = escape_rich(match.summary or "No summary")
+        await reply_rich(message, f"Resumed session `{match.session_id[:12]}...`\n_{summary}_")
         await _update_pinned_status(context.bot, scope, ctx_name, ctx, db, config)
         return
 
@@ -1260,10 +1188,10 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     if keyboard is None:
-        await message.reply_text(text, parse_mode="MarkdownV2")
+        await reply_rich(message, text)
         return
 
-    await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=keyboard)
+    await reply_rich(message, text, reply_markup=keyboard)
 
 
 # ── /resume callback handler ──
@@ -1310,11 +1238,7 @@ async def handle_resume_callback(
         )
         await query.answer()
         try:
-            await query.message.edit_text(
-                text=text,
-                parse_mode="MarkdownV2",
-                reply_markup=keyboard,
-            )
+            await edit_message_rich(query.message, text=text, reply_markup=keyboard)
         except Exception:
             logger.exception("Failed to update resume page")
         return True
@@ -1338,11 +1262,7 @@ async def handle_resume_callback(
         )
         await query.answer()
         try:
-            await query.message.edit_text(
-                text=text,
-                parse_mode="MarkdownV2",
-                reply_markup=keyboard,
-            )
+            await edit_message_rich(query.message, text=text, reply_markup=keyboard)
         except Exception:
             logger.exception("Failed to show session detail")
         return True
@@ -1369,12 +1289,8 @@ async def handle_resume_callback(
     await query.answer(f"Resumed session {session_id[:8]}...")
 
     try:
-        summary_text = f"\u2705 Resumed session `{escape_code(session_id[:12])}\\.\\.\\.`"
-        await query.message.edit_text(
-            text=summary_text,
-            parse_mode="MarkdownV2",
-            reply_markup=None,
-        )
+        summary_text = f"\u2705 Resumed session `{session_id[:12]}...`"
+        await edit_message_rich(query.message, text=summary_text, reply_markup=None)
     except Exception:
         logger.exception("Failed to update resume message")
         try:
@@ -1412,7 +1328,7 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     context_name, ctx = resolved
 
-    escaped_context = escape(context_name)
+    escaped_context = escape_rich(context_name)
     dirs = [ctx.directory] + (ctx.additional_directories or [])
     thread_param = f"&thread_id={scope.thread_id}" if scope.thread_id is not None else ""
 
@@ -1421,7 +1337,7 @@ async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "\U0001f4dd Open Review",
             f"/app/?chat_id={scope.chat_id}{thread_param}",
         )]
-        escaped_dir = escape_code(ctx.directory)
+        escaped_dir = ctx.directory
         text = (
             f"Review changes in *{escaped_context}*\n"
             f"\U0001f4c1 `{escaped_dir}`"
@@ -1494,14 +1410,11 @@ async def _open_vnc_viewer(
         enabled = ctx.sandbox is not None and ctx.sandbox.computer_use
         capability = "computer use"
     if not enabled:
-        await update.message.reply_text(
-            f"Context `{escape_code(context_name)}` does not have "
-            f"{capability} enabled\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(update.message, f"Context `{context_name}` does not have "
+            f"{capability} enabled.")
         return
 
-    escaped_context = escape(context_name)
+    escaped_context = escape_rich(context_name)
     await reply_mini_app(
         update.message,
         text=f"{noun.capitalize()} for *{escaped_context}*",
@@ -1548,22 +1461,22 @@ def _get_sandbox_for_security_key(
 def _push_status_text(push_status: object) -> str:
     status = push_status if isinstance(push_status, str) else None
     if status == "sent":
-        return r"Push notification sent to the paired Android device\."
+        return r"Push notification sent to the paired Android device."
     if status == "no_device":
         return (
             "No paired Android device with push is available; open the Android app "
-            r"and use Find pending session\."
+            r"and use Find pending session."
         )
     if status == "not_configured":
-        return r"Push is not configured; open the Android app and use Find pending session\."
+        return r"Push is not configured; open the Android app and use Find pending session."
     if status in {"failed", "missing_token", "unsupported_provider"}:
         return (
-            rf"Push delivery failed \(`{escape_code(status)}`\); open the Android app "
-            r"and use Find pending session\."
+            rf"Push delivery failed (`{status}`); open the Android app "
+            r"and use Find pending session."
         )
     return (
         "Push status is pending; open the Android app and use Find pending session "
-        r"if no notification arrives\."
+        r"if no notification arrives."
     )
 
 
@@ -1589,10 +1502,7 @@ async def security_key_handler(
         return
     context_name, ctx = resolved
     if ctx.sandbox is None or not ctx.sandbox.computer_use:
-        await update.message.reply_text(
-            rf"Context `{escape_code(context_name)}` does not have computer use enabled\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(update.message, rf"Context `{context_name}` does not have computer use enabled.")
         return
 
     registry = get_or_create_registry(context.bot_data)
@@ -1640,48 +1550,48 @@ async def security_key_handler(
     helper_error = helper_result.error if helper_result is not None else None
 
     helper_status = (
-        r"VM helper started automatically\. Fallback command:"
+        r"VM helper started automatically. Fallback command:"
         if helper_started
-        else r"VM helper was not started automatically\. Run this in the computer\-use VM:"
+        else r"VM helper was not started automatically. Run this in the computer-use VM:"
     )
     record = await get_security_key_session_record(db, session_id=session.id)
     destination_label = security_key_destination_label(config, context_name, sandbox_id)
     manual_fallback_lines = (
         [
-            r"Manual phone URL \(advanced debug fallback\):",
-            f"`{escape_code(session_phone_url)}`",
+            r"Manual phone URL (advanced debug fallback):",
+            f"`{session_phone_url}`",
         ]
         if show_manual_fallback
         else [
-            r"Manual phone URL is hidden by default\. Use `/security_key debug` "
-            r"only if paired Android claim is unavailable\.",
+            r"Manual phone URL is hidden by default. Use `/security_key debug` "
+            r"only if paired Android claim is unavailable.",
         ]
     )
 
     text = "\n".join(
         [
-            r"Security key forwarding request created\.",
-            f"Destination: `{escape_code(destination_label)}`",
+            r"Security key forwarding request created.",
+            f"Destination: `{destination_label}`",
             "",
-            rf"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`\.",
+            rf"Session expires in `{DEFAULT_SESSION_LIFETIME_SECONDS}s`; idle timeout is `{DEFAULT_IDLE_TIMEOUT_SECONDS}s`.",
             _push_status_text(record["push_status"] if record is not None else None),
             *manual_fallback_lines,
             "",
             helper_status,
-            f"`{escape_code(helper_cmd)}`",
+            f"`{helper_cmd}`",
             *(
                 [
                     "",
-                    rf"Auto\-start error: `{escape_code(helper_error)}`",
+                    rf"Auto-start error: `{helper_error}`",
                 ]
                 if helper_error
                 else []
             ),
             "",
-            r"The Android app must still require fresh local device approval before forwarding\.",
+            r"The Android app must still require fresh local device approval before forwarding.",
         ]
     )
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
+    await reply_rich(update.message, text)
 
 
 async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1703,23 +1613,23 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         pairing_url = f"openshrimp://pair?base_url={base}&code={pairing['code']}"
         text = "\n".join(
             [
-                r"Android companion pairing code created\.",
+                r"Android companion pairing code created.",
                 "",
-                f"Code: `{escape_code(pairing['code'])}`",
-                f"Server: `{escape_code(server_id)}`",
-                f"Base URL: `{escape_code(base)}`",
-                f"Deep link: `{escape_code(pairing_url)}`",
+                f"Code: `{pairing['code']}`",
+                f"Server: `{server_id}`",
+                f"Base URL: `{base}`",
+                f"Deep link: `{pairing_url}`",
                 "",
-                r"The code expires in `10 minutes` and can be used once\.",
+                r"The code expires in `10 minutes` and can be used once.",
             ]
         )
-        await update.message.reply_text(text, parse_mode="MarkdownV2")
+        await reply_rich(update.message, text)
         return
 
     if action in {"list", "devices"}:
         devices = await list_android_devices(db)
         if not devices:
-            await update.message.reply_text(r"No Android companion devices are paired\.", parse_mode="MarkdownV2")
+            await reply_rich(update.message, r"No Android companion devices are paired.")
             return
         lines = ["Android companion devices:", ""]
         for device in devices:
@@ -1738,37 +1648,31 @@ async def pair_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 else "never"
             )
             lines.append(
-                f"• `{escape_code(device['device_id'])}` — "
-                f"{escape(device['display_name'])} "
-                rf"\({escape(status)}, {escape(push)}, "
-                rf"last seen {escape(last_seen)}\)"
+                f"• `{device['device_id']}` — "
+                f"{escape_rich(device['display_name'])} "
+                rf"({escape_rich(status)}, {escape_rich(push)}, "
+                rf"last seen {escape_rich(last_seen)})"
             )
         lines.extend(
             [
                 "",
                 "Only one Android companion can be active in this release; "
-                r"pairing a new phone deactivates the previous one\.",
-                r"Revoke with `/pair revoke <device_id>`\.",
+                r"pairing a new phone deactivates the previous one.",
+                r"Revoke with `/pair revoke <device_id>`.",
             ]
         )
-        await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+        await reply_rich(update.message, "\n".join(lines))
         return
 
     if action == "revoke" and len(args) >= 2:
         device_id = args[1]
         if await revoke_android_device(db, device_id):
-            await update.message.reply_text(
-                r"Android companion device revoked\. It can no longer claim pending sessions or receive new push requests\.",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(update.message, r"Android companion device revoked. It can no longer claim pending sessions or receive new push requests.")
         else:
-            await update.message.reply_text(r"No matching active Android companion device found\.", parse_mode="MarkdownV2")
+            await reply_rich(update.message, r"No matching active Android companion device found.")
         return
 
-    await update.message.reply_text(
-        r"Usage: `/pair`, `/pair list`, or `/pair revoke <device_id>`\.",
-        parse_mode="MarkdownV2",
-    )
+    await reply_rich(update.message, r"Usage: `/pair`, `/pair list`, or `/pair revoke <device_id>`.")
 
 
 # ── /login ──
@@ -1785,16 +1689,13 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if not _is_private_chat(update):
-        await update.message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        await reply_rich(update.message, "This command can only be used in private chats.")
         return
 
     scope = chat_scope_from_message(update.message)
     backend = get_backend_for_scope(context.bot_data, scope)
     if backend is not None and "login" not in backend.command_capabilities():
-        await update.message.reply_text(
-            f"/login is not available on the `{escape_code(backend.name)}` backend\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(update.message, f"/login is not available on the `{backend.name}` backend.")
         return
 
     body = "Re-authenticate"
@@ -1806,7 +1707,7 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # discover it as a failed turn later.
     await reply_mini_app(
         update.message,
-        text=escape(body),
+        text=escape_rich(body),
         buttons=[("Open login", "/terminal/?mode=login")],
         config=config,
         user_id=update.effective_user.id,
@@ -1842,19 +1743,13 @@ async def mcp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     scope = chat_scope_from_message(message)
     backend = get_backend_for_scope(context.bot_data, scope)
     if backend is not None and "mcp" not in backend.command_capabilities():
-        await message.reply_text(
-            f"/mcp is not available on the `{escape_code(backend.name)}` backend\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"/mcp is not available on the `{backend.name}` backend.")
         return
 
     session = get_session(scope)
     if session is None:
-        await message.reply_text(
-            "No active session\\. Send a message first to start a session, "
-            "then use /mcp to manage MCP servers\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, "No active session. Send a message first to start a session, "
+            "then use /mcp to manage MCP servers.")
         return
 
     args = message.text.split() if message.text else []
@@ -1866,29 +1761,20 @@ async def mcp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _mcp_list(message, session)
     elif subcommand == "reset":
         if not server_name:
-            await message.reply_text(
-                "Usage: `/mcp reset <server\\-name>`",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, "Usage: `/mcp reset <server-name>`")
             return
         await _mcp_reconnect(message, session, server_name)
     elif subcommand in ("enable", "disable"):
         if not server_name:
-            await message.reply_text(
-                f"Usage: `/mcp {subcommand} <server\\-name>`",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, f"Usage: `/mcp {subcommand} <server-name>`")
             return
         await _mcp_toggle(message, session, server_name, enabled=(subcommand == "enable"))
     else:
-        await message.reply_text(
-            "Unknown subcommand\\. Usage:\n"
+        await reply_rich(message, "Unknown subcommand. Usage:\n"
             "`/mcp` \u2014 list servers\n"
             "`/mcp reset <name>` \u2014 reconnect a server\n"
             "`/mcp enable <name>` \u2014 enable a server\n"
-            "`/mcp disable <name>` \u2014 disable a server",
-            parse_mode="MarkdownV2",
-        )
+            "`/mcp disable <name>` \u2014 disable a server")
 
 
 async def _mcp_list(message: Any, session: AgentSession) -> None:
@@ -1897,32 +1783,32 @@ async def _mcp_list(message: Any, session: AgentSession) -> None:
         status_resp = await session.client.get_mcp_status()
     except Exception:
         logger.exception("Failed to get MCP status")
-        await message.reply_text("Failed to retrieve MCP server status\\.", parse_mode="MarkdownV2")
+        await reply_rich(message, "Failed to retrieve MCP server status.")
         return
 
     servers = status_resp.get("mcpServers", [])
     if not servers:
-        await message.reply_text("No MCP servers configured\\.", parse_mode="MarkdownV2")
+        await reply_rich(message, "No MCP servers configured.")
         return
 
-    lines: list[str] = ["*MCP Servers*\n"]
+    lines: list[str] = ["**MCP Servers**\n"]
     for srv in servers:
         name = srv.get("name", "unknown")
         status = srv.get("status", "unknown")
         emoji = _MCP_STATUS_EMOJI.get(status, "\u2753")
         scope = srv.get("scope", "")
 
-        line = f"{emoji} *{escape(name)}*"
+        line = f"{emoji} *{escape_rich(name)}*"
         if scope:
-            line += f" \\({escape(scope)}\\)"
-        line += f" \u2014 {escape(status)}"
+            line += f" ({escape_rich(scope)})"
+        line += f" \u2014 {escape_rich(status)}"
 
         # Show server info (version) when connected
         server_info = srv.get("serverInfo")
         if server_info:
             version = server_info.get("version", "")
             if version:
-                line += f" v{escape(version)}"
+                line += f" v{escape_rich(version)}"
 
         # Show error message for failed servers
         error = srv.get("error")
@@ -1930,7 +1816,7 @@ async def _mcp_list(message: Any, session: AgentSession) -> None:
             # Truncate long errors
             if len(error) > 120:
                 error = error[:117] + "..."
-            line += f"\n    \u26a0\ufe0f {escape(error)}"
+            line += f"\n    \u26a0\ufe0f {escape_rich(error)}"
 
         # Show tool count when connected
         tools = srv.get("tools", [])
@@ -1940,7 +1826,7 @@ async def _mcp_list(message: Any, session: AgentSession) -> None:
         lines.append(line)
 
     text = "\n".join(lines)
-    await message.reply_text(text, parse_mode="MarkdownV2")
+    await reply_rich(message, text)
 
 
 async def _mcp_reconnect(message: Any, session: AgentSession, server_name: str) -> None:
@@ -1958,17 +1844,11 @@ async def _mcp_reconnect(message: Any, session: AgentSession, server_name: str) 
         await session.client.reconnect_mcp_server(server_name)
     except Exception:
         logger.exception("Failed to reconnect MCP server %s", server_name)
-        await message.reply_text(
-            f"Failed to reconnect `{escape_code(server_name)}`\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"Failed to reconnect `{server_name}`.")
         return
 
-    escaped = escape_code(server_name)
-    await message.reply_text(
-        f"Reconnecting `{escaped}`\\.\\.\\. Use /mcp to check status\\.",
-        parse_mode="MarkdownV2",
-    )
+    escaped = server_name
+    await reply_rich(message, f"Reconnecting `{escaped}`... Use /mcp to check status.")
 
 
 async def _mcp_toggle(message: Any, session: AgentSession, server_name: str, *, enabled: bool) -> None:
@@ -1978,19 +1858,13 @@ async def _mcp_toggle(message: Any, session: AgentSession, server_name: str, *, 
         await session.client.toggle_mcp_server(server_name, enabled=enabled)
     except Exception:
         logger.exception("Failed to %s MCP server %s", action, server_name)
-        await message.reply_text(
-            f"Failed to {escape(action)} `{escape_code(server_name)}`\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"Failed to {escape_rich(action)} `{server_name}`.")
         return
 
     past = "enabled" if enabled else "disabled"
-    escaped = escape_code(server_name)
+    escaped = server_name
     emoji = "\U0001f7e2" if enabled else "\u26aa"
-    await message.reply_text(
-        f"{emoji} `{escaped}` {past}\\.",
-        parse_mode="MarkdownV2",
-    )
+    await reply_rich(message, f"{emoji} `{escaped}` {past}.")
 
 
 # ── /schedule ──
@@ -2038,17 +1912,11 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 # The topic itself stays in Telegram as a record.
                 await delete_event_topic(db, topic_key(task_id))
 
-            escaped = escape_code(task_name)
-            await message.reply_text(
-                f"Deleted scheduled task `{escaped}`\\.",
-                parse_mode="MarkdownV2",
-            )
+            escaped = task_name
+            await reply_rich(message, f"Deleted scheduled task `{escaped}`.")
         else:
-            escaped = escape_code(task_name)
-            await message.reply_text(
-                f"No scheduled task named `{escaped}` found\\.",
-                parse_mode="MarkdownV2",
-            )
+            escaped = task_name
+            await reply_rich(message, f"No scheduled task named `{escaped}` found.")
         return
 
     # List all tasks.
@@ -2056,35 +1924,30 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     tasks = await list_scheduled_tasks(db)
     if not tasks:
-        await message.reply_text(
-            "No scheduled tasks\\. Ask Claude to create one\\!",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, "No scheduled tasks. Ask Claude to create one!")
         return
 
-    lines = [f"*Scheduled tasks \\({len(tasks)}\\):*\n"]
+    lines = [
+        f"**Scheduled tasks ({len(tasks)})**",
+        "",
+        "| Name | When | Context | Prompt |",
+        "| :--- | :--- | :--- | :--- |",
+    ]
     for t in tasks:
-        type_desc = {
+        when = {
             "interval": f"every {t.schedule_expr}",
             "cron": f"cron: {t.schedule_expr}",
             "once": f"at {t.schedule_expr}",
         }.get(t.schedule_type, t.schedule_expr)
-
-        prompt_preview = t.prompt[:50] + ("..." if len(t.prompt) > 50 else "")
-        name_escaped = escape(t.name)
-        desc_escaped = escape(type_desc)
-        prompt_escaped = escape(prompt_preview)
-        ctx_escaped = escape_code(t.context_name)
-
+        prompt = t.prompt[:50] + ("..." if len(t.prompt) > 50 else "")
         lines.append(
-            f"• *{name_escaped}*\n"
-            f"  📅 {desc_escaped}\n"
-            f"  📁 `{ctx_escaped}`\n"
-            f"  💬 _{prompt_escaped}_"
+            f"| **{escape_rich_inline(t.name)}** "
+            f"| {escape_rich_inline(when)} "
+            f"| `{t.context_name}` "
+            f"| {escape_rich_inline(prompt)} |"
         )
 
-    text = "\n".join(lines)
-    await message.reply_text(text, parse_mode="MarkdownV2")
+    await reply_rich(message, "\n".join(lines))
 
 
 # ── /tasks ──
@@ -2122,10 +1985,7 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 break
 
         if not matched_task:
-            await message.reply_text(
-                f"No active task matching `{escape_code(target)}`\\.",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, f"No active task matching `{target}`.")
             return
 
         # Host monitors are host-side processes invisible to the CLI task
@@ -2134,16 +1994,10 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if matched_task.task_type == host_monitor.TASK_TYPE:
             stopped = await host_monitor.stop_monitor(matched_task.task_id)
             if stopped:
-                await message.reply_text(
-                    f"Stopped host monitor "
-                    f"`{escape_code(matched_task.task_id)}`\\.",
-                    parse_mode="MarkdownV2",
-                )
+                await reply_rich(message, f"Stopped host monitor "
+                    f"`{matched_task.task_id}`.")
             else:
-                await message.reply_text(
-                    "Failed to stop host monitor \\(already gone\\)\\.",
-                    parse_mode="MarkdownV2",
-                )
+                await reply_rich(message, "Failed to stop host monitor (already gone).")
             return
 
         from open_shrimp.client_manager import stop_background_task
@@ -2156,16 +2010,10 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             scope_tasks.pop(matched_task.task_id, None)
             if not scope_tasks:
                 _active_bg_tasks.pop(scope, None)
-            tid_short = escape_code(matched_task.task_id[:12])
-            await message.reply_text(
-                f"Stopped task `{tid_short}`\\.",
-                parse_mode="MarkdownV2",
-            )
+            tid_short = matched_task.task_id[:12]
+            await reply_rich(message, f"Stopped task `{tid_short}`.")
         else:
-            await message.reply_text(
-                "Failed to stop task \\(no active session\\)\\.",
-                parse_mode="MarkdownV2",
-            )
+            await reply_rich(message, "Failed to stop task (no active session).")
         return
 
     # ── /tasks (list) ──
@@ -2173,34 +2021,31 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # so they render through the normal _active_bg_tasks path below.
     scope_tasks = _active_bg_tasks.get(scope, {})
     if not scope_tasks:
-        await message.reply_text(
-            "No active background tasks\\.", parse_mode="MarkdownV2"
-        )
+        await reply_rich(message, "No active background tasks.")
         return
 
     now = time.monotonic()
-    lines: list[str] = []
-    lines.append(f"*Active background tasks \\({len(scope_tasks)}\\):*\n")
+    lines = [
+        f"**Active background tasks ({len(scope_tasks)})**",
+        "",
+        "| Id | Type | Description | Last tool | Elapsed |",
+        "| :--- | :--- | :--- | :--- | ---: |",
+    ]
     for task in scope_tasks.values():
         elapsed = int(now - task.started_at)
         minutes, seconds = divmod(elapsed, 60)
         duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
-
-        tid_short = escape_code(task.task_id[:12])
-        desc_escaped = escape(task.description or "No description")
-        type_escaped = escape(task.task_type or "unknown")
-
-        line = (
-            f"• `{tid_short}` \\- {desc_escaped}\n"
-            f"  Type: {type_escaped} \\| Duration: {escape(duration)}"
+        lines.append(
+            f"| `{task.task_id[:12]}` "
+            f"| {escape_rich_inline(task.task_type or 'unknown')} "
+            f"| {escape_rich_inline(task.description or 'No description')} "
+            f"| {escape_rich_inline(task.last_tool_name or '—')} "
+            f"| {duration} |"
         )
-        if task.last_tool_name:
-            line += f" \\| Last tool: {escape(task.last_tool_name)}"
-        lines.append(line)
 
-    lines.append(f"\nUse `/tasks stop <id>` to stop a task\\.")
-    text = "\n".join(lines)
-    await message.reply_text(text, parse_mode="MarkdownV2")
+    lines.append("")
+    lines.append("Use `/tasks stop <id>` to stop a task.")
+    await reply_rich(message, "\n".join(lines))
 
 
 # ── /usage ──
@@ -2228,13 +2073,10 @@ async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Mirrors the legacy single-backend "not available on <name>" message,
         # generalised over the configured set (empty list → "this install").
         if backends:
-            names = ", ".join(f"`{escape_code(b.name)}`" for b in backends)
+            names = ", ".join(f"`{b.name}`" for b in backends)
         else:
             names = "this install"
-        await message.reply_text(
-            f"/usage is not available on {names}\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, f"/usage is not available on {names}.")
         return
 
     reports: list[tuple[str, UsageReport]] = []
@@ -2244,14 +2086,11 @@ async def usage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reports.append((backend.name, report))
 
     if not reports:
-        await message.reply_text(
-            "Usage data unavailable\\. OAuth credentials not found or endpoint unreachable\\.",
-            parse_mode="MarkdownV2",
-        )
+        await reply_rich(message, "Usage data unavailable. OAuth credentials not found or endpoint unreachable.")
         return
 
     text = render_usage_reports(reports)
-    await message.reply_text(text, parse_mode="MarkdownV2")
+    await reply_rich(message, text)
 
 
 # ── /restart ──
@@ -2265,14 +2104,14 @@ async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if not _is_private_chat(update):
-        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        await reply_rich(message, "This command can only be used in private chats.")
         return
 
     import os
 
     from open_shrimp.main import request_restart, request_shutdown
 
-    await message.reply_text("Restarting\\.\\.\\.", parse_mode="MarkdownV2")
+    await reply_rich(message, "Restarting...")
 
     # Pass the chat scope via env vars so the new process can send a
     # confirmation message after startup.
@@ -2304,7 +2143,7 @@ async def config_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not _is_private_chat(update):
-        await message.reply_text("This command can only be used in private chats\\.", parse_mode="MarkdownV2")
+        await reply_rich(message, "This command can only be used in private chats.")
         return
 
     await reply_mini_app(

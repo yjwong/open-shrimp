@@ -21,6 +21,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from tests.rich_stub import wire_rich
 from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
@@ -464,7 +466,7 @@ def _make_bot() -> AsyncMock:
     bot.send_message.side_effect = lambda *a, **kw: SimpleNamespace(
         message_id=next(message_ids)
     )
-    return bot
+    return wire_rich(bot)
 
 
 def _sink(bot, db, **kwargs) -> EventSink:
@@ -530,7 +532,7 @@ async def test_the_card_shows_the_summary_and_the_row_keeps_the_transcript(db):
 
     # One card, not two dozen chunks of transcript.
     assert bot.send_message.call_count == 1
-    card = bot.send_message.call_args.args[1]
+    card = bot.send_message.call_args.kwargs["text"]
     assert "Handed over — 40 messages" in card
     assert "line 7" not in card
     # The agent still reads everything through read_inbound_event.

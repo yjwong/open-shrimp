@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.rich_stub import rendered, wire_rich
+
 from open_shrimp import doctor, sandbox_diagnosis
 from open_shrimp.config import (
     Config,
@@ -32,7 +34,7 @@ from open_shrimp.config import (
 from open_shrimp.db import ChatScope, init_db, set_active_context
 from open_shrimp.handlers.messages import _start_agent_task
 from open_shrimp.handlers.state import _running_tasks
-from open_shrimp.markdown import TELEGRAM_MAX_LENGTH, split_message
+from open_shrimp.markdown import RICH_MAX_LENGTH, split_message
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox import libvirt_prereq, lima_prereq
 from open_shrimp.sandbox_diagnosis import diagnose, failure_reply
@@ -337,7 +339,7 @@ class TestFailureReply:
         text = await failure_reply(_error("hcs"), _config("hcs"))
         parts = split_message(text)
 
-        assert all(len(part) <= TELEGRAM_MAX_LENGTH for part in parts)
+        assert all(len(part) <= RICH_MAX_LENGTH for part in parts)
         assert LONG_REMEDY in "".join(parts)
         assert "C:\\msys64\\mingw64\\bin" in text
 
@@ -356,7 +358,7 @@ class _Context:
     """The slice of ``ContextTypes.DEFAULT_TYPE`` the dispatch path touches."""
 
     def __init__(self, sandbox: "_RefusingSandbox") -> None:
-        self.bot = AsyncMock()
+        self.bot = wire_rich(AsyncMock())
         self.bot.send_message.return_value = SimpleNamespace(message_id=7)
         self.bot_data: dict[str, Any] = {
             "sandbox_managers": {"libvirt": _StubManager(sandbox)}
@@ -424,8 +426,9 @@ async def _drive(db, message: str = "Failed to start container") -> _Context:
 
 
 def _sent(context: _Context) -> list[str]:
+    """What the user reads, with the escaping undone."""
     return [
-        call.kwargs.get("text", "")
+        rendered(call.kwargs.get("text", ""))
         for call in context.bot.send_message.await_args_list
     ]
 
@@ -464,23 +467,15 @@ class TestTheWholeChain:
 
     @pytest.mark.asyncio
     async def test_the_remedy_is_sent_plain(self, monkeypatch, db):
-        """MarkdownV2 would reject these remedies outright, and a message
-        Telegram refuses is worse than the sentence it replaced."""
+        """A remedy is a shell command, not markup: it goes out escaped so
+        every backslash and underscore reaches the user as written."""
         _checks(monkeypatch, ("HCS RDP helper", lambda config: (False, LONG_REMEDY)))
 
         context = await _drive(db)
 
-        remedy_calls = [
-            call
-            for call in context.bot.send_message.await_args_list
-            if "mingw64" in call.kwargs.get("text", "")
-        ]
-        assert remedy_calls
-        for call in remedy_calls:
-            assert call.kwargs.get("parse_mode") is None
-        assert LONG_REMEDY in "".join(
-            call.kwargs["text"] for call in remedy_calls
-        )
+        remedy = [text for text in _sent(context) if "mingw64" in text]
+        assert remedy
+        assert LONG_REMEDY in "".join(remedy)
 
     @pytest.mark.asyncio
     async def test_a_remedy_past_the_length_limit_is_split_not_clipped(
@@ -488,15 +483,15 @@ class TestTheWholeChain:
     ):
         """W6: the remedy is the payload, so the limit costs a second message
         rather than the end of the sentence."""
-        long_report = "\n".join(f"{i}: {LONG_REMEDY}" for i in range(20))
+        long_report = "\n".join(f"{i}: {LONG_REMEDY}" for i in range(160))
         _checks(monkeypatch, ("HCS RDP helper", lambda config: (False, long_report)))
 
         context = await _drive(db)
 
         parts = [text for text in _sent(context) if "mingw64" in text]
         assert len(parts) > 1, "a reply over the limit must arrive in pieces"
-        assert all(len(part) <= TELEGRAM_MAX_LENGTH for part in parts)
-        assert "".join(parts).count(LONG_REMEDY) == 20
+        assert all(len(part) <= RICH_MAX_LENGTH for part in parts)
+        assert "".join(parts).count(LONG_REMEDY) == 160
 
 
 class TestTheReconnectPath:

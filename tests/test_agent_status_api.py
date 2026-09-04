@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
 from tests.android_signing import android_headers, b64url
+from tests.rich_stub import unwrap
 
 from open_shrimp.config import Config, ContextConfig, ReviewConfig, TelegramConfig
 from open_shrimp.db import init_db
@@ -295,8 +296,9 @@ class _RecordingBot:
     def __init__(self) -> None:
         self.edits: list[dict[str, object]] = []
 
-    async def edit_message_text(self, **kwargs: object) -> None:
-        self.edits.append(kwargs)
+    async def do_api_request(self, endpoint, api_kwargs=None, **_: object) -> None:
+        if endpoint == "editMessageText":
+            self.edits.append(unwrap(api_kwargs or {}).__dict__)
 
 
 def _register_question(

@@ -51,7 +51,8 @@ from open_shrimp.handlers.approval import (
     _send_host_bash_approval,
 )
 from open_shrimp.hooks import matches_approval_rule as _matches_rule
-from open_shrimp.markdown import escape, split_message
+from open_shrimp.markdown import RICH_MAX_LENGTH, escape_rich, split_message
+from open_shrimp.rich_message import send_rich
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox_diagnosis import failure_reply
 from open_shrimp.supervisor import (
@@ -87,7 +88,6 @@ from open_shrimp.handlers.utils import (
     _is_authorized,
     _is_bot_addressed,
     _strip_mention,
-    _thread_kwargs,
     _update_pinned_status,
     chat_scope_from_message,
     reply_no_context,
@@ -342,16 +342,14 @@ async def _warn_skipped_attachments(
     """
     if not skipped:
         return
-    lines = "\n".join(f"• {escape(item)}" for item in skipped)
-    header = escape(
+    lines = "\n".join(f"• {escape_rich(item)}" for item in skipped)
+    header = escape_rich(
         "Couldn't read this file:" if len(skipped) == 1 else "Couldn't read these files:"
     )
     try:
-        await bot.send_message(
-            chat_id=scope.chat_id,
-            text=f"{header}\n{lines}",
-            parse_mode="MarkdownV2",
-            **_thread_kwargs(scope),
+        await send_rich(
+            bot, scope.chat_id, f"{header}\n{lines}",
+            thread_id=scope.thread_id,
         )
     except Exception:
         logger.warning("Failed to report skipped attachments for scope %s", scope, exc_info=True)
@@ -458,11 +456,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             logger.exception("Voice transcription failed for scope %s", scope)
             try:
-                await context.bot.send_message(
-                    chat_id=scope.chat_id,
-                    text="Failed to transcribe voice note\\. Is moonshine\\-stt installed?",
-                    parse_mode="MarkdownV2",
-                    **_thread_kwargs(scope),
+                await send_rich(
+                    context.bot,
+                    scope.chat_id,
+                    "Failed to transcribe voice note. "
+                    "Is moonshine-stt installed?",
+                    thread_id=scope.thread_id,
                 )
             except Exception:
                 pass
@@ -741,11 +740,9 @@ async def _dispatch_to_agent(
         if scope not in _running_tasks or _running_tasks[scope].done():
             if placeholder:
                 try:
-                    await context.bot.send_message(
-                        chat_id=scope.chat_id,
-                        text=placeholder,
-                        parse_mode="MarkdownV2",
-                        **_thread_kwargs(scope),
+                    await send_rich(
+                        context.bot, scope.chat_id, placeholder,
+                        thread_id=scope.thread_id,
                     )
                 except Exception:
                     logger.debug("Failed to send placeholder for scope %s", scope)
@@ -779,11 +776,10 @@ async def _dispatch_to_agent(
                 # preserved.
                 await _tear_down_dead_task(scope)
                 try:
-                    await context.bot.send_message(
-                        chat_id=scope.chat_id,
-                        text="↻ Session dropped, resuming\\.\\.\\.",
-                        parse_mode="MarkdownV2",
-                        **_thread_kwargs(scope),
+                    await send_rich(
+                        context.bot, scope.chat_id,
+                        "↻ Session dropped, resuming...",
+                        thread_id=scope.thread_id,
                     )
                 except Exception:
                     logger.debug(
@@ -803,11 +799,12 @@ async def _dispatch_to_agent(
                 scope, len(_setup_queues[scope]),
             )
             try:
-                await context.bot.send_message(
-                    chat_id=scope.chat_id,
-                    text="\u23f3 Setting up session\\.\\.\\. message will be injected shortly\\.",
-                    parse_mode="MarkdownV2",
-                    **_thread_kwargs(scope),
+                await send_rich(
+                    context.bot,
+                    scope.chat_id,
+                    "\u23f3 Setting up session... message will be "
+                    "injected shortly.",
+                    thread_id=scope.thread_id,
                 )
             except Exception:
                 logger.debug("Failed to send setup-queue notification for scope %s", scope)
@@ -901,11 +898,10 @@ async def _inject_message(
         logger.exception("Failed to inject message for scope %s", scope)
         cleanup_attachments(attachment_paths)
         try:
-            await bot.send_message(
-                chat_id=scope.chat_id,
-                text="Failed to inject message into the running session\\.",
-                parse_mode="MarkdownV2",
-                **_thread_kwargs(scope),
+            await send_rich(
+                bot, scope.chat_id,
+                "Failed to inject message into the running session.",
+                thread_id=scope.thread_id,
             )
         except Exception:
             pass
@@ -1382,11 +1378,10 @@ async def _start_agent_task(
                     session = new_session
                     _injectable_sessions[scope] = session
                     try:
-                        await context.bot.send_message(
-                            chat_id=scope.chat_id,
-                            text="Container restarted, resuming session\\.\\.\\.",
-                            parse_mode="MarkdownV2",
-                            **_thread_kwargs(scope),
+                        await send_rich(
+                            context.bot, scope.chat_id,
+                            "Container restarted, resuming session...",
+                            thread_id=scope.thread_id,
                         )
                     except Exception:
                         logger.debug("Failed to send reconnect notice")
@@ -1405,19 +1400,17 @@ async def _start_agent_task(
                 if is_sandboxed(ctx_config):
                     error_text = (
                         "The sandbox process terminated unexpectedly "
-                        "\\(possibly due to a VM shutdown\\)\\. "
-                        "Send a new message to restart the session\\."
+                        "(possibly due to a VM shutdown). "
+                        "Send a new message to restart the session."
                     )
                 else:
                     error_text = (
-                        "The Claude process terminated unexpectedly\\. "
-                        "Send a new message to restart the session\\."
+                        "The Claude process terminated unexpectedly. "
+                        "Send a new message to restart the session."
                     )
-                await context.bot.send_message(
-                    chat_id=scope.chat_id,
-                    text=error_text,
-                    parse_mode="MarkdownV2",
-                    **_thread_kwargs(scope),
+                await send_rich(
+                    context.bot, scope.chat_id, error_text,
+                    thread_id=scope.thread_id,
                 )
             except Exception:
                 logger.exception("Failed to send error message")
@@ -1428,26 +1421,26 @@ async def _start_agent_task(
             # with it.
             logger.exception("Sandbox startup failed for scope %s", scope)
             try:
-                # Plain, and split rather than clamped: these remedies carry
-                # Windows paths and shell variables that MarkdownV2 would
-                # reject, and a message Telegram refuses is worse than the
-                # generic sentence it replaces.
-                for part in split_message(await failure_reply(exc, config)):
-                    await context.bot.send_message(
-                        chat_id=scope.chat_id,
-                        text=part,
-                        **_thread_kwargs(scope),
+                # Escaped rather than formatted, and split rather than
+                # clamped: these remedies carry Windows paths and shell
+                # variables, and a backslash read as markup would rewrite the
+                # path the user is being told to fix.
+                reply = await failure_reply(exc, config)
+                for part in split_message(reply, RICH_MAX_LENGTH):
+                    await send_rich(
+                        context.bot, scope.chat_id, escape_rich(part),
+                        thread_id=scope.thread_id,
                     )
             except Exception:
                 logger.exception("Failed to send sandbox failure message")
         except Exception:
             logger.exception("Agent task failed for scope %s", scope)
             try:
-                await context.bot.send_message(
-                    chat_id=scope.chat_id,
-                    text="An error occurred while processing your request\\.",
-                    parse_mode="MarkdownV2",
-                    **_thread_kwargs(scope),
+                await send_rich(
+                    context.bot,
+                    scope.chat_id,
+                    "An error occurred while processing your request.",
+                    thread_id=scope.thread_id,
                 )
             except Exception:
                 logger.exception("Failed to send error message")

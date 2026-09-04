@@ -7,8 +7,6 @@ when the result arrives, so a slow command is visible while it runs.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
-
 import pytest
 
 from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
@@ -23,21 +21,36 @@ from open_shrimp.stream import stream_response
 
 
 class _RecordingBot:
-    """A bot that records send/edit calls in the order they were made."""
+    """A bot that records rich send/edit calls in the order they were made.
+
+    Every send goes through ``do_api_request``: ``sendRichMessage`` is not in
+    python-telegram-bot, so there is no typed method to patch.  The recorded
+    kwargs are flattened to the shape the assertions care about — the Markdown
+    body and the keyboard.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._next_id = 100
-        self.do_api_request = AsyncMock()
+
+    async def do_api_request(
+        self, endpoint: str, api_kwargs: dict[str, Any], **_: Any,
+    ) -> Any:
+        recorded = dict(api_kwargs)
+        recorded["text"] = api_kwargs.get("rich_message", {}).get("markdown", "")
+        if endpoint == "sendRichMessage":
+            self.calls.append(("send", recorded))
+            self._next_id += 1
+            return type("_Msg", (), {"message_id": self._next_id})()
+        if endpoint == "editMessageText":
+            self.calls.append(("edit", recorded))
+            return None
+        return None
 
     async def send_message(self, **kwargs: Any) -> Any:
-        self.calls.append(("send", kwargs))
+        self.calls.append(("plain", kwargs))
         self._next_id += 1
         return type("_Msg", (), {"message_id": self._next_id})()
-
-    async def edit_message_text(self, **kwargs: Any) -> Any:
-        self.calls.append(("edit", kwargs))
-        return None
 
 
 async def _events(*items: Any) -> Any:
@@ -74,6 +87,8 @@ async def test_header_sent_before_the_result_arrives() -> None:
     assert "sleep 10" in bot.calls[0][1]["text"]
     # No button yet — nothing has been produced to show.
     assert bot.calls[0][1].get("reply_markup") is None
+    # Open while it runs: the command is readable without a tap.
+    assert bot.calls[0][1]["text"].startswith("<details open>")
 
 
 @pytest.mark.asyncio
@@ -89,10 +104,35 @@ async def test_result_edits_the_header_in_place() -> None:
     assert [kind for kind, _ in bot.calls] == ["send", "edit"]
     sent, edited = bot.calls[0][1], bot.calls[1][1]
     assert edited["message_id"] == 101
+    # Collapsed once the result is in: one row, output a tap away.
+    assert edited["text"].startswith("<details>")
     assert edited["chat_id"] == sent["chat_id"]
-    # The edit attaches "Show output" rather than posting a second message.
+    # Output that fits sits in the card body, so there is nothing to reveal.
+    assert "hi" in edited["text"]
+    assert edited.get("reply_markup") is None
+
+
+@pytest.mark.asyncio
+async def test_truncated_output_keeps_the_show_output_button() -> None:
+    """The card holds the tail; the button reveals what it cut."""
+    bot = _RecordingBot()
+    await _run(
+        bot,
+        _bash_use(),
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id="t1",
+                    content="\n".join(f"line {i}" for i in range(200)),
+                ),
+            ],
+        ),
+        ResultMessage(session_id="sess-1"),
+    )
+
+    edited = bot.calls[1][1]
+    assert "…(truncated)" in edited["text"]
     keyboard = edited["reply_markup"]
-    assert keyboard is not None
     assert keyboard.inline_keyboard[0][0].callback_data.startswith("show_bash:")
 
 
@@ -108,7 +148,7 @@ async def test_empty_output_is_noted_on_the_header() -> None:
 
     assert [kind for kind, _ in bot.calls] == ["send", "edit"]
     assert "No output" in bot.calls[1][1]["text"]
-    assert bot.calls[1][1]["reply_markup"] is None
+    assert bot.calls[1][1].get("reply_markup") is None
 
 
 @pytest.mark.asyncio
@@ -142,16 +182,16 @@ async def test_result_for_an_unseen_invocation_renders_nothing() -> None:
 async def test_failed_header_send_falls_back_to_one_message() -> None:
     """A dropped header must not cost the user the output button."""
     bot = _RecordingBot()
-    real_send = bot.send_message
+    real_request = bot.do_api_request
     calls = {"n": 0}
 
-    async def flaky_send(**kwargs: Any) -> Any:
+    async def flaky_request(endpoint: str, **kwargs: Any) -> Any:
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("Telegram said no")
-        return await real_send(**kwargs)
+        return await real_request(endpoint, **kwargs)
 
-    bot.send_message = flaky_send  # type: ignore[method-assign]
+    bot.do_api_request = flaky_request  # type: ignore[method-assign]
 
     await _run(
         bot,
@@ -163,7 +203,7 @@ async def test_failed_header_send_falls_back_to_one_message() -> None:
     # The header never landed, so the result is posted rather than edited.
     assert [kind for kind, _ in bot.calls] == ["send"]
     assert "sleep 10" in bot.calls[0][1]["text"]
-    assert bot.calls[0][1]["reply_markup"] is not None
+    assert "hi" in bot.calls[0][1]["text"]
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.rich_stub import wire_rich
+
 from open_shrimp import client_manager
 from open_shrimp.db import ChatScope
 from open_shrimp.handlers.approval import retire_pending_approvals
@@ -114,9 +116,9 @@ async def test_retire_cancels_future_and_strips_buttons() -> None:
     scope = ChatScope(chat_id=1, thread_id=3)
     loop = asyncio.get_running_loop()
     future: asyncio.Future[bool] = loop.create_future()
-    bot = SimpleNamespace(
+    bot = wire_rich(SimpleNamespace(
         edit_message_text=AsyncMock(), edit_message_reply_markup=AsyncMock(),
-    )
+    ))
     register_pending_approval(scope, 1, 42, future, bot=bot, text="Run rm?")
 
     await retire_pending_approvals(scope)
@@ -125,7 +127,9 @@ async def test_retire_cancels_future_and_strips_buttons() -> None:
     assert has_pending_approval(scope) is False
     kwargs = bot.edit_message_text.await_args.kwargs
     assert kwargs["message_id"] == 42
-    assert kwargs["reply_markup"] is None
+    # Omitted rather than sent as null: editMessageText without a
+    # keyboard is how Telegram is told to take one away.
+    assert kwargs.get("reply_markup") is None
     assert "no longer live" in kwargs["text"]
     # The original card text is preserved above the note.
     assert kwargs["text"].startswith("Run rm?")
@@ -134,10 +138,10 @@ async def test_retire_cancels_future_and_strips_buttons() -> None:
 async def test_retire_falls_back_to_stripping_markup_on_edit_failure() -> None:
     scope = ChatScope(chat_id=1, thread_id=4)
     future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-    bot = SimpleNamespace(
+    bot = wire_rich(SimpleNamespace(
         edit_message_text=AsyncMock(side_effect=RuntimeError("bad markdown")),
         edit_message_reply_markup=AsyncMock(),
-    )
+    ))
     register_pending_approval(scope, 1, 42, future, bot=bot, text="x")
 
     await retire_pending_approvals(scope)

@@ -49,7 +49,8 @@ from open_shrimp.hooks import (
     HostBashApprovalCallback,
     QuestionCallback,
 )
-from open_shrimp.markdown import escape as escape_markdown
+from open_shrimp.markdown import escape_rich
+from open_shrimp.rich_message import edit_rich, send_rich
 from open_shrimp.sandbox import Sandbox, SandboxManager
 from open_shrimp.sandbox.base import SandboxStartupError
 from open_shrimp.sandbox.launch import start_sandboxed_agent
@@ -229,11 +230,8 @@ def _chat_progress_sink(
 
     async def edit(text: str) -> None:
         try:
-            await bot.edit_message_text(
-                chat_id=message.chat_id,
-                message_id=message.message_id,
-                text=text,
-                parse_mode="MarkdownV2",
+            await edit_rich(
+                bot, message.chat_id, message.message_id, text,
                 reply_markup=keyboard,
             )
         except Exception:
@@ -242,7 +240,7 @@ def _chat_progress_sink(
             )
 
     def report(done: int, total: int | None) -> None:
-        text = escape_markdown(_first_turn_text(lead, done, total))
+        text = escape_rich(_first_turn_text(lead, done, total))
         try:
             asyncio.run_coroutine_threadsafe(edit(text), loop)
         except RuntimeError:
@@ -267,17 +265,13 @@ async def _warn_tools_degraded_once(bot: Bot, scope: ChatScope) -> None:
         return
     _tools_degraded_warned.add(scope)
     try:
-        kwargs: dict[str, Any] = {}
-        if scope.thread_id is not None:
-            kwargs["message_thread_id"] = scope.thread_id
-        await bot.send_message(
-            chat_id=scope.chat_id,
-            text=(
-                "⚠️ File, topic, schedule, and host tools are unavailable "
-                "this session — the local tool server didn't start. "
-                "Restart OpenShrimp to restore them."
-            ),
-            **kwargs,
+        await send_rich(
+            bot,
+            scope.chat_id,
+            "⚠️ File, topic, schedule, and host tools are unavailable "
+            "this session — the local tool server didn't start. "
+            "Restart OpenShrimp to restore them.",
+            thread_id=scope.thread_id,
         )
     except Exception:
         logger.debug(
@@ -296,17 +290,13 @@ async def _notify_backend_swapped(
     and the user wouldn't know why.  Best-effort: never break the turn.
     """
     try:
-        kwargs: dict[str, Any] = {}
-        if scope.thread_id is not None:
-            kwargs["message_thread_id"] = scope.thread_id
-        await bot.send_message(
-            chat_id=scope.chat_id,
-            text=(
-                f"🔄 Backend changed from {old_backend} to {new_backend} for "
-                "this context — starting a fresh conversation. History from "
-                "the previous backend can't be carried over."
-            ),
-            **kwargs,
+        await send_rich(
+            bot,
+            scope.chat_id,
+            f"🔄 Backend changed from {old_backend} to {new_backend} for "
+            "this context — starting a fresh conversation. History from "
+            "the previous backend can't be carried over.",
+            thread_id=scope.thread_id,
         )
     except Exception:
         logger.debug(
@@ -341,11 +331,11 @@ async def _run_host_prefetch(
 
     progress: ProgressFn | None = None
     if bot is not None:
-        message = await bot.send_message(
-            chat_id=scope.chat_id,
-            message_thread_id=scope.thread_id,
-            text=escape_markdown(_first_turn_text(pending.label)),
-            parse_mode="MarkdownV2",
+        message = await send_rich(
+            bot,
+            scope.chat_id,
+            escape_rich(_first_turn_text(pending.label)),
+            thread_id=scope.thread_id,
         )
         # No build log outside a sandbox, so no keyboard; the sink carries the
         # markup on every edit precisely so it can be absent.
@@ -697,11 +687,11 @@ async def get_or_create_session(
                 log_file = sandbox_manager.register_build(context_name)
 
                 if needs_build:
-                    progress_text = escape_markdown(
+                    progress_text = escape_rich(
                         _first_turn_text(_SANDBOX_BOOT_LEAD)
                     )
                 else:
-                    progress_text = escape_markdown("Starting sandbox...")
+                    progress_text = escape_rich("Starting sandbox...")
 
                 build_log_button = (
                     make_web_app_button(
@@ -721,11 +711,11 @@ async def get_or_create_session(
                     if build_log_button
                     else None
                 )
-                message = await bot.send_message(
-                    chat_id=scope.chat_id,
-                    message_thread_id=scope.thread_id,
-                    text=progress_text,
-                    parse_mode="MarkdownV2",
+                message = await send_rich(
+                    bot,
+                    scope.chat_id,
+                    progress_text,
+                    thread_id=scope.thread_id,
                     reply_markup=keyboard,
                 )
                 # Only a cold environment downloads anything; a warm one that

@@ -27,6 +27,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebApp
 
 from open_shrimp.config import Config
 from open_shrimp.review.auth import generate_auth_token
+from open_shrimp.markdown import escape_rich
+from open_shrimp.rich_message import reply_rich
 from open_shrimp.web_url import mini_app_base
 
 
@@ -132,8 +134,8 @@ async def reply_mini_app(
     """Reply with a Mini App keyboard, or with the reason there isn't one.
 
     The shape every command handing out a Mini App should use.  ``text`` is
-    MarkdownV2 and is sent only on the button path; the explanation is plain,
-    because it is prose full of characters MarkdownV2 would reject.
+    rich Markdown and is sent only on the button path; the explanation is
+    plain prose and is escaped on the way out.
 
     ``opens`` names the thing in the user's words ("the sign-in page") and
     ``still_works`` says what they can do meanwhile, so the reply explains
@@ -147,9 +149,9 @@ async def reply_mini_app(
         is_private_chat=is_private_chat,
     )
     if keyboard is None:
-        await message.reply_text(_unavailable_text(opens, still_works))
+        await reply_rich(message, escape_rich(_unavailable_text(opens, still_works)))
         return
-    await message.reply_text(text, parse_mode="MarkdownV2", reply_markup=keyboard)
+    await reply_rich(message, text, reply_markup=keyboard)
 
 
 def _append_query_param(url: str, key: str, value: str) -> str:

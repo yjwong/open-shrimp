@@ -446,7 +446,7 @@ class _QuestionState:
     other_query: Any = None
     """The callback query that triggered the "Other..." flow, used to edit the message afterward."""
     original_text_md: str = ""
-    """The original MarkdownV2 message text, saved so we can restore it after Other input."""
+    """The original card body, saved so we can restore it after Other input."""
     bot: Any = None
     """The bot that posted the card.
 

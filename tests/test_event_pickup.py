@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.rich_stub import rich_sends
+
 from open_shrimp.db import (
     ChatScope,
     claim_inbound_event,
@@ -727,11 +729,11 @@ async def test_reply_tool_sends_via_adapter_and_echoes(db, monkeypatch):
         {"message_id": "om_1"}, "on it — rolling back now"
     )
     # The outbound reply is echoed into the pick-up topic.
-    args, kwargs = bot.send_message.call_args
-    assert args[0] == CHAT_ID
-    assert kwargs["message_thread_id"] == NEW_THREAD_ID
-    assert "Replied to lark" in args[1]
-    assert "rolling back now" in args[1]
+    [echo] = rich_sends(bot)
+    assert echo.chat_id == CHAT_ID
+    assert echo.thread_id == NEW_THREAD_ID
+    assert "Replied to lark" in echo.text
+    assert "rolling back now" in echo.text
 
 
 @pytest.mark.asyncio

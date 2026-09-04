@@ -19,6 +19,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+
+from tests.rich_stub import wire_rich
 import yaml
 
 from open_shrimp.bot import _reload_failure_text, _watch_config
@@ -39,7 +41,8 @@ GOOD_CONFIG: dict[str, Any] = {
 
 
 def _bot(**kwargs):
-    return type("_Bot", (), {"send_message": AsyncMock(**kwargs)})()
+    bot = type("_Bot", (), {"send_message": AsyncMock(**kwargs)})()
+    return wire_rich(bot)
 
 
 def _texts(bot) -> list[str]:

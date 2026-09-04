@@ -11,7 +11,8 @@ from telegram.error import BadRequest
 
 from open_shrimp.backend import default_model_label
 from open_shrimp.config import Config, ContextConfig, effective_backend
-from open_shrimp.markdown import escape, escape_code
+from open_shrimp.markdown import escape_rich, escape_rich_inline
+from open_shrimp.rich_message import edit_rich, reply_rich, send_rich
 from open_shrimp.db import (
     ChatScope,
     get_active_context,
@@ -189,9 +190,7 @@ def no_context_answer(config: Config) -> str:
 
 async def reply_no_context(message: Message, config: Config) -> None:
     """Tell the user this scope has no project bound, and how to get one."""
-    await message.reply_text(
-        escape(no_context_text(config)), parse_mode="MarkdownV2"
-    )
+    await reply_rich(message, escape_rich(no_context_text(config)))
 
 
 async def answer_no_context(query: Any, config: Config) -> None:
@@ -201,8 +200,9 @@ async def answer_no_context(query: Any, config: Config) -> None:
 
 async def send_no_context(bot: Bot, scope: ChatScope, config: Config) -> None:
     """The scope-addressed form, for paths with no message to reply to."""
-    await bot.send_message(
-        chat_id=scope.chat_id, text=no_context_text(config), **_thread_kwargs(scope)
+    await send_rich(
+        bot, scope.chat_id, escape_rich(no_context_text(config)),
+        thread_id=scope.thread_id,
     )
 
 
@@ -244,9 +244,8 @@ async def notify_operators(
     bot: Bot,
     allowed_users: list[int],
     text: str,
-    parse_mode: str | None = None,
 ) -> None:
-    """DM every allowed user *text*, best effort.
+    """DM every allowed user *text* (rich Markdown), best effort.
 
     The write side of the policy :func:`_is_authorized` reads, and it
     lives here for the same reason: a message from this bot confirms a
@@ -261,9 +260,7 @@ async def notify_operators(
     """
     for user_id in allowed_users:
         try:
-            await bot.send_message(
-                chat_id=user_id, text=text, parse_mode=parse_mode,
-            )
+            await send_rich(bot, user_id, text)
         except Exception:
             logger.warning(
                 "Could not reach allowed user %s", user_id, exc_info=True
@@ -356,14 +353,6 @@ def _format_token_count(count: int) -> str:
     return str(count)
 
 
-_TODO_STATUS_EMOJI: dict[str, str] = {
-    "completed": "\u2705",
-    "in_progress": "\U0001f504",
-    "pending": "\u2b1c",
-    "cancelled": "\u274c",
-}
-
-
 def _build_status_text(
     ctx_name: str,
     ctx: ContextConfig,
@@ -372,22 +361,17 @@ def _build_status_text(
     turn_usage: dict[str, Any] | None = None,
     todos: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build the pinned status message text in MarkdownV2."""
-    escaped_name = escape_code(ctx_name)
-    escaped_desc = escape(ctx.description)
-    escaped_dir = escape_code(ctx.directory)
-    escaped_model = escape_code(
-        ctx.model or default_model_label(effective_backend(ctx, config))
-    )
+    """Build the pinned status message body."""
+    model = ctx.model or default_model_label(effective_backend(ctx, config))
     lines = [
-        f"\U0001f4cc *Active context:* `{escaped_name}`",
-        f"{escaped_desc}",
+        f"\U0001f4cc **Active context:** `{ctx_name}`",
+        escape_rich(ctx.description),
         "",
-        f"\U0001f4c1 `{escaped_dir}`",
-        f"\U0001f916 `{escaped_model}`",
+        f"\U0001f4c1 `{ctx.directory}`",
+        f"\U0001f916 `{model}`",
     ]
     if ctx.effort:
-        lines.append(f"\U0001f9e0 *Effort:* `{escape_code(ctx.effort)}`")
+        lines.append(f"\U0001f9e0 **Effort:** `{ctx.effort}`")
 
     # Context window usage from per-turn API usage (the last assistant
     # message).  input_tokens + cache tokens = current context size.
@@ -405,45 +389,40 @@ def _build_status_text(
             + turn_usage.get("cache_read_input_tokens", 0)
         )
 
-        total_str = escape(_format_token_count(total_tokens))
-        limit_str = escape(_format_token_count(context_window))
+        total_str = _format_token_count(total_tokens)
+        limit_str = _format_token_count(context_window)
         pct = min(total_tokens / context_window * 100, 100) if context_window > 0 else 0
-        pct_str = escape(f"{pct:.0f}%")
 
         lines.append("")
-        lines.append(f"\U0001f4ca *Context:* {total_str} / {limit_str} \\({pct_str}\\)")
+        lines.append(
+            f"\U0001f4ca **Context:** {total_str} / {limit_str} "
+            f"({pct:.0f}%)"
+        )
 
     if model_usage:
         total_cost = sum(m.get("costUSD", 0) for m in model_usage.values())
         if total_cost > 0:
-            cost_str = escape(f"${total_cost:.4f}")
-            lines.append(f"\U0001f4b0 *Cost:* {cost_str}")
+            lines.append(f"\U0001f4b0 **Cost:** ${total_cost:.4f}")
 
     if todos:
         lines.append("")
-        lines.append("\U0001f4dd *Tasks:*")
+        lines.append("\U0001f4dd **Tasks:**")
         # Cap at 15 items to avoid hitting Telegram's message length limit.
         display_todos = todos[:15]
         for todo in display_todos:
             status = todo.get("status", "pending")
-            emoji = _TODO_STATUS_EMOJI.get(status, "\u2b1c")
-            content = escape(todo.get("content", ""))
+            content = escape_rich_inline(todo.get("content", ""))
             if status == "completed":
-                lines.append(f"{emoji} ~{content}~")
+                lines.append(f"- [x] ~~{content}~~")
+            elif status == "in_progress":
+                lines.append(f"- [ ] **{content}**")
             else:
-                lines.append(f"{emoji} {content}")
+                lines.append(f"- [ ] {content}")
         remaining = len(todos) - len(display_todos)
         if remaining > 0:
-            lines.append(escape(f"   ...and {remaining} more"))
+            lines.append(f"\n*...and {remaining} more*")
 
     return "\n".join(lines)
-
-
-def _thread_kwargs(scope: ChatScope) -> dict[str, Any]:
-    """Build message_thread_id kwargs for Telegram send methods."""
-    if scope.thread_id is not None:
-        return {"message_thread_id": scope.thread_id}
-    return {}
 
 
 async def _update_pinned_status(
@@ -467,12 +446,7 @@ async def _update_pinned_status(
     # Try to edit the existing pinned message
     if existing_msg_id:
         try:
-            await bot.edit_message_text(
-                chat_id=scope.chat_id,
-                message_id=existing_msg_id,
-                text=text,
-                parse_mode="MarkdownV2",
-            )
+            await edit_rich(bot, scope.chat_id, existing_msg_id, text)
             return
         except BadRequest as exc:
             if "message is not modified" in str(exc).lower():
@@ -491,11 +465,8 @@ async def _update_pinned_status(
 
     # Send a new message and pin it
     try:
-        msg = await bot.send_message(
-            chat_id=scope.chat_id,
-            text=text,
-            parse_mode="MarkdownV2",
-            **_thread_kwargs(scope),
+        msg = await send_rich(
+            bot, scope.chat_id, text, thread_id=scope.thread_id,
         )
         await set_pinned_message_id(db, scope, msg.message_id)
         await bot.pin_chat_message(

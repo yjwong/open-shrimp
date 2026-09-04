@@ -1,8 +1,12 @@
-"""Stream bridge between backend events and Telegram sendMessageDraft.
+"""Stream bridge between backend events and Telegram rich messages.
 
-Consumes streaming events from agent.py, buffers text, and sends drafts
-to Telegram at appropriate intervals. Handles message length limits,
-tool call notifications, and final message delivery.
+Consumes streaming events from agent.py, buffers text, and animates a rich
+draft at intervals.  Handles message length limits, tool call notifications,
+and final message delivery.
+
+The buffer is a list of blocks rather than one string because two kinds of
+text share it: GFM the agent produced, which has to be escaped before it
+reaches Telegram, and rich markup this module built, which must not be.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import logging
 import os
 import random
 import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -32,6 +37,7 @@ from open_shrimp.backend.types import (
     TaskUpdatedMessage,
     TextBlock,
     TextDeltaEvent,
+    ThinkingDeltaEvent,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -41,8 +47,17 @@ from telegram.error import BadRequest
 
 from open_shrimp.agent import AgentEvent
 from open_shrimp.db import ChatScope
-from open_shrimp.markdown import gfm_to_telegram
+from open_shrimp.markdown import (
+    RICH_MAX_LENGTH,
+    escape_rich,
+    escape_rich_inline,
+    gfm_to_rich_text,
+    rich_code_block,
+    rich_details,
+    split_message,
+)
 from open_shrimp.mini_app import make_web_app_button
+from open_shrimp.rich_message import edit_rich, send_rich, send_rich_draft
 
 logger = logging.getLogger(__name__)
 
@@ -59,21 +74,22 @@ def _is_thread_not_found(exc: BaseException) -> bool:
         and "message thread not found" in str(exc).lower()
     )
 
-TELEGRAM_MAX_LENGTH = 4096
 DRAFT_INTERVAL_SECONDS = 0.5
-# Maximum lines of Bash output to display.
-BASH_OUTPUT_MAX_LINES = 50
-# Maximum characters of Bash output to display.
-BASH_OUTPUT_MAX_CHARS = 1500
-# MarkdownV2 suffixes for the terminal states of a Bash header message.  A
-# header carries neither while the command is outstanding: between the agent
-# issuing it and the result arriving it may be queued, waiting on an approval
-# tap that never comes, or executing, and the header claims none of them.
-BASH_NO_OUTPUT_SUFFIX = "\n_No output\\._"
-BASH_INTERRUPTED_SUFFIX = "\n_Interrupted\\._"
+# Maximum lines of tool output to fold into a card.
+TOOL_OUTPUT_MAX_LINES = 50
+# Maximum characters of tool output to fold into a card.
+TOOL_OUTPUT_MAX_CHARS = 1500
+# Longest command that fits on a collapsed card's summary row.
+SUMMARY_COMMAND_MAX_CHARS = 80
+# Terminal states of a Bash card.  A running card carries neither: between the
+# agent issuing the command and the result arriving it may be queued, waiting
+# on an approval tap that never comes, or executing, and the card claims none
+# of them.
+BASH_NO_OUTPUT_NOTE = "*No output.*"
+BASH_INTERRUPTED_NOTE = "*Interrupted.*"
 
-# Stored Bash outputs for on-demand reveal via inline keyboard button.
-# Keyed by a unique callback ID, value is the formatted GFM output string.
+# Stored tool outputs for on-demand reveal via inline keyboard button.
+# Keyed by a unique callback ID, value is the full rich body.
 _bash_output_store: dict[str, str] = {}
 
 
@@ -106,14 +122,30 @@ class StreamResult:
 
 
 @dataclass
+class _Block:
+    """One run of the outgoing message.
+
+    ``rich`` markup was built here and goes out untouched; everything else is
+    GFM from the agent and is escaped on the way out, so a ``<details>`` the
+    agent typed reads as text while the one this module built collapses.
+    """
+
+    rich: bool
+    text: str
+
+
+@dataclass
 class _DraftState:
     """Internal state for message drafting."""
 
     chat_id: int
     thread_id: int | None = None
-    # Raw GFM text accumulated so far (before conversion).
-    # Tool notifications are inlined as GFM blockquotes.
-    raw_text: str = ""
+    # Blocks accumulated so far, in send order.
+    buffer: list[_Block] = field(default_factory=list)
+    # tool_use_id -> (index into buffer, summary row) for a tool card still
+    # waiting on its result.  The row rides along so the card can be rebuilt
+    # as a collapsible without re-deriving the summary.
+    tool_cards: dict[str, tuple[int, str]] = field(default_factory=dict)
     # Message IDs of finalized messages (for reference)
     sent_message_ids: list[int] = field(default_factory=list)
     # Draft ID for sendMessageDraft (non-zero integer, stable per draft)
@@ -125,19 +157,16 @@ class _DraftState:
     # Message ID of the current "live edit" message (fallback when drafts
     # are disabled — we send a real message and keep editing it).
     live_edit_message_id: int | None = None
-    # Snapshot of raw_text that was last sent via editMessageText, so we
+    # Snapshot of the rendered body last sent via editMessageText, so we
     # can skip no-op edits.
     live_edit_last_text: str = ""
     # Whether the last assistant turn has completed (AssistantMessage seen).
-    # Used to insert a newline separator before text from the next turn.
+    # Used to start a fresh block for text from the next turn.
     turn_complete: bool = False
-    # Whether the last content appended to raw_text was a tool notification
-    # blockquote ("> Tool: summary").  Used to insert a paragraph break
-    # before the next assistant text so it doesn't get swallowed into the
-    # notification blockquote.  We track this with a flag instead of
-    # checking raw_text for ">" lines, because the assistant's own response text
-    # may also contain blockquotes that should NOT be broken.
-    last_was_notification: bool = False
+    # Reasoning text for the turn in flight.  It rides in the draft's
+    # <tg-thinking> block and is dropped from the message that replaces the
+    # draft, so it never reaches the transcript.
+    thinking: str = ""
     # Session ID captured as early as possible (from SystemMessage init or
     # ResultMessage) so it survives task cancellation.
     session_id: str | None = None
@@ -150,12 +179,13 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
-    # tool_use_id -> (message_id, icon, label) for a Bash header posted at
-    # invocation time and still awaiting its result.  The render arguments
-    # ride along so the message can be rewritten without re-deriving whether
-    # it came from Bash or host_bash.  Dropped once the result arrives and
-    # the message is edited into its final form.
-    pending_bash_messages: dict[str, tuple[int, str, str]] = field(
+    # tool_use_id -> (message_id, icon, label, started_at) for a Bash card
+    # posted at invocation time and still awaiting its result.  The render
+    # arguments ride along so the message can be rewritten without re-deriving
+    # whether it came from Bash or host_bash, and the monotonic start stamps
+    # the elapsed time onto the collapsed summary.  Dropped once the result
+    # arrives and the message is edited into its final form.
+    pending_bash_messages: dict[str, tuple[int, str, str, float]] = field(
         default_factory=dict
     )
     # Fields for web_app button fallback in group chats.
@@ -170,10 +200,40 @@ class _DraftState:
             return {"message_thread_id": self.thread_id}
         return {}
 
+    @property
+    def has_content(self) -> bool:
+        return any(block.text.strip() for block in self.buffer)
+
+    def append_gfm(self, text: str) -> None:
+        """Append agent text, extending the trailing GFM run when there is one.
+
+        Deltas arrive mid-word, so they have to land in the same run or a
+        sentence would gain a paragraph break every few characters.
+        """
+        if self.buffer and not self.buffer[-1].rich:
+            self.buffer[-1].text += text
+        else:
+            self.buffer.append(_Block(rich=False, text=text))
+
+    def append_rich(self, markup: str) -> int:
+        """Append markup built here and return its index for later rewriting."""
+        self.buffer.append(_Block(rich=True, text=markup))
+        return len(self.buffer) - 1
+
+    def clear_buffer(self) -> None:
+        self.buffer.clear()
+        # The indices they hold are gone with the blocks.
+        self.tool_cards.clear()
+
 
 def _build_full_text(state: _DraftState) -> str:
-    """Build the full GFM text."""
-    return state.raw_text
+    """Render the buffer into one rich-message body."""
+    parts: list[str] = []
+    for block in state.buffer:
+        text = block.text if block.rich else gfm_to_rich_text(block.text)
+        if text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts)
 
 
 async def _send_draft(bot: Bot, state: _DraftState) -> None:
@@ -187,11 +247,15 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
         return
 
     full_text = _build_full_text(state)
+    if state.thinking:
+        # <tg-thinking> renders in a draft and nowhere else, which is exactly
+        # the lifetime reasoning text should have.
+        thinking = f"<tg-thinking>{escape_rich(state.thinking)}</tg-thinking>"
+        full_text = f"{thinking}\n\n{full_text}" if full_text else thinking
     if not full_text.strip():
         return
 
-    # Convert to Telegram MarkdownV2
-    chunks = gfm_to_telegram(full_text)
+    chunks = split_message(full_text, RICH_MAX_LENGTH)
     if not chunks:
         return
 
@@ -200,15 +264,9 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
     text = chunks[0]
 
     try:
-        await bot.do_api_request(
-            "sendMessageDraft",
-            api_kwargs={
-                "chat_id": state.chat_id,
-                "draft_id": state.draft_id,
-                "text": text,
-                "parse_mode": "MarkdownV2",
-                **({"message_thread_id": state.thread_id} if state.thread_id is not None else {}),
-            },
+        await send_rich_draft(
+            bot, state.chat_id, state.draft_id, text,
+            thread_id=state.thread_id,
         )
         state.dirty = False
     except Exception as e:
@@ -216,7 +274,8 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
             raise
         error_msg = str(e).lower()
         if "draft_peer_invalid" in error_msg:
-            # sendMessageDraft not supported for this chat type — disable drafts
+            # A rich draft's chat_id is Integer-only, so a group chat has to
+            # fall back to editing a real message.
             logger.info("Drafts not supported for chat %s, disabling", state.chat_id)
             state.drafts_disabled = True
             # Immediately try the live-edit fallback so the user doesn't
@@ -229,7 +288,7 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
 async def _send_live_edit(bot: Bot, state: _DraftState) -> None:
     """Fallback streaming: send a message and keep editing it in-place.
 
-    Used when sendMessageDraft is not supported (e.g. group chats).
+    Used when a rich draft is not supported (e.g. group chats).
     """
     full_text = _build_full_text(state)
     if not full_text.strip():
@@ -239,7 +298,7 @@ async def _send_live_edit(bot: Bot, state: _DraftState) -> None:
     if full_text == state.live_edit_last_text:
         return
 
-    chunks = gfm_to_telegram(full_text)
+    chunks = split_message(full_text, RICH_MAX_LENGTH)
     if not chunks:
         return
 
@@ -252,12 +311,10 @@ async def _send_live_edit(bot: Bot, state: _DraftState) -> None:
     if state.live_edit_message_id is None:
         # First flush — send a new message.
         try:
-            msg = await bot.send_message(
-                chat_id=state.chat_id,
-                text=text,
-                parse_mode="MarkdownV2",
+            msg = await send_rich(
+                bot, state.chat_id, text,
+                thread_id=state.thread_id,
                 disable_notification=True,
-                **state._thread_kwargs,
             )
             state.live_edit_message_id = msg.message_id
             state.live_edit_last_text = full_text
@@ -269,11 +326,8 @@ async def _send_live_edit(bot: Bot, state: _DraftState) -> None:
     else:
         # Update the existing message.
         try:
-            await bot.edit_message_text(
-                chat_id=state.chat_id,
-                message_id=state.live_edit_message_id,
-                text=text,
-                parse_mode="MarkdownV2",
+            await edit_rich(
+                bot, state.chat_id, state.live_edit_message_id, text,
             )
             state.live_edit_last_text = full_text
             state.dirty = False
@@ -304,13 +358,9 @@ async def _finalize_message(
     if not full_text.strip():
         return []
 
-    chunks = gfm_to_telegram(full_text)
+    chunks = split_message(full_text, RICH_MAX_LENGTH)
     if not chunks:
         return []
-
-    notif_kwargs: dict[str, Any] = {}
-    if silent:
-        notif_kwargs["disable_notification"] = True
 
     message_ids: list[int] = []
 
@@ -318,15 +368,13 @@ async def _finalize_message(
         # Reuse the live-edit message for the first chunk.
         if i == 0 and state.live_edit_message_id is not None:
             try:
-                await bot.edit_message_text(
-                    chat_id=state.chat_id,
-                    message_id=state.live_edit_message_id,
-                    text=chunk,
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    bot, state.chat_id, state.live_edit_message_id, chunk,
                 )
             except Exception:
                 logger.exception("Failed to finalize live-edit message")
-                # Fallback: try without parse mode.
+                # Fallback: the markup is what Telegram rejected, so retry
+                # as an unformatted message rather than lose the text.
                 try:
                     await bot.edit_message_text(
                         chat_id=state.chat_id,
@@ -341,25 +389,22 @@ async def _finalize_message(
             continue
 
         try:
-            msg = await bot.send_message(
-                chat_id=state.chat_id,
-                text=chunk,
-                parse_mode="MarkdownV2",
-                **state._thread_kwargs,
-                **notif_kwargs,
+            msg = await send_rich(
+                bot, state.chat_id, chunk,
+                thread_id=state.thread_id,
+                disable_notification=silent,
             )
             message_ids.append(msg.message_id)
         except Exception as e:
             if _is_thread_not_found(e):
                 raise
             logger.exception("Failed to send finalized message chunk")
-            # Retry without MarkdownV2 as fallback
             try:
                 msg = await bot.send_message(
                     chat_id=state.chat_id,
                     text=chunk,
                     **state._thread_kwargs,
-                    **notif_kwargs,
+                    **({"disable_notification": True} if silent else {}),
                 )
                 message_ids.append(msg.message_id)
             except Exception as e2:
@@ -424,68 +469,93 @@ def _extract_bash_output_text(
     return content
 
 
-def _format_bash_header(
-    tool_input: dict[str, Any],
-    icon: str = "💻",
-    label: str = "Bash",
-) -> str:
-    """Format a compact Bash header with command for the button message."""
-    command = tool_input.get("command", "")
-    description = tool_input.get("description", "")
-
-    if description:
-        header = f"{icon} **{label}:** {description}"
-    else:
-        header = f"{icon} **{label}**"
-
-    cmd_display = command[:200] + "..." if len(command) > 200 else command
-    cmd_block = f"```bash\n{cmd_display}\n```"
-    return f"{header}\n\n{cmd_block}"
-
-
-def _format_bash_output(
-    tool_input: dict[str, Any],
-    content: str | list[dict[str, Any]] | None,
-    icon: str = "💻",
-    label: str = "Bash",
-) -> str:
-    """Format Bash tool invocation and output as GFM.
-
-    Mirrors the approval prompt style: shows description (if any) and the
-    command, followed by the output in a fenced code block. Truncates output
-    to BASH_OUTPUT_MAX_LINES / BASH_OUTPUT_MAX_CHARS, keeping the tail
-    (most recent output) when truncation is needed.
-    """
-    header_block = _format_bash_header(tool_input, icon=icon, label=label)
-
-    output_text = _extract_bash_output_text(content).strip()
-    if not output_text:
-        return f"{header_block}\n_No output\\._"
-
-    lines = output_text.splitlines()
+def _truncate_output(text: str) -> tuple[str, bool]:
+    """Cap output at the card limits, keeping the tail — the recent output."""
+    lines = text.splitlines()
     truncated = False
-    if len(lines) > BASH_OUTPUT_MAX_LINES:
-        lines = lines[-BASH_OUTPUT_MAX_LINES:]
+    if len(lines) > TOOL_OUTPUT_MAX_LINES:
+        lines = lines[-TOOL_OUTPUT_MAX_LINES:]
         truncated = True
 
     result = "\n".join(lines)
-    if len(result) > BASH_OUTPUT_MAX_CHARS:
-        result = result[-BASH_OUTPUT_MAX_CHARS:]
+    if len(result) > TOOL_OUTPUT_MAX_CHARS:
+        result = result[-TOOL_OUTPUT_MAX_CHARS:]
         truncated = True
 
-    prefix = "…(truncated)\n" if truncated else ""
-    output_block = f"Output:\n```\n{prefix}{result}\n```"
+    if truncated:
+        result = "…(truncated)\n" + result
+    return result, truncated
 
-    return f"{header_block}\n{output_block}"
+
+def _summary_command(tool_input: dict[str, Any]) -> str:
+    """Flatten a command onto the one line a collapsed summary has room for."""
+    command = " ".join((tool_input.get("command") or "").split())
+    if len(command) > SUMMARY_COMMAND_MAX_CHARS:
+        command = command[:SUMMARY_COMMAND_MAX_CHARS - 1] + "…"
+    return command
 
 
-def _bash_header_text(
-    tool_input: dict[str, Any], icon: str, label: str,
+def _format_elapsed(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, rest = divmod(int(seconds), 60)
+    return f"{minutes}m{rest:02d}s"
+
+
+def _bash_summary(
+    tool_input: dict[str, Any],
+    icon: str,
+    label: str,
+    *,
+    elapsed: float | None = None,
+    is_error: bool = False,
 ) -> str:
-    """Render the Bash header (description + command) as MarkdownV2."""
-    header = _format_bash_header(tool_input, icon=icon, label=label)
-    chunks = gfm_to_telegram(header)
-    return chunks[0] if chunks else ""
+    """Build the one row a collapsed Bash card shows.
+
+    The elapsed time is measured from the agent issuing the command to the
+    result landing, so it counts an approval wait as well as the run.
+    """
+    parts: list[str] = []
+    description = (tool_input.get("description") or "").strip()
+    if description:
+        parts.append(escape_rich_inline(description))
+    if is_error:
+        parts.append("**failed**")
+    if elapsed is not None:
+        parts.append(_format_elapsed(elapsed))
+    command = _summary_command(tool_input)
+    if command:
+        parts.append(f"`{command}`")
+
+    row = f"{icon} **{escape_rich_inline(label)}**"
+    return f"{row} — {' · '.join(parts)}" if parts else row
+
+
+def _bash_card(
+    tool_input: dict[str, Any],
+    icon: str,
+    label: str,
+    *,
+    output: str | None = None,
+    note: str | None = None,
+    elapsed: float | None = None,
+    is_error: bool = False,
+    open: bool = True,
+) -> str:
+    """Render a Bash invocation as a collapsible card.
+
+    Open while the command runs, so the command is readable without a tap;
+    collapsed once the result is in, so a finished command costs one row.
+    """
+    summary = _bash_summary(
+        tool_input, icon, label, elapsed=elapsed, is_error=is_error,
+    )
+    body_parts = [rich_code_block(tool_input.get("command") or "", "bash")]
+    if output:
+        body_parts.append(rich_code_block(output))
+    if note:
+        body_parts.append(note)
+    return rich_details(summary, "\n\n".join(body_parts), open=open)
 
 
 async def _send_bash_header(
@@ -506,12 +576,11 @@ async def _send_bash_header(
     await finalize_and_reset(bot, state)
 
     try:
-        msg = await bot.send_message(
-            chat_id=state.chat_id,
-            text=_bash_header_text(tool_input, icon, label),
-            parse_mode="MarkdownV2",
+        msg = await send_rich(
+            bot, state.chat_id,
+            _bash_card(tool_input, icon, label, open=True),
+            thread_id=state.thread_id,
             disable_notification=True,
-            **state._thread_kwargs,
         )
     except Exception as e:
         if _is_thread_not_found(e):
@@ -520,7 +589,9 @@ async def _send_bash_header(
         return
 
     state.sent_message_ids.append(msg.message_id)
-    state.pending_bash_messages[tool_use_id] = (msg.message_id, icon, label)
+    state.pending_bash_messages[tool_use_id] = (
+        msg.message_id, icon, label, time.monotonic(),
+    )
 
 
 async def _finish_bash_message(
@@ -531,8 +602,9 @@ async def _finish_bash_message(
     content: str | list[dict[str, Any]] | None,
     icon: str = "💻",
     label: str = "Bash",
+    is_error: bool = False,
 ) -> None:
-    """Attach the 'Show output' button to a posted header, or note the miss.
+    """Collapse the posted card onto its result, or note the miss.
 
     Falls back to sending a fresh message when no header went out for this
     tool_use_id — a failed send, or a result whose invocation never reached
@@ -541,39 +613,54 @@ async def _finish_bash_message(
     Background tasks get their "View output" button from the
     ``TaskStartedMessage`` handler instead, so they end at the header.
     """
-    header_text = _bash_header_text(tool_input, icon, label)
+    pending = state.pending_bash_messages.pop(tool_use_id, None)
+    elapsed = time.monotonic() - pending[3] if pending else None
+
     is_background = bool(tool_input.get("run_in_background"))
     output_text = _extract_bash_output_text(content).strip()
 
-    text = header_text
+    output: str | None = None
+    note: str | None = None
     keyboard: InlineKeyboardMarkup | None = None
     if not is_background:
         if output_text:
-            # "Show output" reveals the full text on demand, keeping the
-            # chat readable when a command dumps hundreds of lines.
-            callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
-            _bash_output_store[callback_id] = _format_bash_output(
-                tool_input, content, icon=icon, label=label,
-            )
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "📋 Show output", callback_data=callback_id,
+            output, truncated = _truncate_output(output_text)
+            if truncated:
+                # The card carries the tail; "Show output" reveals the rest
+                # on demand, from reply_markup where web can draw it.
+                callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
+                _bash_output_store[callback_id] = _bash_card(
+                    tool_input, icon, label,
+                    output=output_text,
+                    elapsed=elapsed,
+                    is_error=is_error,
+                    open=True,
                 )
-            ]])
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "📋 Show output", callback_data=callback_id,
+                    )
+                ]])
         else:
-            text = header_text + BASH_NO_OUTPUT_SUFFIX
+            note = BASH_NO_OUTPUT_NOTE
 
-    pending = state.pending_bash_messages.pop(tool_use_id, None)
+    text = _bash_card(
+        tool_input, icon, label,
+        output=output,
+        note=note,
+        elapsed=elapsed,
+        is_error=is_error,
+        open=False,
+    )
+
     if pending is None:
         await finalize_and_reset(bot, state)
         try:
-            msg = await bot.send_message(
-                chat_id=state.chat_id,
-                text=text,
-                parse_mode="MarkdownV2",
+            msg = await send_rich(
+                bot, state.chat_id, text,
+                thread_id=state.thread_id,
                 reply_markup=keyboard,
                 disable_notification=True,
-                **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
         except Exception as e:
@@ -583,12 +670,8 @@ async def _finish_bash_message(
         return
 
     try:
-        await bot.edit_message_text(
-            chat_id=state.chat_id,
-            message_id=pending[0],
-            text=text,
-            parse_mode="MarkdownV2",
-            reply_markup=keyboard,
+        await edit_rich(
+            bot, state.chat_id, pending[0], text, reply_markup=keyboard,
         )
     except Exception as e:
         if "message is not modified" in str(e).lower():
@@ -599,24 +682,26 @@ async def _finish_bash_message(
 
 
 async def _clear_pending_bash_messages(bot: Bot, state: _DraftState) -> None:
-    """Mark headers that never got a result when the stream ends.
+    """Mark cards that never got a result when the stream ends.
 
     Every tool_use is followed by its result, so a leftover here means the
     turn was interrupted or errored out before the tool reported back.
     """
-    for tool_use_id, (message_id, icon, label) in list(
+    for tool_use_id, (message_id, icon, label, started_at) in list(
         state.pending_bash_messages.items()
     ):
         tool_info = state.tool_use_map.get(tool_use_id)
         if tool_info is None:
             continue
         try:
-            await bot.edit_message_text(
-                chat_id=state.chat_id,
-                message_id=message_id,
-                text=_bash_header_text(tool_info[1], icon, label)
-                + BASH_INTERRUPTED_SUFFIX,
-                parse_mode="MarkdownV2",
+            await edit_rich(
+                bot, state.chat_id, message_id,
+                _bash_card(
+                    tool_info[1], icon, label,
+                    note=BASH_INTERRUPTED_NOTE,
+                    elapsed=time.monotonic() - started_at,
+                    open=False,
+                ),
             )
         except Exception:
             logger.exception("Failed to clear pending bash message")
@@ -634,13 +719,14 @@ async def finalize_and_reset(
     Args:
         silent: If True, send the finalized message silently (no notification).
     """
-    if state.raw_text.strip():
+    if state.has_content:
         msg_ids = await _finalize_message(bot, state, silent=silent)
         state.sent_message_ids.extend(msg_ids)
-    state.raw_text = ""
+    state.clear_buffer()
     state.draft_id = random.randint(1, 2**31 - 1)
     state.dirty = False
     state.turn_complete = False
+    state.thinking = ""
     state.live_edit_message_id = None
     state.live_edit_last_text = ""
 
@@ -690,13 +776,9 @@ async def _handle_assistant_error(
 
     await finalize_and_reset(bot, state)
     try:
-        chunks = gfm_to_telegram(msg_text)
-        text = chunks[0] if chunks else msg_text
-        await bot.send_message(
-            chat_id=state.chat_id,
-            text=text,
-            parse_mode="MarkdownV2",
-            **state._thread_kwargs,
+        await send_rich(
+            bot, state.chat_id, gfm_to_rich_text(msg_text),
+            thread_id=state.thread_id,
         )
     except Exception as e:
         if _is_thread_not_found(e):
@@ -853,9 +935,9 @@ async def stream_response(
                     )
 
                 # Mark this turn's text as complete. When the next
-                # turn's StreamEvent deltas arrive, we'll insert a
-                # newline separator to prevent text concatenation.
-                if state.raw_text:
+                # turn's StreamEvent deltas arrive, they start their own
+                # block to prevent text concatenation.
+                if state.has_content:
                     state.turn_complete = True
 
                 for block in event.content:
@@ -880,6 +962,7 @@ async def stream_response(
                         if not p.suppress_notification(block.name):
                             add_tool_notification(
                                 state,
+                                tool_use_id=block.id,
                                 tool_name=block.name,
                                 tool_input=block.input,
                                 auto=block.name in auto_set,
@@ -916,9 +999,9 @@ async def stream_response(
 
             elif isinstance(event, UserMessage):
                 # UserMessage carries tool results (ToolResultBlock).
-                # For Bash-like tools, send a collapsible message with a
-                # "Show output" button instead of embedding the output
-                # inline.
+                # Bash-likes own a whole message, so they collapse their card
+                # in place; every other tool folds its result into the card
+                # already sitting in the draft buffer.
                 checklist_result = False
                 if isinstance(event.content, list):
                     for block in event.content:
@@ -936,13 +1019,20 @@ async def stream_response(
                                     tool_info[1], block.content,
                                     icon=icon,
                                     label=label,
+                                    is_error=block.is_error,
                                 )
                             elif p.is_bash_like(name):
                                 await _finish_bash_message(
                                     bot, state, block.tool_use_id,
                                     tool_info[1], block.content,
+                                    is_error=block.is_error,
                                 )
-                            elif p.is_checklist_tool(name):
+                            else:
+                                fold_tool_result(
+                                    state, block.tool_use_id, block.content,
+                                    is_error=block.is_error,
+                                )
+                            if p.is_checklist_tool(name):
                                 checklist_result = True
                 # A checklist tool finished executing: re-read the store
                 # and refresh the pinned message.  Coalesced per message
@@ -954,20 +1044,29 @@ async def stream_response(
             elif isinstance(event, TextDeltaEvent):
                 text = event.text
                 if text:
+                    # The answer has started, so the reasoning that led to it
+                    # has no more claim on the draft.
+                    state.thinking = ""
                     if state.turn_complete:
-                        state.raw_text += "\n\n"
+                        # A new turn starts its own block, so its first delta
+                        # can't run into the previous turn's last word.
+                        state.buffer.append(_Block(rich=False, text=""))
                         state.turn_complete = False
-                    if state.last_was_notification:
-                        stripped = state.raw_text.rstrip()
-                        state.raw_text = stripped + "\n\n"
-                        state.last_was_notification = False
-                    state.raw_text += text
+                    state.append_gfm(text)
                     state.dirty = True
 
-                    full = _build_full_text(state)
-                    converted = gfm_to_telegram(full)
-                    if len(converted) > 1:
+                    # Rendering the buffer parses the whole answer, so the
+                    # cheap character count gates it.  Escaping only grows
+                    # text, so a buffer under the ceiling in raw form can
+                    # still overflow — the final split catches that.
+                    raw_length = sum(len(b.text) for b in state.buffer)
+                    if raw_length > RICH_MAX_LENGTH:
                         await _finalize_current(bot, state)
+
+            elif isinstance(event, ThinkingDeltaEvent):
+                if event.text:
+                    state.thinking += event.text
+                    state.dirty = True
 
             elif isinstance(event, ResultMessage):
                 # Turn-end checklist read: subagent tool calls never appear
@@ -1017,8 +1116,6 @@ async def stream_response(
                     await finalize_and_reset(bot, state)
                     try:
                         desc = event.description or "Background task"
-                        chunks = gfm_to_telegram(f"⏳ {desc}")
-                        text = chunks[0] if chunks else f"⏳ {desc}"
                         task_type_param = (
                             f"&task_type={event.task_type}"
                             if event.task_type
@@ -1039,13 +1136,12 @@ async def stream_response(
                             if view_output
                             else None
                         )
-                        await bot.send_message(
-                            chat_id=state.chat_id,
-                            text=text,
-                            parse_mode="MarkdownV2",
+                        await send_rich(
+                            bot, state.chat_id,
+                            f"⏳ {escape_rich(desc)}",
+                            thread_id=state.thread_id,
                             reply_markup=keyboard,
                             disable_notification=True,
-                            **state._thread_kwargs,
                         )
                     except Exception as e:
                         if _is_thread_not_found(e):
@@ -1091,14 +1187,11 @@ async def stream_response(
                     await finalize_and_reset(bot, state)
                     try:
                         summary = event.summary or event.status
-                        chunks = gfm_to_telegram(f"📋 {summary}")
-                        text = chunks[0] if chunks else f"📋 {summary}"
-                        await bot.send_message(
-                            chat_id=state.chat_id,
-                            text=text,
-                            parse_mode="MarkdownV2",
+                        await send_rich(
+                            bot, state.chat_id,
+                            f"📋 {escape_rich(summary)}",
+                            thread_id=state.thread_id,
                             disable_notification=True,
-                            **state._thread_kwargs,
                         )
                     except Exception as e:
                         if _is_thread_not_found(e):
@@ -1145,12 +1238,11 @@ async def stream_response(
                     )
                     await finalize_and_reset(bot, state)
                     try:
-                        await bot.send_message(
-                            chat_id=state.chat_id,
-                            text="⚠️ Rate limit reached\\. Waiting for reset\\.",
-                            parse_mode="MarkdownV2",
+                        await send_rich(
+                            bot, state.chat_id,
+                            "⚠️ Rate limit reached. Waiting for reset.",
+                            thread_id=state.thread_id,
                             disable_notification=True,
-                            **state._thread_kwargs,
                         )
                     except Exception as e:
                         if _is_thread_not_found(e):
@@ -1177,7 +1269,7 @@ async def stream_response(
                 pass
 
         # Final send of any remaining text — notify since the task is done.
-        if state.raw_text.strip():
+        if state.has_content:
             msg_ids = await _finalize_message(bot, state, silent=False)
             state.sent_message_ids.extend(msg_ids)
 
@@ -1192,156 +1284,124 @@ async def stream_response(
         result.sent_message_ids = state.sent_message_ids[sent_message_start:]
 
         # Reset for the next stream_response() iteration.
-        state.raw_text = ""
+        state.clear_buffer()
         state.draft_id = random.randint(1, 2**31 - 1)
         state.dirty = False
         state.turn_complete = False
+        state.thinking = ""
         state.live_edit_message_id = None
         state.live_edit_last_text = ""
 
     return result
 
 
-def _find_gfm_split(gfm: str) -> int | None:
-    """Find a position in raw GFM where the converted output fits in one message.
-
-    Binary-searches over paragraph (``\\n\\n``) boundaries, falling back to
-    single-newline boundaries.  Returns the split offset in *gfm*, or
-    ``None`` if the entire text already fits in a single chunk.
-    """
-    if len(gfm_to_telegram(gfm)) <= 1:
-        return None
-
-    # Collect candidate split points: paragraph breaks first, then line breaks.
-    candidates: list[int] = []
-    idx = 0
-    while True:
-        pos = gfm.find("\n\n", idx)
-        if pos == -1:
-            break
-        candidates.append(pos + 2)
-        idx = pos + 2
-
-    if not candidates:
-        idx = 0
-        while True:
-            pos = gfm.find("\n", idx)
-            if pos == -1:
-                break
-            candidates.append(pos + 1)
-            idx = pos + 1
-
-    if not candidates:
-        return None
-
-    # Binary search for the largest prefix that converts to one chunk.
-    lo, hi = 0, len(candidates) - 1
-    best: int | None = None
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        split_pos = candidates[mid]
-        if len(gfm_to_telegram(gfm[:split_pos])) <= 1:
-            best = split_pos
-            lo = mid + 1
-        else:
-            hi = mid - 1
-
-    return best
-
-
 async def _finalize_current(bot: Bot, state: _DraftState) -> None:
-    """Finalize the current draft and keep overflow GFM for the next message.
+    """Send everything but the tail of an answer that outgrew one message.
 
-    Splits at the raw GFM level so that the remainder can seed the next draft
-    without losing any content.
+    The tail seeds the next message.  It goes back as rendered markup rather
+    than GFM: ``split_message`` already chose a boundary the markup survives,
+    and re-parsing it would escape the tags it just balanced.
     """
-    full_text = _build_full_text(state)
-    chunks = gfm_to_telegram(full_text)
-
-    if not chunks:
-        return
-
+    chunks = split_message(_build_full_text(state), RICH_MAX_LENGTH)
     if len(chunks) <= 1:
-        # Nothing to split — shouldn't normally be called in this case,
-        # but be defensive.
         return
 
-    # Find a split point in the raw GFM (including tool prefix) so that
-    # everything before it converts to a single MarkdownV2 chunk.
-    split_pos = _find_gfm_split(full_text)
-
-    if split_pos is None or split_pos <= 0:
-        # Can't find a clean GFM split — fall back to sending chunks[0]
-        # from the already-converted output (loses overflow, but this is
-        # the rare edge case where the text has no newline boundaries).
-        prefix_text = chunks[0]
-        remainder_gfm = ""
-    else:
-        prefix_gfm = full_text[:split_pos]
-        remainder_gfm = full_text[split_pos:]
-        converted = gfm_to_telegram(prefix_gfm)
-        prefix_text = converted[0] if converted else chunks[0]
-
-    # Send the first chunk as a finalized message (silently — intermediate).
-    try:
-        msg = await bot.send_message(
-            chat_id=state.chat_id,
-            text=prefix_text,
-            parse_mode="MarkdownV2",
-            disable_notification=True,
-            **state._thread_kwargs,
-        )
-        state.sent_message_ids.append(msg.message_id)
-    except Exception as e:
-        if _is_thread_not_found(e):
-            raise
-        logger.exception("Failed to finalize message")
+    for chunk in chunks[:-1]:
         try:
-            msg = await bot.send_message(
-                chat_id=state.chat_id,
-                text=prefix_text,
+            msg = await send_rich(
+                bot, state.chat_id, chunk,
+                thread_id=state.thread_id,
                 disable_notification=True,
-                **state._thread_kwargs,
             )
             state.sent_message_ids.append(msg.message_id)
-        except Exception as e2:
-            if _is_thread_not_found(e2):
+        except Exception as e:
+            if _is_thread_not_found(e):
                 raise
-            logger.exception("Failed to send plaintext fallback")
+            logger.exception("Failed to finalize message")
+            try:
+                msg = await bot.send_message(
+                    chat_id=state.chat_id,
+                    text=chunk,
+                    disable_notification=True,
+                    **state._thread_kwargs,
+                )
+                state.sent_message_ids.append(msg.message_id)
+            except Exception as e2:
+                if _is_thread_not_found(e2):
+                    raise
+                logger.exception("Failed to send plaintext fallback")
 
-    # Keep the remainder as raw GFM for the next message.
-    state.raw_text = remainder_gfm
+    state.clear_buffer()
+    state.buffer.append(_Block(rich=True, text=chunks[-1]))
     state.draft_id = random.randint(1, 2**31 - 1)
-    state.dirty = bool(remainder_gfm.strip())
+    state.dirty = True
     state.turn_complete = False
+
+
+def tool_summary_row(
+    tool_name: str,
+    summary: str,
+    auto: bool,
+    *,
+    is_error: bool = False,
+) -> str:
+    """Build the one row a tool call costs when its card is collapsed."""
+    icon = "⚠️" if is_error else "🔧"
+    row = f"{icon} **{escape_rich_inline(tool_name)}**"
+    if summary:
+        row += f" — {escape_rich_inline(summary)}"
+    if auto:
+        row += " *(auto)*"
+    return row
 
 
 def add_tool_notification(
     state: _DraftState,
+    tool_use_id: str,
     tool_name: str,
     tool_input: dict[str, Any],
     auto: bool,
     cwd: str | None = None,
     policy: "BackendPolicy | None" = None,
 ) -> None:
-    """Add a tool call notification inline as a GFM blockquote."""
+    """Add a tool call to the draft as its own row.
+
+    The row becomes a collapsible card once the result lands
+    (``fold_tool_result``); until then there is nothing to collapse, so it
+    stays a plain line and a call whose result never arrives still reads.
+    """
     summary = extract_tool_summary(tool_name, tool_input, cwd=cwd, policy=policy)
-    suffix = " (auto)" if auto else ""
-    line = f"> {tool_name}: {summary}{suffix}"
+    row = tool_summary_row(tool_name, summary, auto)
+    state.tool_cards[tool_use_id] = (state.append_rich(row), row)
+    state.dirty = True
 
-    # Group consecutive tool notifications into a single blockquote block.
-    stripped = state.raw_text.rstrip()
-    last_line = stripped.rsplit("\n", 1)[-1] if stripped else ""
 
-    if last_line.startswith(">"):
-        # Continue the existing blockquote (consecutive tool calls).
-        state.raw_text = stripped + "\n" + line + "\n"
-    elif stripped:
-        # Paragraph break before starting a new blockquote.
-        state.raw_text = stripped + "\n\n" + line + "\n"
-    else:
-        state.raw_text = line + "\n"
+def fold_tool_result(
+    state: _DraftState,
+    tool_use_id: str,
+    content: str | list[dict[str, Any]] | None,
+    *,
+    is_error: bool = False,
+) -> None:
+    """Fold a tool's output into the card its invocation left in the draft.
 
-    state.last_was_notification = True
+    Does nothing when the card has already been sent — the draft is finalized
+    whenever an out-of-band message has to go out first, and a sent message is
+    no longer this buffer's to rewrite.
+    """
+    card = state.tool_cards.pop(tool_use_id, None)
+    if card is None:
+        return
+    index, row = card
+    if index >= len(state.buffer):
+        return
 
+    output = _extract_bash_output_text(content).strip()
+    if not output:
+        return
+
+    body, _ = _truncate_output(output)
+    if is_error:
+        row = row.replace("🔧", "⚠️", 1)
+    state.buffer[index].text = rich_details(row, rich_code_block(body))
     state.dirty = True

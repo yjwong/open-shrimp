@@ -36,7 +36,19 @@ from open_shrimp.handlers.state import (
     RESOLVED_VIA_ANDROID,
     take_pending_approvals,
 )
-from open_shrimp.markdown import escape, escape_code
+from open_shrimp.markdown import (
+    RICH_MAX_LENGTH,
+    escape_rich,
+    escape_rich_inline,
+    rich_code_block,
+    rich_details,
+)
+from open_shrimp.rich_message import (
+    body_of,
+    edit_message_rich,
+    edit_rich,
+    send_rich,
+)
 from open_shrimp.hooks import ApprovalRule, HostBashOutcome
 from open_shrimp.sudo_audit import log_sudo
 
@@ -112,13 +124,7 @@ async def _close_card(
     go, or the card stays live-looking forever.
     """
     try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            parse_mode="MarkdownV2",
-            reply_markup=None,
-        )
+        await edit_rich(bot, chat_id, message_id, text, reply_markup=None)
     except Exception:
         try:
             await bot.edit_message_reply_markup(
@@ -138,22 +144,24 @@ async def _send_auto_approved_diff(
     policy: "BackendPolicy | None" = None,
     scope: ChatScope | None = None,
 ) -> None:
-    """Send a read-only diff message for an auto-approved edit."""
-    p = _resolve_policy(policy, scope=scope)
-    text = p.format_auto_approved_diff(tool_name, tool_input, cwd)
-    text += "\n✅ _Auto\\-approved_"
+    """Send a read-only diff message for an auto-approved edit.
 
-    thread_kwargs: dict[str, Any] = {}
-    if thread_id is not None:
-        thread_kwargs["message_thread_id"] = thread_id
+    Folded shut: nobody is being asked to decide, so the change costs one row
+    in the transcript and opens on a tap when someone wants to read it.
+    """
+    p = _resolve_policy(policy, scope=scope)
+    body = p.format_auto_approved_diff(tool_name, tool_input, cwd)
+    summary, _, patch = body.partition("\n\n")
+    text = (
+        rich_details(f"✅ {summary}", patch) if patch
+        else f"✅ {summary}"
+    )
 
     try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="MarkdownV2",
+        await send_rich(
+            bot, chat_id, text,
+            thread_id=thread_id,
             disable_notification=True,
-            **thread_kwargs,
         )
     except Exception:
         logger.exception("Failed to send auto-approved diff notification")
@@ -186,7 +194,7 @@ async def _send_approval_keyboard(
     auto-approve.  ``scope`` and ``context_name`` are required to scope
     that approval state.
 
-    ``provenance`` is an optional, already-MarkdownV2-escaped header
+    ``provenance`` is an optional, already-escaped rich header
     prepended to the prompt text (used by ``ask_context`` to show that an
     approval originates from a cross-context sub-query rather than the
     active conversation).
@@ -272,16 +280,8 @@ async def _send_approval_keyboard(
         rows.append(session_row)
     keyboard = InlineKeyboardMarkup(rows)
 
-    thread_kwargs: dict[str, Any] = {}
-    if thread_id is not None:
-        thread_kwargs["message_thread_id"] = thread_id
-
-    sent_msg = await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
-        **thread_kwargs,
+    sent_msg = await send_rich(
+        bot, chat_id, text, thread_id=thread_id, reply_markup=keyboard,
     )
     _approval_metadata[tool_use_id]["message_id"] = sent_msg.message_id
 
@@ -308,11 +308,9 @@ async def _send_approval_keyboard(
             icon = "✅" if result else "❌"
             action = "Approved on phone" if result else "Denied on phone"
             try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=sent_msg.message_id,
-                    text=f"{text}\n\n{icon} *{escape(action)}\\.*",
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    bot, chat_id, sent_msg.message_id,
+                    f"{text}\n\n{icon} *{escape_rich_inline(action)}.*",
                     reply_markup=None,
                 )
             except Exception:
@@ -357,11 +355,9 @@ async def retire_pending_approvals(scope: ChatScope) -> None:
         if entry.bot is None or entry.message_id is None:
             continue
         try:
-            await entry.bot.edit_message_text(
-                chat_id=entry.chat_id,
-                message_id=entry.message_id,
-                text=f"{entry.text}\n\n⚪️ *Session ended — no longer live\\.*",
-                parse_mode="MarkdownV2",
+            await edit_rich(
+                entry.bot, entry.chat_id, entry.message_id,
+                f"{entry.text}\n\n⚪️ *Session ended — no longer live.*",
                 reply_markup=None,
             )
         except Exception:
@@ -386,14 +382,17 @@ async def retire_pending_approvals(scope: ChatScope) -> None:
 _HOST_BASH_TIMEOUT_SECONDS = 30.0
 _HOST_BASH_TICK_SECONDS = 2.0
 _HOST_BASH_DENY_PREFIX = "hb_deny:"
+# Room inside a rich message for the header, the countdown line and the fence
+# around the command.
+_MAX_COMMAND_CHARS = RICH_MAX_LENGTH - 500
 
 
 def _render_command_block(command: str, max_len: int) -> str:
-    """Render a bash command as a MarkdownV2 code block with truncation."""
+    """Render a bash command as a highlighted code block with truncation."""
     shown = command
     if len(shown) > max_len:
         shown = shown[:max_len] + "\n..."
-    return f"```bash\n{escape_code(shown)}\n```"
+    return rich_code_block(shown, "bash")
 
 
 def _format_host_bash_approval(
@@ -405,26 +404,27 @@ def _format_host_bash_approval(
     cwd = tool_input.get("cwd", "")
 
     header = (
-        "⚠️ *Start HOST monitor* \\(sudo mode\\)"
+        "⚠️ **Start HOST monitor** (sudo mode)"
         if is_monitor
-        else "⚠️ *HOST shell* \\(sudo mode\\)"
+        else "⚠️ **HOST shell** (sudo mode)"
     )
     parts: list[str] = [header]
     if description:
-        parts.append(escape(description))
-    parts.append(_render_command_block(command, 4096 - 400))
+        parts.append(escape_rich(description))
+    parts.append(_render_command_block(command, _MAX_COMMAND_CHARS))
     if cwd:
-        parts.append(f"_cwd:_ `{escape_code(cwd)}`")
+        parts.append(f"*cwd:* `{cwd}`")
     secs = max(0, int(round(remaining)))
     if is_monitor:
         parts.append(
-            f"_Auto\\-deny in {secs}s — this streams each output line as an "
-            f"event and runs OUTSIDE the sandbox\\._"
+            f"<blockquote>Auto-deny in {secs}s — this streams each output "
+            f"line as an event and runs OUTSIDE the sandbox."
+            f"<cite>host_monitor</cite></blockquote>"
         )
     else:
         parts.append(
-            f"_Auto\\-deny in {secs}s — this command runs OUTSIDE the "
-            f"sandbox\\._"
+            f"<blockquote>Auto-deny in {secs}s — this command runs OUTSIDE "
+            f"the sandbox.<cite>host_bash</cite></blockquote>"
         )
     return "\n\n".join(parts)
 
@@ -443,11 +443,11 @@ def _format_host_bash_final(
     verb = {
         "approved": "Approved",
         "denied": "Denied",
-        "timeout": "Auto\\-denied \\(no response within 30s\\)",
+        "timeout": "Auto-denied (no response within 30s)",
     }[outcome]
     label = "HOST monitor" if is_monitor else "HOST shell"
-    block = _render_command_block(tool_input.get("command", ""), 4096 - 200)
-    return f"{icon} *{label}* — {verb}\n\n{block}"
+    block = _render_command_block(tool_input.get("command", ""), _MAX_COMMAND_CHARS)
+    return f"{icon} **{label}** — {verb}\n\n{block}"
 
 
 async def _host_bash_countdown(
@@ -483,13 +483,9 @@ async def _host_bash_countdown(
             continue
         last_secs = secs
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=_format_host_bash_approval(
-                    tool_input, remaining, is_monitor,
-                ),
-                parse_mode="MarkdownV2",
+            await edit_rich(
+                bot, chat_id, message_id,
+                _format_host_bash_approval(tool_input, remaining, is_monitor),
                 reply_markup=_host_bash_keyboard(tool_use_id),
             )
         except Exception:
@@ -546,18 +542,13 @@ async def _send_host_bash_approval(
         "chat_id": chat_id,
     }
 
-    thread_kwargs: dict[str, Any] = {}
-    if thread_id is not None:
-        thread_kwargs["message_thread_id"] = thread_id
-
-    sent_msg = await bot.send_message(
-        chat_id=chat_id,
-        text=_format_host_bash_approval(
+    sent_msg = await send_rich(
+        bot, chat_id,
+        _format_host_bash_approval(
             tool_input, _HOST_BASH_TIMEOUT_SECONDS, is_monitor,
         ),
-        parse_mode="MarkdownV2",
+        thread_id=thread_id,
         reply_markup=_host_bash_keyboard(tool_use_id),
-        **thread_kwargs,
     )
     message_id = sent_msg.message_id
     _approval_metadata[tool_use_id]["message_id"] = message_id
@@ -589,11 +580,9 @@ async def _send_host_bash_approval(
         outcome = "denied"
 
     try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=_format_host_bash_final(tool_input, outcome, is_monitor),
-            parse_mode="MarkdownV2",
+        await edit_rich(
+            bot, chat_id, message_id,
+            _format_host_bash_final(tool_input, outcome, is_monitor),
             reply_markup=None,
         )
     except Exception:
@@ -640,15 +629,17 @@ def _config_write_keyboard(tool_use_id: str) -> InlineKeyboardMarkup:
 def _format_config_write(headline: str, diff: str, note: str = "") -> str:
     """The card: what it does in a sentence, then the diff that proves it.
 
-    The diff goes through ``escape_code``, not the prose escaper: inside a
-    code entity Telegram honours only ``\\`` and a backtick, so escaping
-    the rest would print the backslashes — and a diff is almost entirely
-    the characters the prose escaper touches.
+    The diff goes in a fence, which a rich message takes literally — a diff
+    is almost entirely the characters an escaper would touch, and escaping
+    them here would print the backslashes.
     """
-    parts = [f"⚙️ *Change OpenShrimp's configuration*\n\n{escape(headline)}\\."]
+    parts = [
+        f"⚙️ **Change OpenShrimp's configuration**\n\n"
+        f"{escape_rich(headline)}."
+    ]
     if note:
-        parts.append(escape(note))
-    parts.append(f"```diff\n{escape_code(diff)}\n```")
+        parts.append(escape_rich(note))
+    parts.append(rich_code_block(diff, "diff"))
     return "\n\n".join(parts)
 
 
@@ -687,10 +678,6 @@ async def _send_config_write_approval(
     except ConfigWriteRefused as exc:
         return str(exc)
 
-    thread_kwargs: dict[str, Any] = {}
-    if thread_id is not None:
-        thread_kwargs["message_thread_id"] = thread_id
-
     approve_data = f"{_CONFIG_WRITE_APPROVE_PREFIX}{tool_use_id}"
     deny_data = f"{_CONFIG_WRITE_DENY_PREFIX}{tool_use_id}"
     loop = asyncio.get_running_loop()
@@ -703,12 +690,10 @@ async def _send_config_write_approval(
     # to something else.
 
     text = _format_config_write(plan.headline, plan.diff)
-    sent_msg = await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode="MarkdownV2",
+    sent_msg = await send_rich(
+        bot, chat_id, text,
+        thread_id=thread_id,
         reply_markup=_config_write_keyboard(tool_use_id),
-        **thread_kwargs,
     )
     pending = register_pending_approval(
         scope, chat_id, sent_msg.message_id, future, bot=bot, text=text,
@@ -824,15 +809,11 @@ async def _auto_resolve_pending_approvals(
 
         if msg_id:
             try:
-                escaped_tool = escape(t_name)
-                icon = '✅'
-                compact = f"{icon} *{escaped_tool}* — Auto\\-approved\\."
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=compact,
-                    parse_mode="MarkdownV2",
-                    reply_markup=None,
+                compact = (
+                    f"✅ **{escape_rich_inline(t_name)}** — Auto-approved."
+                )
+                await edit_rich(
+                    bot, chat_id, msg_id, compact, reply_markup=None,
                 )
             except Exception:
                 logger.exception(
@@ -895,9 +876,8 @@ async def handle_approval_callback(
                 ]
             )
             try:
-                await query.message.edit_text(
-                    text=expanded_text,
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    expanded_text,
                     reply_markup=keyboard,
                 )
             except Exception:
@@ -914,14 +894,9 @@ async def handle_approval_callback(
         await query.answer()
 
         if query.message:
-            from open_shrimp.markdown import gfm_to_telegram
-
-            chunks = gfm_to_telegram(formatted_output)
-            expanded_text = chunks[0] if chunks else ""
             try:
-                await query.message.edit_text(
-                    text=expanded_text,
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    formatted_output,
                     reply_markup=None,
                 )
             except Exception:
@@ -960,11 +935,9 @@ async def handle_approval_callback(
 
         if query.message:
             try:
-                original_md = query.message.text_markdown_v2 or query.message.text or ""
-                status = "\n\n✅ *Approved\\.* _All future edits auto\\-approved\\._"
-                await query.message.edit_text(
-                    text=original_md + status,
-                    parse_mode="MarkdownV2",
+                status = "\n\n✅ **Approved.** *All future edits auto-approved.*"
+                await edit_rich(
+                    body_of(query.message) + status,
                     reply_markup=None,
                 )
             except Exception:
@@ -1022,21 +995,18 @@ async def handle_approval_callback(
                 )
 
         future.set_result(True)
-        escaped_prefix = escape(prefix)
         await query.answer(
             f"Approved. Rule saved: {prefix} * auto-approved."
         )
 
         if query.message:
             try:
-                icon = '✅'
                 compact = (
-                    f"{icon} *Bash* — Approved\\. "
-                    f"_Rule saved: {escaped_prefix} \\* auto\\-approved\\._"
+                    f"✅ **Bash** — Approved. "
+                    f"*Rule saved: `{prefix} *` auto-approved.*"
                 )
-                await query.message.edit_text(
-                    text=compact,
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    compact,
                     reply_markup=None,
                 )
             except Exception:
@@ -1085,26 +1055,19 @@ async def handle_approval_callback(
         )
 
         future.set_result(True)
-        escaped_dir = escape_code(directory)
         await query.answer(
             f"Approved. {directory}/ allowed for this session."
         )
 
         if query.message:
             try:
-                original_md = (
-                    query.message.text_markdown_v2
-                    or query.message.text
-                    or ""
-                )
                 status = (
-                    f"\n\n✅ *Approved\\.* "
-                    f"_All future tool calls in `{escaped_dir}` "
-                    f"auto\\-approved this session\\._"
+                    f"\n\n✅ **Approved.** "
+                    f"*All future tool calls in `{directory}` "
+                    f"auto-approved this session.*"
                 )
-                await query.message.edit_text(
-                    text=original_md + status,
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    body_of(query.message) + status,
                     reply_markup=None,
                 )
             except Exception:
@@ -1156,21 +1119,19 @@ async def handle_approval_callback(
                 )
 
         future.set_result(True)
-        escaped_tool = escape(accepted_tool_name)
         await query.answer(
             f"Approved. All future {accepted_tool_name} calls will be auto-approved."
         )
 
         if query.message:
             try:
-                original_md = query.message.text_markdown_v2 or query.message.text or ""
                 status = (
-                    f"\n\n✅ *Approved\\.* _All future {escaped_tool} "
-                    f"calls auto\\-approved\\._"
+                    f"\n\n✅ **Approved.** *All future "
+                    f"{escape_rich_inline(accepted_tool_name)} "
+                    f"calls auto-approved.*"
                 )
-                await query.message.edit_text(
-                    text=original_md + status,
-                    parse_mode="MarkdownV2",
+                await edit_rich(
+                    body_of(query.message) + status,
                     reply_markup=None,
                 )
             except Exception:
@@ -1233,23 +1194,18 @@ async def handle_approval_callback(
         # the command again.
         if query.message:
             try:
+                icon = '✅' if approved else '❌'
                 if tool_name and p.is_bash_like(tool_name):
-                    icon = '✅' if approved else '❌'
-                    compact = f"{icon} *{escape(tool_name)}* — {action}\\."
-                    await query.message.edit_text(
-                        text=compact,
-                        parse_mode="MarkdownV2",
-                        reply_markup=None,
+                    body = (
+                        f"{icon} **{escape_rich_inline(tool_name)}** "
+                        f"— {action}."
                     )
                 else:
-                    original_md = query.message.text_markdown_v2 or query.message.text or ""
-                    icon = '✅' if approved else '❌'
-                    status = f"\n\n{icon} *{action}\\.*"
-                    await query.message.edit_text(
-                        text=original_md + status,
-                        parse_mode="MarkdownV2",
-                        reply_markup=None,
-                    )
+                    body = body_of(query.message) + f"\n\n{icon} *{action}.*"
+                await edit_rich(
+                    body,
+                    reply_markup=None,
+                )
             except Exception:
                 try:
                     await query.message.edit_reply_markup(reply_markup=None)

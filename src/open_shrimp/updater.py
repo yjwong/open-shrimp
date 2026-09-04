@@ -23,7 +23,8 @@ from pathlib import Path
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from open_shrimp.markdown import escape, escape_code
+from open_shrimp.markdown import escape_rich
+from open_shrimp.rich_message import send_rich
 
 logger = logging.getLogger(__name__)
 
@@ -305,11 +306,11 @@ async def _send_update_notification(
         notes = notes[:497] + "..."
 
     text = (
-        f"*Update available*\n\n"
-        f"`{escape_code(current)}` \\-\\> `{escape_code(update_info.version)}`\n\n"
+        f"**Update available**\n\n"
+        f"`{current}` -> `{update_info.version}`\n\n"
     )
     if notes.strip():
-        text += f"{escape(notes)}\n\n"
+        text += f"{escape_rich(notes)}\n\n"
     text += f"[View release]({update_info.release_url})"
 
     keyboard = InlineKeyboardMarkup(
@@ -330,12 +331,7 @@ async def _send_update_notification(
     messages: list[tuple[int, int]] = []
     for uid in user_ids:
         try:
-            msg = await bot.send_message(
-                chat_id=uid,
-                text=text,
-                parse_mode="MarkdownV2",
-                reply_markup=keyboard,
-            )
+            msg = await send_rich(bot, uid, text, reply_markup=keyboard)
             messages.append((uid, msg.message_id))
         except Exception:
             logger.warning("Failed to send update notification to %d", uid, exc_info=True)
@@ -439,14 +435,11 @@ async def apply_update(
         )
         for uid in config.allowed_users:
             try:
-                await bot.send_message(
-                    chat_id=uid,
-                    text=(
-                        f"Update failed: permission denied writing to "
-                        f"`{escape_code(str(binary_path))}`\\. "
-                        f"Check file ownership/permissions\\."
-                    ),
-                    parse_mode="MarkdownV2",
+                await send_rich(
+                    bot,
+                    uid,
+                    f"Update failed: permission denied writing to "
+                    f"`{binary_path}`. Check file ownership/permissions.",
                 )
             except Exception:
                 pass
@@ -455,11 +448,9 @@ async def apply_update(
         logger.exception("Update download/replace failed")
         for uid in config.allowed_users:
             try:
-                await bot.send_message(
-                    chat_id=uid,
-                    text="Update failed\\. Check the bot logs for details\\.",
-                    parse_mode="MarkdownV2",
-                )
+                await send_rich(
+                bot, uid, "Update failed. Check the bot logs for details.",
+            )
             except Exception:
                 pass
         return
@@ -467,10 +458,10 @@ async def apply_update(
     # Notify and restart.
     for uid in config.allowed_users:
         try:
-            await bot.send_message(
-                chat_id=uid,
-                text=f"Update to `{escape_code(update_info.version)}` downloaded\\. Restarting\\.\\.\\.",
-                parse_mode="MarkdownV2",
+            await send_rich(
+                bot,
+                uid,
+                f"Update to `{update_info.version}` downloaded. Restarting...",
             )
         except Exception:
             pass

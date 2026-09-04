@@ -71,6 +71,7 @@ from open_shrimp.handlers.messages import message_handler, web_app_data_handler
 from open_shrimp.handlers.questions import _handle_question_callback
 from open_shrimp.handlers.turned_away import note_unauthorized
 from open_shrimp.handlers.utils import _is_authorized, notify_operators
+from open_shrimp.rich_message import send_rich
 
 logger = logging.getLogger(__name__)
 
@@ -593,11 +594,11 @@ async def run_bot(
     if restart_chat is not None:
         restart_thread = _os.environ.pop("OPENSHRIMP_RESTART_THREAD_ID", None)
         try:
-            await app.bot.send_message(
-                chat_id=int(restart_chat),
-                message_thread_id=int(restart_thread) if restart_thread else None,
-                text="Back online\\.",
-                parse_mode="MarkdownV2",
+            await send_rich(
+                app.bot,
+                int(restart_chat),
+                "Back online.",
+                thread_id=int(restart_thread) if restart_thread else None,
             )
         except Exception:
             logger.warning("Failed to send restart confirmation", exc_info=True)
@@ -606,13 +607,10 @@ async def run_bot(
     # seeded a newer binary and spawned it.  An install nobody approved is one
     # the operator finds out about here or not at all.
     if update_version is not None:
-        from open_shrimp.markdown import escape_code
-
         await notify_operators(
             app.bot,
             config.allowed_users,
-            f"Updated to `{escape_code(update_version)}`\\. Back online\\.",
-            parse_mode="MarkdownV2",
+            f"Updated to `{update_version}`. Back online.",
         )
 
     # The enrollment handshake spends Telegram's one-shot START press, so the

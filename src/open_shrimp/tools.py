@@ -29,7 +29,9 @@ from open_shrimp.host_shell import (
     spawn_host_shell,
 )
 from open_shrimp.supervisor import is_supervisor_context
+from open_shrimp.markdown import escape_rich
 from open_shrimp.mini_app import make_web_app_button, mini_app_keyboard
+from open_shrimp.rich_message import edit_rich, send_rich
 
 logger = logging.getLogger(__name__)
 
@@ -1855,13 +1857,13 @@ def create_openshrimp_tools(
             )
             status_msg = None
             try:
-                status_msg = await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"⏳ {escape(description)}",
-                    parse_mode="MarkdownV2",
+                status_msg = await send_rich(
+                    bot,
+                    chat_id,
+                    f"⏳ {escape_rich(description)}",
+                    thread_id=thread_id,
                     reply_markup=reply_markup,
                     disable_notification=True,
-                    **_thread_kwargs,
                 )
             except Exception:
                 logger.debug(
@@ -1882,14 +1884,12 @@ def create_openshrimp_tools(
                     try:
                         # Keep the View output button so the (now static)
                         # tee file stays reachable after the end.
-                        await bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=_status_message_id,
-                            text=(
-                                f"{icon} {escape(description)} — "
-                                f"{escape(reason)}"
-                            ),
-                            parse_mode="MarkdownV2",
+                        await edit_rich(
+                            bot,
+                            chat_id,
+                            _status_message_id,
+                            f"{icon} {escape_rich(description)} — "
+                            f"{escape_rich(reason)}",
                             reply_markup=_status_markup,
                         )
                     except Exception:

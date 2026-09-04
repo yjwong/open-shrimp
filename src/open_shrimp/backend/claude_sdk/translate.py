@@ -217,6 +217,14 @@ class SdkTranslator:
                             session_id=msg.session_id,
                             parent_tool_use_id=getattr(msg, "parent_tool_use_id", None),
                         )
+                if isinstance(delta, dict) and delta.get("type") == "thinking_delta":
+                    candidate = delta.get("thinking", "")
+                    if isinstance(candidate, str) and candidate:
+                        return bt.ThinkingDeltaEvent(
+                            text=candidate,
+                            session_id=msg.session_id,
+                            parent_tool_use_id=getattr(msg, "parent_tool_use_id", None),
+                        )
             return None
         if isinstance(msg, _SdkRateLimit):
             info = msg.rate_limit_info

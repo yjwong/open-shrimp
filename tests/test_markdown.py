@@ -13,10 +13,16 @@ import re
 import pytest
 
 from open_shrimp.markdown import (
+    RICH_MAX_LENGTH,
     TELEGRAM_MAX_LENGTH,
     escape,
     escape_code,
+    escape_rich,
+    escape_rich_inline,
+    gfm_to_rich,
     gfm_to_telegram,
+    rich_code_block,
+    rich_details,
 )
 
 # Telegram drops the backslash of any "\x" pair and takes x literally.
@@ -135,3 +141,116 @@ def test_code_block_fence_detection_survives_escaped_backticks() -> None:
     assert len(chunks) > 1
     for chunk in chunks:
         assert chunk.count("```") % 2 == 0
+
+
+# ── Rich messages ──
+#
+# The rich renderer's job is the mirror image: Telegram's rich parser reads
+# both Markdown and HTML, so "<" has to leave as an entity and every markup
+# character mistune did *not* claim has to leave backslash-escaped.
+
+
+def test_angle_brackets_survive_as_entities() -> None:
+    """An unescaped "<" opens a tag and eats through the next ">"."""
+    assert "".join(gfm_to_rich("Generic<T> List<int>")) == (
+        "Generic&lt;T&gt; List&lt;int&gt;"
+    )
+
+
+def test_script_tag_keeps_its_body() -> None:
+    out = "".join(gfm_to_rich("<script>alert(1)</script>"))
+    assert out == "&lt;script&gt;alert(1)&lt;/script&gt;"
+
+
+def test_ampersand_is_escaped() -> None:
+    assert "".join(gfm_to_rich("A & B")) == "A &amp; B"
+
+
+def test_stray_asterisks_are_escaped() -> None:
+    """Telegram italicises the 3 in "5 * 3 * 2"; mistune leaves it as text."""
+    assert "".join(gfm_to_rich("5 * 3 * 2")) == "5 \\* 3 \\* 2"
+
+
+def test_dunder_stays_bold_and_snake_case_does_not() -> None:
+    out = "".join(gfm_to_rich("__dunder__ and snake_case_name"))
+    assert out == "**dunder** and snake\\_case\\_name"
+
+
+def test_blockquote_lines_get_an_explicit_break() -> None:
+    """Newlines inside a blockquote collapse without one."""
+    assert "".join(gfm_to_rich(">line one\n>line two")) == (
+        "> line one<br>line two"
+    )
+
+
+def test_unclosed_fence_is_closed() -> None:
+    assert "".join(gfm_to_rich("```\nunclosed")) == "```\nunclosed\n```"
+
+
+def test_code_fence_content_is_not_escaped() -> None:
+    """A fence is taken literally, so escaping there would show the entities."""
+    out = "".join(gfm_to_rich('```python\nprint("a<b & c")\n```'))
+    assert 'print("a<b & c")' in out
+
+
+def test_fence_grows_past_backticks_in_the_body() -> None:
+    out = "".join(gfm_to_rich("    ```\n    inner\n    ```"))
+    assert out.startswith("````")
+
+
+def test_table_keeps_its_alignment() -> None:
+    out = "".join(gfm_to_rich("| a | b |\n|:--|--:|\n| 1 | 2 |"))
+    assert out == "| a | b |\n| :--- | ---: |\n| 1 | 2 |"
+
+
+def test_task_list_survives() -> None:
+    out = "".join(gfm_to_rich("- [x] done\n- [ ] todo"))
+    assert out == "- [x] done\n- [ ] todo"
+
+
+def test_nested_list_stays_nested() -> None:
+    out = "".join(gfm_to_rich("- plain\n  - nested"))
+    assert out == "- plain\n  - nested"
+
+
+def test_headings_are_clamped_to_h3() -> None:
+    """h1 and h2 are centred on web and left-aligned on Android."""
+    assert "".join(gfm_to_rich("# Big")) == "### Big"
+
+
+def test_link_parens_are_percent_encoded() -> None:
+    out = "".join(gfm_to_rich("[t](http://e.com/a(b)"))
+    assert "http://e.com/a%28b" in out
+
+
+def test_rich_chunks_use_the_larger_ceiling() -> None:
+    text = "word " * 2000
+    assert len(gfm_to_rich(text)) == 1
+    assert len(gfm_to_rich("word " * 20000)) > 1
+
+
+def test_no_rich_chunk_splits_an_entity() -> None:
+    text = ("a & b\n" * 8000)
+    chunks = gfm_to_rich(text)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= RICH_MAX_LENGTH
+        assert chunk.count("&") == chunk.count("&amp;")
+
+
+def test_escape_rich_turns_newlines_into_breaks() -> None:
+    assert escape_rich("a\nb") == "a<br>b"
+
+
+def test_escape_rich_inline_collapses_newlines() -> None:
+    assert escape_rich_inline("a\n b") == "a b"
+
+
+def test_rich_details_wraps_an_escaped_body() -> None:
+    out = rich_details("Bash", rich_code_block("ls -la", "bash"))
+    assert out.startswith("<details><summary>Bash</summary>")
+    assert "```bash\nls -la\n```" in out
+
+
+def test_rich_details_can_start_open() -> None:
+    assert rich_details("s", "b", open=True).startswith("<details open>")

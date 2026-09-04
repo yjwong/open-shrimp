@@ -37,9 +37,11 @@ def _state() -> _DraftState:
 
 
 def _sent_text(bot: Any) -> str:
-    """The MarkdownV2-escaped body the bot was asked to send."""
-    bot.send_message.assert_awaited_once()
-    return bot.send_message.await_args.kwargs["text"]
+    """The rich Markdown body the bot was asked to send."""
+    bot.do_api_request.assert_awaited_once()
+    kwargs = bot.do_api_request.await_args.kwargs
+    assert bot.do_api_request.await_args.args[0] == "sendRichMessage"
+    return kwargs["api_kwargs"]["rich_message"]["markdown"]
 
 
 @pytest.mark.asyncio
