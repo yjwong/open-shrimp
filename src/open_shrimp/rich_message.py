@@ -15,13 +15,26 @@ supported on the web version of Telegram" — and the server returns a normal
 from __future__ import annotations
 
 import logging
+import warnings
 from collections import OrderedDict
 from typing import Any
 
 from telegram import Bot, InlineKeyboardMarkup, Message
-
+from telegram.warnings import PTBUserWarning
 
 logger = logging.getLogger(__name__)
+
+# PTB nags whenever ``do_api_request`` names an endpoint it has a typed method
+# for, and ``editMessageText`` is one.  The typed method cannot carry
+# ``rich_message`` — it requires ``text``, which is the field being replaced —
+# so the advice does not apply and the nag would otherwise print on every card
+# that collapses.  Matched on the endpoint so the same warning about any other
+# method still gets through.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Please use 'Bot\.editMessageText' instead",
+    category=PTBUserWarning,
+)
 
 # Rich bodies of the cards this process sent, keyed by (chat_id, message_id).
 # A callback that appends an outcome line to a card — "Approved", "Session
