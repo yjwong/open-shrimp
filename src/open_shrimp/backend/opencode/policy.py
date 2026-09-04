@@ -70,9 +70,10 @@ _MUTATING_PATH_TOOLS: set[str] = {"edit", "write"}
 _FILE_TARGETED_PATH_TOOLS: set[str] = {"read", "edit", "write"}
 
 #: Tools whose blockquote notifications are suppressed because their output
-#: is shown directly (bash output as code block; edit/write/apply_patch via
-#: dedicated diff messages).
-_SUPPRESS_NOTIFICATION_TOOLS: set[str] = {"bash", "edit", "write", "apply_patch"}
+#: is shown directly (edit/write/apply_patch via dedicated diff messages).
+#: The bash-likes are suppressed by ``is_bash_like`` instead: they own a
+#: card, and naming them here as well would state the rule twice.
+_SUPPRESS_NOTIFICATION_TOOLS: set[str] = {"edit", "write", "apply_patch"}
 
 #: Tools auto-approved inside a sandbox (bash runs arbitrary shell
 #: commands; the sandbox provides the safety boundary).  OpenCode has no

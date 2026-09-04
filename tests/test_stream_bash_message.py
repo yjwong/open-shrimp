@@ -223,3 +223,65 @@ async def test_each_command_gets_its_own_message() -> None:
     assert bot.calls[1][1]["message_id"] == 101
     assert "echo two" in bot.calls[2][1]["text"]
     assert bot.calls[3][1]["message_id"] == 102
+
+
+def _host_bash_use(
+    command: str = "systemctl --user restart open-shrimp",
+    tool_id: str = "h1",
+) -> AssistantMessage:
+    return AssistantMessage(
+        content=[
+            ToolUseBlock(
+                id=tool_id,
+                name="mcp__openshrimp__host_bash",
+                input={"command": command, "description": "Restart the bot"},
+            ),
+        ],
+        session_id="sess-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_host_bash_costs_one_message() -> None:
+    """The approval prompt shows the command while it waits, so the stream
+    adds a card only once there is a result to put in it."""
+    bot = _RecordingBot()
+    await _run(
+        bot,
+        _host_bash_use(),
+        UserMessage(content=[ToolResultBlock(tool_use_id="h1", content="ok")]),
+        ResultMessage(session_id="sess-1"),
+    )
+
+    assert [kind for kind, _ in bot.calls] == ["send"]
+    card = bot.calls[0][1]["text"]
+    # Collapsed, and the elapsed time survived the missing header.
+    assert card.startswith("<details><summary>")
+    assert "Restart the bot" in card
+    assert "0.0s" in card
+    assert "ok" in card
+
+
+@pytest.mark.asyncio
+async def test_interrupted_host_bash_still_gets_a_card() -> None:
+    bot = _RecordingBot()
+    await _run(bot, _host_bash_use())
+
+    assert [kind for kind, _ in bot.calls] == ["send"]
+    assert "Interrupted" in bot.calls[0][1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_bash_call_adds_no_summary_row() -> None:
+    """The card says what the row would, so the row is not sent."""
+    bot = _RecordingBot()
+    await _run(
+        bot,
+        _bash_use(),
+        UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="hi")]),
+        _host_bash_use(),
+        UserMessage(content=[ToolResultBlock(tool_use_id="h1", content="ok")]),
+        ResultMessage(session_id="sess-1"),
+    )
+
+    assert all("🔧" not in kw.get("text", "") for _, kw in bot.calls)

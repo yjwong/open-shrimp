@@ -197,13 +197,14 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
-    # tool_use_id -> (message_id, icon, label, started_at) for a Bash card
-    # posted at invocation time and still awaiting its result.  The render
-    # arguments ride along so the message can be rewritten without re-deriving
-    # whether it came from Bash or host_bash, and the monotonic start stamps
-    # the elapsed time onto the collapsed summary.  Dropped once the result
-    # arrives and the message is edited into its final form.
-    pending_bash_messages: dict[str, tuple[int, str, str, float]] = field(
+    # tool_use_id -> (message_id, icon, label, started_at) for a Bash call
+    # still awaiting its result.  The render arguments ride along so the
+    # message can be rewritten without re-deriving whether it came from Bash
+    # or host_bash, and the monotonic start stamps the elapsed time onto the
+    # collapsed summary.  A None message_id is a host escape, which records
+    # its start without posting a card — its approval prompt is the message
+    # on screen while it waits.  Dropped once the result arrives.
+    pending_bash_messages: dict[str, tuple[int | None, str, str, float]] = field(
         default_factory=dict
     )
     # Fields for web_app button fallback in group chats.
@@ -488,6 +489,7 @@ async def _send_bash_header(
     tool_input: dict[str, Any],
     icon: str = "💻",
     label: str = "Bash",
+    post: bool = True,
 ) -> None:
     """Post the command when the agent issues it, before it runs.
 
@@ -495,7 +497,18 @@ async def _send_bash_header(
     ``_finish_bash_message`` edits this message into its final form when the
     result arrives, so a command that takes a minute appears at second zero
     rather than at the end.
+
+    With *post* false only the start stamp is recorded, so the card still
+    reports how long the command took.  That is the host-escape case: its
+    approval prompt is already showing the command and the command cannot
+    start until the user taps, so a second copy above it says nothing.
     """
+    if not post:
+        state.pending_bash_messages[tool_use_id] = (
+            None, icon, label, time.monotonic(),
+        )
+        return
+
     await finalize_and_reset(bot, state)
 
     try:
@@ -575,7 +588,7 @@ async def _finish_bash_message(
         open=False,
     )
 
-    if pending is None:
+    if pending is None or pending[0] is None:
         await finalize_and_reset(bot, state)
         try:
             msg = await send_rich(
@@ -607,7 +620,9 @@ async def _clear_pending_bash_messages(bot: Bot, state: _DraftState) -> None:
     """Mark cards that never got a result when the stream ends.
 
     Every tool_use is followed by its result, so a leftover here means the
-    turn was interrupted or errored out before the tool reported back.
+    turn was interrupted or errored out before the tool reported back.  A
+    host escape has no card to mark — it posts one only on its result — so
+    the interrupted card is sent now instead.
     """
     for tool_use_id, (message_id, icon, label, started_at) in list(
         state.pending_bash_messages.items()
@@ -615,16 +630,22 @@ async def _clear_pending_bash_messages(bot: Bot, state: _DraftState) -> None:
         tool_info = state.tool_use_map.get(tool_use_id)
         if tool_info is None:
             continue
+        card = bash_card(
+            tool_info[1], icon, label,
+            note=BASH_INTERRUPTED_NOTE,
+            elapsed=time.monotonic() - started_at,
+            open=False,
+        )
         try:
-            await edit_rich(
-                bot, state.chat_id, message_id,
-                bash_card(
-                    tool_info[1], icon, label,
-                    note=BASH_INTERRUPTED_NOTE,
-                    elapsed=time.monotonic() - started_at,
-                    open=False,
-                ),
-            )
+            if message_id is None:
+                msg = await send_rich(
+                    bot, state.chat_id, card,
+                    thread_id=state.thread_id,
+                    disable_notification=True,
+                )
+                state.sent_message_ids.append(msg.message_id)
+            else:
+                await edit_rich(bot, state.chat_id, message_id, card)
         except Exception:
             logger.exception("Failed to clear pending bash message")
     state.pending_bash_messages.clear()
@@ -875,7 +896,12 @@ async def stream_response(
 
                         # Add tool invocation as an inline notification,
                         # but suppress tools whose output is shown directly.
-                        if not p.suppress_notification(block.name):
+                        # A bash-like owns a card of its own a few lines
+                        # down, which says everything the row would.
+                        if not (
+                            p.suppress_notification(block.name)
+                            or p.is_bash_like(block.name)
+                        ):
                             add_tool_notification(
                                 state,
                                 tool_use_id=block.id,
@@ -888,13 +914,16 @@ async def stream_response(
 
                         # Bash-likes get their own message, posted now so a
                         # long-running command is visible while it runs and
-                        # edited in place when the result arrives.
+                        # edited in place when the result arrives.  A host
+                        # escape waits on an approval card that already shows
+                        # the command, so its card waits for the result.
                         if p.is_host_bash(block.name):
                             icon, label = p.host_bash_render()
                             await _send_bash_header(
                                 bot, state, block.id, block.input,
                                 icon=icon,
                                 label=label,
+                                post=False,
                             )
                         elif p.is_bash_like(block.name):
                             await _send_bash_header(

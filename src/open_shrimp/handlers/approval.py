@@ -435,7 +435,12 @@ def _format_host_bash_final(
     outcome: HostBashOutcome,
     is_monitor: bool = False,
 ) -> str:
-    """Render the final state of the host-escape approval message."""
+    """Render the final state of the host-escape approval message.
+
+    One row once the decision is made, with the command folded away: an
+    approved command is about to be repeated by its own card, and the row is
+    what the user scrolls past on the way to the answer.
+    """
     icon = {
         "approved": "✅",
         "denied": "❌",
@@ -447,8 +452,12 @@ def _format_host_bash_final(
         "timeout": "Auto-denied (no response within 30s)",
     }[outcome]
     label = "HOST monitor" if is_monitor else "HOST shell"
+    description = (tool_input.get("description") or "").strip()
+    summary = f"{icon} **{label}** — {verb}"
+    if description:
+        summary += f" · {escape_rich_inline(description)}"
     block = _render_command_block(tool_input.get("command", ""), RICH_MAX_BODY)
-    return f"{icon} **{label}** — {verb}\n\n{block}"
+    return rich_details(summary, block)
 
 
 async def _host_bash_countdown(

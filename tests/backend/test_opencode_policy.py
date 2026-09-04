@@ -78,7 +78,8 @@ class TestCategoricalQueries:
 
     def test_suppress_notification(self) -> None:
         p = OpenCodePolicy()
-        assert p.suppress_notification("bash") is True
+        # bash is not here: it is suppressed as a bash-like, which owns a card.
+        assert p.suppress_notification("bash") is False
         assert p.suppress_notification("edit") is True
         assert p.suppress_notification("write") is True
         assert p.suppress_notification("apply_patch") is True

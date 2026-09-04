@@ -60,12 +60,13 @@ _MUTATING_PATH_TOOLS: set[str] = {"Edit", "Write", "NotebookEdit"}
 _FILE_TARGETED_PATH_TOOLS: set[str] = {"Read", "Edit", "Write", "NotebookEdit"}
 
 #: Tools whose blockquote notifications are suppressed because their output
-#: is shown directly (Bash output as code block, Write/Edit via dedicated
-#: diff messages, NotebookEdit via the Edit-shaped affordances).  TaskList
-#: and TaskGet are read-only checklist bookkeeping — pure noise next to the
-#: pinned checklist message.
+#: is shown directly (Write/Edit via dedicated diff messages, NotebookEdit
+#: via the Edit-shaped affordances).  TaskList and TaskGet are read-only
+#: checklist bookkeeping — pure noise next to the pinned checklist message.
+#: The bash-likes are suppressed by ``is_bash_like`` instead: they own a
+#: card, and naming them here as well would state the rule twice.
 _SUPPRESS_NOTIFICATION_TOOLS: set[str] = {
-    "Bash", "Edit", "Write", "NotebookEdit", "TaskList", "TaskGet",
+    "Edit", "Write", "NotebookEdit", "TaskList", "TaskGet",
 }
 
 #: The checklist tools that mutate the session checklist.  Incremental — no
