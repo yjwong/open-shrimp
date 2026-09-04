@@ -29,11 +29,10 @@ def unwrap(api_kwargs: dict[str, Any]) -> SimpleNamespace:
 class RichBot:
     """A bot that records rich sends and edits in the order they were made."""
 
-    def __init__(self, first_message_id: int = 1000) -> None:
+    def __init__(self) -> None:
         self.sends: list[SimpleNamespace] = []
         self.edits: list[SimpleNamespace] = []
-        self.drafts: list[SimpleNamespace] = []
-        self._next_id = first_message_id
+        self._next_id = 1000
 
     async def do_api_request(
         self, endpoint: str, api_kwargs: dict[str, Any] | None = None, **_: Any,
@@ -46,19 +45,11 @@ class RichBot:
             return SimpleNamespace(message_id=message_id)
         if endpoint == "editMessageText":
             self.edits.append(call)
-        elif endpoint == "sendRichMessageDraft":
-            self.drafts.append(call)
         return None
 
     @property
     def texts(self) -> list[str]:
         return [call.text for call in self.sends]
-
-    @property
-    def text(self) -> str:
-        """The single message sent, for the tests that expect exactly one."""
-        assert len(self.sends) == 1, f"expected one send, got {len(self.sends)}"
-        return self.sends[0].text
 
 
 def wire_rich(bot: Any) -> Any:
@@ -86,6 +77,8 @@ def wire_rich(bot: Any) -> Any:
         return None
 
     bot.do_api_request = AsyncMock(side_effect=api)
+    if not isinstance(getattr(bot, "edit_message_text", None), AsyncMock):
+        bot.edit_message_text = AsyncMock()
     return bot
 
 

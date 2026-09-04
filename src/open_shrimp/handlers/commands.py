@@ -30,11 +30,7 @@ from open_shrimp.config import (
     sandbox_backend,
 )
 from open_shrimp.markdown import escape_rich, escape_rich_inline
-from open_shrimp.rich_message import (
-    edit_message_rich,
-    reply_rich,
-    send_rich,
-)
+from open_shrimp.rich_message import edit_message_rich, reply_rich
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
 from open_shrimp.backend.factory import default_model_label, get_backend_by_name
 from open_shrimp.android_companion import (

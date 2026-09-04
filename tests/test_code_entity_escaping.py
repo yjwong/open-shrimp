@@ -1,18 +1,15 @@
-"""A Windows path renders as written, on both message formats.
+"""A Windows path renders as written.
 
 An approval card exists to show a person exactly what they are agreeing
 to, so a path that renders as something other than the path being used is
 the one failure it cannot have.  Every Windows context directory is such
-a path, and the two formats need opposite treatment to get there.
+a path.
 
-MarkdownV2 consumes a lone backslash as an escape character, so every one
-has to leave doubled:
-
-    doubled  ->  directory: C:\\\\Users\\\\ada\\\\my-project   (correct)
-    lone     ->  directory: C:Usersadamy-project    (wrong)
-
-A rich message takes a fenced block literally, so the same doubling would
-show the user two backslashes where the path has one.
+Two mechanisms get it there, and they pull in opposite directions.  A fence
+is taken literally, so a path inside one goes in untouched — doubling a
+backslash there would show the user two.  Prose is not, so a path in prose
+leaves escaped, or the parser eats the backslash and shows
+``C:Usersadamy-project``.
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ from __future__ import annotations
 import pytest
 
 from open_shrimp import markdown
-from open_shrimp.markdown import escape, escape_code
+from open_shrimp.markdown import escape_rich, rich_code_block
 
 WINDOWS_PATH = r"C:\Users\ada\my-project"
 
@@ -35,7 +32,7 @@ _ESCAPERS = [
     "escaper", [fn for _, fn in _ESCAPERS], ids=[name for name, _ in _ESCAPERS]
 )
 def test_every_escaper_doubles_a_backslash(escaper):
-    """The property that makes the choice between them a matter of bytes.
+    """The property that keeps a path in prose intact.
 
     Enumerated from the module rather than listed, so an escaper added
     later is held to it without anyone remembering to come back here.
@@ -43,14 +40,14 @@ def test_every_escaper_doubles_a_backslash(escaper):
     assert escaper(WINDOWS_PATH).count("\\\\") == 3
 
 
-def test_the_two_escapers_differ_only_in_how_much_they_escape():
-    assert escape_code(WINDOWS_PATH) == r"C:\\Users\\ada\\my-project"
-    assert escape(WINDOWS_PATH) == r"C:\\Users\\ada\\my\-project"
+def test_escape_rich_leaves_the_path_readable():
+    assert escape_rich(WINDOWS_PATH) == r"C:\\Users\\ada\\my-project"
 
 
-def test_a_diff_survives_escape_code_unchanged_apart_from_backslashes():
+def test_a_fence_takes_a_diff_exactly_as_written():
+    """Escaping inside a fence would print the backslashes."""
     diff = "@@ -1 +1 @@\n-  old: 1.5\n+  new: 2.0"
-    assert escape_code(diff) == diff
+    assert rich_code_block(diff, "diff") == f"```diff\n{diff}\n```"
 
 
 @pytest.mark.parametrize(

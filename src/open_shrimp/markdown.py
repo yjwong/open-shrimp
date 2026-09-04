@@ -1,14 +1,9 @@
-"""GFM to Telegram converters.
+"""GFM to Telegram's rich-message Markdown.
 
-Two renderers share the mistune parse.  ``gfm_to_rich`` emits the GFM dialect
+``gfm_to_rich`` walks a mistune parse and re-emits it as the GFM dialect
 ``sendRichMessage`` accepts, which keeps tables, task lists and collapsible
-blocks and raises the per-message ceiling from 4096 to 32768 characters; every
-message the bot sends goes through it.
-
-``gfm_to_telegram`` emits MarkdownV2, which escapes 18 metacharacters and
-flattens a table into a code fence.  Nothing calls it: it is the way back if a
-client turns out not to render rich messages, and iOS and desktop are still
-unchecked.
+blocks and holds 32768 characters.  Every message the bot sends goes through
+it.
 """
 
 from __future__ import annotations
@@ -18,204 +13,13 @@ from typing import Any
 
 import mistune
 
+# A regular message — plain text, no rich body — still caps at 4096.
 TELEGRAM_MAX_LENGTH = 4096
 RICH_MAX_LENGTH = 32768
-
-# Characters that must be escaped in Telegram MarkdownV2 (outside code spans/blocks).
-# The backslash is in the set because Telegram treats an unescaped one as an
-# escape character and drops it: a literal backslash must be sent doubled.
-_ESCAPE_CHARS = "\\" + r"_*[]()~`>#+-=|{}.!"
-_ESCAPE_RE = re.compile(r"([" + re.escape(_ESCAPE_CHARS) + r"])")
-
-# Inside pre and code entities Telegram only honours these two escapes; every
-# other character is literal, so escaping more would show the backslashes.
-_CODE_ESCAPE_RE = re.compile(r"([\\`])")
-
-
-def escape(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    return _ESCAPE_RE.sub(r"\\\1", text)
-
-
-def escape_code(text: str) -> str:
-    """Escape the characters Telegram honours inside pre and code entities."""
-    return _CODE_ESCAPE_RE.sub(r"\\\1", text)
-
-
-def _plain_text(token: dict[str, Any]) -> str:
-    """Extract plain text from a token tree (no formatting)."""
-    if "raw" in token and isinstance(token["raw"], str):
-        return token["raw"]
-    if "children" in token:
-        children = token["children"]
-        if isinstance(children, str):
-            return children
-        if isinstance(children, list):
-            return "".join(_plain_text(c) for c in children)
-    return ""
-
-
-class TelegramRenderer(mistune.BaseRenderer):
-    """Render mistune AST tokens into Telegram MarkdownV2 strings.
-
-    Follows the same render_token pattern as mistune's HTMLRenderer:
-    methods receive pre-rendered children text + keyword attrs.
-    """
-
-    NAME = "telegram"
-
-    def render_token(self, token: dict[str, Any], state: Any) -> str:
-        ttype = token["type"]
-
-        # Tables need raw token access to extract cell text
-        if ttype == "table":
-            return self._render_table(token, state)
-
-        func = self._get_method(ttype)
-        attrs = token.get("attrs", {})
-
-        if "raw" in token:
-            children = token["raw"]
-        elif "children" in token:
-            children = self.render_tokens(token["children"], state)
-        else:
-            return func(**attrs) if attrs else func()
-
-        return func(children, **attrs) if attrs else func(children)
-
-    # ── Block-level ──
-
-    def text(self, text: str) -> str:
-        return escape(text)
-
-    def paragraph(self, text: str) -> str:
-        return text + "\n\n"
-
-    def heading(self, text: str, **attrs: Any) -> str:
-        return f"*{text}*\n\n"
-
-    def blank_line(self) -> str:
-        return ""
-
-    def thematic_break(self) -> str:
-        return escape("---") + "\n\n"
-
-    def block_code(self, code: str, **attrs: Any) -> str:
-        info = attrs.get("info", "")
-        code = escape_code(code.rstrip("\n"))
-        if info:
-            return f"```{info}\n{code}\n```\n\n"
-        return f"```\n{code}\n```\n\n"
-
-    def block_quote(self, text: str) -> str:
-        lines = text.strip().split("\n")
-        # Filter out empty lines: Telegram ends a blockquote at a bare ">"
-        # line, so empty lines between paragraphs would break a single
-        # blockquote into multiple separate ones with unquoted gaps.
-        non_empty = [line for line in lines if line]
-        quoted = "\n".join(">" + line for line in non_empty)
-        return quoted + "\n\n"
-
-    def list(self, text: str, **attrs: Any) -> str:
-        return text + "\n"
-
-    def list_item(self, text: str) -> str:
-        return escape("- ") + text.strip() + "\n"
-
-    def block_text(self, text: str) -> str:
-        return text
-
-    def block_error(self, text: str) -> str:
-        return ""
-
-    # ── Tables → monospace preformatted ──
-    # Tables need access to the raw token tree, so we override render_token
-    # for the table type and handle it specially.
-
-    def _render_table(self, token: dict[str, Any], state: Any) -> str:
-        rows: list[list[str]] = []
-        for child in token.get("children", []):
-            if child["type"] == "table_head":
-                row = [_plain_text(cell) for cell in child.get("children", [])]
-                rows.append(row)
-            elif child["type"] == "table_body":
-                for table_row in child.get("children", []):
-                    row = [_plain_text(cell) for cell in table_row.get("children", [])]
-                    rows.append(row)
-
-        if not rows:
-            return ""
-
-        col_count = max(len(r) for r in rows)
-        col_widths = [0] * col_count
-        for r in rows:
-            for i, cell in enumerate(r):
-                col_widths[i] = max(col_widths[i], len(cell))
-
-        lines: list[str] = []
-        for idx, r in enumerate(rows):
-            padded = [
-                (r[i] if i < len(r) else "").ljust(col_widths[i])
-                for i in range(col_count)
-            ]
-            lines.append(" | ".join(padded))
-            if idx == 0:
-                lines.append("-+-".join("-" * w for w in col_widths))
-
-        # Escape after padding: the escapes are invisible once Telegram parses
-        # them, so column widths must be measured on the unescaped text.
-        table_text = escape_code("\n".join(lines))
-        return f"```\n{table_text}\n```\n\n"
-
-    # Stubs so mistune finds the method; actual rendering is in _render_table
-    def table(self, text: str) -> str:
-        return text  # pragma: no cover
-
-    def table_head(self, text: str) -> str:
-        return text  # pragma: no cover
-
-    def table_body(self, text: str) -> str:
-        return text  # pragma: no cover
-
-    def table_cell(self, text: str, **attrs: Any) -> str:
-        return text  # pragma: no cover
-
-    # ── Inline-level ──
-
-    def emphasis(self, text: str) -> str:
-        return f"_{text}_"
-
-    def strong(self, text: str) -> str:
-        return f"*{text}*"
-
-    def codespan(self, code: str) -> str:
-        return f"`{escape_code(code)}`"
-
-    def link(self, text: str, **attrs: Any) -> str:
-        url = attrs.get("url", "")
-        # Escape only ) and \ in URLs for MarkdownV2
-        escaped_url = url.replace("\\", "\\\\").replace(")", "\\)")
-        return f"[{text}]({escaped_url})"
-
-    def image(self, text: str, **attrs: Any) -> str:
-        # Strip images, return alt text (already rendered from children)
-        return text if text else ""
-
-    def linebreak(self) -> str:
-        return "\n"
-
-    def softbreak(self) -> str:
-        return "\n"
-
-    def inline_html(self, html: str) -> str:
-        return ""
-
-    def block_html(self, html: str) -> str:
-        return ""
-
-    def strikethrough(self, text: str) -> str:
-        return f"~{text}~"
-
+# What one body inside a card may take.  The headroom is for the header, the
+# fence around it, and whatever the caller composes on top; the number belongs
+# here because no single call site can see the whole card it ends up in.
+RICH_MAX_BODY = RICH_MAX_LENGTH - 500
 
 # Characters that can open a markup construct in Telegram's rich GFM dialect
 # and so must leave a text run backslash-escaped.  The backslash itself leads
@@ -274,9 +78,8 @@ def rich_details(summary: str, body: str, *, open: bool = False) -> str:
 class RichRenderer(mistune.BaseRenderer):
     """Render mistune AST tokens back out as Telegram rich-message Markdown.
 
-    Where ``TelegramRenderer`` rewrites the tree into MarkdownV2's smaller
-    vocabulary, this one re-emits GFM: the target dialect is GFM, so the work
-    is escaping the text runs and spelling out the breaks GFM would collapse.
+    The target dialect is GFM, so the work is escaping the text runs and
+    spelling out the breaks GFM would collapse.
     """
 
     NAME = "rich"
@@ -551,7 +354,7 @@ def _back_off_markup(text: str, split_at: int) -> int:
     return split_at
 
 
-def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
+def split_message(text: str, max_length: int = RICH_MAX_LENGTH) -> list[str]:
     """Split a rendered message into chunks of at most max_length characters.
 
     Splits at natural boundaries: paragraph breaks, then line breaks.
@@ -596,20 +399,6 @@ def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]
         remaining = rest
 
     return [c for c in chunks if c]
-
-
-def gfm_to_telegram(text: str) -> list[str]:
-    """Convert GitHub-Flavored Markdown to Telegram MarkdownV2.
-
-    Returns a list of strings, each at most 4096 characters, suitable for
-    sending as individual Telegram messages.
-    """
-    md = mistune.create_markdown(
-        renderer=TelegramRenderer(),
-        plugins=["strikethrough", "table"],
-    )
-    rendered = md(text)
-    return split_message(rendered)
 
 
 def gfm_to_rich_text(text: str) -> str:

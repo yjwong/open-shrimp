@@ -26,10 +26,14 @@ from typing import TYPE_CHECKING, Any
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
+from open_shrimp.backend.approval_cards import (
+    format_agent_approval,
+    format_bash_approval,
+    format_generic_approval,
+    format_write_approval,
+)
 from open_shrimp.markdown import (
-    RICH_MAX_LENGTH,
-    escape_rich,
-    escape_rich_inline,
+    RICH_MAX_BODY,
     rich_code_block,
 )
 from open_shrimp.mini_app import make_web_app_button
@@ -304,11 +308,6 @@ def _summarize(
     return ""
 
 
-# The headroom covers the header and the fence around whatever body is being
-# clipped to fit.
-_MAX_BODY_CHARS = RICH_MAX_LENGTH - 500
-
-
 # ---------------------------------------------------------------------------
 # Per-tool approval renderers
 # ---------------------------------------------------------------------------
@@ -337,41 +336,10 @@ def _format_edit_approval(
     else:
         diff_body = "(no diff)"
 
-    if len(diff_body) > _MAX_BODY_CHARS:
-        diff_body = diff_body[:_MAX_BODY_CHARS] + "\n..."
+    if len(diff_body) > RICH_MAX_BODY:
+        diff_body = diff_body[:RICH_MAX_BODY] + "\n..."
 
     return f"{header}\n\n{rich_code_block(diff_body, 'diff')}"
-
-
-def _format_bash_approval(tool_input: dict[str, Any]) -> str:
-    command = tool_input.get("command", "")
-    description = tool_input.get("description", "")
-
-    parts: list[str] = []
-    if description:
-        parts.append(f"\U0001f4bb **Bash:** {escape_rich_inline(description)}")
-    else:
-        parts.append("\U0001f4bb **Bash**")
-
-    if len(command) > _MAX_BODY_CHARS:
-        command = command[:_MAX_BODY_CHARS] + "\n..."
-    parts.append(rich_code_block(command, "bash"))
-
-    return "\n\n".join(parts)
-
-
-def _format_write_approval(
-    tool_input: dict[str, Any], cwd: str | None = None,
-) -> str:
-    file_path = _relative_path(tool_input.get("filePath", "unknown"), cwd)
-    content = tool_input.get("content", "")
-
-    header = f"\U0001f4dd **Write:** `{file_path}`"
-
-    if len(content) > _MAX_BODY_CHARS:
-        content = content[:_MAX_BODY_CHARS] + "\n..."
-
-    return f"{header}\n\n{rich_code_block(content)}"
 
 
 def _format_apply_patch_approval(
@@ -386,8 +354,8 @@ def _format_apply_patch_approval(
     if file_count == 0:
         parts.append("\U0001fa84 **ApplyPatch**")
         body = patch_text
-        if len(body) > _MAX_BODY_CHARS:
-            body = body[:_MAX_BODY_CHARS] + "\n..."
+        if len(body) > RICH_MAX_BODY:
+            body = body[:RICH_MAX_BODY] + "\n..."
         parts.append(rich_code_block(body, "diff"))
         return "\n\n".join(parts)
 
@@ -418,10 +386,10 @@ def _format_apply_patch_approval(
         fragment = _render_apply_patch_file(f, cwd)
         block = rich_code_block(fragment, "diff")
         used = sum(len(p) for p in parts) + 2 * len(parts)
-        if used + len(block) > _MAX_BODY_CHARS:
+        if used + len(block) > RICH_MAX_BODY:
             if rendered == 0:
                 budget = max(
-                    0, _MAX_BODY_CHARS - used - len("```diff\n\n```\n..."),
+                    0, RICH_MAX_BODY - used - len("```diff\n\n```\n..."),
                 )
                 parts.append(rich_code_block(fragment[:budget] + "\n...", "diff"))
                 rendered += 1
@@ -435,48 +403,6 @@ def _format_apply_patch_approval(
         parts.append(f"*... {omitted} more file{more_plural} omitted*")
 
     return "\n\n".join(parts)
-
-
-def _format_agent_approval(
-    tool_input: dict[str, Any], expanded: bool = False,
-) -> str:
-    description = tool_input.get("description", "")
-    subagent_type = tool_input.get("subagent_type", "")
-    prompt = tool_input.get("prompt", "")
-
-    parts: list[str] = []
-
-    if subagent_type:
-        parts.append(
-            f"\U0001f916 **Agent** ({escape_rich_inline(subagent_type)})",
-        )
-    else:
-        parts.append("\U0001f916 **Agent**")
-
-    if description:
-        parts.append(escape_rich(description))
-
-    if expanded and prompt:
-        display_prompt = prompt
-        if len(display_prompt) > _MAX_BODY_CHARS:
-            display_prompt = display_prompt[:_MAX_BODY_CHARS] + "\n..."
-        parts.append(rich_code_block(display_prompt))
-
-    return "\n\n".join(parts)
-
-
-def _format_generic_approval(
-    tool_name: str, tool_input: dict[str, Any],
-) -> str:
-    summary_parts = [f"**Tool:** `{tool_name}`"]
-    for key, val in tool_input.items():
-        val_str = str(val)
-        if len(val_str) > 200:
-            val_str = val_str[:200] + "..."
-        summary_parts.append(
-            f"**{escape_rich_inline(key)}:** {escape_rich(val_str)}"
-        )
-    return "<br>".join(summary_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -676,14 +602,17 @@ class OpenCodePolicy:
         if tool_name == "edit":
             return _format_edit_approval(tool_input, cwd=cwd)
         if tool_name == "bash":
-            return _format_bash_approval(tool_input)
+            return format_bash_approval(tool_input)
         if tool_name == "write":
-            return _format_write_approval(tool_input, cwd=cwd)
+            return format_write_approval(
+                tool_input,
+                _relative_path(tool_input.get("filePath", "unknown"), cwd),
+            )
         if tool_name == "apply_patch":
             return _format_apply_patch_approval(tool_input, cwd=cwd)
         if tool_name == "task":
-            return _format_agent_approval(tool_input, expanded=False)
-        return _format_generic_approval(tool_name, tool_input)
+            return format_agent_approval(tool_input, expanded=False)
+        return format_generic_approval(tool_name, tool_input)
 
     def format_auto_approved_diff(
         self,
@@ -694,17 +623,20 @@ class OpenCodePolicy:
         if tool_name == "edit":
             return _format_edit_approval(tool_input, cwd=cwd)
         if tool_name == "write":
-            return _format_write_approval(tool_input, cwd=cwd)
+            return format_write_approval(
+                tool_input,
+                _relative_path(tool_input.get("filePath", "unknown"), cwd),
+            )
         if tool_name == "apply_patch":
             return _format_apply_patch_approval(tool_input, cwd=cwd)
-        return _format_generic_approval(tool_name, tool_input)
+        return format_generic_approval(tool_name, tool_input)
 
     def format_expanded_prompt(
         self,
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> str:
-        return _format_agent_approval(tool_input, expanded=True)
+        return format_agent_approval(tool_input, expanded=True)
 
     def approval_keyboard_extras(
         self,

@@ -25,35 +25,8 @@ from open_shrimp.config import (
     TelegramConfig,
 )
 from open_shrimp.cross_context import _OuterApproval, build_ask_context_tool
+from tests.rich_stub import wire_rich
 from open_shrimp.tools import create_openshrimp_tools
-
-
-def _wire_rich(bot: MagicMock) -> MagicMock:
-    """Route the raw rich-message API back onto ``bot.send_message``.
-
-    ``sendRichMessage`` and ``editMessageText(rich_message=...)`` have no
-    python-telegram-bot method, so every card reaches Telegram through
-    ``do_api_request``.  Unwrapping it here keeps the assertions written
-    against the body and the keyboard rather than the envelope.
-    """
-
-    async def api(endpoint, api_kwargs=None, **_):
-        kwargs = dict(api_kwargs or {})
-        text = kwargs.pop("rich_message")["markdown"]
-        if endpoint == "sendRichMessage":
-            return await bot.send_message(
-                chat_id=kwargs.pop("chat_id"), text=text, **kwargs,
-            )
-        return await bot.edit_message_text(
-            chat_id=kwargs.pop("chat_id"),
-            message_id=kwargs.pop("message_id"),
-            text=text,
-            **kwargs,
-        )
-
-    bot.do_api_request = AsyncMock(side_effect=api)
-    bot.edit_message_text = AsyncMock()
-    return bot
 
 
 def _config() -> Config:
@@ -286,7 +259,7 @@ async def test_happy_path_returns_answer(monkeypatch) -> None:
     bot = MagicMock()
     sent = SimpleNamespace(message_id=42)
     bot.send_message = AsyncMock(return_value=sent)
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
 
     tool = build_ask_context_tool(
@@ -332,7 +305,7 @@ async def test_outer_denial_errors_without_running(monkeypatch) -> None:
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
 
     tool = build_ask_context_tool(
@@ -375,7 +348,7 @@ async def test_allowed_tools_inherit_target(monkeypatch) -> None:
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
 
     tool = build_ask_context_tool(
@@ -418,7 +391,7 @@ async def test_sandboxed_target_uses_sandbox_launch(monkeypatch) -> None:
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
     manager = _FakeSandboxManager()
 
@@ -485,7 +458,7 @@ async def test_sandboxed_target_injects_proxied_mcp_servers(monkeypatch) -> None
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
     manager = _FakeSandboxManager()
 
@@ -536,7 +509,7 @@ async def test_sandboxed_target_without_manager_fails_closed(monkeypatch) -> Non
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
 
     tool = build_ask_context_tool(
@@ -572,7 +545,7 @@ async def test_transient_task_unregistered_after_run(monkeypatch) -> None:
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
 
     tool = build_ask_context_tool(
@@ -653,7 +626,7 @@ async def test_handoff_creates_topic_binds_and_dispatches(monkeypatch) -> None:
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
     bot.get_chat = AsyncMock(return_value=SimpleNamespace(is_forum=True))
     bot.create_forum_topic = AsyncMock(
@@ -702,7 +675,7 @@ async def test_handle_handoff_callback_resolves_future() -> None:
     query = MagicMock()
     query.answer = AsyncMock()
     query.message.text = "🔎 Ask x?"
-    query.message.get_bot.return_value = _wire_rich(MagicMock())
+    query.message.get_bot.return_value = wire_rich(MagicMock())
 
     try:
         handled = await handle_handoff_callback(query, data)
@@ -735,7 +708,7 @@ async def test_handoff_rejected_in_non_forum_chat(monkeypatch) -> None:
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
     bot.get_chat = AsyncMock(return_value=SimpleNamespace(is_forum=False))
     bot.create_forum_topic = AsyncMock(
@@ -784,7 +757,7 @@ async def test_handoff_allowed_in_private_chat_without_is_forum(monkeypatch) -> 
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
     # A private chat: is_forum is None. get_chat must not gate the decision.
     bot.get_chat = AsyncMock(return_value=SimpleNamespace(is_forum=None))
@@ -837,7 +810,7 @@ async def test_self_target_handoff_binds_same_context(monkeypatch) -> None:
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
-    _wire_rich(bot)
+    wire_rich(bot)
     bot.edit_message_text = AsyncMock()
     bot.create_forum_topic = AsyncMock(
         return_value=SimpleNamespace(message_thread_id=99),
@@ -877,7 +850,7 @@ async def test_outer_approval_card_omits_inline_for_self() -> None:
 
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=9))
-    _wire_rich(bot)
+    wire_rich(bot)
 
     task = asyncio.create_task(_request_outer_approval(
         bot=bot, chat_id=1, thread_id=None, target="default",
@@ -963,7 +936,7 @@ async def test_outer_approval_registers_pending_card_for_scope() -> None:
     scope = ChatScope(chat_id=1, thread_id=77)
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=9))
-    _wire_rich(bot)
+    wire_rich(bot)
 
     assert has_pending_approval(scope) is False
     task = asyncio.create_task(_request_outer_approval(

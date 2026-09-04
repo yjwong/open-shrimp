@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import random
 import re
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -50,7 +50,6 @@ from open_shrimp.db import ChatScope
 from open_shrimp.markdown import (
     RICH_MAX_LENGTH,
     escape_rich,
-    escape_rich_inline,
     gfm_to_rich_text,
     rich_code_block,
     rich_details,
@@ -58,6 +57,13 @@ from open_shrimp.markdown import (
 )
 from open_shrimp.mini_app import make_web_app_button
 from open_shrimp.rich_message import edit_rich, send_rich, send_rich_draft
+from open_shrimp.tool_cards import (
+    BASH_INTERRUPTED_NOTE,
+    BASH_NO_OUTPUT_NOTE,
+    bash_card,
+    tool_summary_row,
+    truncate_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,22 +81,22 @@ def _is_thread_not_found(exc: BaseException) -> bool:
     )
 
 DRAFT_INTERVAL_SECONDS = 0.5
-# Maximum lines of tool output to fold into a card.
-TOOL_OUTPUT_MAX_LINES = 50
-# Maximum characters of tool output to fold into a card.
-TOOL_OUTPUT_MAX_CHARS = 1500
-# Longest command that fits on a collapsed card's summary row.
-SUMMARY_COMMAND_MAX_CHARS = 80
-# Terminal states of a Bash card.  A running card carries neither: between the
-# agent issuing the command and the result arriving it may be queued, waiting
-# on an approval tap that never comes, or executing, and the card claims none
-# of them.
-BASH_NO_OUTPUT_NOTE = "*No output.*"
-BASH_INTERRUPTED_NOTE = "*Interrupted.*"
 
-# Stored tool outputs for on-demand reveal via inline keyboard button.
-# Keyed by a unique callback ID, value is the full rich body.
-_bash_output_store: dict[str, str] = {}
+# Full tool outputs held for the "Show output" button, keyed by callback id.
+# An entry is freed when the button is tapped, which most never are, so the
+# store is capped: the value is a whole command output and a long-running bot
+# would otherwise keep every one of them for the life of the process.
+_MAX_STASHED_OUTPUTS = 64
+_bash_output_store: OrderedDict[str, str] = OrderedDict()
+
+
+def stash_bash_output(body: str) -> str:
+    """Hold *body* for a "Show output" tap and return its callback id."""
+    callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
+    _bash_output_store[callback_id] = body
+    while len(_bash_output_store) > _MAX_STASHED_OUTPUTS:
+        _bash_output_store.popitem(last=False)
+    return callback_id
 
 
 @dataclass
@@ -132,6 +138,19 @@ class _Block:
 
     rich: bool
     text: str
+    #: ``render()``'s answer, and the ``text`` it was computed from.  Only the
+    #: trailing block grows during a turn, so caching here turns the twice-a-
+    #: second flush from one markdown parse per block into one per turn.
+    _rendered: str = ""
+    _rendered_from: str | None = None
+
+    def render(self) -> str:
+        if self.rich:
+            return self.text
+        if self._rendered_from != self.text:
+            self._rendered = gfm_to_rich_text(self.text)
+            self._rendered_from = self.text
+        return self._rendered
 
 
 @dataclass
@@ -142,10 +161,9 @@ class _DraftState:
     thread_id: int | None = None
     # Blocks accumulated so far, in send order.
     buffer: list[_Block] = field(default_factory=list)
-    # tool_use_id -> (index into buffer, summary row) for a tool card still
-    # waiting on its result.  The row rides along so the card can be rebuilt
-    # as a collapsible without re-deriving the summary.
-    tool_cards: dict[str, tuple[int, str]] = field(default_factory=dict)
+    # tool_use_id -> index into buffer, for a tool card still waiting on its
+    # result.  The row itself is the block at that index.
+    tool_cards: dict[str, int] = field(default_factory=dict)
     # Message IDs of finalized messages (for reference)
     sent_message_ids: list[int] = field(default_factory=list)
     # Draft ID for sendMessageDraft (non-zero integer, stable per draft)
@@ -225,15 +243,25 @@ class _DraftState:
         # The indices they hold are gone with the blocks.
         self.tool_cards.clear()
 
+    def begin_new_message(self) -> None:
+        """Drop everything that belongs to the message just sent.
+
+        One owner, because the turn-end path and the out-of-band-send path
+        both need it and a field reset in only one of them is invisible.
+        """
+        self.clear_buffer()
+        self.draft_id = random.randint(1, 2**31 - 1)
+        self.dirty = False
+        self.turn_complete = False
+        self.thinking = ""
+        self.live_edit_message_id = None
+        self.live_edit_last_text = ""
+
 
 def _build_full_text(state: _DraftState) -> str:
     """Render the buffer into one rich-message body."""
-    parts: list[str] = []
-    for block in state.buffer:
-        text = block.text if block.rich else gfm_to_rich_text(block.text)
-        if text.strip():
-            parts.append(text.strip())
-    return "\n\n".join(parts)
+    parts = [block.render().strip() for block in state.buffer]
+    return "\n\n".join(part for part in parts if part)
 
 
 async def _send_draft(bot: Bot, state: _DraftState) -> None:
@@ -294,8 +322,12 @@ async def _send_live_edit(bot: Bot, state: _DraftState) -> None:
     if not full_text.strip():
         return
 
-    # Skip if nothing changed since last edit.
+    # Skip if nothing changed since last edit.  Clearing the flag matters:
+    # reasoning deltas mark the state dirty but never reach a real message,
+    # so a thinking phase would otherwise re-render the whole buffer twice a
+    # second and find the same text every time.
     if full_text == state.live_edit_last_text:
+        state.dirty = False
         return
 
     chunks = split_message(full_text, RICH_MAX_LENGTH)
@@ -415,26 +447,6 @@ async def _finalize_message(
     return message_ids
 
 
-def _relative_path(path: str, cwd: str | None) -> str:
-    """Return *path* relative to *cwd* when it lives under that directory.
-
-    If *cwd* is ``None`` or *path* is outside *cwd*, the original absolute
-    path is returned unchanged.
-    """
-    if not cwd or not path:
-        return path
-    try:
-        rel = os.path.relpath(path, cwd)
-    except ValueError:
-        # On Windows, relpath raises ValueError for paths on different drives.
-        return path
-    # Only use the relative form when the path is actually inside cwd
-    # (i.e. doesn't start with "..").
-    if rel.startswith(".."):
-        return path
-    return rel
-
-
 def _resolve_policy(
     policy: "BackendPolicy | None",
     scope: "ChatScope | None" = None,
@@ -469,95 +481,6 @@ def _extract_bash_output_text(
     return content
 
 
-def _truncate_output(text: str) -> tuple[str, bool]:
-    """Cap output at the card limits, keeping the tail — the recent output."""
-    lines = text.splitlines()
-    truncated = False
-    if len(lines) > TOOL_OUTPUT_MAX_LINES:
-        lines = lines[-TOOL_OUTPUT_MAX_LINES:]
-        truncated = True
-
-    result = "\n".join(lines)
-    if len(result) > TOOL_OUTPUT_MAX_CHARS:
-        result = result[-TOOL_OUTPUT_MAX_CHARS:]
-        truncated = True
-
-    if truncated:
-        result = "…(truncated)\n" + result
-    return result, truncated
-
-
-def _summary_command(tool_input: dict[str, Any]) -> str:
-    """Flatten a command onto the one line a collapsed summary has room for."""
-    command = " ".join((tool_input.get("command") or "").split())
-    if len(command) > SUMMARY_COMMAND_MAX_CHARS:
-        command = command[:SUMMARY_COMMAND_MAX_CHARS - 1] + "…"
-    return command
-
-
-def _format_elapsed(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    minutes, rest = divmod(int(seconds), 60)
-    return f"{minutes}m{rest:02d}s"
-
-
-def _bash_summary(
-    tool_input: dict[str, Any],
-    icon: str,
-    label: str,
-    *,
-    elapsed: float | None = None,
-    is_error: bool = False,
-) -> str:
-    """Build the one row a collapsed Bash card shows.
-
-    The elapsed time is measured from the agent issuing the command to the
-    result landing, so it counts an approval wait as well as the run.
-    """
-    parts: list[str] = []
-    description = (tool_input.get("description") or "").strip()
-    if description:
-        parts.append(escape_rich_inline(description))
-    if is_error:
-        parts.append("**failed**")
-    if elapsed is not None:
-        parts.append(_format_elapsed(elapsed))
-    command = _summary_command(tool_input)
-    if command:
-        parts.append(f"`{command}`")
-
-    row = f"{icon} **{escape_rich_inline(label)}**"
-    return f"{row} — {' · '.join(parts)}" if parts else row
-
-
-def _bash_card(
-    tool_input: dict[str, Any],
-    icon: str,
-    label: str,
-    *,
-    output: str | None = None,
-    note: str | None = None,
-    elapsed: float | None = None,
-    is_error: bool = False,
-    open: bool = True,
-) -> str:
-    """Render a Bash invocation as a collapsible card.
-
-    Open while the command runs, so the command is readable without a tap;
-    collapsed once the result is in, so a finished command costs one row.
-    """
-    summary = _bash_summary(
-        tool_input, icon, label, elapsed=elapsed, is_error=is_error,
-    )
-    body_parts = [rich_code_block(tool_input.get("command") or "", "bash")]
-    if output:
-        body_parts.append(rich_code_block(output))
-    if note:
-        body_parts.append(note)
-    return rich_details(summary, "\n\n".join(body_parts), open=open)
-
-
 async def _send_bash_header(
     bot: Bot,
     state: _DraftState,
@@ -578,7 +501,7 @@ async def _send_bash_header(
     try:
         msg = await send_rich(
             bot, state.chat_id,
-            _bash_card(tool_input, icon, label, open=True),
+            bash_card(tool_input, icon, label, open=True),
             thread_id=state.thread_id,
             disable_notification=True,
         )
@@ -624,18 +547,17 @@ async def _finish_bash_message(
     keyboard: InlineKeyboardMarkup | None = None
     if not is_background:
         if output_text:
-            output, truncated = _truncate_output(output_text)
+            output, truncated = truncate_output(output_text)
             if truncated:
                 # The card carries the tail; "Show output" reveals the rest
                 # on demand, from reply_markup where web can draw it.
-                callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
-                _bash_output_store[callback_id] = _bash_card(
+                callback_id = stash_bash_output(bash_card(
                     tool_input, icon, label,
                     output=output_text,
                     elapsed=elapsed,
                     is_error=is_error,
                     open=True,
-                )
+                ))
                 keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
                         "📋 Show output", callback_data=callback_id,
@@ -644,7 +566,7 @@ async def _finish_bash_message(
         else:
             note = BASH_NO_OUTPUT_NOTE
 
-    text = _bash_card(
+    text = bash_card(
         tool_input, icon, label,
         output=output,
         note=note,
@@ -696,7 +618,7 @@ async def _clear_pending_bash_messages(bot: Bot, state: _DraftState) -> None:
         try:
             await edit_rich(
                 bot, state.chat_id, message_id,
-                _bash_card(
+                bash_card(
                     tool_info[1], icon, label,
                     note=BASH_INTERRUPTED_NOTE,
                     elapsed=time.monotonic() - started_at,
@@ -722,13 +644,7 @@ async def finalize_and_reset(
     if state.has_content:
         msg_ids = await _finalize_message(bot, state, silent=silent)
         state.sent_message_ids.extend(msg_ids)
-    state.clear_buffer()
-    state.draft_id = random.randint(1, 2**31 - 1)
-    state.dirty = False
-    state.turn_complete = False
-    state.thinking = ""
-    state.live_edit_message_id = None
-    state.live_edit_last_text = ""
+    state.begin_new_message()
 
 
 #: Neutral fallback messages for the vendor-agnostic error codes a backend
@@ -1284,13 +1200,7 @@ async def stream_response(
         result.sent_message_ids = state.sent_message_ids[sent_message_start:]
 
         # Reset for the next stream_response() iteration.
-        state.clear_buffer()
-        state.draft_id = random.randint(1, 2**31 - 1)
-        state.dirty = False
-        state.turn_complete = False
-        state.thinking = ""
-        state.live_edit_message_id = None
-        state.live_edit_last_text = ""
+        state.begin_new_message()
 
     return result
 
@@ -1331,28 +1241,9 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
                     raise
                 logger.exception("Failed to send plaintext fallback")
 
-    state.clear_buffer()
+    state.begin_new_message()
     state.buffer.append(_Block(rich=True, text=chunks[-1]))
-    state.draft_id = random.randint(1, 2**31 - 1)
     state.dirty = True
-    state.turn_complete = False
-
-
-def tool_summary_row(
-    tool_name: str,
-    summary: str,
-    auto: bool,
-    *,
-    is_error: bool = False,
-) -> str:
-    """Build the one row a tool call costs when its card is collapsed."""
-    icon = "⚠️" if is_error else "🔧"
-    row = f"{icon} **{escape_rich_inline(tool_name)}**"
-    if summary:
-        row += f" — {escape_rich_inline(summary)}"
-    if auto:
-        row += " *(auto)*"
-    return row
 
 
 def add_tool_notification(
@@ -1372,7 +1263,7 @@ def add_tool_notification(
     """
     summary = extract_tool_summary(tool_name, tool_input, cwd=cwd, policy=policy)
     row = tool_summary_row(tool_name, summary, auto)
-    state.tool_cards[tool_use_id] = (state.append_rich(row), row)
+    state.tool_cards[tool_use_id] = state.append_rich(row)
     state.dirty = True
 
 
@@ -1389,18 +1280,16 @@ def fold_tool_result(
     whenever an out-of-band message has to go out first, and a sent message is
     no longer this buffer's to rewrite.
     """
-    card = state.tool_cards.pop(tool_use_id, None)
-    if card is None:
+    index = state.tool_cards.pop(tool_use_id, None)
+    if index is None or index >= len(state.buffer):
         return
-    index, row = card
-    if index >= len(state.buffer):
-        return
+    row = state.buffer[index].text
 
     output = _extract_bash_output_text(content).strip()
     if not output:
         return
 
-    body, _ = _truncate_output(output)
+    body, _ = truncate_output(output)
     if is_error:
         row = row.replace("🔧", "⚠️", 1)
     state.buffer[index].text = rich_details(row, rich_code_block(body))

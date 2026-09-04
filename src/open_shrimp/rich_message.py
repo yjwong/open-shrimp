@@ -20,15 +20,18 @@ from typing import Any
 
 from telegram import Bot, InlineKeyboardMarkup, Message
 
-from open_shrimp.markdown import gfm_to_rich
 
 logger = logging.getLogger(__name__)
 
-# Rich bodies of the messages this process sent, keyed by (chat_id,
-# message_id).  A callback that appends an outcome line to a card — "Approved",
-# "Session ended" — needs the Markdown the card was built from, and Telegram
-# hands back entities instead: a table or a <details> has no entity form to
-# reconstruct.  Bounded because a long-running bot sends without limit.
+# Rich bodies of the cards this process sent, keyed by (chat_id, message_id).
+# A callback that appends an outcome line to a card — "Approved", "Session
+# ended" — needs the Markdown the card was built from, and Telegram hands back
+# entities instead: a table or a <details> has no entity form to reconstruct.
+#
+# Only messages carrying a keyboard are kept.  They are the only ones a
+# callback can arrive for, and a streamed answer is both far larger and never
+# read back, so remembering everything would spend the budget on the traffic
+# that cannot use it.
 _MAX_REMEMBERED_BODIES = 512
 _bodies: OrderedDict[tuple[int, int], str] = OrderedDict()
 
@@ -49,18 +52,9 @@ def body_of(message: Message) -> str:
     return message.text or ""
 
 
-def rich_text(gfm: str) -> str:
-    """Convert GFM to a single rich body, dropping any overflow past 32768."""
-    chunks = gfm_to_rich(gfm)
-    return chunks[0] if chunks else ""
-
-
-def _body(text: str, media: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _body(text: str) -> dict[str, Any]:
     """Build an ``InputRichMessage`` around a Markdown body."""
-    body: dict[str, Any] = {"markdown": text}
-    if media:
-        body["media"] = media
-    return body
+    return {"markdown": text}
 
 
 def _thread_kwargs(thread_id: int | None) -> dict[str, Any]:
@@ -76,13 +70,12 @@ async def send_rich(
     reply_markup: InlineKeyboardMarkup | None = None,
     disable_notification: bool = False,
     reply_to_message_id: int | None = None,
-    media: list[dict[str, Any]] | None = None,
     **extra: Any,
 ) -> Message:
     """Send *text* (already rich Markdown) as a rich message."""
     api_kwargs: dict[str, Any] = {
         "chat_id": chat_id,
-        "rich_message": _body(text, media),
+        "rich_message": _body(text),
         **_thread_kwargs(thread_id),
         **extra,
     }
@@ -97,42 +90,9 @@ async def send_rich(
         "sendRichMessage", api_kwargs=api_kwargs, return_type=Message,
     )
     message_id = getattr(result, "message_id", None)
-    if message_id is not None:
+    if message_id is not None and reply_markup is not None:
         _remember(chat_id, message_id, text)
     return result
-
-
-async def send_gfm(
-    bot: Bot,
-    chat_id: int,
-    gfm: str,
-    *,
-    thread_id: int | None = None,
-    reply_markup: InlineKeyboardMarkup | None = None,
-    disable_notification: bool = False,
-    **extra: Any,
-) -> list[Message]:
-    """Convert *gfm* and send it, splitting only if it passes 32768 characters.
-
-    The keyboard rides on the last chunk, where it reads as belonging to the
-    whole answer rather than to its opening paragraph.
-    """
-    chunks = gfm_to_rich(gfm)
-    sent: list[Message] = []
-    for index, chunk in enumerate(chunks):
-        last = index == len(chunks) - 1
-        sent.append(
-            await send_rich(
-                bot,
-                chat_id,
-                chunk,
-                thread_id=thread_id,
-                reply_markup=reply_markup if last else None,
-                disable_notification=disable_notification,
-                **extra,
-            )
-        )
-    return sent
 
 
 async def reply_rich(
@@ -162,27 +122,6 @@ async def reply_rich(
     )
 
 
-async def reply_gfm(
-    message: Message,
-    gfm: str,
-    *,
-    reply_markup: InlineKeyboardMarkup | None = None,
-    disable_notification: bool = False,
-    **extra: Any,
-) -> list[Message]:
-    """``reply_rich`` over GFM source."""
-    thread_id = message.message_thread_id if message.is_topic_message else None
-    return await send_gfm(
-        message.get_bot(),
-        message.chat_id,
-        gfm,
-        thread_id=thread_id,
-        reply_markup=reply_markup,
-        disable_notification=disable_notification,
-        **extra,
-    )
-
-
 async def edit_rich(
     bot: Bot,
     chat_id: int,
@@ -190,7 +129,6 @@ async def edit_rich(
     text: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
-    media: list[dict[str, Any]] | None = None,
 ) -> None:
     """Rewrite a sent rich message in place.
 
@@ -201,12 +139,15 @@ async def edit_rich(
     api_kwargs: dict[str, Any] = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "rich_message": _body(text, media),
+        "rich_message": _body(text),
     }
     if reply_markup is not None:
         api_kwargs["reply_markup"] = reply_markup
     await bot.do_api_request("editMessageText", api_kwargs=api_kwargs)
-    _remember(chat_id, message_id, text)
+    # An edit that takes the keyboard away still updates a tracked card: the
+    # decision may be recorded in two steps.
+    if reply_markup is not None or (chat_id, message_id) in _bodies:
+        _remember(chat_id, message_id, text)
 
 
 async def edit_message_rich(

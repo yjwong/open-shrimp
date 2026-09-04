@@ -15,9 +15,14 @@ from typing import TYPE_CHECKING, Any
 from telegram import InlineKeyboardButton
 
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
+from open_shrimp.backend.approval_cards import (
+    format_agent_approval,
+    format_bash_approval,
+    format_generic_approval,
+    format_write_approval,
+)
 from open_shrimp.markdown import (
-    RICH_MAX_LENGTH,
-    escape_rich,
+    RICH_MAX_BODY,
     escape_rich_inline,
     rich_code_block,
 )
@@ -217,10 +222,6 @@ def _is_single_subcommand_safe(
     return True
 
 
-# The headroom covers the header and the fence around whatever body is being
-# clipped to fit.
-_MAX_BODY_CHARS = RICH_MAX_LENGTH - 500
-
 # ---------------------------------------------------------------------------
 # Per-tool summary renderers
 # ---------------------------------------------------------------------------
@@ -339,28 +340,10 @@ def _format_edit_approval(
     else:
         diff_body = "(no diff)"
 
-    if len(diff_body) > _MAX_BODY_CHARS:
-        diff_body = diff_body[:_MAX_BODY_CHARS] + "\n..."
+    if len(diff_body) > RICH_MAX_BODY:
+        diff_body = diff_body[:RICH_MAX_BODY] + "\n..."
 
     return f"{header}\n\n{rich_code_block(diff_body, 'diff')}"
-
-
-def _format_bash_approval(tool_input: dict[str, Any]) -> str:
-    """Format a Bash tool call for the approval prompt."""
-    command = tool_input.get("command", "")
-    description = tool_input.get("description", "")
-
-    parts: list[str] = []
-    if description:
-        parts.append(f"\U0001f4bb **Bash:** {escape_rich_inline(description)}")
-    else:
-        parts.append("\U0001f4bb **Bash**")
-
-    if len(command) > _MAX_BODY_CHARS:
-        command = command[:_MAX_BODY_CHARS] + "\n..."
-    parts.append(rich_code_block(command, "bash"))
-
-    return "\n\n".join(parts)
 
 
 def _format_monitor_approval(tool_input: dict[str, Any]) -> str:
@@ -377,53 +360,9 @@ def _format_monitor_approval(tool_input: dict[str, Any]) -> str:
         header = f"{header} *(persistent)*"
     parts.append(header)
 
-    if len(command) > _MAX_BODY_CHARS:
-        command = command[:_MAX_BODY_CHARS] + "\n..."
+    if len(command) > RICH_MAX_BODY:
+        command = command[:RICH_MAX_BODY] + "\n..."
     parts.append(rich_code_block(command, "bash"))
-
-    return "\n\n".join(parts)
-
-
-def _format_write_approval(
-    tool_input: dict[str, Any], cwd: str | None = None,
-) -> str:
-    """Format a Write tool call for the approval prompt."""
-    file_path = _relative_path(tool_input.get("file_path", "unknown"), cwd)
-    content = tool_input.get("content", "")
-
-    header = f"\U0001f4dd **Write:** `{file_path}`"
-
-    if len(content) > _MAX_BODY_CHARS:
-        content = content[:_MAX_BODY_CHARS] + "\n..."
-
-    return f"{header}\n\n{rich_code_block(content)}"
-
-
-def _format_agent_approval(
-    tool_input: dict[str, Any], expanded: bool = False,
-) -> str:
-    """Format an Agent tool call for the approval prompt."""
-    description = tool_input.get("description", "")
-    subagent_type = tool_input.get("subagent_type", "")
-    prompt = tool_input.get("prompt", "")
-
-    parts: list[str] = []
-
-    if subagent_type:
-        parts.append(
-            f"\U0001f916 **Agent** ({escape_rich_inline(subagent_type)})",
-        )
-    else:
-        parts.append("\U0001f916 **Agent**")
-
-    if description:
-        parts.append(escape_rich(description))
-
-    if expanded and prompt:
-        display_prompt = prompt
-        if len(display_prompt) > _MAX_BODY_CHARS:
-            display_prompt = display_prompt[:_MAX_BODY_CHARS] + "\n..."
-        parts.append(rich_code_block(display_prompt))
 
     return "\n\n".join(parts)
 
@@ -443,21 +382,6 @@ def _format_plan_approval(tool_input: dict[str, Any]) -> str:
     if preview:
         header += f": {escape_rich_inline(preview)}"
     return header
-
-
-def _format_generic_approval(
-    tool_name: str, tool_input: dict[str, Any],
-) -> str:
-    """Format a generic tool call for the approval prompt."""
-    summary_parts = [f"**Tool:** `{tool_name}`"]
-    for key, val in tool_input.items():
-        val_str = str(val)
-        if len(val_str) > 200:
-            val_str = val_str[:200] + "..."
-        summary_parts.append(
-            f"**{escape_rich_inline(key)}:** {escape_rich(val_str)}"
-        )
-    return "<br>".join(summary_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -656,16 +580,19 @@ class ClaudeSdkPolicy:
         if tool_name == "Edit" or tool_name == "NotebookEdit":
             return _format_edit_approval(tool_input, cwd=cwd)
         if tool_name == "Bash":
-            return _format_bash_approval(tool_input)
+            return format_bash_approval(tool_input)
         if tool_name == "Monitor":
             return _format_monitor_approval(tool_input)
         if tool_name == "Write":
-            return _format_write_approval(tool_input, cwd=cwd)
+            return format_write_approval(
+                tool_input,
+                _relative_path(tool_input.get("file_path", "unknown"), cwd),
+            )
         if tool_name == "Agent":
-            return _format_agent_approval(tool_input, expanded=False)
+            return format_agent_approval(tool_input, expanded=False)
         if tool_name == "ExitPlanMode":
             return _format_plan_approval(tool_input)
-        return _format_generic_approval(tool_name, tool_input)
+        return format_generic_approval(tool_name, tool_input)
 
     def format_auto_approved_diff(
         self,
@@ -676,15 +603,18 @@ class ClaudeSdkPolicy:
         if tool_name == "Edit" or tool_name == "NotebookEdit":
             return _format_edit_approval(tool_input, cwd=cwd)
         if tool_name == "Write":
-            return _format_write_approval(tool_input, cwd=cwd)
-        return _format_generic_approval(tool_name, tool_input)
+            return format_write_approval(
+                tool_input,
+                _relative_path(tool_input.get("file_path", "unknown"), cwd),
+            )
+        return format_generic_approval(tool_name, tool_input)
 
     def format_expanded_prompt(
         self,
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> str:
-        return _format_agent_approval(tool_input, expanded=True)
+        return format_agent_approval(tool_input, expanded=True)
 
     def approval_keyboard_extras(
         self,

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import signal
-from typing import Any
 
 import pytest
 

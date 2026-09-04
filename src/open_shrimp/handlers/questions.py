@@ -27,12 +27,7 @@ from open_shrimp.handlers.state import (
 )
 from open_shrimp.handlers.utils import _is_authorized
 from open_shrimp.markdown import escape_rich, escape_rich_inline
-from open_shrimp.rich_message import (
-    body_of,
-    edit_message_rich,
-    edit_rich,
-    send_rich,
-)
+from open_shrimp.rich_message import body_of, edit_message_rich, send_rich
 from open_shrimp.stream import _DraftState, finalize_and_reset
 
 logger = logging.getLogger(__name__)
@@ -275,7 +270,8 @@ async def _complete_other_input(
         keyboard = _build_question_keyboard(state)
         if query and query.message:
             try:
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     original_md,
                     reply_markup=keyboard,
                 )
@@ -286,7 +282,8 @@ async def _complete_other_input(
         state.future.set_result(custom_text)
         if query and query.message:
             try:
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     original_md
                     + f"\n\n\u2705 **Answer:** {escape_rich(custom_text)}",
                     reply_markup=None,
@@ -378,7 +375,8 @@ async def _handle_question_callback(
         # Update message to show selections, remove keyboard
         if query.message:
             try:
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     body_of(query.message)
                     + f"\n\n\u2705 **Selected:** {escape_rich(result)}",
                     reply_markup=None,
@@ -401,7 +399,8 @@ async def _handle_question_callback(
         # Hide the keyboard and prompt the user to type their answer.
         if query.message:
             try:
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     body_of(query.message)
                     + "\n\n\u270f\ufe0f *Type your answer below:*",
                     reply_markup=None,

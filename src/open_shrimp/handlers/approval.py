@@ -37,7 +37,7 @@ from open_shrimp.handlers.state import (
     take_pending_approvals,
 )
 from open_shrimp.markdown import (
-    RICH_MAX_LENGTH,
+    RICH_MAX_BODY,
     escape_rich,
     escape_rich_inline,
     rich_code_block,
@@ -151,10 +151,14 @@ async def _send_auto_approved_diff(
     """
     p = _resolve_policy(policy, scope=scope)
     body = p.format_auto_approved_diff(tool_name, tool_input, cwd)
-    summary, _, patch = body.partition("\n\n")
+    # A card is a header line and a fenced patch, and the fence is what makes
+    # the split safe to do here: a renderer that emits neither — the generic
+    # one joins its rows with <br> — has nothing to fold, and folding on the
+    # paragraph break alone would put its whole payload in the summary row.
+    summary, fence, patch = body.partition("\n\n```")
     text = (
-        rich_details(f"✅ {summary}", patch) if patch
-        else f"✅ {summary}"
+        rich_details(f"✅ {summary}", fence.lstrip("\n") + patch) if fence
+        else f"✅ {body}"
     )
 
     try:
@@ -382,9 +386,6 @@ async def retire_pending_approvals(scope: ChatScope) -> None:
 _HOST_BASH_TIMEOUT_SECONDS = 30.0
 _HOST_BASH_TICK_SECONDS = 2.0
 _HOST_BASH_DENY_PREFIX = "hb_deny:"
-# Room inside a rich message for the header, the countdown line and the fence
-# around the command.
-_MAX_COMMAND_CHARS = RICH_MAX_LENGTH - 500
 
 
 def _render_command_block(command: str, max_len: int) -> str:
@@ -411,7 +412,7 @@ def _format_host_bash_approval(
     parts: list[str] = [header]
     if description:
         parts.append(escape_rich(description))
-    parts.append(_render_command_block(command, _MAX_COMMAND_CHARS))
+    parts.append(_render_command_block(command, RICH_MAX_BODY))
     if cwd:
         parts.append(f"*cwd:* `{cwd}`")
     secs = max(0, int(round(remaining)))
@@ -446,7 +447,7 @@ def _format_host_bash_final(
         "timeout": "Auto-denied (no response within 30s)",
     }[outcome]
     label = "HOST monitor" if is_monitor else "HOST shell"
-    block = _render_command_block(tool_input.get("command", ""), _MAX_COMMAND_CHARS)
+    block = _render_command_block(tool_input.get("command", ""), RICH_MAX_BODY)
     return f"{icon} **{label}** — {verb}\n\n{block}"
 
 
@@ -876,7 +877,8 @@ async def handle_approval_callback(
                 ]
             )
             try:
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     expanded_text,
                     reply_markup=keyboard,
                 )
@@ -895,7 +897,8 @@ async def handle_approval_callback(
 
         if query.message:
             try:
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     formatted_output,
                     reply_markup=None,
                 )
@@ -936,7 +939,8 @@ async def handle_approval_callback(
         if query.message:
             try:
                 status = "\n\n✅ **Approved.** *All future edits auto-approved.*"
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     body_of(query.message) + status,
                     reply_markup=None,
                 )
@@ -1005,7 +1009,8 @@ async def handle_approval_callback(
                     f"✅ **Bash** — Approved. "
                     f"*Rule saved: `{prefix} *` auto-approved.*"
                 )
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     compact,
                     reply_markup=None,
                 )
@@ -1066,7 +1071,8 @@ async def handle_approval_callback(
                     f"*All future tool calls in `{directory}` "
                     f"auto-approved this session.*"
                 )
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     body_of(query.message) + status,
                     reply_markup=None,
                 )
@@ -1130,7 +1136,8 @@ async def handle_approval_callback(
                     f"{escape_rich_inline(accepted_tool_name)} "
                     f"calls auto-approved.*"
                 )
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     body_of(query.message) + status,
                     reply_markup=None,
                 )
@@ -1202,7 +1209,8 @@ async def handle_approval_callback(
                     )
                 else:
                     body = body_of(query.message) + f"\n\n{icon} *{action}.*"
-                await edit_rich(
+                await edit_message_rich(
+                    query.message,
                     body,
                     reply_markup=None,
                 )
