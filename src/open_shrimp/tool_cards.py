@@ -78,17 +78,24 @@ def bash_summary(
 ) -> str:
     """Build the one row a collapsed Bash card shows.
 
+    The agent's own description of the command is what the row says; the
+    command itself is in the card body a tap away, and wrapping a pipeline
+    across three lines buries the rest of the row.  A call that came without
+    a description falls back to the command, clipped.
+
     The elapsed time is measured from the agent issuing the command to the
     result landing, so it counts an approval wait as well as the run.
     """
-    command = " ".join((tool_input.get("command") or "").split())
-    if len(command) > SUMMARY_COMMAND_MAX_CHARS:
-        command = command[:SUMMARY_COMMAND_MAX_CHARS - 1] + "…"
-
     parts: list[str] = []
     description = (tool_input.get("description") or "").strip()
     if description:
         parts.append(escape_rich_inline(description))
+    else:
+        command = " ".join((tool_input.get("command") or "").split())
+        if len(command) > SUMMARY_COMMAND_MAX_CHARS:
+            command = command[:SUMMARY_COMMAND_MAX_CHARS - 1] + "…"
+        if command:
+            parts.append(f"`{command}`")
     if is_error:
         parts.append("**failed**")
     if elapsed is not None:
@@ -97,8 +104,6 @@ def bash_summary(
         else:
             minutes, rest = divmod(int(elapsed), 60)
             parts.append(f"{minutes}m{rest:02d}s")
-    if command:
-        parts.append(f"`{command}`")
 
     row = f"{icon} **{escape_rich_inline(label)}**"
     return f"{row} — {' · '.join(parts)}" if parts else row

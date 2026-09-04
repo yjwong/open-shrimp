@@ -361,17 +361,28 @@ def _build_status_text(
     turn_usage: dict[str, Any] | None = None,
     todos: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build the pinned status message body."""
+    """Build the pinned status message body.
+
+    Rows that belong together are joined with ``<br>``: a bare newline inside
+    a rich-message paragraph collapses to a space, which runs the directory
+    into the model and the context size into the cost.
+    """
     model = ctx.model or default_model_label(effective_backend(ctx, config))
+    blocks = [
+        "<br>".join([
+            f"\U0001f4cc **Active context:** `{ctx_name}`",
+            escape_rich(ctx.description),
+        ]),
+    ]
     lines = [
-        f"\U0001f4cc **Active context:** `{ctx_name}`",
-        escape_rich(ctx.description),
-        "",
         f"\U0001f4c1 `{ctx.directory}`",
         f"\U0001f916 `{model}`",
     ]
     if ctx.effort:
         lines.append(f"\U0001f9e0 **Effort:** `{ctx.effort}`")
+    blocks.append("<br>".join(lines))
+
+    usage_lines: list[str] = []
 
     # Context window usage from per-turn API usage (the last assistant
     # message).  input_tokens + cache tokens = current context size.
@@ -393,8 +404,7 @@ def _build_status_text(
         limit_str = _format_token_count(context_window)
         pct = min(total_tokens / context_window * 100, 100) if context_window > 0 else 0
 
-        lines.append("")
-        lines.append(
+        usage_lines.append(
             f"\U0001f4ca **Context:** {total_str} / {limit_str} "
             f"({pct:.0f}%)"
         )
@@ -402,11 +412,13 @@ def _build_status_text(
     if model_usage:
         total_cost = sum(m.get("costUSD", 0) for m in model_usage.values())
         if total_cost > 0:
-            lines.append(f"\U0001f4b0 **Cost:** ${total_cost:.4f}")
+            usage_lines.append(f"\U0001f4b0 **Cost:** ${total_cost:.4f}")
+
+    if usage_lines:
+        blocks.append("<br>".join(usage_lines))
 
     if todos:
-        lines.append("")
-        lines.append("\U0001f4dd **Tasks:**")
+        lines = ["\U0001f4dd **Tasks:**", ""]
         # Cap at 15 items to avoid hitting Telegram's message length limit.
         display_todos = todos[:15]
         for todo in display_todos:
@@ -421,8 +433,9 @@ def _build_status_text(
         remaining = len(todos) - len(display_todos)
         if remaining > 0:
             lines.append(f"\n*...and {remaining} more*")
+        blocks.append("\n".join(lines))
 
-    return "\n".join(lines)
+    return "\n\n".join(blocks)
 
 
 async def _update_pinned_status(
