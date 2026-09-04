@@ -1,15 +1,17 @@
-"""HTTP endpoint for resolving agent tool approvals from the Android app.
+"""HTTP endpoints for answering the agent from the Android app.
 
-The companion's Live Update exposes inline approve/deny actions on the
-permission-required segment.  Tapping one POSTs here, authenticated with the
-device's existing per-request signature scheme (see
+Two things park a turn on the human, and the companion's Live Update can
+resolve either: a tool approval (inline approve/deny actions) and an
+AskUserQuestion (option actions, or the bottom sheet the notification opens).
+Both POST here, authenticated with the device's existing per-request
+signature scheme (see
 :func:`~open_shrimp.android_companion.authenticate_android_request`).
 
-Approvals do **not** route through Telegram and need no bot token on the
-phone.  Both triggers — the Telegram inline button and this endpoint —
-converge on the same ``asyncio.Future`` in ``handlers/state._approval_futures``
-(resolved server-side by the ``canUseTool`` callback), so there is a single
-source of truth and no second approval decision path to keep in sync.
+Neither routes through Telegram, and neither needs a bot token on the phone.
+Each converges on the same ``asyncio.Future`` the Telegram buttons resolve —
+``handlers/state._approval_futures`` for approvals, the ``_QuestionState``
+future for questions — so there is a single source of truth per decision and
+no second answer path to keep in sync.
 """
 
 from __future__ import annotations
@@ -45,41 +47,68 @@ async def resolve_agent_approval_endpoint(request: Request) -> JSONResponse:
             {"error": "decision must be 'approve' or 'deny'"}, status_code=400
         )
 
-    # Each card sender registers the same future under its own approve and
-    # deny callback keys; either resolves it.  The senders differ only in
-    # which prefix they used, and the phone knows the tool_use_id and
-    # nothing else, so every prefix is probed rather than named here — a
-    # sender this file has not heard of is one the phone cannot answer.
-    from open_shrimp.handlers.state import (
-        APPROVE_CALLBACK_PREFIXES,
-        RESOLVED_VIA_ANDROID,
-        STANDARD_APPROVE_PREFIX,
-        _approval_futures,
-        _approval_resolved_via,
-    )
+    from open_shrimp.handlers.approval import resolve_approval_from_device
 
-    future = None
-    matched = ""
-    for prefix in APPROVE_CALLBACK_PREFIXES:
-        future = _approval_futures.get(f"{prefix}{tool_use_id}")
-        if future is not None:
-            matched = prefix
-            break
-    if future is None or future.done():
+    if not await resolve_approval_from_device(
+        tool_use_id, decision == "approve",
+    ):
         # Already resolved or never existed — treat as a benign no-op so the
         # phone doesn't surface an error when the user was simply too late.
         return JSONResponse({"status": "expired"})
-
-    # The host-escape and config-write flows edit their own message
-    # unconditionally and never read ``_approval_resolved_via``, so only the
-    # standard path needs the "resolved on phone" marker (and its cleanup).
-    if matched == STANDARD_APPROVE_PREFIX:
-        _approval_resolved_via[tool_use_id] = RESOLVED_VIA_ANDROID
-    future.set_result(decision == "approve")
     logger.info(
         "Resolved agent approval %s via Android: %s", tool_use_id, decision,
     )
     return JSONResponse({"status": "resolved", "decision": decision})
+
+
+async def answer_agent_question_endpoint(request: Request) -> JSONResponse:
+    """POST /api/agent/questions/{question_id}.
+
+    Body: ``{"option_indexes": [0, 2], "other_texts": ["…"]}``.  Options are
+    named by position in the list the phone was pushed rather than by label,
+    so an answer cannot miss by a character; ``other_texts`` carries whatever
+    the user typed instead of picking.  Single-select questions send exactly
+    one entry across the two lists.
+
+    Answers "expired" rather than failing when the question is already gone,
+    matching the approval endpoint: the user was simply too late, or answered
+    in Telegram first.
+    """
+    try:
+        await authenticate_android_request(request)
+        body = await read_json_body(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    question_id = request.path_params["question_id"]
+    raw_indexes = body.get("option_indexes", [])
+    raw_others = body.get("other_texts", [])
+    # bool is an int subclass, and JSON true would otherwise select option 1.
+    if (
+        not isinstance(raw_indexes, list)
+        or not all(
+            isinstance(i, int) and not isinstance(i, bool) for i in raw_indexes
+        )
+        or not isinstance(raw_others, list)
+        or not all(isinstance(t, str) for t in raw_others)
+    ):
+        return JSONResponse(
+            {
+                "error": "option_indexes must be integers and "
+                         "other_texts strings",
+            },
+            status_code=400,
+        )
+
+    from open_shrimp.handlers.questions import resolve_question_from_device
+
+    answer = await resolve_question_from_device(
+        question_id, raw_indexes, [t for t in raw_others if t.strip()],
+    )
+    if answer is None:
+        return JSONResponse({"status": "expired"})
+    logger.info("Answered question %s via Android: %s", question_id, answer)
+    return JSONResponse({"status": "resolved", "answer": answer})
 
 
 def create_agent_status_routes() -> list[Route]:
@@ -87,6 +116,11 @@ def create_agent_status_routes() -> list[Route]:
         Route(
             "/api/agent/approvals/{tool_use_id}",
             resolve_agent_approval_endpoint,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/agent/questions/{question_id}",
+            answer_agent_question_endpoint,
             methods=["POST"],
         ),
     ]

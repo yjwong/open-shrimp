@@ -24,6 +24,21 @@ class Prefs(context: Context) {
         get() = serverId.isNotEmpty()
 
     /**
+     * The paired server's `(baseUrl, deviceId)`, or null when the app has
+     * never been paired.
+     *
+     * Every call to the host needs both, and neither is usable alone, so they
+     * are read together and the trailing-slash trim happens once here rather
+     * than at each call site.
+     */
+    val pairedServer: Pair<String, String>?
+        get() {
+            val url = baseUrl.trimEnd('/')
+            val id = deviceId
+            return if (url.isEmpty() || id == null) null else url to id
+        }
+
+    /**
      * The chats whose messages may be read, as raw chat JIDs.
      *
      * Empty is the honest default and reads nothing: a selection that has not

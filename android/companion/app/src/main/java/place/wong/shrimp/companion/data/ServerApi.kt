@@ -162,6 +162,34 @@ class ServerApi(private val http: OkHttpClient = defaultClient()) {
         )
     }
 
+    /**
+     * Answer a live AskUserQuestion.
+     *
+     * Options are named by their position in the list the push carried, not by
+     * label, so an answer cannot miss by a character or a truncation. A
+     * single-select question sends exactly one entry across the two lists; a
+     * multi-select sends as many as were ticked, and an empty pair is the
+     * host's "None selected". Returns true if the host accepted the answer
+     * (resolved, or already expired); false on transport/HTTP error.
+     */
+    suspend fun answerAgentQuestion(
+        baseUrl: String,
+        deviceId: String,
+        questionId: String,
+        optionIndexes: List<Int>,
+        otherTexts: List<String>,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("option_indexes", JSONArray(optionIndexes))
+            .put("other_texts", JSONArray(otherTexts))
+            .toString()
+        signedPostSuccess(
+            "$baseUrl/api/agent/questions/${urlEncode(questionId)}",
+            deviceId,
+            body,
+        )
+    }
+
     suspend fun pendingPortForwardSessions(
         baseUrl: String,
         deviceId: String,

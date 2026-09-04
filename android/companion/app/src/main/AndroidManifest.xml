@@ -37,6 +37,19 @@
             </intent-filter>
         </activity>
 
+        <!--
+          Answering an agent question, opened from its notification. Its own
+          task with no affinity to the main one, so answering from over another
+          app does not drag the companion's back stack in with it.
+        -->
+        <activity
+            android:name=".QuestionSheetActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/SheetTheme" />
+
         <service
             android:name=".SecurityKeyForwardingService"
             android:exported="false"
@@ -116,6 +129,10 @@
 
         <receiver
             android:name=".AgentApprovalReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".AgentQuestionReceiver"
             android:exported="false" />
 
         <provider

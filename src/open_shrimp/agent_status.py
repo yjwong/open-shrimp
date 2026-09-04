@@ -10,11 +10,19 @@ Progress is driven by the agent's task checklist: ``running`` events carry
 ``todo_done``/``todo_total`` counts that render as a segmented bar and an
 "x/y" chip, and the ``text`` body reflects the active todo's label (the
 ``in_progress`` item's ``activeForm``) instead of a generic "Working…".
-Awaiting a tool approval is *not* a phase — it is an overlay on
-the running notification (``awaiting=1``), adding inline approve/deny actions
-and bumping the push to high priority.  The overlay carries the
-``tool_use_id`` so those actions resolve the right server-side future (see
-``/api/agent/approvals/{tool_use_id}``).
+
+Waiting on the human is *not* a phase — it is an overlay on the running
+notification that bumps the push to high priority.  ``awaiting_kind`` names
+the wait and is the only field that says one is happening; ``awaiting_id``
+answers it, and the endpoint follows from the kind:
+
+- ``approval`` (+ ``tool_name``) — a tool approval, answered by the
+  notification's approve/deny actions via ``/api/agent/approvals/{id}``.
+- ``question`` (+ ``question_options``, ``multi_select``) — an
+  AskUserQuestion, answered by index via ``/api/agent/questions/{id}``.
+  The options ride in the push so the phone renders the whole choice
+  without calling back, and the answer is a list of positions in that
+  same list.
 
 Events are delivered as FCM data messages, one stable notification per
 :class:`~open_shrimp.db.ChatScope`.  See the v2 contract in
@@ -23,6 +31,7 @@ Events are delivered as FCM data messages, one stable notification per
 
 from __future__ import annotations
 
+import json
 import logging
 import zlib
 from typing import Any, Literal
@@ -37,6 +46,10 @@ from open_shrimp.db import ChatScope
 logger = logging.getLogger(__name__)
 
 AgentStatusPhase = Literal["running", "done"]
+
+# What the turn is parked on.  The phone derives the endpoint that ends the
+# wait from this, so a new kind here is a new route in ``agent_status_api``.
+AwaitingKind = Literal["approval", "question"]
 
 _DEFAULT_STATUS_TEXT: dict[str, str] = {"running": "Working…", "done": "Done"}
 
@@ -82,6 +95,52 @@ def todo_counts(todos: list[dict[str, Any]] | None) -> tuple[int, int] | None:
     return done, total
 
 
+# FCM rejects a data message whose keys and values exceed 4KB in total.  The
+# rest of an agent-status payload (title, body, deep-link fields) runs to a few
+# hundred bytes, so the encoded option list gets this slice of the budget.
+_MAX_OPTIONS_BYTES = 2048
+_MAX_LABEL_CHARS = 60
+_MAX_DESCRIPTION_CHARS = 140
+_TRUNCATED_LABEL_CHARS = 24
+
+
+def _clip(value: Any, limit: int) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def encode_question_options(options: list[dict[str, Any]]) -> str:
+    """Serialise an AskUserQuestion option list for the FCM data payload.
+
+    The phone answers with positions in this list, so every option survives
+    encoding and the order is the contract.  Only the text shrinks when the
+    payload runs past ``_MAX_OPTIONS_BYTES``: descriptions go first, then
+    labels are clipped hard.  A list too long to fit even then is sent
+    oversized and FCM refuses it, costing the notification — which beats one
+    the user answers without having seen the option they wanted.
+    """
+    encoded = [
+        {
+            "label": _clip(o.get("label"), _MAX_LABEL_CHARS),
+            "description": _clip(o.get("description"), _MAX_DESCRIPTION_CHARS),
+        }
+        for o in options
+    ]
+    payload = json.dumps(encoded, separators=(",", ":"))
+    if len(payload.encode("utf-8")) <= _MAX_OPTIONS_BYTES:
+        return payload
+
+    for entry in encoded:
+        entry["description"] = ""
+    payload = json.dumps(encoded, separators=(",", ":"))
+    if len(payload.encode("utf-8")) <= _MAX_OPTIONS_BYTES:
+        return payload
+
+    for entry in encoded:
+        entry["label"] = _clip(entry["label"], _TRUNCATED_LABEL_CHARS)
+    return json.dumps(encoded, separators=(",", ":"))
+
+
 def scope_notification_id(scope: ChatScope) -> int:
     """Derive a stable, positive notification id from a ChatScope.
 
@@ -102,17 +161,20 @@ async def notify_agent_status(
     *,
     title: str,
     text: str | None = None,
-    awaiting: bool = False,
-    tool_use_id: str | None = None,
+    awaiting_kind: AwaitingKind | None = None,
+    awaiting_id: str | None = None,
     tool_name: str | None = None,
+    question_options: list[dict[str, Any]] | None = None,
+    multi_select: bool = False,
     todos: list[dict[str, Any]] | None = None,
 ) -> None:
     """Push an agent-status event to every active FCM companion device.
 
-    ``phase`` is ``running`` or ``done``.  ``awaiting`` overlays an approval
-    request on a running notification (it carries ``tool_use_id`` and bumps
-    the push to high priority).  ``todos`` is the latest task checklist, used
-    to attach ``done/total`` progress counts on running events.
+    ``phase`` is ``running`` or ``done``.  ``awaiting_kind`` overlays a wait
+    for the human on a running notification and bumps the push to high
+    priority; ``awaiting_id`` is what the phone sends back to end the wait.
+    ``todos`` is the latest task checklist, used to attach ``done/total``
+    progress counts on running events.
 
     Best-effort: any failure (no devices, FCM not configured, network) is
     swallowed so the agent turn is never blocked on notification delivery.
@@ -156,14 +218,18 @@ async def notify_agent_status(
             done, total = counts
             data["todo_done"] = str(done)
             data["todo_total"] = str(total)
-    if awaiting:
-        data["awaiting"] = "1"
-        if tool_use_id:
-            data["tool_use_id"] = tool_use_id
+    if awaiting_kind is not None:
+        data["awaiting_kind"] = awaiting_kind
+        data["awaiting_id"] = awaiting_id or ""
         if tool_name:
             data["tool_name"] = tool_name
+        if awaiting_kind == "question":
+            data["question_options"] = encode_question_options(
+                question_options or [],
+            )
+            data["multi_select"] = "1" if multi_select else "0"
 
-    high_priority = awaiting
+    high_priority = awaiting_kind is not None
     for device in fcm_devices:
         try:
             await sender.send_agent_status(

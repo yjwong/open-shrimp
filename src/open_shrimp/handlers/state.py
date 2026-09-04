@@ -447,6 +447,13 @@ class _QuestionState:
     """The callback query that triggered the "Other..." flow, used to edit the message afterward."""
     original_text_md: str = ""
     """The original MarkdownV2 message text, saved so we can restore it after Other input."""
+    bot: Any = None
+    """The bot that posted the card.
+
+    An answer from the Android companion arrives over HTTP with no
+    CallbackQuery to edit the card, so the card carries the bot needed to
+    retire itself (the same reason :class:`PendingApproval` does).
+    """
 
 
 # Pending question states: question_id -> _QuestionState

@@ -10,6 +10,7 @@ import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import androidx.annotation.RequiresApi
+import place.wong.shrimp.companion.data.AgentQuestion
 
 /**
  * Renders the per-ChatScope agent-status Live Update (FCM data contract v2).
@@ -21,13 +22,19 @@ import androidx.annotation.RequiresApi
  * todo) and an "x/y" status-bar chip.  When no todos exist the bar is omitted
  * and the chip reads "Running".
  *
- * Every running turn requests promotion to a status-bar chip; awaiting a tool
- * approval is *not* a phase but an overlay on the running notification
- * (``awaiting=1``) that adds inline approve/deny actions and swaps the chip to
- * "Approve?".  Each ChatScope keeps a single, stable notification id so
- * repeated events update in place rather than stacking, and the done event
- * dismisses exactly the right one.  All notifications share a group + summary
- * so the shade does not fill with chips.
+ * Every running turn requests promotion to a status-bar chip.  Waiting on the
+ * human is *not* a phase but an overlay on the running notification, named by
+ * ``awaiting_kind`` and answered with ``awaiting_id``:
+ *
+ * - ``approval`` — a tool approval: approve/deny actions, chip "Approve?".
+ * - ``question`` — an AskUserQuestion: chip "Answer?", options inline where
+ *   they fit (see [addQuestionActions]), and a tap target of
+ *   [QuestionSheetActivity], which renders the choice in full.
+ *
+ * Each ChatScope keeps a single, stable notification id so repeated events
+ * update in place rather than stacking, and the done event dismisses exactly
+ * the right one.  All notifications share a group + summary so the shade does
+ * not fill with chips.
  */
 object AgentStatusNotifier {
     const val CHANNEL_ID = "agent_status"
@@ -36,6 +43,21 @@ object AgentStatusNotifier {
 
     private const val PHASE_RUNNING = "running"
     private const val PHASE_DONE = "done"
+
+    // What the turn is parked on, per the host's ``awaiting_kind``.
+    private const val KIND_APPROVAL = "approval"
+    private const val KIND_QUESTION = "question"
+
+    /**
+     * How many actions actually survive on the shade.
+     *
+     * The builder accepts three, but the row is laid out by width and the
+     * system's own snooze affordance sits in it: on a Pixel 6 a third action
+     * is dropped without a trace, which is how "Other…" vanished from a
+     * two-option question.  Two is what the approve/deny pair has always
+     * shown, so it is what the option list is allowed to use.
+     */
+    private const val MAX_ACTIONS = 2
 
     // Value of the (API 36.1) Notification.EXTRA_REQUEST_PROMOTED_ONGOING constant,
     // hardcoded because the app compiles against API 36.0 where it is absent.
@@ -56,33 +78,38 @@ object AgentStatusNotifier {
         if (phase != PHASE_RUNNING) return
 
         ensureChannel(manager)
+        val kind = data["awaiting_kind"]
+        val deepLink = telegramDeepLink(
+            data["chat_id"], data["thread_id"], data["bot_username"],
+        )
         val notification = build(
             context = context,
             notificationId = notificationId,
             title = data["title"].orEmpty().ifEmpty { "OpenShrimp" },
             text = data["text"].orEmpty(),
-            awaiting = data["awaiting"] == "1",
-            toolUseId = data["tool_use_id"],
+            toolUseId = if (kind == KIND_APPROVAL) data["awaiting_id"] else null,
+            question = if (kind == KIND_QUESTION) {
+                AgentQuestion.from(data, notificationId, deepLink?.toString())
+            } else {
+                null
+            },
             todoDone = data["todo_done"]?.toIntOrNull(),
             todoTotal = data["todo_total"]?.toIntOrNull(),
-            chatId = data["chat_id"],
-            threadId = data["thread_id"],
-            botUsername = data["bot_username"],
+            deepLink = deepLink,
         )
         manager.notify(notificationId, notification)
         manager.notify(SUMMARY_ID, buildSummary(context))
     }
 
     /**
-     * Optimistically reflect a tapped approve/deny action before the bot's
-     * follow-up ``running`` event (overlay dropped) arrives, so the buttons
-     * disappear at once.
+     * Optimistically strip the overlay's actions before the bot's follow-up
+     * ``running`` event arrives, so a tapped button stops offering itself the
+     * moment it is tapped.
      */
-    fun markResolved(context: Context, notificationId: Int, decision: String) {
+    fun markResolved(context: Context, notificationId: Int, text: String) {
         if (notificationId == 0) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         ensureChannel(manager)
-        val text = if (decision == "approve") "Approved — resuming…" else "Denied — resuming…"
         manager.notify(notificationId, baseBuilder(context, "OpenShrimp", text).build())
     }
 
@@ -91,35 +118,46 @@ object AgentStatusNotifier {
         notificationId: Int,
         title: String,
         text: String,
-        awaiting: Boolean,
         toolUseId: String?,
+        question: AgentQuestion?,
         todoDone: Int?,
         todoTotal: Int?,
-        chatId: String?,
-        threadId: String?,
-        botUsername: String?,
+        deepLink: Uri?,
     ): Notification {
         val builder = baseBuilder(
             context, title, text,
             notificationId = notificationId,
-            chatId = chatId,
-            threadId = threadId,
-            botUsername = botUsername,
+            deepLink = deepLink,
         )
-        if (awaiting && !toolUseId.isNullOrEmpty()) {
+        if (question != null) {
+            // A question is new information rather than a progress tick, so it
+            // takes the tap target, alerts on arrival, and gets the whole
+            // sentence: the collapsed notification would cut it off exactly
+            // where it stops making sense.
+            builder.setCategory(Notification.CATEGORY_MESSAGE)
+                .setOnlyAlertOnce(false)
+                .setContentIntent(sheetIntent(context, question))
+                .setStyle(Notification.BigTextStyle().bigText(text))
+            addQuestionActions(context, builder, question)
+        } else if (!toolUseId.isNullOrEmpty()) {
             builder.addAction(action(context, notificationId, toolUseId, "approve", "Approve"))
             builder.addAction(action(context, notificationId, toolUseId, "deny", "Deny"))
         }
         val hasProgress = todoTotal != null && todoTotal >= 1 && todoDone != null
         if (Build.VERSION.SDK_INT >= 36) {
-            if (hasProgress) {
+            // A notification has one style, and the question already took it:
+            // a truncated question cannot be answered, while the x/y count is
+            // still on the chip.
+            if (hasProgress && question == null) {
                 applyProgressStyle(builder, todoDone!!, todoTotal!!)
             }
             // Glanceable label rendered inside the status-bar chip when promoted.
-            // Permission wins; otherwise show "x/y" progress, else a plain label.
+            // A wait on the human wins; otherwise show "x/y" progress, else a
+            // plain label.
             builder.setShortCriticalText(
                 when {
-                    awaiting -> "Approve?"
+                    question != null -> "Answer?"
+                    !toolUseId.isNullOrEmpty() -> "Approve?"
                     hasProgress -> "$todoDone/$todoTotal"
                     else -> "Running"
                 },
@@ -154,9 +192,7 @@ object AgentStatusNotifier {
         title: String,
         text: String,
         notificationId: Int = 0,
-        chatId: String? = null,
-        threadId: String? = null,
-        botUsername: String? = null,
+        deepLink: Uri? = null,
     ): Notification.Builder {
         val builder = if (Build.VERSION.SDK_INT >= 26) {
             Notification.Builder(context, CHANNEL_ID)
@@ -171,9 +207,7 @@ object AgentStatusNotifier {
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setContentIntent(
-                contentIntent(context, notificationId, chatId, threadId, botUsername),
-            )
+            .setContentIntent(contentIntent(context, notificationId, deepLink))
             .setGroup(GROUP_KEY)
     }
 
@@ -208,6 +242,85 @@ object AgentStatusNotifier {
             .build()
     }
 
+    /**
+     * Offer the question's options in the shade, but only when every one of
+     * them fits [MAX_ACTIONS] — a partial list reads as the whole choice.
+     *
+     * A two-way single-select is then answered in one tap without leaving the
+     * shade, which is the point of pushing the choice at all.  Anything wider,
+     * including any multi-select (one tap cannot express that answer), gets a
+     * single "Answer…" that opens the sheet.
+     *
+     * Free text is the sheet's job and not an action here: a RemoteInput
+     * action is accepted by the builder and then not drawn at all on a
+     * promoted ongoing notification, so the affordance would exist only in
+     * the dump.
+     */
+    private fun addQuestionActions(
+        context: Context,
+        builder: Notification.Builder,
+        question: AgentQuestion,
+    ) {
+        val fitsInline = !question.multiSelect &&
+            question.options.size in 1..MAX_ACTIONS
+        if (!fitsInline) {
+            builder.addAction(
+                notificationAction(
+                    context, "Answer…", android.R.drawable.ic_menu_edit,
+                    sheetIntent(context, question),
+                ),
+            )
+            return
+        }
+        question.options.forEachIndexed { index, option ->
+            // Scalars, not the parcelled question: the receiver needs three
+            // fields, and system_server holds whatever rides here for as long
+            // as the question is open — which has no deadline.
+            val intent = Intent(context, AgentQuestionReceiver::class.java).apply {
+                action = AgentQuestionReceiver.ACTION_OPTION
+                putExtra(AgentQuestionReceiver.EXTRA_QUESTION_ID, question.questionId)
+                putExtra(AgentQuestionReceiver.EXTRA_NOTIFICATION_ID, question.notificationId)
+                putExtra(AgentQuestionReceiver.EXTRA_OPTION_INDEX, index)
+            }
+            builder.addAction(
+                notificationAction(
+                    context, option.label, android.R.drawable.ic_menu_send,
+                    PendingIntent.getBroadcast(
+                        context,
+                        (question.questionId + index).hashCode(),
+                        intent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    ),
+                ),
+            )
+        }
+    }
+
+    private fun notificationAction(
+        context: Context,
+        label: String,
+        iconRes: Int,
+        pendingIntent: PendingIntent,
+    ): Notification.Action = Notification.Action.Builder(
+        Icon.createWithResource(context, iconRes),
+        label,
+        pendingIntent,
+    ).build()
+
+    /** The full-choice surface: a bottom sheet over whatever is on screen. */
+    private fun sheetIntent(context: Context, question: AgentQuestion): PendingIntent {
+        val intent = AgentQuestion.put(
+            Intent(context, QuestionSheetActivity::class.java),
+            question,
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        return PendingIntent.getActivity(
+            context,
+            question.questionId.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
     private fun action(
         context: Context,
         notificationId: Int,
@@ -227,15 +340,16 @@ object AgentStatusNotifier {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val icon = Icon.createWithResource(
+        return notificationAction(
             context,
+            label,
             if (decision == "approve") {
                 android.R.drawable.ic_menu_save
             } else {
                 android.R.drawable.ic_menu_close_clear_cancel
             },
+            pendingIntent,
         )
-        return Notification.Action.Builder(icon, label, pendingIntent).build()
     }
 
     /**
@@ -248,11 +362,8 @@ object AgentStatusNotifier {
     private fun contentIntent(
         context: Context,
         notificationId: Int,
-        chatId: String?,
-        threadId: String?,
-        botUsername: String?,
+        deepLink: Uri?,
     ): PendingIntent {
-        val deepLink = telegramDeepLink(chatId, threadId, botUsername)
         val intent = if (deepLink != null) {
             Intent(Intent.ACTION_VIEW, deepLink)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

@@ -962,6 +962,19 @@ async def _start_agent_task(
             # button-builder downstream already reads as "render no button".
             _base_url: str | None = mini_app_base(config)
 
+            async def clear_agent_overlay() -> None:
+                """Return the Live Update to the plain running state.
+
+                Every overlay is torn down through here, so a wait that ends
+                any way at all — answered, denied, or the turn cancelled under
+                it — leaves the same notification behind.
+                """
+                await notify_agent_status(
+                    context.bot_data, config, db, scope, "running",
+                    title=ctx_name,
+                    todos=_scope_todos.get(scope),
+                )
+
             async def request_approval(
                 tool_name: str,
                 tool_input: dict[str, Any],
@@ -973,8 +986,8 @@ async def _start_agent_task(
                     context.bot_data, config, db, scope, "running",
                     title=ctx_name,
                     text=_permission_text(tool_name, tool_input),
-                    awaiting=True,
-                    tool_use_id=tool_use_id,
+                    awaiting_kind="approval",
+                    awaiting_id=tool_use_id,
                     tool_name=tool_name,
                     todos=_scope_todos.get(scope),
                 )
@@ -992,19 +1005,32 @@ async def _start_agent_task(
                         context_name=ctx_name,
                     )
                 finally:
-                    # Drop the approval overlay: return the Live Update to the
-                    # plain running state once the decision is in.
-                    await notify_agent_status(
-                        context.bot_data, config, db, scope, "running",
-                        title=ctx_name,
-                        todos=_scope_todos.get(scope),
-                    )
+                    await clear_agent_overlay()
 
             async def handle_questions(
                 questions: list[dict[str, Any]],
             ) -> dict[str, str]:
+                async def on_question_open(
+                    question_id: str,
+                    text: str,
+                    options: list[dict[str, Any]],
+                    multi_select: bool,
+                ) -> None:
+                    await notify_agent_status(
+                        context.bot_data, config, db, scope, "running",
+                        title=ctx_name,
+                        text=text,
+                        awaiting_kind="question",
+                        awaiting_id=question_id,
+                        question_options=options,
+                        multi_select=multi_select,
+                        todos=_scope_todos.get(scope),
+                    )
+
                 return await _handle_ask_user_questions(
-                    context.bot, scope, questions, draft_state
+                    context.bot, scope, questions, draft_state,
+                    on_question_open=on_question_open,
+                    on_questions_closed=clear_agent_overlay,
                 )
 
             async def notify_edit(
@@ -1035,8 +1061,8 @@ async def _start_agent_task(
                     context.bot_data, config, db, scope, "running",
                     title=ctx_name,
                     text=status_text,
-                    awaiting=True,
-                    tool_use_id=tool_use_id,
+                    awaiting_kind="approval",
+                    awaiting_id=tool_use_id,
                     tool_name=label,
                     todos=_scope_todos.get(scope),
                 )
@@ -1051,13 +1077,7 @@ async def _start_agent_task(
                         is_monitor=is_monitor,
                     )
                 finally:
-                    # Drop the approval overlay: return the Live Update to the
-                    # plain running state once the decision is in.
-                    await notify_agent_status(
-                        context.bot_data, config, db, scope, "running",
-                        title=ctx_name,
-                        todos=_scope_todos.get(scope),
-                    )
+                    await clear_agent_overlay()
 
             async def request_config_write(
                 tool: str,
@@ -1075,8 +1095,8 @@ async def _start_agent_task(
                     context.bot_data, config, db, scope, "running",
                     title=ctx_name,
                     text=f"Approve a change to config.yaml ({tool})?",
-                    awaiting=True,
-                    tool_use_id=tool_use_id,
+                    awaiting_kind="approval",
+                    awaiting_id=tool_use_id,
                     tool_name=tool,
                     todos=_scope_todos.get(scope),
                 )
@@ -1092,11 +1112,7 @@ async def _start_agent_task(
                         scope=scope,
                     )
                 finally:
-                    await notify_agent_status(
-                        context.bot_data, config, db, scope, "running",
-                        title=ctx_name,
-                        todos=_scope_todos.get(scope),
-                    )
+                    await clear_agent_overlay()
 
             # Mutable container for the latest task checklist.
             # Preserved across stream_response iterations so the pinned

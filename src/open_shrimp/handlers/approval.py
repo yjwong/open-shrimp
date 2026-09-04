@@ -62,6 +62,45 @@ def _resolve_policy(
 # ---------------------------------------------------------------------------
 
 
+async def resolve_approval_from_device(
+    tool_use_id: str, approve: bool,
+) -> bool:
+    """Resolve a pending approval on behalf of the Android companion.
+
+    Returns ``False`` when the card is already gone — answered in Telegram
+    first, or the turn ended under it.
+
+    Each card sender registers one future under its own approve and deny
+    callback keys, and the phone knows the ``tool_use_id`` and nothing else,
+    so every prefix is probed rather than named: a sender missing from
+    ``APPROVE_CALLBACK_PREFIXES`` is one the phone can display and never
+    answer.  Lives here, with the senders and the key format, so the HTTP
+    layer does not have to know either.
+    """
+    from open_shrimp.handlers.state import (
+        APPROVE_CALLBACK_PREFIXES,
+        RESOLVED_VIA_ANDROID,
+        STANDARD_APPROVE_PREFIX,
+        _approval_futures,
+        _approval_resolved_via,
+    )
+
+    for prefix in APPROVE_CALLBACK_PREFIXES:
+        future = _approval_futures.get(f"{prefix}{tool_use_id}")
+        if future is None:
+            continue
+        if future.done():
+            return False
+        # The host-escape and config-write flows edit their own message
+        # unconditionally and never read ``_approval_resolved_via``, so only
+        # the standard path needs the "resolved on phone" marker.
+        if prefix == STANDARD_APPROVE_PREFIX:
+            _approval_resolved_via[tool_use_id] = RESOLVED_VIA_ANDROID
+        future.set_result(approve)
+        return True
+    return False
+
+
 async def _close_card(
     bot: Bot, chat_id: int, message_id: int, text: str,
 ) -> None:

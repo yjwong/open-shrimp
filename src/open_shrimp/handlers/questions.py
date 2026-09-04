@@ -1,16 +1,25 @@
-"""AskUserQuestion handling via Telegram inline keyboards."""
+"""AskUserQuestion handling via Telegram inline keyboards.
+
+The Telegram card is one of two ways to answer.  The Android companion
+renders the same question from the agent-status push and answers it by
+option index over ``/api/agent/questions/{question_id}``; both paths
+resolve the one :class:`_QuestionState` future, so the answer the agent
+receives is identical whichever surface produced it.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from open_shrimp.config import Config
 from open_shrimp.db import ChatScope
+from open_shrimp.handlers.approval import _close_card
 from open_shrimp.handlers.state import (
     _QuestionState,
     _pending_other_input,
@@ -22,14 +31,53 @@ from open_shrimp.stream import _DraftState, finalize_and_reset
 
 logger = logging.getLogger(__name__)
 
+# Called once a question's card is up and its state registered, with the id
+# plus the pieces a second surface needs to render the same choice — never the
+# raw tool input, so the AskUserQuestion schema stays this module's business.
+# The agent-status push needs a Config and a database handle that this module
+# has no reason to hold, so the caller supplies the two edges instead.
+QuestionOpened = Callable[
+    [str, str, list[dict[str, Any]], bool], Awaitable[None]
+]
+QuestionsClosed = Callable[[], Awaitable[None]]
+
+
+def option_label(options: list[dict[str, Any]], index: int) -> str:
+    """The label at *index*, or a positional stand-in when it has none.
+
+    The one place the fallback is spelled, because the button, the toast and
+    the answer must all name an option the same way.
+    """
+    return options[index].get("label", f"Option {index + 1}")
+
+
+def format_answer(
+    options: list[dict[str, Any]],
+    indexes: Iterable[int],
+    other_texts: Sequence[str],
+) -> str:
+    """Render chosen option positions and free text as the agent's answer.
+
+    Out-of-range positions are dropped rather than raising: the phone
+    answers by index into a list it was pushed, and a stale push must not
+    take the bot down.
+    """
+    labels = [
+        option_label(options, i)
+        for i in sorted(set(indexes))
+        if 0 <= i < len(options)
+    ]
+    labels.extend(other_texts)
+    return ", ".join(labels) if labels else "None selected"
+
 
 def _build_question_keyboard(state: _QuestionState) -> InlineKeyboardMarkup:
     """Build inline keyboard for a question's options."""
     qid = state.question_id
     buttons: list[list[InlineKeyboardButton]] = []
 
-    for i, opt in enumerate(state.options):
-        label = opt.get("label", f"Option {i + 1}")
+    for i in range(len(state.options)):
+        label = option_label(state.options, i)
         if state.multi_select:
             prefix = "\u2713 " if i in state.selected else ""
             cb_data = f"q_toggle:{qid}:{i}"
@@ -78,6 +126,7 @@ async def _send_question_keyboard(
     bot: Bot,
     scope: ChatScope,
     question: dict[str, Any],
+    on_open: QuestionOpened | None = None,
 ) -> str:
     """Present a question via inline keyboard and wait for the user's answer.
 
@@ -96,6 +145,7 @@ async def _send_question_keyboard(
         options=options,
         multi_select=multi_select,
         future=future,
+        bot=bot,
     )
     _question_states[question_id] = state
 
@@ -116,6 +166,16 @@ async def _send_question_keyboard(
     state.message_id = msg.message_id
     state.original_text_md = text
 
+    # Announced only once the card is up and the id is resolvable, so a phone
+    # answering the instant the push lands finds the state it names.
+    if on_open is not None:
+        await on_open(
+            question_id,
+            question.get("question") or question.get("header") or text,
+            options,
+            bool(multi_select),
+        )
+
     try:
         return await future
     finally:
@@ -127,21 +187,67 @@ async def _handle_ask_user_questions(
     scope: ChatScope,
     questions: list[dict[str, Any]],
     draft_state: _DraftState,
+    on_question_open: QuestionOpened | None = None,
+    on_questions_closed: QuestionsClosed | None = None,
 ) -> dict[str, str]:
     """Present AskUserQuestion questions via Telegram and collect answers.
 
     Called from the PreToolUse hook when AskUserQuestion is intercepted.
-    Finalizes any in-progress draft before presenting questions.
+    Finalizes any in-progress draft before presenting questions.  Questions
+    are asked one at a time, and the overlay is torn down once at the end
+    rather than between them: closing per question drops a three-question
+    batch back to "Running" and re-alerts twice on the way through.
     """
     await finalize_and_reset(bot, draft_state)
 
     answers: dict[str, str] = {}
-    for q in questions:
-        question_text = q.get("question", "")
-        answer = await _send_question_keyboard(bot, scope, q)
-        answers[question_text] = answer
+    try:
+        for q in questions:
+            question_text = q.get("question", "")
+            answers[question_text] = await _send_question_keyboard(
+                bot, scope, q, on_open=on_question_open,
+            )
+    finally:
+        if on_questions_closed is not None:
+            await on_questions_closed()
 
     return answers
+
+
+async def resolve_question_from_device(
+    question_id: str,
+    option_indexes: Iterable[int],
+    other_texts: Sequence[str],
+) -> str | None:
+    """Answer a live question from the Android companion.
+
+    Returns the answer handed to the agent, or ``None`` when the question is
+    already gone — answered in Telegram first, or the turn ended under it.
+    """
+    state = _question_states.get(question_id)
+    if state is None or state.future.done():
+        return None
+
+    answer = format_answer(state.options, option_indexes, other_texts)
+    state.future.set_result(answer)
+
+    # The user may have tapped "Other…" in Telegram and still be typing; that
+    # pending input now belongs to a question nobody is waiting on, and left
+    # in place it would swallow their next message to the agent.
+    if _pending_other_input.get(state.scope) == question_id:
+        _pending_other_input.pop(state.scope, None)
+    state.waiting_for_other = False
+
+    # Nothing else will strike the card: the inline-button path edits it from
+    # its own CallbackQuery, and an answer over HTTP has none.
+    if state.bot is not None and state.message_id is not None:
+        await _close_card(
+            state.bot,
+            state.scope.chat_id,
+            state.message_id,
+            state.original_text_md + f"\n\n✅ *Answer:* {escape(answer)}",
+        )
+    return answer
 
 
 async def _complete_other_input(
@@ -225,7 +331,7 @@ async def _handle_question_callback(
         # Single-select: resolve immediately with the selected option label
         option_idx = int(parts[2]) if len(parts) > 2 else 0
         if 0 <= option_idx < len(state.options):
-            label = state.options[option_idx].get("label", f"Option {option_idx + 1}")
+            label = option_label(state.options, option_idx)
             state.future.set_result(label)
             await query.answer(f"Selected: {label}")
 
@@ -264,13 +370,7 @@ async def _handle_question_callback(
 
     if action == "q_done":
         # Multi-select: finalize with all selected options
-        labels: list[str] = []
-        for idx in sorted(state.selected):
-            if 0 <= idx < len(state.options):
-                labels.append(state.options[idx].get("label", f"Option {idx + 1}"))
-        labels.extend(state.other_texts)
-
-        result = ", ".join(labels) if labels else "None selected"
+        result = format_answer(state.options, state.selected, state.other_texts)
         state.future.set_result(result)
         await query.answer(f"Done: {result[:50]}")
 

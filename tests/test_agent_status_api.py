@@ -282,3 +282,232 @@ def test_android_approval_rejects_unsigned_request(tmp_path: Path) -> None:
     finally:
         client.close()
         asyncio.run(db.close())
+
+
+# ---------------------------------------------------------------------------
+# AskUserQuestion: the same Live Update answers a choice, by option position
+# ---------------------------------------------------------------------------
+
+
+class _RecordingBot:
+    """Captures the card edit the phone's answer triggers."""
+
+    def __init__(self) -> None:
+        self.edits: list[dict[str, object]] = []
+
+    async def edit_message_text(self, **kwargs: object) -> None:
+        self.edits.append(kwargs)
+
+
+def _register_question(
+    question_id: str,
+    *,
+    options: list[dict[str, str]],
+    multi_select: bool = False,
+    bot: object = None,
+    message_id: int | None = None,
+) -> "_FakeFuture":
+    from open_shrimp.db import ChatScope
+    from open_shrimp.handlers.state import _QuestionState, _question_states
+
+    future = _FakeFuture()
+    _question_states[question_id] = _QuestionState(
+        question_id=question_id,
+        scope=ChatScope(chat_id=-1001234, thread_id=77),
+        options=options,  # type: ignore[arg-type]
+        multi_select=multi_select,
+        future=future,  # type: ignore[arg-type]
+        bot=bot,
+        message_id=message_id,
+        original_text_md="Which one\\?",
+    )
+    return future
+
+
+def _post_answer(
+    client: TestClient,
+    private_key: ec.EllipticCurvePrivateKey,
+    device_id: str,
+    question_id: str,
+    payload: bytes,
+    nonce: str,
+) -> object:
+    path = f"/api/agent/questions/{question_id}"
+    return client.post(
+        path,
+        content=payload,
+        headers={
+            "content-type": "application/json",
+            **android_headers(
+                private_key,
+                device_id=device_id,
+                method="POST",
+                path=path,
+                body=payload,
+                nonce=nonce,
+            ),
+        },
+    )
+
+
+def test_android_question_answers_by_option_index(tmp_path: Path) -> None:
+    """The phone answers with a position, and the agent hears the label.
+
+    Indexes are the contract precisely so the two surfaces cannot disagree:
+    the label the phone rendered came out of the same list the host resolves
+    against, however the push truncated it for the notification.
+    """
+    from open_shrimp.handlers.state import _question_states
+
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    device_id = "android-question-device"
+    question_id = "q-single"
+    future = _register_question(
+        question_id,
+        options=[{"label": "Merge"}, {"label": "Rebase"}],
+    )
+    try:
+        _pair(client, private_key, device_id)
+        resp = _post_answer(
+            client, private_key, device_id, question_id,
+            b'{"option_indexes":[1],"other_texts":[]}', "nonce-q-single",
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "resolved", "answer": "Rebase"}
+        assert future.result_value == "Rebase"
+    finally:
+        _question_states.pop(question_id, None)
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_android_question_multi_select_joins_options_and_free_text(
+    tmp_path: Path,
+) -> None:
+    from open_shrimp.handlers.state import _question_states
+
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    device_id = "android-question-multi"
+    question_id = "q-multi"
+    future = _register_question(
+        question_id,
+        options=[{"label": "Tests"}, {"label": "Docs"}, {"label": "Types"}],
+        multi_select=True,
+    )
+    try:
+        _pair(client, private_key, device_id)
+        resp = _post_answer(
+            client, private_key, device_id, question_id,
+            b'{"option_indexes":[2,0],"other_texts":["and a changelog"," "]}',
+            "nonce-q-multi",
+        )
+        assert resp.status_code == 200
+        # Sorted by position, then whatever was typed; blank entries dropped.
+        assert future.result_value == "Tests, Types, and a changelog"
+    finally:
+        _question_states.pop(question_id, None)
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_android_question_closes_the_telegram_card(tmp_path: Path) -> None:
+    """An answer over HTTP has no CallbackQuery, so it must retire the card.
+
+    Left alone, the Telegram card keeps offering buttons for a future that
+    is already resolved, and the next tap reports the question expired.
+    """
+    from open_shrimp.handlers.state import _question_states
+
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    device_id = "android-question-card"
+    question_id = "q-card"
+    bot = _RecordingBot()
+    _register_question(
+        question_id,
+        options=[{"label": "Merge"}],
+        bot=bot,
+        message_id=4242,
+    )
+    try:
+        _pair(client, private_key, device_id)
+        resp = _post_answer(
+            client, private_key, device_id, question_id,
+            b'{"option_indexes":[0],"other_texts":[]}', "nonce-q-card",
+        )
+        assert resp.status_code == 200
+        assert len(bot.edits) == 1
+        edit = bot.edits[0]
+        assert edit["chat_id"] == -1001234
+        assert edit["message_id"] == 4242
+        assert edit["reply_markup"] is None
+        assert "Merge" in str(edit["text"])
+    finally:
+        _question_states.pop(question_id, None)
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_android_question_expired_when_answered_in_telegram_first(
+    tmp_path: Path,
+) -> None:
+    from open_shrimp.handlers.state import _question_states
+
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    device_id = "android-question-late"
+    question_id = "q-late"
+    future = _register_question(question_id, options=[{"label": "Merge"}])
+    future.set_result("Merge")
+    try:
+        _pair(client, private_key, device_id)
+        resp = _post_answer(
+            client, private_key, device_id, question_id,
+            b'{"option_indexes":[0],"other_texts":[]}', "nonce-q-late",
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "expired"}
+    finally:
+        _question_states.pop(question_id, None)
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_android_question_rejects_boolean_option_index(tmp_path: Path) -> None:
+    """JSON ``true`` is an int in Python and would silently select option 1."""
+    from open_shrimp.handlers.state import _question_states
+
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    device_id = "android-question-bool"
+    question_id = "q-bool"
+    future = _register_question(
+        question_id, options=[{"label": "Merge"}, {"label": "Rebase"}],
+    )
+    try:
+        _pair(client, private_key, device_id)
+        resp = _post_answer(
+            client, private_key, device_id, question_id,
+            b'{"option_indexes":[true],"other_texts":[]}', "nonce-q-bool",
+        )
+        assert resp.status_code == 400
+        assert future.result_value is None
+    finally:
+        _question_states.pop(question_id, None)
+        client.close()
+        asyncio.run(db.close())
+
+
+def test_android_question_rejects_unsigned_request(tmp_path: Path) -> None:
+    client, db = _make_client(tmp_path)
+    try:
+        resp = client.post(
+            "/api/agent/questions/q-x",
+            json={"option_indexes": [0], "other_texts": []},
+        )
+        assert resp.status_code == 401
+    finally:
+        client.close()
+        asyncio.run(db.close())

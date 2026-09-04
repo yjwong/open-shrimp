@@ -6,4 +6,17 @@
         <item name="colorTertiary">#006b5f</item>
         <item name="android:navigationBarColor">?attr/colorSurface</item>
     </style>
+
+    <!--
+      For QuestionSheetActivity, which draws only a bottom sheet: the window
+      itself must be invisible so the app underneath stays on screen. The sheet
+      brings its own scrim and its own enter animation, so the system's window
+      dim and transition would double up on both.
+    -->
+    <style name="SheetTheme" parent="AppTheme">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
 </resources>
