@@ -65,6 +65,12 @@ DRAFT_INTERVAL_SECONDS = 0.5
 BASH_OUTPUT_MAX_LINES = 50
 # Maximum characters of Bash output to display.
 BASH_OUTPUT_MAX_CHARS = 1500
+# MarkdownV2 suffixes for the terminal states of a Bash header message.  A
+# header carries neither while the command is outstanding: between the agent
+# issuing it and the result arriving it may be queued, waiting on an approval
+# tap that never comes, or executing, and the header claims none of them.
+BASH_NO_OUTPUT_SUFFIX = "\n_No output\\._"
+BASH_INTERRUPTED_SUFFIX = "\n_Interrupted\\._"
 
 # Stored Bash outputs for on-demand reveal via inline keyboard button.
 # Keyed by a unique callback ID, value is the formatted GFM output string.
@@ -144,6 +150,14 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
+    # tool_use_id -> (message_id, icon, label) for a Bash header posted at
+    # invocation time and still awaiting its result.  The render arguments
+    # ride along so the message can be rewritten without re-deriving whether
+    # it came from Bash or host_bash.  Dropped once the result arrives and
+    # the message is edited into its final form.
+    pending_bash_messages: dict[str, tuple[int, str, str]] = field(
+        default_factory=dict
+    )
     # Fields for web_app button fallback in group chats.
     user_id: int = 0
     is_private_chat: bool = True
@@ -465,41 +479,99 @@ def _format_bash_output(
     return f"{header_block}\n{output_block}"
 
 
-async def _send_bash_button(
+def _bash_header_text(
+    tool_input: dict[str, Any], icon: str, label: str,
+) -> str:
+    """Render the Bash header (description + command) as MarkdownV2."""
+    header = _format_bash_header(tool_input, icon=icon, label=label)
+    chunks = gfm_to_telegram(header)
+    return chunks[0] if chunks else ""
+
+
+async def _send_bash_header(
     bot: Bot,
     state: _DraftState,
+    tool_use_id: str,
+    tool_input: dict[str, Any],
+    icon: str = "💻",
+    label: str = "Bash",
+) -> None:
+    """Post the command when the agent issues it, before it runs.
+
+    Finalizes any in-progress draft first to preserve message ordering.
+    ``_finish_bash_message`` edits this message into its final form when the
+    result arrives, so a command that takes a minute appears at second zero
+    rather than at the end.
+    """
+    await finalize_and_reset(bot, state)
+
+    try:
+        msg = await bot.send_message(
+            chat_id=state.chat_id,
+            text=_bash_header_text(tool_input, icon, label),
+            parse_mode="MarkdownV2",
+            disable_notification=True,
+            **state._thread_kwargs,
+        )
+    except Exception as e:
+        if _is_thread_not_found(e):
+            raise
+        logger.exception("Failed to send bash header")
+        return
+
+    state.sent_message_ids.append(msg.message_id)
+    state.pending_bash_messages[tool_use_id] = (msg.message_id, icon, label)
+
+
+async def _finish_bash_message(
+    bot: Bot,
+    state: _DraftState,
+    tool_use_id: str,
     tool_input: dict[str, Any],
     content: str | list[dict[str, Any]] | None,
     icon: str = "💻",
     label: str = "Bash",
 ) -> None:
-    """Send a compact Bash message with a 'Show output' inline button.
+    """Attach the 'Show output' button to a posted header, or note the miss.
 
-    Finalizes any in-progress draft first to preserve message ordering,
-    then sends a standalone message showing the command with an inline
-    keyboard button to reveal the output on demand.
+    Falls back to sending a fresh message when no header went out for this
+    tool_use_id — a failed send, or a result whose invocation never reached
+    this stream.
 
     Background tasks get their "View output" button from the
-    ``TaskStartedMessage`` handler instead.
+    ``TaskStartedMessage`` handler instead, so they end at the header.
     """
-    # Finalize any in-progress draft so the bash button appears in order.
-    await finalize_and_reset(bot, state)
-
-    header = _format_bash_header(tool_input, icon=icon, label=label)
-    header_chunks = gfm_to_telegram(header)
-    header_text = header_chunks[0] if header_chunks else ""
-
+    header_text = _bash_header_text(tool_input, icon, label)
     is_background = bool(tool_input.get("run_in_background"))
-
-    # Check if there's any actual output to show.
     output_text = _extract_bash_output_text(content).strip()
-    if not output_text and not is_background:
-        # No output and not a background task — send header only.
+
+    text = header_text
+    keyboard: InlineKeyboardMarkup | None = None
+    if not is_background:
+        if output_text:
+            # "Show output" reveals the full text on demand, keeping the
+            # chat readable when a command dumps hundreds of lines.
+            callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
+            _bash_output_store[callback_id] = _format_bash_output(
+                tool_input, content, icon=icon, label=label,
+            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "📋 Show output", callback_data=callback_id,
+                )
+            ]])
+        else:
+            text = header_text + BASH_NO_OUTPUT_SUFFIX
+
+    pending = state.pending_bash_messages.pop(tool_use_id, None)
+    if pending is None:
+        await finalize_and_reset(bot, state)
         try:
             msg = await bot.send_message(
                 chat_id=state.chat_id,
-                text=header_text + "\n_No output\\._",
+                text=text,
                 parse_mode="MarkdownV2",
+                reply_markup=keyboard,
                 disable_notification=True,
                 **state._thread_kwargs,
             )
@@ -507,40 +579,48 @@ async def _send_bash_button(
         except Exception as e:
             if _is_thread_not_found(e):
                 raise
-            logger.exception("Failed to send bash header (no output)")
+            logger.exception("Failed to send bash result message")
         return
 
-    # Build keyboard buttons.
-    buttons: list[InlineKeyboardButton] = []
-
-    # "Show output" callback button (for inline reveal).
-    # Skip for background tasks — the inline output is just the
-    # "running in background" message which isn't useful.
-    if output_text and not is_background:
-        callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
-        _bash_output_store[callback_id] = _format_bash_output(
-            tool_input, content, icon=icon, label=label,
-        )
-        buttons.append(
-            InlineKeyboardButton("📋 Show output", callback_data=callback_id)
-        )
-
-    keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
-
     try:
-        msg = await bot.send_message(
+        await bot.edit_message_text(
             chat_id=state.chat_id,
-            text=header_text,
+            message_id=pending[0],
+            text=text,
             parse_mode="MarkdownV2",
             reply_markup=keyboard,
-            disable_notification=True,
-            **state._thread_kwargs,
         )
-        state.sent_message_ids.append(msg.message_id)
     except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return
         if _is_thread_not_found(e):
             raise
-        logger.exception("Failed to send bash button message")
+        logger.exception("Failed to edit bash message with its result")
+
+
+async def _clear_pending_bash_messages(bot: Bot, state: _DraftState) -> None:
+    """Mark headers that never got a result when the stream ends.
+
+    Every tool_use is followed by its result, so a leftover here means the
+    turn was interrupted or errored out before the tool reported back.
+    """
+    for tool_use_id, (message_id, icon, label) in list(
+        state.pending_bash_messages.items()
+    ):
+        tool_info = state.tool_use_map.get(tool_use_id)
+        if tool_info is None:
+            continue
+        try:
+            await bot.edit_message_text(
+                chat_id=state.chat_id,
+                message_id=message_id,
+                text=_bash_header_text(tool_info[1], icon, label)
+                + BASH_INTERRUPTED_SUFFIX,
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            logger.exception("Failed to clear pending bash message")
+    state.pending_bash_messages.clear()
 
 
 async def finalize_and_reset(
@@ -807,6 +887,21 @@ async def stream_response(
                                 policy=p,
                             )
 
+                        # Bash-likes get their own message, posted now so a
+                        # long-running command is visible while it runs and
+                        # edited in place when the result arrives.
+                        if p.is_host_bash(block.name):
+                            icon, label = p.host_bash_render()
+                            await _send_bash_header(
+                                bot, state, block.id, block.input,
+                                icon=icon,
+                                label=label,
+                            )
+                        elif p.is_bash_like(block.name):
+                            await _send_bash_header(
+                                bot, state, block.id, block.input,
+                            )
+
                         # Checklist update: when the tool input carries the
                         # full list, push it to the pinned message directly.
                         # Incremental checklist tools are handled at their
@@ -836,16 +931,16 @@ async def stream_response(
                             name = tool_info[0]
                             if p.is_host_bash(name):
                                 icon, label = p.host_bash_render()
-                                await _send_bash_button(
-                                    bot, state, tool_info[1],
-                                    block.content,
+                                await _finish_bash_message(
+                                    bot, state, block.tool_use_id,
+                                    tool_info[1], block.content,
                                     icon=icon,
                                     label=label,
                                 )
                             elif p.is_bash_like(name):
-                                await _send_bash_button(
-                                    bot, state, tool_info[1],
-                                    block.content,
+                                await _finish_bash_message(
+                                    bot, state, block.tool_use_id,
+                                    tool_info[1], block.content,
                                 )
                             elif p.is_checklist_tool(name):
                                 checklist_result = True
@@ -1085,6 +1180,9 @@ async def stream_response(
         if state.raw_text.strip():
             msg_ids = await _finalize_message(bot, state, silent=False)
             state.sent_message_ids.extend(msg_ids)
+
+        if state.pending_bash_messages:
+            await _clear_pending_bash_messages(bot, state)
 
         # Snapshot the message ids this turn produced for the per-turn
         # backend hook (Backend.on_turn_end).  The handler reads the
