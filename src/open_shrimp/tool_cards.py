@@ -65,6 +65,15 @@ def format_elapsed(elapsed: float, *, subsecond: bool = True) -> str:
     return f"{minutes}m{rest:02d}s"
 
 
+def plural(count: int, noun: str) -> str:
+    """``"1 message"`` / ``"2 messages"`` — the regular case only.
+
+    Any noun whose plural is not a trailing "s" is spelled out at the call
+    site rather than given a table here.
+    """
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
 def summary_row(icon: str, label: str, parts: list[str]) -> str:
     """Assemble a card's summary row: icon, bold label, then the trimmings.
 

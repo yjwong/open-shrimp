@@ -20,6 +20,7 @@ from collections import OrderedDict
 from typing import Any
 
 from telegram import Bot, InlineKeyboardMarkup, Message
+from telegram.error import BadRequest
 from telegram.warnings import PTBUserWarning
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,33 @@ async def edit_message_rich(
         text,
         reply_markup=reply_markup,
     )
+
+
+async def edit_rich_unchanged_ok(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Rewrite a card, treating "already says that" as success.
+
+    Telegram rejects an edit whose body and keyboard both match what is
+    already there, which a refresh button hits every time nothing has moved.
+    Returns False only when the message could not be edited at all, so a
+    caller that needs to fall back to sending a new one can tell the two
+    apart.
+    """
+    try:
+        await edit_rich(
+            bot, chat_id, message_id, text, reply_markup=reply_markup,
+        )
+        return True
+    except BadRequest as exc:
+        return "message is not modified" in str(exc).lower()
+    except Exception:
+        return False
 
 
 async def send_rich_draft(

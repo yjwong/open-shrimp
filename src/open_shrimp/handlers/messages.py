@@ -79,6 +79,8 @@ from open_shrimp.handlers.state import (
     _running_tasks,
     _scope_todos,
     _setup_queues,
+    clear_running_turn,
+    set_running_turn,
     signal_turn_done,
 )
 from open_shrimp.handlers.utils import (
@@ -1466,7 +1468,6 @@ async def _start_agent_task(
                     logger.debug(
                         "Failed to save session on cleanup for scope %s", scope
                     )
-            _running_tasks.pop(scope, None)
+            clear_running_turn(scope)
 
-    task = asyncio.create_task(_run())
-    _running_tasks[scope] = task
+    set_running_turn(scope, asyncio.create_task(_run()))

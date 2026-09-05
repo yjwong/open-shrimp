@@ -51,6 +51,7 @@ from open_shrimp.handlers.commands import (
     handle_context_callback,
     handle_model_callback,
     handle_resume_callback,
+    handle_status_callback,
     login_handler,
     mcp_handler,
     model_handler,
@@ -117,6 +118,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     # /resume session selection
     if await handle_resume_callback(query, data, config, context):
+        return
+
+    # /status card actions (refresh, cancel, clear, pickers)
+    if await handle_status_callback(query, data, config, context):
         return
 
     # /add_dir persistence choice

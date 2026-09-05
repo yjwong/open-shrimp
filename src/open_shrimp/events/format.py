@@ -33,7 +33,3 @@ def stamp_millis(value: object) -> str | None:
         return datetime.fromtimestamp(millis / 1000).strftime(STAMP_FORMAT)
     except (OverflowError, OSError, ValueError):
         return None
-
-
-def plural(count: int) -> str:
-    return f"{count} message" if count == 1 else f"{count} messages"

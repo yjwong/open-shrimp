@@ -27,8 +27,9 @@ from typing import Any
 
 from open_shrimp.config import EventSourceConfig
 from open_shrimp.events.base import DeliveryOutcome, EmitFn
-from open_shrimp.events.format import DATE_CHARS, plural, stamp_millis
+from open_shrimp.events.format import DATE_CHARS, stamp_millis
 from open_shrimp.events.types import Event
+from open_shrimp.tool_cards import plural
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +215,7 @@ def _header_lines(capture: Capture) -> list[str]:
     Being the first line of ``Event.text`` also gives the spawned topic a
     usable name, which the oldest message's opening words would not.
     """
-    first = f"LinkedIn conversation with {capture.title} — {plural(len(capture.lines))}"
+    first = f"LinkedIn conversation with {capture.title} — {plural(len(capture.lines), 'message')}"
     if capture.stamps:
         first += f", {capture.stamps[0]} to {capture.stamps[-1]}"
     lines = [first + "."]
@@ -255,7 +256,7 @@ def render_summary(capture: Capture) -> str:
     Without it the sink would chunk a long thread into a dozen Telegram
     messages in the inbox topic.
     """
-    line = f"Handed over — {plural(len(capture.lines))}"
+    line = f"Handed over — {plural(len(capture.lines), 'message')}"
     if capture.stamps:
         first = capture.stamps[0][:DATE_CHARS]
         last = capture.stamps[-1][:DATE_CHARS]

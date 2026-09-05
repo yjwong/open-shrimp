@@ -7,12 +7,14 @@ from typing import Any
 
 import aiosqlite
 from telegram import Bot, Message, Update
-from telegram.error import BadRequest
 
-from open_shrimp.backend import default_model_label
-from open_shrimp.config import Config, ContextConfig, effective_backend
-from open_shrimp.markdown import escape_rich, escape_rich_inline
-from open_shrimp.rich_message import edit_rich, reply_rich, send_rich
+from open_shrimp.config import Config, ContextConfig
+from open_shrimp.markdown import escape_rich
+from open_shrimp.rich_message import (
+    edit_rich_unchanged_ok,
+    reply_rich,
+    send_rich,
+)
 from open_shrimp.db import (
     ChatScope,
     get_active_context,
@@ -21,11 +23,11 @@ from open_shrimp.db import (
     set_pinned_message_id,
 )
 from open_shrimp.handlers.state import (
-    _DEFAULT_CONTEXT_LIMIT,
     _additional_dir_cache,
     _effort_overrides,
     _model_overrides,
 )
+from open_shrimp.handlers.status_render import build_pinned_status
 from open_shrimp.supervisor import is_supervisor_context, resolve_context
 
 logger = logging.getLogger(__name__)
@@ -79,12 +81,15 @@ async def _get_context_name(
     ``default_context`` can name it.
     """
     # If locked, always use that context regardless of what's saved
+    saved = await get_active_context(db, scope)
     locked = _get_locked_context(scope.chat_id, config)
     if locked:
-        await set_active_context(db, scope, locked)
+        # The write is a durable commit, and this runs on every card render
+        # — including every Refresh tap — so skip it once it already agrees.
+        if saved != locked:
+            await set_active_context(db, scope, locked)
         return locked
 
-    saved = await get_active_context(db, scope)
     if saved and (saved in config.contexts or is_supervisor_context(saved)):
         return saved
 
@@ -322,7 +327,7 @@ async def _cancel_running(scope: ChatScope) -> None:
     import asyncio
 
     from open_shrimp.client_manager import get_session
-    from open_shrimp.handlers.state import _running_tasks
+    from open_shrimp.handlers.state import clear_running_turn
 
     session = get_session(scope)
     if session is not None:
@@ -334,7 +339,7 @@ async def _cancel_running(scope: ChatScope) -> None:
                 "Failed to send interrupt for scope %s", scope, exc_info=True
             )
 
-    task = _running_tasks.pop(scope, None)
+    task = clear_running_turn(scope)
     if task and not task.done():
         task.cancel()
         try:
@@ -342,100 +347,6 @@ async def _cancel_running(scope: ChatScope) -> None:
         except asyncio.CancelledError:
             pass
         logger.info("Cancelled running task for scope %s", scope)
-
-
-def _format_token_count(count: int) -> str:
-    """Format a token count as a human-readable string (e.g. 12.3k, 1.2M)."""
-    if count >= 1_000_000:
-        return f"{count / 1_000_000:.1f}M"
-    if count >= 1_000:
-        return f"{count / 1_000:.1f}k"
-    return str(count)
-
-
-def _build_status_text(
-    ctx_name: str,
-    ctx: ContextConfig,
-    config: Config,
-    model_usage: dict[str, Any] | None = None,
-    turn_usage: dict[str, Any] | None = None,
-    todos: list[dict[str, Any]] | None = None,
-) -> str:
-    """Build the pinned status message body.
-
-    Rows that belong together are joined with ``<br>``: a bare newline inside
-    a rich-message paragraph collapses to a space, which runs the directory
-    into the model and the context size into the cost.
-    """
-    model = ctx.model or default_model_label(effective_backend(ctx, config))
-    blocks = [
-        "<br>".join([
-            f"\U0001f4cc **Active context:** `{ctx_name}`",
-            escape_rich(ctx.description),
-        ]),
-    ]
-    lines = [
-        f"\U0001f4c1 `{ctx.directory}`",
-        f"\U0001f916 `{model}`",
-    ]
-    if ctx.effort:
-        lines.append(f"\U0001f9e0 **Effort:** `{ctx.effort}`")
-    blocks.append("<br>".join(lines))
-
-    usage_lines: list[str] = []
-
-    # Context window usage from per-turn API usage (the last assistant
-    # message).  input_tokens + cache tokens = current context size.
-    if turn_usage:
-        context_window = _DEFAULT_CONTEXT_LIMIT
-        if model_usage:
-            first_model = next(iter(model_usage.values()))
-            context_window = first_model.get("contextWindow", _DEFAULT_CONTEXT_LIMIT)
-
-        # Per-turn usage from the API: input_tokens is non-cached
-        # input, plus the two cache buckets = total context size.
-        total_tokens = (
-            turn_usage.get("input_tokens", 0)
-            + turn_usage.get("cache_creation_input_tokens", 0)
-            + turn_usage.get("cache_read_input_tokens", 0)
-        )
-
-        total_str = _format_token_count(total_tokens)
-        limit_str = _format_token_count(context_window)
-        pct = min(total_tokens / context_window * 100, 100) if context_window > 0 else 0
-
-        usage_lines.append(
-            f"\U0001f4ca **Context:** {total_str} / {limit_str} "
-            f"({pct:.0f}%)"
-        )
-
-    if model_usage:
-        total_cost = sum(m.get("costUSD", 0) for m in model_usage.values())
-        if total_cost > 0:
-            usage_lines.append(f"\U0001f4b0 **Cost:** ${total_cost:.4f}")
-
-    if usage_lines:
-        blocks.append("<br>".join(usage_lines))
-
-    if todos:
-        lines = ["\U0001f4dd **Tasks:**", ""]
-        # Cap at 15 items to avoid hitting Telegram's message length limit.
-        display_todos = todos[:15]
-        for todo in display_todos:
-            status = todo.get("status", "pending")
-            content = escape_rich_inline(todo.get("content", ""))
-            if status == "completed":
-                lines.append(f"- [x] ~~{content}~~")
-            elif status == "in_progress":
-                lines.append(f"- [ ] **{content}**")
-            else:
-                lines.append(f"- [ ] {content}")
-        remaining = len(todos) - len(display_todos)
-        if remaining > 0:
-            lines.append(f"\n*...and {remaining} more*")
-        blocks.append("\n".join(lines))
-
-    return "\n\n".join(blocks)
 
 
 async def _update_pinned_status(
@@ -450,7 +361,7 @@ async def _update_pinned_status(
     todos: list[dict[str, Any]] | None = None,
 ) -> None:
     """Send or update the pinned status message for a scope."""
-    text = _build_status_text(
+    text = build_pinned_status(
         ctx_name, ctx, config, model_usage=model_usage, turn_usage=turn_usage,
         todos=todos,
     )
@@ -458,23 +369,13 @@ async def _update_pinned_status(
 
     # Try to edit the existing pinned message
     if existing_msg_id:
-        try:
-            await edit_rich(bot, scope.chat_id, existing_msg_id, text)
+        if await edit_rich_unchanged_ok(bot, scope.chat_id, existing_msg_id, text):
             return
-        except BadRequest as exc:
-            if "message is not modified" in str(exc).lower():
-                return
-            logger.debug(
-                "Could not edit pinned message %d in scope %s, will send new one",
-                existing_msg_id,
-                scope,
-            )
-        except Exception:
-            logger.debug(
-                "Could not edit pinned message %d in scope %s, will send new one",
-                existing_msg_id,
-                scope,
-            )
+        logger.debug(
+            "Could not edit pinned message %d in scope %s, will send new one",
+            existing_msg_id,
+            scope,
+        )
 
     # Send a new message and pin it
     try:

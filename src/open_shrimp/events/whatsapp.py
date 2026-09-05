@@ -29,8 +29,9 @@ from typing import Any
 
 from open_shrimp.config import EventSourceConfig
 from open_shrimp.events.base import Delivery, DeliveryOutcome, EmitFn
-from open_shrimp.events.format import DATE_CHARS, plural, stamp_millis
+from open_shrimp.events.format import DATE_CHARS, stamp_millis
 from open_shrimp.events.types import Event
+from open_shrimp.tool_cards import plural
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +268,7 @@ def _header_line(
     """
     jid = _text(chat.get("jid")) or "unknown"
     stamps = [stamp for stamp, _ in drawn if stamp]
-    line = f"WhatsApp chat with {chat_label(chat)} ({jid}) — {plural(len(drawn))}"
+    line = f"WhatsApp chat with {chat_label(chat)} ({jid}) — {plural(len(drawn), 'message')}"
     if stamps:
         line += f", {stamps[0]} to {stamps[-1]}"
     line += "."
@@ -300,7 +301,7 @@ def render_summary(chat: dict, rows: list[dict], truncated: bool) -> str:
     """
     drawn = _drawn_rows(chat, rows)
     stamps = [stamp for stamp, _ in drawn if stamp]
-    line = f"Handed over — {plural(len(drawn))}"
+    line = f"Handed over — {plural(len(drawn), 'message')}"
     if stamps:
         first, last = stamps[0][:DATE_CHARS], stamps[-1][:DATE_CHARS]
         line += f", {first}" + (f" → {last}" if last != first else "")

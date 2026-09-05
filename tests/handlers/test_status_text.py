@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from open_shrimp.config import Config, ContextConfig, TelegramConfig
-from open_shrimp.handlers.utils import _build_status_text
+from open_shrimp.handlers.status_render import build_pinned_status
 
 
 def _config(ctx: ContextConfig) -> Config:
@@ -35,7 +35,7 @@ def _ctx(**overrides: object) -> ContextConfig:
 
 def test_rows_carry_explicit_breaks() -> None:
     ctx = _ctx(effort="high")
-    status = _build_status_text(
+    status = build_pinned_status(
         "default", ctx, _config(ctx),
         model_usage={"claude-opus-5": {
             "costUSD": 9.9856, "contextWindow": 1_000_000,
@@ -56,7 +56,7 @@ def test_rows_carry_explicit_breaks() -> None:
 def test_tasks_stay_a_list() -> None:
     """Checklist items are list rows, not <br>-joined text."""
     ctx = _ctx()
-    status = _build_status_text(
+    status = build_pinned_status(
         "default", ctx, _config(ctx),
         todos=[
             {"content": "Write it", "status": "completed"},
@@ -72,7 +72,7 @@ def test_tasks_stay_a_list() -> None:
 @pytest.mark.parametrize("description", ["", "Two\nlines"])
 def test_no_usage_block_without_usage(description: str) -> None:
     ctx = _ctx(description=description)
-    status = _build_status_text("default", ctx, _config(ctx))
+    status = build_pinned_status("default", ctx, _config(ctx))
 
     assert "Context:" not in status
     assert status.count("\n\n") == 1

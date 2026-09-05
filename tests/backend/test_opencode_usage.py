@@ -7,7 +7,7 @@ from open_shrimp.backend.opencode.client import _context_window_from_models
 from open_shrimp.backend.opencode.sse import EventQueueClosed
 from open_shrimp.backend.opencode.translate import _iter_response
 from open_shrimp.config import Config, ContextConfig, TelegramConfig
-from open_shrimp.handlers.utils import _build_status_text
+from open_shrimp.handlers.status_render import build_pinned_status
 
 
 class _FakeQueue:
@@ -87,7 +87,7 @@ async def test_usage_is_normalised_for_status_rendering() -> None:
         default_context="default",
         backend="opencode",
     )
-    status = _build_status_text(
+    status = build_pinned_status(
         "default", ctx, config, result.model_usage, assistant.usage
     )
     assert "32.0k / 400.0k" in status

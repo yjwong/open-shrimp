@@ -11,7 +11,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # ---------------------------------------------------------------------------
 # Forward references (to avoid importing heavy modules at module level)
@@ -25,6 +25,36 @@ from open_shrimp.db import ChatScope
 # Per-scope running asyncio task (for cancellation)
 # ---------------------------------------------------------------------------
 _running_tasks: dict[ChatScope, asyncio.Task[Any]] = {}
+
+#: ``time.monotonic()`` at which each scope's task was created, so ``/status``
+#: can say how long the scope has been busy.  The task carries no start stamp
+#: of its own.  Only :func:`set_running_turn` and :func:`clear_running_turn`
+#: touch this and ``_running_tasks``, so the pair cannot be half-written.
+_run_started_at: dict[ChatScope, float] = {}
+
+
+def set_running_turn(scope: ChatScope, task: asyncio.Task[Any]) -> None:
+    """Record the scope's live task and when it started."""
+    _running_tasks[scope] = task
+    _run_started_at[scope] = time.monotonic()
+
+
+def clear_running_turn(scope: ChatScope) -> asyncio.Task[Any] | None:
+    """Forget the scope's task, returning it so the caller can cancel it."""
+    _run_started_at.pop(scope, None)
+    return _running_tasks.pop(scope, None)
+
+
+def get_run_elapsed(scope: ChatScope) -> float | None:
+    """Seconds since the scope's live task started, or None when idle.
+
+    Measures the task, which spans every message injected into it, not the
+    latest turn — the persistent client keeps one task alive across turns.
+    """
+    if get_running_turn(scope) is None:
+        return None
+    started = _run_started_at.get(scope)
+    return None if started is None else time.monotonic() - started
 
 
 def get_running_turn(scope: ChatScope) -> asyncio.Task[Any] | None:
@@ -83,6 +113,15 @@ _scope_dispatch_locks: dict[ChatScope, asyncio.Lock] = {}
 # ---------------------------------------------------------------------------
 _injectable_sessions: dict[ChatScope, AgentSession] = {}
 
+
+def is_injectable(scope: ChatScope) -> bool:
+    """Whether a live turn will accept another message into it.
+
+    False while a running scope is still in setup — the window the setup
+    queue exists to cover.
+    """
+    return scope in _injectable_sessions
+
 # ---------------------------------------------------------------------------
 # Per-scope queue for messages that arrive during the brief setup phase
 # (before the session is ready for injection).  Drained immediately once
@@ -91,6 +130,11 @@ _injectable_sessions: dict[ChatScope, AgentSession] = {}
 from open_shrimp.agent import FileAttachment
 
 _setup_queues: dict[ChatScope, list[tuple[str, list[FileAttachment]]]] = {}
+
+
+def queued_count(scope: ChatScope) -> int:
+    """How many messages are waiting for the session to become injectable."""
+    return len(_setup_queues.get(scope, ()))
 
 # ---------------------------------------------------------------------------
 # Attachment temp-file paths created by injected messages.  Cleaned up in
@@ -283,6 +327,28 @@ _pending_session_dirs: dict[str, tuple[ChatScope, str, str]] = {}
 _pending_tool_approvals: dict[str, str] = {}
 
 
+class SessionApprovals(NamedTuple):
+    """What ``(scope, context_name)`` has been told to stop asking about."""
+
+    all_edits: bool
+    tool_rules: list[ApprovalRule]
+    directories: set[str]
+
+
+def session_approvals(scope: ChatScope, context_name: str) -> SessionApprovals:
+    """The read-side twin of :func:`clear_session_approvals`.
+
+    One function reads the three containers so a caller outside this module
+    never has to know there are three, or how each is keyed.
+    """
+    key = (scope, context_name)
+    return SessionApprovals(
+        all_edits=key in _edit_approved_sessions,
+        tool_rules=list(_tool_approved_sessions.get(key, ())),
+        directories=set(_session_approved_dirs.get(key, ())),
+    )
+
+
 def clear_session_approvals(scope: ChatScope, context_name: str) -> None:
     """Drop every session-scoped approval for *(scope, context_name)*.
 
@@ -355,6 +421,11 @@ _finished_bg_tasks: dict[ChatScope, dict[str, TrackedTask]] = {}
 #: How many finished tasks a scope remembers.  A task whose notification
 #: never arrives is evicted by the ones behind it rather than kept forever.
 _FINISHED_TASK_MEMORY = 16
+
+
+def active_tasks(scope: ChatScope) -> list[TrackedTask]:
+    """The scope's live background tasks, oldest registration first."""
+    return list(_active_bg_tasks.get(scope, {}).values())
 
 
 def finish_task(scope: ChatScope, task_id: str) -> TrackedTask | None:

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 
 from open_shrimp.mini_app import reply_mini_app
 from open_shrimp.web_url import phone_websocket_base, public_base
@@ -30,8 +30,12 @@ from open_shrimp.config import (
     sandbox_backend,
 )
 from open_shrimp.markdown import escape_rich, escape_rich_inline
-from open_shrimp.rich_message import edit_message_rich, reply_rich
-from open_shrimp.tool_cards import format_elapsed
+from open_shrimp.rich_message import (
+    edit_message_rich,
+    edit_rich_unchanged_ok,
+    reply_rich,
+)
+from open_shrimp.tool_cards import plural
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
 from open_shrimp.backend.factory import default_model_label, get_backend_by_name
 from open_shrimp.android_companion import (
@@ -50,10 +54,30 @@ from open_shrimp.handlers.state import (
     _resume_page_cache,
     _resume_selections,
     _resume_session_cache,
-    _running_tasks,
     _setup_queues,
+    active_tasks,
     clear_session_approvals,
+    get_run_elapsed,
+    get_running_turn,
+    has_pending_approval,
+    is_injectable,
+    queued_count,
     reset_scope,
+    session_approvals,
+)
+from open_shrimp.handlers.status_render import (
+    STATUS_CANCEL,
+    STATUS_CLEAR,
+    STATUS_CLEAR_CONFIRM,
+    STATUS_CONTEXT,
+    STATUS_MODEL,
+    STATUS_PREFIX,
+    STATUS_REFRESH,
+    ScopeStatus,
+    clear_confirm_keyboard,
+    render_status_card,
+    render_unbound_card,
+    task_facts,
 )
 from open_shrimp.handlers.utils import (
     _cancel_running,
@@ -65,9 +89,11 @@ from open_shrimp.handlers.utils import (
     answer_no_context,
     chat_scope_from_message,
     get_backend_for_scope,
+    no_context_text,
     reply_no_context,
     require_context,
 )
+from open_shrimp.sandbox.status import describe_sandbox
 from open_shrimp.supervisor import resolve_context, selectable_contexts
 from open_shrimp.android_push import get_push_sender
 from open_shrimp.security_key.api import (
@@ -293,6 +319,52 @@ async def handle_context_callback(
     return False
 
 
+async def _post_context_picker(
+    message: Message,
+    scope: ChatScope,
+    config: Config,
+    db: aiosqlite.Connection,
+) -> None:
+    """Offer the project picker, or say why this chat cannot switch.
+
+    Shared by ``/context`` with no argument and the status card's Context
+    button, so a locked chat gets the same sentence either way.
+    """
+    locked = _get_locked_context(scope.chat_id, config)
+    if locked:
+        desc = escape_rich(config.contexts[locked].description)
+        await reply_rich(
+            message, f"This chat is locked to context `{locked}` - {desc}",
+        )
+        return
+    current = await _get_context_name(scope, config, db)
+    text, markup = _build_context_page(config, current, page=0)
+    await reply_rich(message, text, reply_markup=markup)
+
+
+async def _post_model_picker(
+    message: Message,
+    scope: ChatScope,
+    config: Config,
+    db: aiosqlite.Connection,
+) -> bool:
+    """Offer the model picker; False when the scope has no context.
+
+    Reads the raw config entry rather than ``_get_context``'s copy, which
+    has any override already merged in — the page shows the override and
+    the context default side by side, so it needs both.
+    """
+    ctx = resolve_context(config, await _get_context_name(scope, config, db))
+    if ctx is None:
+        return False
+    backend = get_backend_by_name(effective_backend(ctx, config))
+    text, markup = _build_model_page(
+        backend, ctx.model, _model_overrides.get(scope),
+    )
+    await reply_rich(message, text, reply_markup=markup)
+    return True
+
+
 async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /context command: list or switch contexts."""
     config: Config = context.bot_data["config"]
@@ -305,17 +377,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     args = message.text.split() if message.text else []
 
     if len(args) < 2:
-        # List contexts as inline keyboard
-        current = await _get_context_name(scope, config, db)
-        locked = _get_locked_context(scope.chat_id, config)
-        if locked:
-            ctx = config.contexts[locked]
-            escaped_name = locked
-            escaped_desc = escape_rich(ctx.description)
-            await reply_rich(message, f"This chat is locked to context `{escaped_name}` - {escaped_desc}")
-        else:
-            text, markup = _build_context_page(config, current, page=0)
-            await reply_rich(message, text, reply_markup=markup)
+        await _post_context_picker(message, scope, config, db)
         return
 
     # Switch context.  The supervisor is offered alongside the projects, so
@@ -365,6 +427,37 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ── /clear ──
 
 
+async def _clear_scope_session(
+    scope: ChatScope,
+    ctx_name: str,
+    ctx: ContextConfig,
+    bot_data: dict[str, Any],
+) -> None:
+    """Reset *scope* to a fresh session and drop the forwards it opened.
+
+    ``reset_scope`` deliberately leaves port forwards alone; a user asking
+    for a clean session wants the tunnels this conversation opened gone too.
+    """
+    db: aiosqlite.Connection = bot_data["db"]
+    await reset_scope(scope, ctx_name, db)
+
+    if not is_sandboxed(ctx):
+        return
+    sandbox_managers = bot_data.get("sandbox_managers") or {}
+    manager = sandbox_managers.get(sandbox_backend(ctx))
+    if manager is None:
+        return
+    active = manager.get_active_sandbox(ctx_name)
+    if active is None or not active.supports_port_forwarding():
+        return
+    try:
+        await asyncio.to_thread(active.cleanup_port_forwards, scope.key)
+    except Exception:
+        logger.exception(
+            "Failed to clean up port forwards on clear for %s", ctx_name,
+        )
+
+
 async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /clear command: start fresh session."""
     config: Config = context.bot_data["config"]
@@ -380,23 +473,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     ctx_name, ctx = resolved
 
-    await reset_scope(scope, ctx_name, db)
-
-    if is_sandboxed(ctx):
-        sandbox_managers = context.bot_data.get("sandbox_managers") or {}
-        manager = sandbox_managers.get(sandbox_backend(ctx))
-        if manager is not None:
-            active = manager.get_active_sandbox(ctx_name)
-            if active is not None and active.supports_port_forwarding():
-                try:
-                    await asyncio.to_thread(
-                        active.cleanup_port_forwards, scope.key,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to clean up port forwards on /clear for %s",
-                        ctx_name,
-                    )
+    await _clear_scope_session(scope, ctx_name, ctx, context.bot_data)
 
     await reply_rich(message, f"Started fresh session in context `{ctx_name}`.")
     await _update_pinned_status(context.bot, scope, ctx_name, ctx, db, config)
@@ -405,62 +482,182 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ── /status ──
 
 
+async def _gather_status(
+    scope: ChatScope,
+    ctx_name: str,
+    ctx: ContextConfig,
+    config: Config,
+    db: aiosqlite.Connection,
+    bot_data: dict[str, Any],
+) -> ScopeStatus:
+    """Collect everything the card shows; the renderer does no I/O."""
+    return ScopeStatus(
+        context_name=ctx_name,
+        ctx=ctx,
+        config=config,
+        session_id=await get_session_id(db, scope, ctx_name),
+        running=get_running_turn(scope) is not None,
+        elapsed=get_run_elapsed(scope),
+        injectable=is_injectable(scope),
+        queued=queued_count(scope),
+        awaiting_approval=has_pending_approval(scope),
+        approvals=session_approvals(scope, ctx_name),
+        sandbox=await describe_sandbox(
+            bot_data.get("sandbox_managers") or {}, ctx_name, ctx, scope.key,
+        ),
+        tasks=active_tasks(scope),
+        model_overridden=scope in _model_overrides,
+        effort_overridden=scope in _effort_overrides,
+    )
+
+
+async def _status_card(
+    scope: ChatScope,
+    config: Config,
+    context: ContextTypes.DEFAULT_TYPE,
+    resolved: tuple[str, ContextConfig] | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """The card for *scope*, bound or not.
+
+    *resolved* lets a caller that just looked the context up hand it over
+    rather than pay a second lookup.
+    """
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if resolved is None:
+        resolved = await _get_context(scope, config, db)
+    if resolved is None:
+        return render_unbound_card(config, no_context_text(config))
+    ctx_name, ctx = resolved
+    status = await _gather_status(
+        scope, ctx_name, ctx, config, db, context.bot_data,
+    )
+    return render_status_card(status, time.monotonic())
+
+
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /status command: show current state."""
     config: Config = context.bot_data["config"]
-    db: aiosqlite.Connection = context.bot_data["db"]
     message = update.effective_message
     if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
         return
 
     scope = chat_scope_from_message(message)
-    resolved = await require_context(message, scope, config, db)
-    if resolved is None:
-        return
-    ctx_name, ctx = resolved
-    session_id = await get_session_id(db, scope, ctx_name)
-    running = scope in _running_tasks and not _running_tasks[scope].done()
-    injectable = scope in _injectable_sessions
-    setup_queued = len(_setup_queues.get(scope, []))
+    text, markup = await _status_card(scope, config, context)
+    await reply_rich(message, text, reply_markup=markup)
 
-    backend_name = effective_backend(ctx, config)
-    model = ctx.model or default_model_label(backend_name)
-    rows = [
-        ("Context", f"`{ctx_name}`"),
-        ("Directory", f"`{ctx.directory}`"),
-        ("Backend", f"`{backend_name}`"),
-        ("Model", f"`{model}`"
-                  + (" (override)" if scope in _model_overrides else "")),
-        ("Effort", f"`{ctx.effort or 'default'}`"
-                   + (" (override)" if scope in _effort_overrides else "")),
-        ("Session", f"`{session_id[:12]}...`" if session_id else "None"),
-        ("Running", "Yes" if running else "No"),
-        ("Injectable", "Yes" if injectable else "No"),
-        ("Setup queued", str(setup_queued)),
-    ]
-    lines = ["| | |", "| :--- | :--- |"]
-    lines.extend(f"| **{key}** | {value} |" for key, value in rows)
 
-    scope_tasks = _active_bg_tasks.get(scope, {})
-    if scope_tasks:
-        now = time.monotonic()
-        lines.append("")
-        lines.append(f"**Background tasks ({len(scope_tasks)})**")
-        lines.append("")
-        lines.append("| Id | Type | Description | Elapsed |")
-        lines.append("| :--- | :--- | :--- | ---: |")
-        for task in scope_tasks.values():
-            duration = format_elapsed(now - task.started_at, subsecond=False)
-            lines.append(
-                f"| `{task.task_id[:12]}` "
-                f"| {escape_rich_inline(task.task_type or 'unknown')} "
-                f"| {escape_rich_inline(task.description or 'N/A')} "
-                f"| {duration} |"
+async def _redraw_status(
+    query: Any,
+    config: Config,
+    context: ContextTypes.DEFAULT_TYPE,
+    notice: str,
+    resolved: tuple[str, ContextConfig] | None = None,
+) -> None:
+    """Rebuild the card in place and answer the tap with *notice*."""
+    scope = chat_scope_from_message(query.message)
+    text, markup = await _status_card(scope, config, context, resolved)
+    if not await edit_rich_unchanged_ok(
+        query.message.get_bot(),
+        query.message.chat_id,
+        query.message.message_id,
+        text,
+        reply_markup=markup,
+    ):
+        logger.debug("Could not redraw status card in scope %s", scope)
+    await query.answer(notice)
+
+
+async def handle_status_callback(
+    query: Any, data: str, config: Config, context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Handle status-card button presses. Returns True if handled."""
+    if not data.startswith(STATUS_PREFIX):
+        return False
+
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if not query.message:
+        await query.answer("Cannot determine chat.")
+        return True
+    scope = chat_scope_from_message(query.message)
+
+    if data == STATUS_CONTEXT:
+        await query.answer()
+        await _post_context_picker(query.message, scope, config, db)
+        return True
+
+    if data == STATUS_MODEL:
+        if not await _post_model_picker(query.message, scope, config, db):
+            await answer_no_context(query, config)
+            return True
+        await query.answer()
+        return True
+
+    if data == STATUS_CANCEL:
+        queued = await _cancel_scope(scope)
+        if queued is None:
+            await _redraw_status(query, config, context, "Nothing running.")
+            return True
+        notice = "Cancelled"
+        if queued:
+            notice += f", cleared {plural(queued, 'queued message')}"
+        await _redraw_status(query, config, context, notice)
+        return True
+
+    if data == STATUS_CLEAR:
+        # Swap in a confirmation rather than resetting on one tap.
+        try:
+            await query.message.edit_reply_markup(
+                reply_markup=clear_confirm_keyboard(),
             )
-    await reply_rich(message, "\n".join(lines))
+        except Exception:
+            logger.debug("Could not show clear confirmation", exc_info=True)
+        await query.answer("Clear this session?")
+        return True
+
+    if data == STATUS_CLEAR_CONFIRM:
+        resolved = await _get_context(scope, config, db)
+        if resolved is None:
+            await answer_no_context(query, config)
+            return True
+        ctx_name, ctx = resolved
+        await _clear_scope_session(scope, ctx_name, ctx, context.bot_data)
+        await _update_pinned_status(
+            context.bot, scope, ctx_name, ctx, db, config,
+        )
+        await _redraw_status(
+            query, config, context, "Session cleared", resolved,
+        )
+        return True
+
+    if data == STATUS_REFRESH:
+        await _redraw_status(query, config, context, "Refreshed")
+        return True
+
+    logger.debug("Unhandled status callback: %s", data)
+    await query.answer()
+    return True
 
 
 # ── /cancel ──
+
+
+async def _cancel_scope(scope: ChatScope) -> int | None:
+    """Tear down *scope*'s live turn; None when there was nothing to stop.
+
+    Returns how many queued messages went with it.  The order is load
+    bearing: the session stops accepting injections before the task is
+    cancelled, so a message racing the cancel cannot be injected into a
+    dying turn.
+    """
+    if get_running_turn(scope) is None:
+        # Nothing is running, but a queue can still be left over from a turn
+        # that died before draining it.
+        _setup_queues.pop(scope, None)
+        return None
+    queued = len(_setup_queues.pop(scope, []))
+    _injectable_sessions.pop(scope, None)
+    await _cancel_running(scope)
+    return queued
 
 
 async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -471,21 +668,15 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     scope = chat_scope_from_message(message)
-    had_running = scope in _running_tasks and not _running_tasks[scope].done()
-    setup_queued = len(_setup_queues.pop(scope, []))
+    queued = await _cancel_scope(scope)
 
-    if had_running:
-        _injectable_sessions.pop(scope, None)
-        await _cancel_running(scope)
-
-    if had_running:
-        parts = ["Cancelled running task"]
-        if setup_queued:
-            parts.append(f"cleared {setup_queued} queued message{'s' if setup_queued != 1 else ''}")
-        text = ". ".join(parts) + "."
-        await reply_rich(message, text)
-    else:
+    if queued is None:
         await reply_rich(message, "Nothing running.")
+        return
+    parts = ["Cancelled running task"]
+    if queued:
+        parts.append(f"cleared {plural(queued, 'queued message')}")
+    await reply_rich(message, ". ".join(parts) + ".")
 
 
 # ── /model ──
@@ -612,10 +803,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     args = message.text.split() if message.text else []
 
     if len(args) < 2:
-        text, markup = _build_model_page(
-            backend, ctx_default_model, current_override
-        )
-        await reply_rich(message, text, reply_markup=markup)
+        await _post_model_picker(message, scope, config, db)
         return
 
     target = args[1]
@@ -2027,13 +2215,11 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "| :--- | :--- | :--- | :--- | ---: |",
     ]
     for task in scope_tasks.values():
-        duration = format_elapsed(now - task.started_at, subsecond=False)
+        short_id, kind, description, elapsed = task_facts(task, now)
         lines.append(
-            f"| `{task.task_id[:12]}` "
-            f"| {escape_rich_inline(task.task_type or 'unknown')} "
-            f"| {escape_rich_inline(task.description or 'No description')} "
+            f"| `{short_id}` | {kind} | {description} "
             f"| {escape_rich_inline(task.last_tool_name or '—')} "
-            f"| {duration} |"
+            f"| {elapsed} |"
         )
 
     lines.append("")
