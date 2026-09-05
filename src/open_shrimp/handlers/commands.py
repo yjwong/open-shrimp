@@ -31,6 +31,7 @@ from open_shrimp.config import (
 )
 from open_shrimp.markdown import escape_rich, escape_rich_inline
 from open_shrimp.rich_message import edit_message_rich, reply_rich
+from open_shrimp.tool_cards import format_elapsed
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
 from open_shrimp.backend.factory import default_model_label, get_backend_by_name
 from open_shrimp.android_companion import (
@@ -449,9 +450,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lines.append("| Id | Type | Description | Elapsed |")
         lines.append("| :--- | :--- | :--- | ---: |")
         for task in scope_tasks.values():
-            elapsed = int(now - task.started_at)
-            minutes, seconds = divmod(elapsed, 60)
-            duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
+            duration = format_elapsed(now - task.started_at, subsecond=False)
             lines.append(
                 f"| `{task.task_id[:12]}` "
                 f"| {escape_rich_inline(task.task_type or 'unknown')} "
@@ -2028,9 +2027,7 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "| :--- | :--- | :--- | :--- | ---: |",
     ]
     for task in scope_tasks.values():
-        elapsed = int(now - task.started_at)
-        minutes, seconds = divmod(elapsed, 60)
-        duration = f"{minutes}m{seconds}s" if minutes else f"{seconds}s"
+        duration = format_elapsed(now - task.started_at, subsecond=False)
         lines.append(
             f"| `{task.task_id[:12]}` "
             f"| {escape_rich_inline(task.task_type or 'unknown')} "

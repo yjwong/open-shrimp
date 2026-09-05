@@ -183,6 +183,15 @@ class TaskProgressMessage(SystemMessage):
 
 @dataclass
 class TaskNotificationMessage(SystemMessage):
+    """A background task reaching a terminal state.
+
+    ``summary`` is the task's final report as the agent wrote it — GFM, as
+    long as it likes.  ``stream.py`` renders it under a collapsible card whose
+    row is built from the description on the matching ``TaskStartedMessage``,
+    so a backend that puts a short label here posts a card whose body repeats
+    its own row.
+    """
+
     task_id: str = ""
     tool_use_id: str | None = None
     output_file: str | None = None

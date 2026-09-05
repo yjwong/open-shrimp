@@ -15,6 +15,7 @@ from typing import Any
 
 from open_shrimp.markdown import (
     escape_rich_inline,
+    gfm_to_rich_text,
     rich_code_block,
     rich_details,
 )
@@ -49,6 +50,30 @@ def truncate_output(text: str) -> tuple[str, bool]:
     if truncated:
         result = "…(truncated)\n" + result
     return result, truncated
+
+
+def format_elapsed(elapsed: float, *, subsecond: bool = True) -> str:
+    """Render a duration for a card's summary row.
+
+    A card reports a finished command, where the tenth separates a cached
+    result from a real one.  A table of tasks still running reports a moving
+    number, so it asks for whole seconds instead.
+    """
+    if elapsed < 60:
+        return f"{elapsed:.1f}s" if subsecond else f"{int(elapsed)}s"
+    minutes, rest = divmod(int(elapsed), 60)
+    return f"{minutes}m{rest:02d}s"
+
+
+def summary_row(icon: str, label: str, parts: list[str]) -> str:
+    """Assemble a card's summary row: icon, bold label, then the trimmings.
+
+    One grammar for every card — an em dash before the trimmings and a middle
+    dot between them — so a Bash card and a task card line up in the same
+    message.  *parts* are already-rendered markup; *label* is literal text.
+    """
+    row = f"{icon} **{escape_rich_inline(label)}**"
+    return f"{row} — {' · '.join(parts)}" if parts else row
 
 
 def tool_summary_row(
@@ -99,14 +124,9 @@ def bash_summary(
     if is_error:
         parts.append("**failed**")
     if elapsed is not None:
-        if elapsed < 60:
-            parts.append(f"{elapsed:.1f}s")
-        else:
-            minutes, rest = divmod(int(elapsed), 60)
-            parts.append(f"{minutes}m{rest:02d}s")
+        parts.append(format_elapsed(elapsed))
 
-    row = f"{icon} **{escape_rich_inline(label)}**"
-    return f"{row} — {' · '.join(parts)}" if parts else row
+    return summary_row(icon, label, parts)
 
 
 def bash_card(
@@ -134,3 +154,38 @@ def bash_card(
     if note:
         body_parts.append(note)
     return rich_details(summary, "\n\n".join(body_parts), open=open)
+
+
+def task_report_card(
+    description: str | None,
+    report: str | None,
+    *,
+    status: str | None = None,
+    elapsed: float | None = None,
+) -> str:
+    """Render a finished background task as a collapsible card.
+
+    The report is the subagent's whole final message — findings, file lists,
+    reasoning — so it goes under the chevron and the row carries only which
+    task finished.  It is the agent's own GFM, so it is converted rather than
+    escaped: a heading renders as a heading instead of printing its hashes.
+
+    Every terminal status other than ``completed`` reads as a failure, so a
+    backend that spells one of them ``error`` or ``killed`` needs no entry
+    here.
+    """
+    is_error = (status or "completed").lower() != "completed"
+    parts: list[str] = []
+    if is_error and status:
+        parts.append(f"**{escape_rich_inline(status)}**")
+    if elapsed is not None:
+        parts.append(format_elapsed(elapsed))
+    row = summary_row(
+        "⚠️" if is_error else "📋",
+        (description or "").strip() or "Background task",
+        parts,
+    )
+
+    if not report:
+        return row
+    return rich_details(row, gfm_to_rich_text(report))

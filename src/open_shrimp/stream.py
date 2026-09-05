@@ -60,6 +60,7 @@ from open_shrimp.tool_cards import (
     BASH_INTERRUPTED_NOTE,
     BASH_NO_OUTPUT_NOTE,
     bash_card,
+    task_report_card,
     tool_summary_row,
     truncate_output,
 )
@@ -988,8 +989,6 @@ async def stream_response(
                     )
                     # Track the task.
                     if scope is not None:
-                        import time
-
                         from open_shrimp.handlers.state import (
                             TrackedTask,
                             _active_bg_tasks,
@@ -1062,31 +1061,46 @@ async def stream_response(
                             )
 
                 elif isinstance(event, TaskNotificationMessage):
+                    # The summary is the subagent's whole report, so the line
+                    # says how much came back rather than pasting it into the
+                    # log on every completion.
                     logger.info(
-                        "Background task %s %s for chat %d: %s",
+                        "Background task %s %s for chat %d: %d chars",
                         event.task_id,
                         event.status,
                         state.chat_id,
-                        event.summary,
+                        len(event.summary or ""),
                     )
-                    # Remove from tracking state.
+                    # Remove from tracking state, keeping what the card
+                    # needs: the tracker holds the description and the start
+                    # stamp, and the notification carries neither.
+                    tracked = None
                     if scope is not None:
                         from open_shrimp.handlers.state import _active_bg_tasks
 
                         scope_tasks = _active_bg_tasks.get(scope)
                         if scope_tasks:
-                            scope_tasks.pop(event.task_id, None)
+                            tracked = scope_tasks.pop(event.task_id, None)
                             if not scope_tasks:
                                 _active_bg_tasks.pop(scope, None)
+                    description = tracked.description if tracked else None
+                    elapsed = (
+                        time.monotonic() - tracked.started_at if tracked else None
+                    )
                     await finalize_and_reset(bot, state)
                     try:
-                        summary = event.summary or event.status
-                        await send_rich(
-                            bot, state.chat_id,
-                            f"📋 {escape_rich(summary)}",
-                            thread_id=state.thread_id,
-                            disable_notification=True,
+                        card = task_report_card(
+                            description,
+                            event.summary,
+                            status=event.status,
+                            elapsed=elapsed,
                         )
+                        for chunk in split_message(card):
+                            await send_rich(
+                                bot, state.chat_id, chunk,
+                                thread_id=state.thread_id,
+                                disable_notification=True,
+                            )
                     except Exception as e:
                         if _is_thread_not_found(e):
                             raise

@@ -317,6 +317,54 @@ def _is_inside_code_block(text: str, position: int) -> tuple[bool, str]:
     return inside, fence
 
 
+#: What a continuation chunk adds to the summary row it repeats.
+_DETAILS_CONTINUED = " (cont.)"
+
+#: How much of a summary row a continuation repeats.  The cap keeps the
+#: reopening tag far shorter than the progress each split makes, so a card
+#: with a long row cannot grow its own continuations faster than the body
+#: shrinks.
+_DETAILS_SUMMARY_MAX = 200
+
+#: A card's opening tag with its summary row, or a card's closing tag.
+_DETAILS_TAG_RE = re.compile(
+    r"<details(?P<expanded> open)?><summary>(?P<summary>.*?)</summary>"
+    r"|(?P<close></details>)",
+    re.DOTALL,
+)
+
+
+def _open_details(text: str, position: int) -> str | None:
+    """The tag that reopens a card left open at *position*, or None.
+
+    A ``<details>`` cut in half leaves the first chunk holding an unclosed
+    block and the second opening with a bare body.  The continuation repeats
+    the summary row so the reader can tell what the rest belongs to.
+    """
+    depth = 0
+    summary = ""
+    expanded = False
+    for match in _DETAILS_TAG_RE.finditer(text, 0, position):
+        if match.group("close"):
+            depth = max(0, depth - 1)
+        else:
+            depth += 1
+            summary = match.group("summary") or ""
+            expanded = bool(match.group("expanded"))
+    if depth <= 0:
+        return None
+    tag = "<details open>" if expanded else "<details>"
+    # A card can span three chunks; the mark is idempotent so the third
+    # summary reads "… (cont.)" rather than "… (cont.) (cont.)".
+    if not summary.endswith(_DETAILS_CONTINUED):
+        # An over-long row is dropped rather than clipped: a cut through
+        # "**" would leave the continuation's bold unterminated.
+        if len(summary) > _DETAILS_SUMMARY_MAX:
+            summary = "…"
+        summary += _DETAILS_CONTINUED
+    return f"{tag}<summary>{summary}</summary>"
+
+
 def _back_off_escape(text: str, split_at: int) -> int:
     """Move a split point off the middle of a backslash escape sequence.
 
@@ -354,12 +402,19 @@ def _back_off_markup(text: str, split_at: int) -> int:
     return split_at
 
 
+#: Room held back from every split for the closers a chunk may have to grow:
+#: a fence (4) and a card's closing tag (12).  Without it a chunk that lands
+#: exactly on the limit overflows it by closing what it opened.
+_SPLIT_RESERVE = 16
+
+
 def split_message(text: str, max_length: int = RICH_MAX_LENGTH) -> list[str]:
     """Split a rendered message into chunks of at most max_length characters.
 
-    Splits at natural boundaries: paragraph breaks, then line breaks.
-    Code-block-aware: if the split point falls inside a fenced code block,
-    the current chunk is closed with ``` and the next chunk reopens the fence.
+    Splits at natural boundaries: paragraph breaks, then line breaks.  A split
+    that lands inside a fenced code block or a ``<details>`` card closes it in
+    the chunk and reopens it in the next, so neither half carries a construct
+    the other half terminates.
     """
     text = text.strip()
     if not text:
@@ -369,20 +424,24 @@ def split_message(text: str, max_length: int = RICH_MAX_LENGTH) -> list[str]:
 
     chunks: list[str] = []
     remaining = text
+    budget = max_length - _SPLIT_RESERVE
 
     while remaining:
         if len(remaining) <= max_length:
             chunks.append(remaining.strip())
             break
 
-        # Try to split at a paragraph boundary (double newline)
-        split_at = remaining.rfind("\n\n", 0, max_length)
-        if split_at <= 0:
-            # Try to split at a single newline
-            split_at = remaining.rfind("\n", 0, max_length)
-        if split_at <= 0:
-            # Last resort: split at max_length
-            split_at = max_length
+        # Try a paragraph boundary (double newline), then a line break, then
+        # the budget.  A boundary in the first half of the budget is refused
+        # rather than taken: a card whose body is one long paragraph has its
+        # only blank line right after the summary row, and splitting there
+        # ships a chunk holding nothing but the header — which the next chunk
+        # then reopens, so the loop never shortens what is left.
+        split_at = remaining.rfind("\n\n", 0, budget)
+        if split_at < budget // 2:
+            split_at = remaining.rfind("\n", 0, budget)
+        if split_at < budget // 2:
+            split_at = budget
 
         split_at = _back_off_markup(remaining, _back_off_escape(remaining, split_at))
         chunk = remaining[:split_at].strip()
@@ -395,10 +454,25 @@ def split_message(text: str, max_length: int = RICH_MAX_LENGTH) -> list[str]:
             chunk = chunk + "\n```"
             rest = fence + "\n" + rest
 
+        # …and inside a card, whose closing tag goes outside the fence's
+        reopen = _open_details(remaining, split_at)
+        if reopen:
+            chunk = chunk + "\n\n</details>"
+            rest = reopen + "\n\n" + rest
+
         chunks.append(chunk)
         remaining = rest
 
     return [c for c in chunks if c]
+
+
+#: One parser for the process.  Building it compiles the block and inline
+#: scanners and registers three plugins; parse state is per-call, so the
+#: single-threaded event loop can share the instance across every message.
+_MARKDOWN = mistune.create_markdown(
+    renderer=RichRenderer(),
+    plugins=["strikethrough", "table", "task_lists"],
+)
 
 
 def gfm_to_rich_text(text: str) -> str:
@@ -407,11 +481,7 @@ def gfm_to_rich_text(text: str) -> str:
     Callers that assemble several converted runs into one body need the whole
     rendering; ``gfm_to_rich`` splits it for sending.
     """
-    md = mistune.create_markdown(
-        renderer=RichRenderer(),
-        plugins=["strikethrough", "table", "task_lists"],
-    )
-    return md(text).strip()
+    return _MARKDOWN(text).strip()
 
 
 def gfm_to_rich(text: str) -> list[str]:

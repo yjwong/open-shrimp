@@ -20,6 +20,7 @@ from open_shrimp.markdown import (
     gfm_to_rich,
     rich_code_block,
     rich_details,
+    split_message,
 )
 
 # Telegram drops the backslash of any "\x" pair and takes x literally.
@@ -220,3 +221,41 @@ def test_rich_details_wraps_an_escaped_body() -> None:
 
 def test_rich_details_can_start_open() -> None:
     assert rich_details("s", "b", open=True).startswith("<details open>")
+
+
+def test_a_split_card_closes_and_reopens() -> None:
+    body = "\n\n".join(f"finding {i}" for i in range(6000))
+    chunks = split_message(rich_details("📋 **Review**", body))
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= RICH_MAX_LENGTH
+        assert chunk.count("<details") == chunk.count("</details>")
+    assert chunks[0].startswith("<details><summary>📋 **Review**</summary>")
+    assert chunks[1].startswith("<details><summary>📋 **Review** (cont.)</summary>")
+
+
+def test_a_card_split_inside_a_fence_closes_both() -> None:
+    body = rich_code_block("\n".join(f"line {i}" for i in range(6000)))
+    chunks = split_message(rich_details("💻 **Bash**", body))
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.count("```") % 2 == 0
+        assert chunk.count("<details") == chunk.count("</details>")
+    # The fence closes inside the card it was opened in.
+    assert chunks[0].endswith("```\n\n</details>")
+
+
+def test_an_expanded_card_reopens_expanded() -> None:
+    body = "\n\n".join(f"line {i}" for i in range(6000))
+    chunks = split_message(rich_details("💻 **Bash**", body, open=True))
+
+    assert chunks[1].startswith("<details open><summary>")
+
+
+def test_text_outside_a_card_reopens_nothing() -> None:
+    chunks = split_message(rich_details("s", "b") + "\n\n" + ("word " * 20000))
+
+    assert len(chunks) > 1
+    assert "(cont.)" not in "".join(chunks[1:])

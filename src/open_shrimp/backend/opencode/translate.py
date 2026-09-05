@@ -664,7 +664,10 @@ def _taskpart_messages(
                     tool_use_id=call_id,
                     output_file=None,
                     status="completed",
-                    summary=_task_description(raw_input),
+                    # ``summary`` carries the report the child wrote; the row
+                    # above it is built from the description task_started
+                    # already sent.
+                    summary=output if isinstance(output, str) else None,
                     session_id=parent_session_id,
                 )
             )
@@ -696,7 +699,9 @@ def _taskpart_messages(
                     tool_use_id=call_id,
                     output_file=None,
                     status="error",
-                    summary=_task_description(raw_input) or "subagent failed",
+                    # The failure text is the report here.  With none, the
+                    # card is the row alone, which already reads ⚠️ error.
+                    summary=err if isinstance(err, str) else None,
                     session_id=parent_session_id,
                 )
             )

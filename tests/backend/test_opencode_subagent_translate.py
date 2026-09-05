@@ -93,6 +93,9 @@ async def test_task_part_emits_started_and_notification():
     assert len(notifs) == 1
     assert notifs[0].task_id == "child-1"
     assert notifs[0].status == "completed"
+    # The report, not the label: stream.py folds it into the card whose row
+    # already says "summarise the repo".
+    assert notifs[0].summary == "all done"
 
     results = [
         b
