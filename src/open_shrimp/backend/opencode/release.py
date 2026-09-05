@@ -22,17 +22,17 @@ import platform
 import shlex
 
 #: The opencode release every host and every guest installs.
-OPENCODE_VERSION = "1.18.23"
+OPENCODE_VERSION = "1.18.29"
 
 #: sha256 of each release asset, keyed by the platform slug in its name.
 #: Regenerate with ``scripts/bump_opencode.py``; never edit by hand.
 OPENCODE_CHECKSUMS: dict[str, str] = {
-    "linux-x64": "ab7015cd8113e011a461f30a0c2b77d8299a144ff688cb62e93e8802835d7288",
-    "linux-arm64": "86d3afaf4e8784f9adab189be2a315c12b27ec40a04b70defbe70595c3cc7c65",
-    "darwin-x64": "6b617da75b5773836fcdc7247d7ea2bd39aec942a58b89a041bafb3d4d2a8c23",
-    "darwin-arm64": "373cf36673836f2ce8847295a0bb2cd2447d03c769b44d84185916bd471b4274",
-    "windows-x64": "a2fe9e8c2d074d26975024d494927b966680b3efdc3e0377eadb9afb05f7e191",
-    "windows-arm64": "3ff8c553ae270e89499808fbce7635535762f75cfaae4b0bb818b10d7eb18d9b",
+    "linux-x64": "ea800b7ff56226b70952126c9fc1e2517ca4c4b5682fd9d3f9e87449697a1194",
+    "linux-arm64": "70baf769395ca4e7a68924026530c390eace194f3b7e4919d4efcb2aa2eed3c0",
+    "darwin-x64": "9858853e7bacdbbd22c2d70c377e009dc4b354dd04f5588705411e7afb89fd2d",
+    "darwin-arm64": "fe764f7f360c584a83e18dd5f23fb1a6b2725f5ee8854b0252fe558f7798e946",
+    "windows-x64": "b32618aa3d1415f6e4f473aec248edef25759203fb707d7d968359d86d4a35ee",
+    "windows-arm64": "f953f0f0f5263d723ff4ea6141d5aa094d4941cf2f5d9179fc66eb0eb2d9524b",
 }
 
 _DOWNLOAD_BASE = "https://github.com/anomalyco/opencode/releases/download"
