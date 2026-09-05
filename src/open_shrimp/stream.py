@@ -262,9 +262,12 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
     full_text = _build_full_text(state)
     if state.thinking:
         # <tg-thinking> renders in a draft and nowhere else, which is exactly
-        # the lifetime reasoning text should have.
+        # the lifetime reasoning text should have.  It goes last because the
+        # buffer above it is already written: reasoning that arrives between
+        # two tool calls is newer than the answer's opening paragraph, and
+        # putting it on top pushes a whole turn of rows down under it.
         thinking = f"<tg-thinking>{escape_rich(state.thinking)}</tg-thinking>"
-        full_text = f"{thinking}\n\n{full_text}" if full_text else thinking
+        full_text = f"{full_text}\n\n{thinking}" if full_text else thinking
     if not full_text.strip():
         return
 

@@ -47,7 +47,7 @@ class _RecordingBot:
         if endpoint == "editMessageText":
             self.calls.append(("edit", recorded))
             return None
-        if endpoint == "sendMessageDraft":
+        if endpoint == "sendRichMessageDraft":
             self.calls.append(("draft", recorded))
             return None
         return None
@@ -336,3 +336,21 @@ async def test_a_failed_read_folds_its_reason() -> None:
     body = bot.sends[0]["text"]
     assert "<details>" in body
     assert "File does not exist." in body
+
+
+@pytest.mark.asyncio
+async def test_reasoning_trails_the_rows_it_follows() -> None:
+    """Reasoning between two tool calls is newer than the opening paragraph."""
+    bot = _RecordingBot()
+    state = _DraftState(chat_id=1)
+    state.thinking = "Now checking the second file."
+    state.append_gfm("Starting the survey.")
+    state.tool_cards["t1"] = state.append_rich("<details><summary>row</summary>x</details>")
+
+    from open_shrimp.stream import _send_draft
+
+    await _send_draft(bot, state)
+
+    body = [kw["text"] for kind, kw in bot.calls if kind == "draft"][0]
+    assert body.index("Starting the survey.") < body.index("<tg-thinking>")
+    assert body.index("<details>") < body.index("<tg-thinking>")
