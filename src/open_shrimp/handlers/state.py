@@ -344,6 +344,60 @@ class TrackedTask:
 
 _active_bg_tasks: dict[ChatScope, dict[str, TrackedTask]] = {}
 
+#: Tasks that have reported a terminal state but whose notification has not
+#: arrived yet.  The CLI sends the terminal ``task_updated`` a few
+#: milliseconds ahead of the ``task_notification`` carrying the report, so a
+#: task dropped on the patch would leave the report's card with no
+#: description and no elapsed time.  A task lands here on the first of the
+#: two and is taken by the second.
+_finished_bg_tasks: dict[ChatScope, dict[str, TrackedTask]] = {}
+
+#: How many finished tasks a scope remembers.  A task whose notification
+#: never arrives is evicted by the ones behind it rather than kept forever.
+_FINISHED_TASK_MEMORY = 16
+
+
+def finish_task(scope: ChatScope, task_id: str) -> TrackedTask | None:
+    """Move a task out of the active set, holding it for its notification.
+
+    ``/tasks`` stops listing it immediately — it is finished — while the
+    card the notification renders can still read its description and start
+    stamp.
+    """
+    tracked = take_task(scope, task_id)
+    if tracked is None:
+        return None
+    finished = _finished_bg_tasks.setdefault(scope, {})
+    finished[task_id] = tracked
+    while len(finished) > _FINISHED_TASK_MEMORY:
+        finished.pop(next(iter(finished)))
+    return tracked
+
+
+def take_task(scope: ChatScope, task_id: str) -> TrackedTask | None:
+    """Pop a task from the active set, dropping an emptied scope with it."""
+    scope_tasks = _active_bg_tasks.get(scope)
+    if scope_tasks is None:
+        return None
+    tracked = scope_tasks.pop(task_id, None)
+    if not scope_tasks:
+        _active_bg_tasks.pop(scope, None)
+    return tracked
+
+
+def take_finished_task(scope: ChatScope, task_id: str) -> TrackedTask | None:
+    """Take a task whichever of its two terminal messages arrived first."""
+    tracked = take_task(scope, task_id)
+    if tracked is not None:
+        return tracked
+    finished = _finished_bg_tasks.get(scope)
+    if finished is None:
+        return None
+    tracked = finished.pop(task_id, None)
+    if not finished:
+        _finished_bg_tasks.pop(scope, None)
+    return tracked
+
 
 def is_task_active(task_id: str) -> bool:
     """Check whether a background task is still active (any scope)."""
@@ -382,12 +436,7 @@ def unregister_transient_task(scope: ChatScope, task_id: str) -> None:
     Drops the scope entry entirely once its last task is gone, matching the
     interactive stream's cleanup so ``is_task_active`` stays accurate.
     """
-    scope_tasks = _active_bg_tasks.get(scope)
-    if scope_tasks is None:
-        return
-    scope_tasks.pop(task_id, None)
-    if not scope_tasks:
-        _active_bg_tasks.pop(scope, None)
+    take_task(scope, task_id)
 
 
 async def reset_scope(scope: ChatScope, ctx_name: str, db: Any) -> None:
@@ -413,6 +462,7 @@ async def reset_scope(scope: ChatScope, ctx_name: str, db: Any) -> None:
     _model_overrides.pop(scope, None)
     _effort_overrides.pop(scope, None)
     _active_bg_tasks.pop(scope, None)
+    _finished_bg_tasks.pop(scope, None)
 
 
 # ---------------------------------------------------------------------------

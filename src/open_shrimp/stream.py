@@ -1071,18 +1071,18 @@ async def stream_response(
                         state.chat_id,
                         len(event.summary or ""),
                     )
-                    # Remove from tracking state, keeping what the card
-                    # needs: the tracker holds the description and the start
-                    # stamp, and the notification carries neither.
+                    # Take the tracker from wherever it is: a terminal
+                    # task_updated for the same task can land first and park
+                    # it in the finished set.  It holds the description and
+                    # the start stamp, which the notification carries
+                    # neither of.
                     tracked = None
                     if scope is not None:
-                        from open_shrimp.handlers.state import _active_bg_tasks
+                        from open_shrimp.handlers.state import (
+                            take_finished_task,
+                        )
 
-                        scope_tasks = _active_bg_tasks.get(scope)
-                        if scope_tasks:
-                            tracked = scope_tasks.pop(event.task_id, None)
-                            if not scope_tasks:
-                                _active_bg_tasks.pop(scope, None)
+                        tracked = take_finished_task(scope, event.task_id)
                     description = tracked.description if tracked else None
                     elapsed = (
                         time.monotonic() - tracked.started_at if tracked else None
@@ -1111,20 +1111,19 @@ async def stream_response(
                 elif isinstance(event, TaskUpdatedMessage):
                     # A task's terminal state can arrive only as a
                     # task_updated patch with no accompanying notification
-                    # (e.g. killed via TaskStop). Clear tracking so it does
-                    # not linger in /tasks. Stays silent: a normal completion
-                    # also emits a TaskNotificationMessage, which owns the 📋.
+                    # (e.g. killed via TaskStop), so /tasks stops listing it
+                    # here.  A completion sends both, patch first by a few
+                    # milliseconds, so the tracker moves to the finished set
+                    # rather than being dropped — the notification's card is
+                    # built from it.  Stays silent either way: the
+                    # TaskNotificationMessage owns the 📋.
                     if (
                         event.status in TERMINAL_TASK_STATUSES
                         and scope is not None
                     ):
-                        from open_shrimp.handlers.state import _active_bg_tasks
+                        from open_shrimp.handlers.state import finish_task
 
-                        scope_tasks = _active_bg_tasks.get(scope)
-                        if scope_tasks and event.task_id in scope_tasks:
-                            scope_tasks.pop(event.task_id, None)
-                            if not scope_tasks:
-                                _active_bg_tasks.pop(scope, None)
+                        if finish_task(scope, event.task_id) is not None:
                             logger.info(
                                 "Cleared task %s from tracking on terminal "
                                 "task_updated (%s) for chat %d",

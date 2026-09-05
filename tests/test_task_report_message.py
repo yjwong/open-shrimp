@@ -18,6 +18,7 @@ from open_shrimp.backend.types import (
     ResultMessage,
     TaskNotificationMessage,
     TaskStartedMessage,
+    TaskUpdatedMessage,
 )
 from open_shrimp.db import ChatScope
 from open_shrimp.stream import stream_response
@@ -41,8 +42,8 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return bodies
 
 
-async def _run(summary: str | None) -> None:
-    events = [
+async def _run(summary: str | None, *, patch_first: bool = True) -> None:
+    events: list[Any] = [
         TaskStartedMessage(
             subtype="task_started",
             data={},
@@ -52,6 +53,21 @@ async def _run(summary: str | None) -> None:
             task_type="local_agent",
             session_id="sess-1",
         ),
+    ]
+    if patch_first:
+        # What the CLI actually sends: the terminal patch lands a few
+        # milliseconds ahead of the notification carrying the report.
+        events.append(
+            TaskUpdatedMessage(
+                subtype="task_updated",
+                data={},
+                task_id="task-1",
+                patch={"status": "completed"},
+                status="completed",
+                session_id="sess-1",
+            )
+        )
+    events += [
         TaskNotificationMessage(
             subtype="task_notification",
             data={},
@@ -76,11 +92,32 @@ async def _run(summary: str | None) -> None:
 async def test_the_card_is_built_from_the_started_description(
     sent: list[str],
 ) -> None:
+    """The terminal patch must not carry the description off with it."""
     await _run("## Findings\n\n`store.waiting` mirrors the column.")
 
     assert sent[0] == "⏳ Review efficiency"
     assert sent[1].startswith("<details><summary>📋 **Review efficiency** — ")
     assert "### Findings" in sent[1]
+
+
+@pytest.mark.asyncio
+async def test_a_notification_without_a_preceding_patch_reads_the_same(
+    sent: list[str],
+) -> None:
+    await _run("done", patch_first=False)
+
+    assert sent[1].startswith("<details><summary>📋 **Review efficiency** — ")
+
+
+@pytest.mark.asyncio
+async def test_a_finished_task_leaves_the_active_list() -> None:
+    from open_shrimp.handlers.state import _active_bg_tasks, _finished_bg_tasks
+
+    scope = ChatScope(chat_id=1, thread_id=None)
+    await _run("done")
+
+    assert scope not in _active_bg_tasks
+    assert scope not in _finished_bg_tasks
 
 
 @pytest.mark.asyncio
