@@ -1,9 +1,9 @@
 """A live draft has to be refreshed often enough, and sent rarely enough.
 
-Telegram's clients delete a live draft 30 seconds after the last one they
-received, and the server stops accepting them past 20 calls in 5 seconds or
-40 in 30.  Both ends of that window make the draft disappear mid-turn, so
-both are pinned here.
+Telegram's clients delete a live draft ``message_typing_draft_ttl`` seconds
+after the last one they received, and the server stops accepting them past 20
+calls in 5 seconds or 40 in 30.  Both ends of that window make the draft
+disappear mid-turn, so both are pinned here.
 """
 
 from __future__ import annotations
@@ -19,11 +19,13 @@ from telegram.error import RetryAfter
 from open_shrimp import rich_message
 from open_shrimp.rich_message import (
     DRAFT_TTL_SECONDS,
+    _DRAFT_MIN_INTERVAL,
     _draft_budgets,
     draft_budget_spent,
     send_rich_draft,
 )
 from open_shrimp.stream import (
+    DRAFT_INTERVAL_SECONDS,
     DRAFT_KEEPALIVE_SECONDS,
     _draft_is_stale,
     _DraftState,
@@ -63,25 +65,31 @@ def test_twenty_calls_in_five_seconds_defers_the_twenty_first() -> None:
 def test_the_thirty_second_tier_binds_a_half_second_cadence() -> None:
     """A 0.5s flush is 60 calls in 30 seconds, which the 40-call tier stops."""
     _spend(1, [100.0 + i * 0.5 for i in range(40)])
-    assert _draft_budgets[1].spent(119.5) is True
+    # Asked far enough past the last send that pacing is not what refuses it.
+    assert _draft_budgets[1].spent(120.5) is True
 
 
-def test_a_refresh_always_lands_inside_the_draft_ttl() -> None:
-    """A keepalive is only worth having if the limiter cannot outlast it.
+def test_pacing_never_opens_a_gap_the_ttl_can_close() -> None:
+    """A paced sender is never stalled, so no gap approaches the TTL.
 
-    Sends are packed as tightly as both tiers allow — 20 calls, then 20 more
-    five seconds later — and the wait the next one then serves is measured
-    against the TTL it has to beat.  It comes out at 25 seconds: the
-    keepalive asks at 15, waits, and still refreshes the draft in time.
+    Spending the allowance as fast as the tiers alone permit — 20 calls, then
+    20 more five seconds later — blocks the peer until 30 seconds after the
+    first of them, a 25-second silence that deletes the draft.  Driving the
+    budget at the flush loop's own cadence for two minutes shows the worst gap
+    pacing leaves instead: one tick past the interval.
     """
-    _spend(1, [100.0 + i * 0.01 for i in range(20)])
-    _spend(1, [105.2 + i * 0.01 for i in range(20)])
-    last_sent = 105.4
-    waited = next(
-        gap for gap in range(1, 60)
-        if not _draft_budgets[1].spent(last_sent + gap)
-    )
-    assert DRAFT_KEEPALIVE_SECONDS < waited < DRAFT_TTL_SECONDS
+    budget = _draft_budgets[1]
+    sent: list[float] = []
+    now = 100.0
+    while now < 220.0:
+        if not budget.spent(now):
+            budget.charge(now)
+            sent.append(now)
+        now += DRAFT_INTERVAL_SECONDS
+
+    gaps = [later - earlier for earlier, later in zip(sent, sent[1:])]
+    assert max(gaps) <= _DRAFT_MIN_INTERVAL + DRAFT_INTERVAL_SECONDS
+    assert max(gaps) < DRAFT_KEEPALIVE_SECONDS < DRAFT_TTL_SECONDS
 
 
 def test_calls_older_than_the_widest_window_stop_counting() -> None:

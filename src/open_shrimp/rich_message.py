@@ -212,18 +212,23 @@ async def edit_rich_unchanged_ok(
 # Telegram's ceilings on live drafts, as (window seconds, calls allowed):
 # 20 calls in 5 seconds and 40 in 30.  Both are enforced, because staying
 # under the 5-second tier alone permits 4 calls/s, which exhausts the
-# 30-second tier after 10 seconds of streaming.  The FLOOD_WAIT that follows
-# outlasts DRAFT_TTL_SECONDS, so overrunning the limit is what makes a draft
-# vanish mid-turn.
+# 30-second tier after 10 seconds of streaming.
 _DRAFT_RATE_LIMITS: tuple[tuple[float, int], ...] = ((5.0, 20), (30.0, 40))
 _DRAFT_WIDEST_WINDOW = max(width for width, _ in _DRAFT_RATE_LIMITS)
 
-#: How long a graphical client keeps a live draft it has stopped receiving
-#: updates for — Telegram's ``message_typing_draft_ttl``.  The tightest legal
-#: packing of the limits above is 20 calls, then 20 more five seconds later,
-#: which defers the next send to 25 seconds after the last one accepted: a
-#: sender that refreshes inside that margin never loses the draft.
-DRAFT_TTL_SECONDS = 30.0
+#: How long a client keeps a live draft it has stopped receiving updates for,
+#: from ``message_typing_draft_ttl`` in the app config the server publishes.
+#: A lapse is not a pause: the client deletes the draft outright, and the next
+#: update builds a fresh one at the bottom of the list.
+DRAFT_TTL_SECONDS = 10.0
+
+#: Never send two drafts for one peer closer together than this.  The binding
+#: tier is 40 calls per 30 seconds, one every 0.75s, so spending the allowance
+#: as fast as the tiers permit — 20 calls, then 20 more five seconds later —
+#: buys nothing and blocks the peer until 30 seconds after the first of them,
+#: a 25-second silence that no keepalive inside the TTL can cover.  Spacing
+#: every send holds the longest gap to one tick and leaves both tiers slack.
+_DRAFT_MIN_INTERVAL = 0.8
 
 
 class _DraftBudget:
@@ -242,11 +247,15 @@ class _DraftBudget:
         self._flood_until = 0.0
 
     def spent(self, now: float) -> bool:
-        """Whether Telegram would refuse another draft for this peer."""
+        """Whether another draft for this peer is refused or simply too early."""
         if now < self._flood_until:
             return True
-        # Sends are appended in order, so the allowance-th entry from the end
-        # is the oldest one a tier still counts.
+        if self._calls and now - self._calls[-1] < _DRAFT_MIN_INTERVAL:
+            return True
+        # The tiers stay enforced behind the pacing above, which alone cannot
+        # bring a peer back under a limit a FLOOD_WAIT or a clock jump left it
+        # over.  Sends are appended in order, so the allowance-th entry from
+        # the end is the oldest one a tier still counts.
         return any(
             len(self._calls) >= allowance
             and now - self._calls[-allowance] < width

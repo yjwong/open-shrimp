@@ -92,8 +92,8 @@ DRAFT_INTERVAL_SECONDS = 0.5
 #: A client deletes a live draft ``DRAFT_TTL_SECONDS`` after the last one it
 #: received, so a turn that goes quiet for longer loses the draft it is still
 #: writing into: a Bash call that runs a minute, an approval waiting on a tap,
-#: a gap between a tool result and the next token.  Half the TTL clears the
-#: 25-second worst case the rate limiter can defer a refresh by.
+#: a gap between a tool result and the next token.  Pacing holds the longest
+#: deferral to a single tick, so half the TTL lands with seconds to spare.
 DRAFT_KEEPALIVE_SECONDS = DRAFT_TTL_SECONDS / 2
 
 
