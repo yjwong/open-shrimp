@@ -48,3 +48,38 @@ def test_failure_and_elapsed_ride_along_with_the_description() -> None:
     )
 
     assert row == "💻 **Bash** — Run tests · **failed** · 1m22s"
+
+
+def test_an_auto_approved_edit_row_carries_one_emoji() -> None:
+    """The ✅ the caller prefixes is the row's emoji; ✏️ would be a second."""
+    from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
+
+    body = ClaudeSdkPolicy().format_auto_approved_diff(
+        "Edit",
+        {"file_path": "/tmp/x.py", "old_string": "a", "new_string": "b"},
+        None,
+    )
+    summary = body.partition("\n\n")[0]
+    assert summary.startswith("**Edit:**"), summary
+    assert "✏️" not in summary
+
+
+def test_an_undecided_edit_prompt_keeps_its_emoji() -> None:
+    """Nothing prefixes the prompt, so the header is where the icon lives."""
+    from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
+
+    body = ClaudeSdkPolicy().format_approval_text(
+        "Edit",
+        {"file_path": "/tmp/x.py", "old_string": "a", "new_string": "b"},
+        None,
+    )
+    assert body.startswith("✏️ **Edit:**")
+
+
+def test_an_auto_approved_write_row_carries_one_emoji() -> None:
+    from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
+
+    body = ClaudeSdkPolicy().format_auto_approved_diff(
+        "Write", {"file_path": "/tmp/x.py", "content": "hi"}, None,
+    )
+    assert body.startswith("**Write:**"), body

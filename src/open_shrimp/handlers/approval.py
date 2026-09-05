@@ -1180,9 +1180,9 @@ async def handle_approval_callback(
         await query.answer(f"{action}.")
 
         # Update the message to show the decision (remove buttons, append
-        # status).  For Bash-like tools, collapse to a compact one-liner
-        # since the "Show output" button message that follows will show
-        # the command again.
+        # status).  For Bash-like tools, collapse to a compact one-liner:
+        # the card that lands when the command returns carries the command
+        # and its output already.
         if query.message:
             try:
                 icon = '✅' if approved else '❌'

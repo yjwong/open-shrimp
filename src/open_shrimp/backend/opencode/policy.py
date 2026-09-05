@@ -321,16 +321,21 @@ def _summarize(
 
 
 def _format_edit_approval(
-    tool_input: dict[str, Any], cwd: str | None = None,
+    tool_input: dict[str, Any], cwd: str | None = None, *, icon: bool = True,
 ) -> str:
-    """Format an edit tool call as a unified diff."""
+    """Format an edit tool call as a unified diff.
+
+    *icon* off for a card that already leads with an outcome emoji: the row
+    names the tool either way, so two emojis in front of it is one more than
+    the row can spend.
+    """
     file_path = _relative_path(
         tool_input.get("filePath", "unknown"), cwd,
     )
     old_string = tool_input.get("oldString", "")
     new_string = tool_input.get("newString", "")
 
-    header = f"✏️ **Edit:** `{file_path}`"
+    header = f"{'✏️ ' if icon else ''}**Edit:** `{file_path}`"
 
     old_lines = old_string.splitlines()
     new_lines = new_string.splitlines()
@@ -631,11 +636,12 @@ class OpenCodePolicy:
         cwd: str | None,
     ) -> str:
         if tool_name == "edit":
-            return _format_edit_approval(tool_input, cwd=cwd)
+            return _format_edit_approval(tool_input, cwd=cwd, icon=False)
         if tool_name == "write":
             return format_write_approval(
                 tool_input,
                 _relative_path(tool_input.get("filePath", "unknown"), cwd),
+                icon=False,
             )
         if tool_name == "apply_patch":
             return _format_apply_patch_approval(tool_input, cwd=cwd)

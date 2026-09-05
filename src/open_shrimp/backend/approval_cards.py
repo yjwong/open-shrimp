@@ -44,14 +44,21 @@ def format_bash_approval(tool_input: dict[str, Any]) -> str:
     return f"{header}\n\n{rich_code_block(command, 'bash')}"
 
 
-def format_write_approval(tool_input: dict[str, Any], file_path: str) -> str:
+def format_write_approval(
+    tool_input: dict[str, Any], file_path: str, *, icon: bool = True,
+) -> str:
     """Format a Write tool call for the approval prompt.
 
     The path arrives resolved: the SDK calls it ``file_path`` and OpenCode
     ``filePath``, and which one to read is the caller's business.
+
+    *icon* off for a card that already leads with an outcome emoji: the row
+    says "**Write:**" either way, so two emojis in front of it is one more
+    than the row can spend.
     """
     content = _clip(tool_input.get("content", ""))
-    return f"\U0001f4dd **Write:** `{file_path}`\n\n{rich_code_block(content)}"
+    prefix = "\U0001f4dd " if icon else ""
+    return f"{prefix}**Write:** `{file_path}`\n\n{rich_code_block(content)}"
 
 
 def format_agent_approval(

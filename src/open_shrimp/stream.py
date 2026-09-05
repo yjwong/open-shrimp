@@ -266,7 +266,9 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
         # buffer above it is already written: reasoning that arrives between
         # two tool calls is newer than the answer's opening paragraph, and
         # putting it on top pushes a whole turn of rows down under it.
-        thinking = f"<tg-thinking>{escape_rich(state.thinking)}</tg-thinking>"
+        thinking = (
+            f"<tg-thinking>{escape_rich(state.thinking.strip())}</tg-thinking>"
+        )
         full_text = f"{full_text}\n\n{thinking}" if full_text else thinking
     if not full_text.strip():
         return
@@ -834,6 +836,13 @@ async def stream_response(
                             block.name,
                             block.input,
                         )
+
+                        # Acting ends a reasoning block.  ThinkingDeltaEvent
+                        # carries no block boundary, so without a break here
+                        # the next block's first delta runs into this one's
+                        # last word: "…independently.I'll gather the manifest".
+                        if state.thinking:
+                            state.thinking = state.thinking.rstrip() + "\n\n"
 
                         # Add tool invocation as an inline notification,
                         # but suppress tools whose output is shown directly.

@@ -19,7 +19,12 @@ from open_shrimp.backend.types import (
     ToolUseBlock,
     UserMessage,
 )
-from open_shrimp.stream import _DraftState, _open_bash_card, stream_response
+from open_shrimp.stream import (
+    DRAFT_INTERVAL_SECONDS,
+    _DraftState,
+    _open_bash_card,
+    stream_response,
+)
 
 
 class _RecordingBot:
@@ -354,3 +359,35 @@ async def test_reasoning_trails_the_rows_it_follows() -> None:
     body = [kw["text"] for kind, kw in bot.calls if kind == "draft"][0]
     assert body.index("Starting the survey.") < body.index("<tg-thinking>")
     assert body.index("<details>") < body.index("<tg-thinking>")
+
+
+@pytest.mark.asyncio
+async def test_reasoning_across_a_tool_call_keeps_a_paragraph_break() -> None:
+    """ThinkingDeltaEvent carries no block boundary; the tool call is one."""
+    import asyncio
+
+    from open_shrimp.backend.types import ThinkingDeltaEvent
+
+    bot = _RecordingBot()
+
+    async def events() -> Any:
+        yield ThinkingDeltaEvent(session_id="sess-1", text="Checked independently.")
+        yield _bash_use("ls", "t1")
+        yield UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="ok")])
+        yield ThinkingDeltaEvent(session_id="sess-1", text="I'll gather the manifest.")
+        # Reasoning reaches a draft and nowhere else, so the flush has to
+        # happen while the stream is still open.
+        await asyncio.sleep(DRAFT_INTERVAL_SECONDS * 2)
+        yield ResultMessage(session_id="sess-1")
+
+    await stream_response(
+        events=events(), bot=bot, chat_id=1, policy=ClaudeSdkPolicy(),
+    )
+
+    drafts = [kw["text"] for kind, kw in bot.calls if kind == "draft"]
+    thinking = [text for text in drafts if "<tg-thinking>" in text]
+    assert thinking, drafts
+    body = thinking[-1]
+    assert "Checked independently." in body
+    assert "I'll gather the manifest." in body
+    assert "independently.I'll" not in body

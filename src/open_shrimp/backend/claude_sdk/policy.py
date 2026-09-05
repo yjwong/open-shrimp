@@ -314,9 +314,14 @@ def _summarize(
 
 
 def _format_edit_approval(
-    tool_input: dict[str, Any], cwd: str | None = None,
+    tool_input: dict[str, Any], cwd: str | None = None, *, icon: bool = True,
 ) -> str:
-    """Format an Edit (or NotebookEdit) tool call as a unified diff."""
+    """Format an Edit (or NotebookEdit) tool call as a unified diff.
+
+    *icon* off for a card that already leads with an outcome emoji: the row
+    names the tool either way, so two emojis in front of it is one more than
+    the row can spend.
+    """
     # NotebookEdit uses ``notebook_path`` instead of ``file_path``.
     file_path = tool_input.get("file_path") or tool_input.get(
         "notebook_path", "unknown",
@@ -334,7 +339,7 @@ def _format_edit_approval(
 
     is_notebook = "notebook_path" in tool_input
     label = "NotebookEdit" if is_notebook else "Edit"
-    header = f"✏️ **{label}:** `{file_path}`"
+    header = f"{'✏️ ' if icon else ''}**{label}:** `{file_path}`"
 
     old_lines = old_string.splitlines()
     new_lines = new_string.splitlines()
@@ -611,11 +616,12 @@ class ClaudeSdkPolicy:
         cwd: str | None,
     ) -> str:
         if tool_name == "Edit" or tool_name == "NotebookEdit":
-            return _format_edit_approval(tool_input, cwd=cwd)
+            return _format_edit_approval(tool_input, cwd=cwd, icon=False)
         if tool_name == "Write":
             return format_write_approval(
                 tool_input,
                 _relative_path(tool_input.get("file_path", "unknown"), cwd),
+                icon=False,
             )
         return format_generic_approval(tool_name, tool_input)
 
