@@ -16,7 +16,6 @@ import logging
 import random
 import re
 import time
-from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -42,7 +41,7 @@ from open_shrimp.backend.types import (
     ToolUseBlock,
     UserMessage,
 )
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import BadRequest
 
 from open_shrimp.agent import AgentEvent
@@ -81,22 +80,6 @@ def _is_thread_not_found(exc: BaseException) -> bool:
     )
 
 DRAFT_INTERVAL_SECONDS = 0.5
-
-# Full tool outputs held for the "Show output" button, keyed by callback id.
-# An entry is freed when the button is tapped, which most never are, so the
-# store is capped: the value is a whole command output and a long-running bot
-# would otherwise keep every one of them for the life of the process.
-_MAX_STASHED_OUTPUTS = 64
-_bash_output_store: OrderedDict[str, str] = OrderedDict()
-
-
-def stash_bash_output(body: str) -> str:
-    """Hold *body* for a "Show output" tap and return its callback id."""
-    callback_id = f"show_bash:{random.randint(1, 2**63 - 1)}"
-    _bash_output_store[callback_id] = body
-    while len(_bash_output_store) > _MAX_STASHED_OUTPUTS:
-        _bash_output_store.popitem(last=False)
-    return callback_id
 
 
 @dataclass
@@ -197,14 +180,15 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
-    # tool_use_id -> (message_id, icon, label, started_at) for a Bash call
-    # still awaiting its result.  The render arguments ride along so the
-    # message can be rewritten without re-deriving whether it came from Bash
-    # or host_bash, and the monotonic start stamps the elapsed time onto the
-    # collapsed summary.  A None message_id is a host escape, which records
-    # its start without posting a card — its approval prompt is the message
-    # on screen while it waits.  Dropped once the result arrives.
-    pending_bash_messages: dict[str, tuple[int | None, str, str, float]] = field(
+    # tool_use_id -> (icon, label, started_at) for a Bash call still awaiting
+    # its result.  The render arguments ride along so the row can be rewritten
+    # without re-deriving whether it came from Bash or host_bash, and the
+    # monotonic start stamps the elapsed time onto the collapsed summary.  The
+    # row's place in the buffer is in ``tool_cards``, which a host escape has
+    # no entry in: it records its start without adding a row, because its
+    # approval prompt is what shows the command while it waits.  Dropped once
+    # the result arrives.
+    pending_bash_cards: dict[str, tuple[str, str, float]] = field(
         default_factory=dict
     )
     # Fields for web_app button fallback in group chats.
@@ -482,8 +466,22 @@ def _extract_bash_output_text(
     return content
 
 
-async def _send_bash_header(
-    bot: Bot,
+def _place_card(state: _DraftState, tool_use_id: str, card: str) -> None:
+    """Rewrite the row this invocation left in the draft, or start a new one.
+
+    The row is gone whenever an approval prompt finalized the draft between the
+    command and its result; the collapsed card then opens the next message
+    rather than chasing a message the buffer no longer owns.
+    """
+    index = state.tool_cards.pop(tool_use_id, None)
+    if index is None or index >= len(state.buffer):
+        state.append_rich(card)
+    else:
+        state.buffer[index].text = card
+    state.dirty = True
+
+
+def _open_bash_card(
     state: _DraftState,
     tool_use_id: str,
     tool_input: dict[str, Any],
@@ -491,47 +489,28 @@ async def _send_bash_header(
     label: str = "Bash",
     post: bool = True,
 ) -> None:
-    """Post the command when the agent issues it, before it runs.
+    """Put the command in the draft when the agent issues it, before it runs.
 
-    Finalizes any in-progress draft first to preserve message ordering.
-    ``_finish_bash_message`` edits this message into its final form when the
-    result arrives, so a command that takes a minute appears at second zero
-    rather than at the end.
+    The draft flushes twice a second, so a command that takes a minute is on
+    screen at second zero; ``_close_bash_card`` rewrites the row in place when
+    the result arrives.  Nothing is sent here — a Bash call costs a row in the
+    turn's message, not a message.
 
     With *post* false only the start stamp is recorded, so the card still
     reports how long the command took.  That is the host-escape case: its
     approval prompt is already showing the command and the command cannot
     start until the user taps, so a second copy above it says nothing.
     """
+    state.pending_bash_cards[tool_use_id] = (icon, label, time.monotonic())
     if not post:
-        state.pending_bash_messages[tool_use_id] = (
-            None, icon, label, time.monotonic(),
-        )
         return
-
-    await finalize_and_reset(bot, state)
-
-    try:
-        msg = await send_rich(
-            bot, state.chat_id,
-            bash_card(tool_input, icon, label, open=True),
-            thread_id=state.thread_id,
-            disable_notification=True,
-        )
-    except Exception as e:
-        if _is_thread_not_found(e):
-            raise
-        logger.exception("Failed to send bash header")
-        return
-
-    state.sent_message_ids.append(msg.message_id)
-    state.pending_bash_messages[tool_use_id] = (
-        msg.message_id, icon, label, time.monotonic(),
+    state.tool_cards[tool_use_id] = state.append_rich(
+        bash_card(tool_input, icon, label, open=True),
     )
+    state.dirty = True
 
 
-async def _finish_bash_message(
-    bot: Bot,
+def _close_bash_card(
     state: _DraftState,
     tool_use_id: str,
     tool_input: dict[str, Any],
@@ -540,115 +519,73 @@ async def _finish_bash_message(
     label: str = "Bash",
     is_error: bool = False,
 ) -> None:
-    """Collapse the posted card onto its result, or note the miss.
+    """Collapse the row onto its result.
 
-    Falls back to sending a fresh message when no header went out for this
-    tool_use_id — a failed send, or a result whose invocation never reached
-    this stream.
+    The output rides inside the card, capped by ``truncate_output``: one
+    message carries one keyboard, and the turn's message is shared by every
+    row, so there is nowhere to hang a "reveal the rest" button.
 
     Background tasks get their "View output" button from the
-    ``TaskStartedMessage`` handler instead, so they end at the header.
+    ``TaskStartedMessage`` handler instead, so their card stays output-free.
     """
-    pending = state.pending_bash_messages.pop(tool_use_id, None)
-    elapsed = time.monotonic() - pending[3] if pending else None
-
-    is_background = bool(tool_input.get("run_in_background"))
-    output_text = _extract_bash_output_text(content).strip()
+    pending = state.pending_bash_cards.pop(tool_use_id, None)
+    elapsed = time.monotonic() - pending[2] if pending else None
 
     output: str | None = None
     note: str | None = None
-    keyboard: InlineKeyboardMarkup | None = None
-    if not is_background:
+    if not tool_input.get("run_in_background"):
+        output_text = _extract_bash_output_text(content).strip()
         if output_text:
-            output, truncated = truncate_output(output_text)
-            if truncated:
-                # The card carries the tail; "Show output" reveals the rest
-                # on demand, from reply_markup where web can draw it.
-                callback_id = stash_bash_output(bash_card(
-                    tool_input, icon, label,
-                    output=output_text,
-                    elapsed=elapsed,
-                    is_error=is_error,
-                    open=True,
-                ))
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "📋 Show output", callback_data=callback_id,
-                    )
-                ]])
+            output, _ = truncate_output(output_text)
         else:
             note = BASH_NO_OUTPUT_NOTE
 
-    text = bash_card(
+    _place_card(state, tool_use_id, bash_card(
         tool_input, icon, label,
         output=output,
         note=note,
         elapsed=elapsed,
         is_error=is_error,
         open=False,
-    )
-
-    if pending is None or pending[0] is None:
-        await finalize_and_reset(bot, state)
-        try:
-            msg = await send_rich(
-                bot, state.chat_id, text,
-                thread_id=state.thread_id,
-                reply_markup=keyboard,
-                disable_notification=True,
-            )
-            state.sent_message_ids.append(msg.message_id)
-        except Exception as e:
-            if _is_thread_not_found(e):
-                raise
-            logger.exception("Failed to send bash result message")
-        return
-
-    try:
-        await edit_rich(
-            bot, state.chat_id, pending[0], text, reply_markup=keyboard,
-        )
-    except Exception as e:
-        if "message is not modified" in str(e).lower():
-            return
-        if _is_thread_not_found(e):
-            raise
-        logger.exception("Failed to edit bash message with its result")
+    ))
 
 
-async def _clear_pending_bash_messages(bot: Bot, state: _DraftState) -> None:
+def _drop_open_bash_cards(state: _DraftState) -> None:
+    """Blank rows for commands still running as the draft is finalized.
+
+    An open card in a sent message can never be collapsed — the buffer that
+    owns the row is about to be cleared — so it would sit there expanded while
+    the result posts a second copy of the same command below it.  Blanking
+    rather than removing keeps the indices of the rows around it valid;
+    ``_build_full_text`` drops empty blocks.
+    """
+    for tool_use_id in state.pending_bash_cards:
+        index = state.tool_cards.pop(tool_use_id, None)
+        if index is not None and index < len(state.buffer):
+            state.buffer[index].text = ""
+
+
+def _clear_pending_bash_cards(state: _DraftState) -> None:
     """Mark cards that never got a result when the stream ends.
 
     Every tool_use is followed by its result, so a leftover here means the
-    turn was interrupted or errored out before the tool reported back.  A
-    host escape has no card to mark — it posts one only on its result — so
-    the interrupted card is sent now instead.
+    turn was interrupted or errored out before the tool reported back.  Runs
+    before the turn's last finalize, so the mark reaches the message the row
+    is already sitting in rather than trailing it.
     """
-    for tool_use_id, (message_id, icon, label, started_at) in list(
-        state.pending_bash_messages.items()
+    for tool_use_id, (icon, label, started_at) in list(
+        state.pending_bash_cards.items()
     ):
         tool_info = state.tool_use_map.get(tool_use_id)
         if tool_info is None:
             continue
-        card = bash_card(
+        _place_card(state, tool_use_id, bash_card(
             tool_info[1], icon, label,
             note=BASH_INTERRUPTED_NOTE,
             elapsed=time.monotonic() - started_at,
             open=False,
-        )
-        try:
-            if message_id is None:
-                msg = await send_rich(
-                    bot, state.chat_id, card,
-                    thread_id=state.thread_id,
-                    disable_notification=True,
-                )
-                state.sent_message_ids.append(msg.message_id)
-            else:
-                await edit_rich(bot, state.chat_id, message_id, card)
-        except Exception:
-            logger.exception("Failed to clear pending bash message")
-    state.pending_bash_messages.clear()
+        ))
+    state.pending_bash_cards.clear()
 
 
 async def finalize_and_reset(
@@ -662,6 +599,7 @@ async def finalize_and_reset(
     Args:
         silent: If True, send the finalized message silently (no notification).
     """
+    _drop_open_bash_cards(state)
     if state.has_content:
         msg_ids = await _finalize_message(bot, state, silent=silent)
         state.sent_message_ids.extend(msg_ids)
@@ -912,23 +850,21 @@ async def stream_response(
                                 policy=p,
                             )
 
-                        # Bash-likes get their own message, posted now so a
-                        # long-running command is visible while it runs and
-                        # edited in place when the result arrives.  A host
+                        # Bash-likes get a card instead of a row, opened now so
+                        # a long-running command is visible while it runs and
+                        # collapsed in place when the result arrives.  A host
                         # escape waits on an approval card that already shows
                         # the command, so its card waits for the result.
                         if p.is_host_bash(block.name):
                             icon, label = p.host_bash_render()
-                            await _send_bash_header(
-                                bot, state, block.id, block.input,
+                            _open_bash_card(
+                                state, block.id, block.input,
                                 icon=icon,
                                 label=label,
                                 post=False,
                             )
                         elif p.is_bash_like(block.name):
-                            await _send_bash_header(
-                                bot, state, block.id, block.input,
-                            )
+                            _open_bash_card(state, block.id, block.input)
 
                         # Checklist update: when the tool input carries the
                         # full list, push it to the pinned message directly.
@@ -943,10 +879,10 @@ async def stream_response(
                                 await fire_todo_update(snapshot)
 
             elif isinstance(event, UserMessage):
-                # UserMessage carries tool results (ToolResultBlock).
-                # Bash-likes own a whole message, so they collapse their card
-                # in place; every other tool folds its result into the card
-                # already sitting in the draft buffer.
+                # UserMessage carries tool results (ToolResultBlock).  Every
+                # tool folds its result into the row its invocation left in
+                # the draft; a bash-like's row is a card carrying the command,
+                # so it collapses onto the output instead of growing one.
                 checklist_result = False
                 if isinstance(event.content, list):
                     for block in event.content:
@@ -959,16 +895,16 @@ async def stream_response(
                             name = tool_info[0]
                             if p.is_host_bash(name):
                                 icon, label = p.host_bash_render()
-                                await _finish_bash_message(
-                                    bot, state, block.tool_use_id,
+                                _close_bash_card(
+                                    state, block.tool_use_id,
                                     tool_info[1], block.content,
                                     icon=icon,
                                     label=label,
                                     is_error=block.is_error,
                                 )
                             elif p.is_bash_like(name):
-                                await _finish_bash_message(
-                                    bot, state, block.tool_use_id,
+                                _close_bash_card(
+                                    state, block.tool_use_id,
                                     tool_info[1], block.content,
                                     is_error=block.is_error,
                                 )
@@ -976,6 +912,7 @@ async def stream_response(
                                 fold_tool_result(
                                     state, block.tool_use_id, block.content,
                                     is_error=block.is_error,
+                                    suppress_body=p.suppress_result_body(name),
                                 )
                             if p.is_checklist_tool(name):
                                 checklist_result = True
@@ -1213,13 +1150,15 @@ async def stream_response(
             except asyncio.CancelledError:
                 pass
 
+        # Commands with no result get their mark before the send, not after:
+        # the row is in the buffer about to go out.
+        if state.pending_bash_cards:
+            _clear_pending_bash_cards(state)
+
         # Final send of any remaining text — notify since the task is done.
         if state.has_content:
             msg_ids = await _finalize_message(bot, state, silent=False)
             state.sent_message_ids.extend(msg_ids)
-
-        if state.pending_bash_messages:
-            await _clear_pending_bash_messages(bot, state)
 
         # Snapshot the message ids this turn produced for the per-turn
         # backend hook (Backend.on_turn_end).  The handler reads the
@@ -1302,17 +1241,26 @@ def fold_tool_result(
     content: str | list[dict[str, Any]] | None,
     *,
     is_error: bool = False,
+    suppress_body: bool = False,
 ) -> None:
     """Fold a tool's output into the card its invocation left in the draft.
 
     Does nothing when the card has already been sent — the draft is finalized
     whenever an out-of-band message has to go out first, and a sent message is
     no longer this buffer's to rewrite.
+
+    With *suppress_body* a successful call stays a row: a tool that hands back
+    what the row already names — a file read hands back the file — has nothing
+    to add by repeating it under a chevron.  A failure still folds, because
+    then the output is the reason it failed rather than the thing asked for.
     """
     index = state.tool_cards.pop(tool_use_id, None)
     if index is None or index >= len(state.buffer):
         return
     row = state.buffer[index].text
+
+    if suppress_body and not is_error:
+        return
 
     output = _extract_bash_output_text(content).strip()
     if not output:

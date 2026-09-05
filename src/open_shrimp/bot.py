@@ -123,7 +123,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     if await handle_add_dir_callback(query, data, config, context):
         return
 
-    # Tool approval, show_prompt, show_bash, accept_all_edits
+    # Tool approval, show_prompt, accept_all_edits
     if await handle_approval_callback(query, data, config, context):
         return
 

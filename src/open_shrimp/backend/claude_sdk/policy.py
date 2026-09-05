@@ -69,6 +69,12 @@ _SUPPRESS_NOTIFICATION_TOOLS: set[str] = {
     "Edit", "Write", "NotebookEdit", "TaskList", "TaskGet",
 }
 
+#: Tools whose successful output is the thing the row already names, so
+#: folding it under the row's chevron repeats the row at length.  A read
+#: hands back the file at ``file_path``; a fetch hands back the page at
+#: ``url``.  Failures still fold — the output is then the reason.
+_SUPPRESS_RESULT_BODY_TOOLS: set[str] = {"Read", "NotebookRead", "WebFetch"}
+
 #: The checklist tools that mutate the session checklist.  Incremental — no
 #: tool input carries the full list, so each call triggers a re-read of the
 #: CLI's on-disk task store (``task_checklist.read_checklist``) to refresh
@@ -546,6 +552,9 @@ class ClaudeSdkPolicy:
 
     def is_bash_like(self, tool_name: str) -> bool:
         return tool_name in ("Bash", HOST_BASH_TOOL_NAME)
+
+    def suppress_result_body(self, tool_name: str) -> bool:
+        return tool_name in _SUPPRESS_RESULT_BODY_TOOLS
 
     def is_host_bash(self, tool_name: str) -> bool:
         return tool_name == HOST_BASH_TOOL_NAME

@@ -1,7 +1,8 @@
-"""Tests for the two-phase Bash message in stream.py.
+"""Tests for the folded Bash card in stream.py.
 
-The header goes out when the agent issues the command and is edited in place
-when the result arrives, so a slow command is visible while it runs.
+A Bash call costs a row in the turn's message, not a message: the card opens
+in the draft when the agent issues the command and collapses onto its output
+in place, so a turn with three commands still sends one message.
 """
 
 from __future__ import annotations
@@ -13,15 +14,16 @@ from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
 from open_shrimp.backend.types import (
     AssistantMessage,
     ResultMessage,
+    TextDeltaEvent,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
 )
-from open_shrimp.stream import stream_response
+from open_shrimp.stream import _DraftState, _open_bash_card, stream_response
 
 
 class _RecordingBot:
-    """A bot that records rich send/edit calls in the order they were made.
+    """A bot that records rich send/edit/draft calls in order.
 
     Every send goes through ``do_api_request``: ``sendRichMessage`` is not in
     python-telegram-bot, so there is no typed method to patch.  The recorded
@@ -45,12 +47,19 @@ class _RecordingBot:
         if endpoint == "editMessageText":
             self.calls.append(("edit", recorded))
             return None
+        if endpoint == "sendMessageDraft":
+            self.calls.append(("draft", recorded))
+            return None
         return None
 
     async def send_message(self, **kwargs: Any) -> Any:
         self.calls.append(("plain", kwargs))
         self._next_id += 1
         return type("_Msg", (), {"message_id": self._next_id})()
+
+    @property
+    def sends(self) -> list[dict[str, Any]]:
+        return [kw for kind, kw in self.calls if kind == "send"]
 
 
 async def _events(*items: Any) -> Any:
@@ -77,22 +86,7 @@ async def _run(bot: _RecordingBot, *events: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_header_sent_before_the_result_arrives() -> None:
-    bot = _RecordingBot()
-    await _run(bot, _bash_use())
-
-    # The invocation alone produced a message: the command is on screen
-    # while it runs, not only once it finishes.
-    assert [kind for kind, _ in bot.calls[:1]] == ["send"]
-    assert "sleep 10" in bot.calls[0][1]["text"]
-    # No button yet — nothing has been produced to show.
-    assert bot.calls[0][1].get("reply_markup") is None
-    # Open while it runs: the command is readable without a tap.
-    assert bot.calls[0][1]["text"].startswith("<details open>")
-
-
-@pytest.mark.asyncio
-async def test_result_edits_the_header_in_place() -> None:
+async def test_a_command_and_its_result_cost_one_message() -> None:
     bot = _RecordingBot()
     await _run(
         bot,
@@ -101,20 +95,72 @@ async def test_result_edits_the_header_in_place() -> None:
         ResultMessage(session_id="sess-1"),
     )
 
-    assert [kind for kind, _ in bot.calls] == ["send", "edit"]
-    sent, edited = bot.calls[0][1], bot.calls[1][1]
-    assert edited["message_id"] == 101
+    assert len(bot.sends) == 1
+    card = bot.sends[0]["text"]
     # Collapsed once the result is in: one row, output a tap away.
-    assert edited["text"].startswith("<details>")
-    assert edited["chat_id"] == sent["chat_id"]
-    # Output that fits sits in the card body, so there is nothing to reveal.
-    assert "hi" in edited["text"]
-    assert edited.get("reply_markup") is None
+    assert card.startswith("<details><summary>")
+    assert "sleep 10" in card
+    assert "hi" in card
 
 
 @pytest.mark.asyncio
-async def test_truncated_output_keeps_the_show_output_button() -> None:
-    """The card holds the tail; the button reveals what it cut."""
+async def test_three_commands_share_one_message() -> None:
+    bot = _RecordingBot()
+    await _run(
+        bot,
+        _bash_use("echo one", "t1"),
+        UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="one")]),
+        _bash_use("echo two", "t2"),
+        UserMessage(content=[ToolResultBlock(tool_use_id="t2", content="two")]),
+        _bash_use("echo three", "t3"),
+        UserMessage(content=[ToolResultBlock(tool_use_id="t3", content="three")]),
+        ResultMessage(session_id="sess-1"),
+    )
+
+    assert len(bot.sends) == 1
+    body = bot.sends[0]["text"]
+    for command in ("echo one", "echo two", "echo three"):
+        assert command in body
+    assert body.count("<details>") == 3
+
+
+@pytest.mark.asyncio
+async def test_the_answer_and_its_commands_share_one_message() -> None:
+    """The prose is not cut in two by the command that follows it."""
+    bot = _RecordingBot()
+    await _run(
+        bot,
+        TextDeltaEvent(session_id="sess-1", text="Checking the schema."),
+        _bash_use("sqlite3 db .schema", "t1"),
+        UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="ok")]),
+        ResultMessage(session_id="sess-1"),
+    )
+
+    assert len(bot.sends) == 1
+    body = bot.sends[0]["text"]
+    assert "Checking the schema." in body
+    assert "sqlite3 db .schema" in body
+
+
+def test_the_running_command_sits_open_in_the_draft() -> None:
+    """A command that takes a minute is on screen at second zero.
+
+    Asserted on the buffer rather than through a stream: the draft flushes on
+    a half-second timer, and a stream of canned events is over long before the
+    first tick.
+    """
+    state = _DraftState(chat_id=1)
+    _open_bash_card(state, "t1", {"command": "sleep 10"})
+
+    assert state.dirty
+    assert state.tool_cards["t1"] == 0
+    assert state.buffer[0].text.startswith("<details open>")
+    assert "sleep 10" in state.buffer[0].text
+
+
+@pytest.mark.asyncio
+async def test_truncated_output_gets_no_button() -> None:
+    """One message, one keyboard — the card carries the tail and stops there."""
     bot = _RecordingBot()
     await _run(
         bot,
@@ -130,14 +176,13 @@ async def test_truncated_output_keeps_the_show_output_button() -> None:
         ResultMessage(session_id="sess-1"),
     )
 
-    edited = bot.calls[1][1]
-    assert "…(truncated)" in edited["text"]
-    keyboard = edited["reply_markup"]
-    assert keyboard.inline_keyboard[0][0].callback_data.startswith("show_bash:")
+    assert len(bot.sends) == 1
+    assert "…(truncated)" in bot.sends[0]["text"]
+    assert bot.sends[0].get("reply_markup") is None
 
 
 @pytest.mark.asyncio
-async def test_empty_output_is_noted_on_the_header() -> None:
+async def test_empty_output_is_noted_on_the_card() -> None:
     bot = _RecordingBot()
     await _run(
         bot,
@@ -146,83 +191,31 @@ async def test_empty_output_is_noted_on_the_header() -> None:
         ResultMessage(session_id="sess-1"),
     )
 
-    assert [kind for kind, _ in bot.calls] == ["send", "edit"]
-    assert "No output" in bot.calls[1][1]["text"]
-    assert bot.calls[1][1].get("reply_markup") is None
+    assert "No output" in bot.sends[0]["text"]
 
 
 @pytest.mark.asyncio
-async def test_header_without_a_result_is_marked_interrupted() -> None:
+async def test_a_command_without_a_result_is_marked_interrupted() -> None:
     bot = _RecordingBot()
     await _run(bot, _bash_use())
 
-    assert [kind for kind, _ in bot.calls] == ["send", "edit"]
-    assert "Interrupted" in bot.calls[1][1]["text"]
+    assert len(bot.sends) == 1
+    card = bot.sends[0]["text"]
+    assert "Interrupted" in card
+    # Collapsed, not left hanging open from the invocation.
+    assert card.startswith("<details><summary>")
 
 
 @pytest.mark.asyncio
 async def test_result_for_an_unseen_invocation_renders_nothing() -> None:
     """Without the invocation there is no command to caption the output."""
     bot = _RecordingBot()
-    await stream_response(
-        events=_events(
-            UserMessage(
-                content=[ToolResultBlock(tool_use_id="t1", content="hi")],
-            ),
-            ResultMessage(session_id="sess-1"),
-        ),
-        bot=bot,
-        chat_id=1,
-        policy=ClaudeSdkPolicy(),
-    )
-    assert bot.calls == []
-
-
-@pytest.mark.asyncio
-async def test_failed_header_send_falls_back_to_one_message() -> None:
-    """A dropped header must not cost the user the output button."""
-    bot = _RecordingBot()
-    real_request = bot.do_api_request
-    calls = {"n": 0}
-
-    async def flaky_request(endpoint: str, **kwargs: Any) -> Any:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("Telegram said no")
-        return await real_request(endpoint, **kwargs)
-
-    bot.do_api_request = flaky_request  # type: ignore[method-assign]
-
     await _run(
         bot,
-        _bash_use(),
         UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="hi")]),
         ResultMessage(session_id="sess-1"),
     )
-
-    # The header never landed, so the result is posted rather than edited.
-    assert [kind for kind, _ in bot.calls] == ["send"]
-    assert "sleep 10" in bot.calls[0][1]["text"]
-    assert "hi" in bot.calls[0][1]["text"]
-
-
-@pytest.mark.asyncio
-async def test_each_command_gets_its_own_message() -> None:
-    bot = _RecordingBot()
-    await _run(
-        bot,
-        _bash_use("echo one", "t1"),
-        UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="one")]),
-        _bash_use("echo two", "t2"),
-        UserMessage(content=[ToolResultBlock(tool_use_id="t2", content="two")]),
-        ResultMessage(session_id="sess-1"),
-    )
-
-    assert [kind for kind, _ in bot.calls] == ["send", "edit", "send", "edit"]
-    assert "echo one" in bot.calls[0][1]["text"]
-    assert bot.calls[1][1]["message_id"] == 101
-    assert "echo two" in bot.calls[2][1]["text"]
-    assert bot.calls[3][1]["message_id"] == 102
+    assert bot.sends == []
 
 
 def _host_bash_use(
@@ -242,7 +235,7 @@ def _host_bash_use(
 
 
 @pytest.mark.asyncio
-async def test_host_bash_costs_one_message() -> None:
+async def test_host_bash_adds_no_row_until_its_result() -> None:
     """The approval prompt shows the command while it waits, so the stream
     adds a card only once there is a result to put in it."""
     bot = _RecordingBot()
@@ -253,9 +246,11 @@ async def test_host_bash_costs_one_message() -> None:
         ResultMessage(session_id="sess-1"),
     )
 
-    assert [kind for kind, _ in bot.calls] == ["send"]
-    card = bot.calls[0][1]["text"]
-    # Collapsed, and the elapsed time survived the missing header.
+    drafts = [kw["text"] for kind, kw in bot.calls if kind == "draft"]
+    assert not any("<details open>" in text for text in drafts)
+
+    assert len(bot.sends) == 1
+    card = bot.sends[0]["text"]
     assert card.startswith("<details><summary>")
     assert "Restart the bot" in card
     assert "0.0s" in card
@@ -267,13 +262,13 @@ async def test_interrupted_host_bash_still_gets_a_card() -> None:
     bot = _RecordingBot()
     await _run(bot, _host_bash_use())
 
-    assert [kind for kind, _ in bot.calls] == ["send"]
-    assert "Interrupted" in bot.calls[0][1]["text"]
+    assert len(bot.sends) == 1
+    assert "Interrupted" in bot.sends[0]["text"]
 
 
 @pytest.mark.asyncio
 async def test_a_bash_call_adds_no_summary_row() -> None:
-    """The card says what the row would, so the row is not sent."""
+    """The card says what the row would, so the row is not added."""
     bot = _RecordingBot()
     await _run(
         bot,
@@ -285,3 +280,59 @@ async def test_a_bash_call_adds_no_summary_row() -> None:
     )
 
     assert all("🔧" not in kw.get("text", "") for _, kw in bot.calls)
+
+
+def _read_use(path: str = "src/open_shrimp/db.py") -> AssistantMessage:
+    return AssistantMessage(
+        content=[
+            ToolUseBlock(id="r1", name="Read", input={"file_path": path}),
+        ],
+        session_id="sess-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_read_stays_a_row() -> None:
+    """The row names the file; folding the file under it says it again."""
+    bot = _RecordingBot()
+    await _run(
+        bot,
+        _read_use(),
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id="r1",
+                    content="\n".join(f"{i}: line" for i in range(200)),
+                ),
+            ],
+        ),
+        ResultMessage(session_id="sess-1"),
+    )
+
+    body = bot.sends[0]["text"]
+    assert "db.py" in body
+    assert "<details>" not in body
+    assert "199: line" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_folds_its_reason() -> None:
+    bot = _RecordingBot()
+    await _run(
+        bot,
+        _read_use("/nope.py"),
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id="r1",
+                    content="File does not exist.",
+                    is_error=True,
+                ),
+            ],
+        ),
+        ResultMessage(session_id="sess-1"),
+    )
+
+    body = bot.sends[0]["text"]
+    assert "<details>" in body
+    assert "File does not exist." in body

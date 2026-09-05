@@ -852,7 +852,6 @@ async def handle_approval_callback(
         _get_context_name,
         chat_scope_from_message,
     )
-    from open_shrimp.stream import _bash_output_store
 
     # Scope the policy lookup to the chat that owns this callback: each
     # per-context backend may render different keyboards / match different
@@ -893,30 +892,6 @@ async def handle_approval_callback(
                 )
             except Exception:
                 logger.exception("Failed to expand Agent prompt")
-        return True
-
-    # Handle "Show output" for Bash tool results
-    if data.startswith("show_bash:"):
-        formatted_output = _bash_output_store.pop(data, None)
-        if not formatted_output:
-            await query.answer("Output data no longer available.")
-            return True
-
-        await query.answer()
-
-        if query.message:
-            try:
-                await edit_message_rich(
-                    query.message,
-                    formatted_output,
-                    reply_markup=None,
-                )
-            except Exception:
-                logger.exception("Failed to expand Bash output")
-                try:
-                    await query.message.edit_reply_markup(reply_markup=None)
-                except Exception:
-                    logger.exception("Failed to remove bash button")
         return True
 
     # Handle "Accept all edits" -- approve this tool and enable auto-

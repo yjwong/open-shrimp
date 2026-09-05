@@ -169,9 +169,15 @@ class BackendPolicy(Protocol):
         ...
 
     def is_bash_like(self, tool_name: str) -> bool:
-        """True for tools whose output should render as a collapsible
-        "Show output" message (SDK: Bash + host_bash; OpenCode: bash +
-        host_bash).  Drives the streaming Bash-button render path."""
+        """True for tools whose row is a card carrying the command and its
+        output (SDK: Bash + host_bash; OpenCode: bash + host_bash).  Drives
+        the streaming Bash-card render path."""
+        ...
+
+    def suppress_result_body(self, tool_name: str) -> bool:
+        """True if a successful call's output must not be folded into its
+        row.  For a file read the output is the file the row already names,
+        and the agent is the one that needed it."""
         ...
 
     def is_host_bash(self, tool_name: str) -> bool:

@@ -75,6 +75,12 @@ _FILE_TARGETED_PATH_TOOLS: set[str] = {"read", "edit", "write"}
 #: card, and naming them here as well would state the rule twice.
 _SUPPRESS_NOTIFICATION_TOOLS: set[str] = {"edit", "write", "apply_patch"}
 
+#: Tools whose successful output is the thing the row already names, so
+#: folding it under the row's chevron repeats the row at length.  A read
+#: hands back the file at ``filePath``; a fetch hands back the page at
+#: ``url``.  Failures still fold — the output is then the reason.
+_SUPPRESS_RESULT_BODY_TOOLS: set[str] = {"read", "webfetch"}
+
 #: Tools auto-approved inside a sandbox (bash runs arbitrary shell
 #: commands; the sandbox provides the safety boundary).  OpenCode has no
 #: Monitor equivalent.
@@ -566,6 +572,9 @@ class OpenCodePolicy:
 
     def is_bash_like(self, tool_name: str) -> bool:
         return tool_name in ("bash", HOST_BASH_TOOL_NAME)
+
+    def suppress_result_body(self, tool_name: str) -> bool:
+        return tool_name in _SUPPRESS_RESULT_BODY_TOOLS
 
     def is_host_bash(self, tool_name: str) -> bool:
         return tool_name == HOST_BASH_TOOL_NAME
