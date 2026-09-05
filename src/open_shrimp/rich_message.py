@@ -14,13 +14,15 @@ supported on the web version of Telegram" — and the server returns a normal
 
 from __future__ import annotations
 
+import datetime as dtm
 import logging
+import time
 import warnings
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict, deque
 from typing import Any
 
 from telegram import Bot, InlineKeyboardMarkup, Message
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.warnings import PTBUserWarning
 
 logger = logging.getLogger(__name__)
@@ -207,6 +209,74 @@ async def edit_rich_unchanged_ok(
         return False
 
 
+# Telegram's ceilings on live drafts, as (window seconds, calls allowed):
+# 20 calls in 5 seconds and 40 in 30.  Both are enforced, because staying
+# under the 5-second tier alone permits 4 calls/s, which exhausts the
+# 30-second tier after 10 seconds of streaming.  The FLOOD_WAIT that follows
+# outlasts DRAFT_TTL_SECONDS, so overrunning the limit is what makes a draft
+# vanish mid-turn.
+_DRAFT_RATE_LIMITS: tuple[tuple[float, int], ...] = ((5.0, 20), (30.0, 40))
+_DRAFT_WIDEST_WINDOW = max(width for width, _ in _DRAFT_RATE_LIMITS)
+
+#: How long a graphical client keeps a live draft it has stopped receiving
+#: updates for — Telegram's ``message_typing_draft_ttl``.  The tightest legal
+#: packing of the limits above is 20 calls, then 20 more five seconds later,
+#: which defers the next send to 25 seconds after the last one accepted: a
+#: sender that refreshes inside that margin never loses the draft.
+DRAFT_TTL_SECONDS = 30.0
+
+
+class _DraftBudget:
+    """What one peer may still spend on live drafts.
+
+    Telegram counts the peer, so two forum topics of one chat streaming at
+    once draw on the same instance.
+    """
+
+    __slots__ = ("_calls", "_flood_until")
+
+    def __init__(self) -> None:
+        #: Send times, newest last.
+        self._calls: deque[float] = deque()
+        #: Monotonic deadline a FLOOD_WAIT put this peer behind.
+        self._flood_until = 0.0
+
+    def spent(self, now: float) -> bool:
+        """Whether Telegram would refuse another draft for this peer."""
+        if now < self._flood_until:
+            return True
+        # Sends are appended in order, so the allowance-th entry from the end
+        # is the oldest one a tier still counts.
+        return any(
+            len(self._calls) >= allowance
+            and now - self._calls[-allowance] < width
+            for width, allowance in _DRAFT_RATE_LIMITS
+        )
+
+    def charge(self, now: float) -> None:
+        """Book a send, dropping the entries too old to constrain anything."""
+        while self._calls and now - self._calls[0] >= _DRAFT_WIDEST_WINDOW:
+            self._calls.popleft()
+        self._calls.append(now)
+
+    def flooded(self, seconds: float) -> None:
+        """Hold the peer for the cool-down Telegram named."""
+        self._flood_until = time.monotonic() + seconds
+
+
+_draft_budgets: dict[int, _DraftBudget] = defaultdict(_DraftBudget)
+
+
+def draft_budget_spent(chat_id: int) -> bool:
+    """Whether a live draft for ``chat_id`` would be refused right now.
+
+    A caller with expensive text to render can ask first and keep the work
+    for its next attempt.  ``send_rich_draft`` checks again regardless, so
+    skipping this changes nothing but the wasted render.
+    """
+    return _draft_budgets[chat_id].spent(time.monotonic())
+
+
 async def send_rich_draft(
     bot: Bot,
     chat_id: int,
@@ -214,25 +284,55 @@ async def send_rich_draft(
     text: str,
     *,
     thread_id: int | None = None,
-) -> None:
+) -> bool:
     """Animate a partial answer while the turn runs.
 
-    The draft lives about 30 seconds and is never persisted, so the turn still
-    ends with a real ``sendRichMessage``.  ``chat_id`` is Integer-only, so a
-    group chat gets ``draft_peer_invalid`` back and has to fall back to editing
-    a real message.
+    The draft expires after ``DRAFT_TTL_SECONDS`` and is never persisted, so
+    the turn still ends with a real ``sendRichMessage``.  ``chat_id`` is
+    Integer-only, so a group chat gets ``draft_peer_invalid`` back and has to
+    fall back to editing a real message.
+
+    Returns whether the draft reached Telegram: False means the peer's rate
+    budget is spent or a FLOOD_WAIT is still running, and the caller should
+    keep its text pending and offer it again.  Skipping rather than sleeping
+    keeps the next attempt carrying the newest text instead of a snapshot
+    taken before the wait.
 
     ``can_stop`` stays off.  It would render a second stop control feeding
     ``stopped_message_generation`` into the same cancellation state ``/stop``
     already drives, and two producers for one piece of state is how a turn
     ends up half-cancelled.
     """
-    await bot.do_api_request(
-        "sendRichMessageDraft",
-        api_kwargs={
-            "chat_id": chat_id,
-            "draft_id": draft_id,
-            "rich_message": _body(text),
-            **_thread_kwargs(thread_id),
-        },
-    )
+    now = time.monotonic()
+    budget = _draft_budgets[chat_id]
+    if budget.spent(now):
+        return False
+
+    # Charged before the request, so drafts in flight for other topics of the
+    # same chat are visible to each other.
+    budget.charge(now)
+    try:
+        await bot.do_api_request(
+            "sendRichMessageDraft",
+            api_kwargs={
+                "chat_id": chat_id,
+                "draft_id": draft_id,
+                "rich_message": _body(text),
+                **_thread_kwargs(thread_id),
+            },
+        )
+    except RetryAfter as exc:
+        # The server hands out cool-downs of up to 3 seconds even to callers
+        # under the limit, so honour the value it names instead of retrying
+        # on the caller's own cadence and extending the wait.  PTB reports it
+        # as seconds or as a timedelta, per its PTB_TIMEDELTA setting.
+        after = exc.retry_after
+        seconds = (
+            after.total_seconds() if isinstance(after, dtm.timedelta) else after
+        )
+        budget.flooded(seconds)
+        logger.info(
+            "Live draft flood wait of %.1fs for chat %s", seconds, chat_id,
+        )
+        return False
+    return True

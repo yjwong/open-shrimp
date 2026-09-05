@@ -55,7 +55,13 @@ from open_shrimp.markdown import (
     split_message,
 )
 from open_shrimp.mini_app import make_web_app_button
-from open_shrimp.rich_message import edit_rich, send_rich, send_rich_draft
+from open_shrimp.rich_message import (
+    DRAFT_TTL_SECONDS,
+    draft_budget_spent,
+    edit_rich,
+    send_rich,
+    send_rich_draft,
+)
 from open_shrimp.tool_cards import (
     BASH_INTERRUPTED_NOTE,
     BASH_NO_OUTPUT_NOTE,
@@ -81,6 +87,14 @@ def _is_thread_not_found(exc: BaseException) -> bool:
     )
 
 DRAFT_INTERVAL_SECONDS = 0.5
+
+#: Re-send an unchanged draft once it has gone this long without an update.
+#: A client deletes a live draft ``DRAFT_TTL_SECONDS`` after the last one it
+#: received, so a turn that goes quiet for longer loses the draft it is still
+#: writing into: a Bash call that runs a minute, an approval waiting on a tap,
+#: a gap between a tool result and the next token.  Half the TTL clears the
+#: 25-second worst case the rate limiter can defer a refresh by.
+DRAFT_KEEPALIVE_SECONDS = DRAFT_TTL_SECONDS / 2
 
 
 @dataclass
@@ -154,6 +168,10 @@ class _DraftState:
     draft_id: int = field(default_factory=lambda: random.randint(1, 2**31 - 1))
     # Whether the draft needs to be flushed
     dirty: bool = False
+    # Monotonic time of the last draft Telegram accepted, 0.0 when none has
+    # landed yet.  Drives the keepalive re-send that keeps the draft from
+    # expiring during a quiet stretch.
+    last_draft_sent: float = 0.0
     # Whether drafts are disabled (e.g. unsupported chat type)
     drafts_disabled: bool = False
     # Message ID of the current "live edit" message (fallback when drafts
@@ -238,6 +256,7 @@ class _DraftState:
         self.clear_buffer()
         self.draft_id = random.randint(1, 2**31 - 1)
         self.dirty = False
+        self.last_draft_sent = 0.0
         self.turn_complete = False
         self.thinking = ""
         self.live_edit_message_id = None
@@ -250,6 +269,19 @@ def _build_full_text(state: _DraftState) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def _draft_is_stale(state: _DraftState) -> bool:
+    """Whether the live draft is close enough to its TTL to need re-sending.
+
+    Only for real drafts: the fallback path edits an ordinary message, which
+    Telegram keeps until it is edited again.
+    """
+    if state.drafts_disabled or not state.last_draft_sent:
+        return False
+    if not state.has_content and not state.thinking:
+        return False
+    return time.monotonic() - state.last_draft_sent >= DRAFT_KEEPALIVE_SECONDS
+
+
 async def _send_draft(bot: Bot, state: _DraftState) -> None:
     """Send or update a draft message via sendMessageDraft.
 
@@ -258,6 +290,12 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
     """
     if state.drafts_disabled:
         await _send_live_edit(bot, state)
+        return
+
+    if draft_budget_spent(state.chat_id):
+        # Rendering below is the expensive part of a tick — a markdown parse
+        # of every block that changed — and the send would only be refused.
+        # The state stays dirty, so the next tick spends it on newer text.
         return
 
     full_text = _build_full_text(state)
@@ -283,11 +321,14 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
     text = chunks[0]
 
     try:
-        await send_rich_draft(
+        # False is the budget going while the text was rendered, not a
+        # failure — same treatment as the gate above.
+        if await send_rich_draft(
             bot, state.chat_id, state.draft_id, text,
             thread_id=state.thread_id,
-        )
-        state.dirty = False
+        ):
+            state.dirty = False
+            state.last_draft_sent = time.monotonic()
     except Exception as e:
         if _is_thread_not_found(e):
             raise
@@ -765,10 +806,10 @@ async def stream_response(
         await fire_todo_update(todos)
 
     async def periodic_flush() -> None:
-        """Periodically flush dirty drafts."""
+        """Flush dirty drafts, and refresh a quiet one before it expires."""
         while True:
             await asyncio.sleep(DRAFT_INTERVAL_SECONDS)
-            if state.dirty:
+            if state.dirty or _draft_is_stale(state):
                 await _send_draft(bot, state)
 
     try:
