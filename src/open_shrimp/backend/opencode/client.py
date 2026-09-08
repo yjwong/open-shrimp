@@ -50,7 +50,7 @@ _ASK_BY_DEFAULT_MCP_PERMS = frozenset({
 _ALWAYS_ALLOWED_OPENCODE_PERMS = frozenset({"question", "todowrite"})
 
 
-_BUS_REGISTRY: dict[tuple[str, str, str], EventBus] = {}
+_BUS_REGISTRY: dict[tuple[str, str, str], tuple[EventBus, int]] = {}
 _BUS_LOCK: asyncio.Lock | None = None
 
 
@@ -75,7 +75,7 @@ def _context_window_from_models(
     return None
 
 
-async def _get_bus(
+async def _acquire_bus(
     server: OpenCodeServer | OpenCodeEndpoint,
     directory: str | None,
 ) -> EventBus:
@@ -84,12 +84,39 @@ async def _get_bus(
         _BUS_LOCK = asyncio.Lock()
     async with _BUS_LOCK:
         key = (server.base_url, server.auth_header, directory or "")
-        bus = _BUS_REGISTRY.get(key)
-        if bus is None:
+        entry = _BUS_REGISTRY.get(key)
+        if entry is not None and not entry[0].is_alive():
+            del _BUS_REGISTRY[key]
+            await entry[0].stop(
+                CLIConnectionError("opencode serve exited or its endpoint was replaced")
+            )
+            entry = None
+        if entry is None:
             bus = EventBus(server, directory=directory)
             await bus.start()
-            _BUS_REGISTRY[key] = bus
+            _BUS_REGISTRY[key] = (bus, 1)
+        else:
+            bus, users = entry
+            _BUS_REGISTRY[key] = (bus, users + 1)
         return bus
+
+
+async def _release_bus(bus: EventBus) -> None:
+    # Registry updates contain no await; release must not wait behind another
+    # endpoint's startup while the caller's disconnect timeout is running.
+    for key, (registered, users) in _BUS_REGISTRY.items():
+        if registered is bus:
+            if users > 1:
+                _BUS_REGISTRY[key] = (bus, users - 1)
+            else:
+                del _BUS_REGISTRY[key]
+                stop = asyncio.create_task(bus.stop())
+                try:
+                    await asyncio.shield(stop)
+                except asyncio.CancelledError:
+                    await stop
+                    raise
+            return
 
 
 async def _shutdown_buses() -> None:
@@ -97,9 +124,9 @@ async def _shutdown_buses() -> None:
     if _BUS_LOCK is None:
         _BUS_LOCK = asyncio.Lock()
     async with _BUS_LOCK:
-        for bus in list(_BUS_REGISTRY.values()):
-            await bus.stop()
+        buses = list(_BUS_REGISTRY.values())
         _BUS_REGISTRY.clear()
+        await asyncio.gather(*(bus.stop() for bus, _ in buses))
 
 
 class OpenCodeClient:
@@ -134,34 +161,20 @@ class OpenCodeClient:
         return self._session_id
 
     def is_alive(self) -> bool:
-        """True if the underlying ``opencode serve`` process is healthy."""
-        server = self._server
-        if server is None:
-            return False
-        if isinstance(server, OpenCodeEndpoint):
-            owner = server.owner
-            proc = getattr(owner, "_served_proc", None)
-            if proc is not None:
-                poll = getattr(proc, "poll", None)
-                if callable(poll):
-                    return poll() is None
-            return True
-        proc = getattr(server, "proc", None)
-        if proc is None:
-            return False
-        return getattr(proc, "returncode", None) is None
+        """True while this connection's event bus and server remain alive."""
+        return self._bus is not None and self._bus.is_alive()
 
     async def connect(self) -> None:
         if self._server is not None:
             return
-        self._server = self._options.endpoint or await OpenCodeServer.get_or_start()
-        self._bus = await _get_bus(self._server, self._options.cwd)
-        self._http = httpx.AsyncClient(
-            base_url=self._server.base_url,
-            timeout=30.0,
-            headers={"Authorization": self._server.auth_header},
-        )
         try:
+            self._server = self._options.endpoint or await OpenCodeServer.get_or_start()
+            self._bus = await _acquire_bus(self._server, self._options.cwd)
+            self._http = httpx.AsyncClient(
+                base_url=self._server.base_url,
+                timeout=30.0,
+                headers={"Authorization": self._server.auth_header},
+            )
             await self._load_context_window()
             await self._register_mcp_servers()
             if self._options.resume:
@@ -191,8 +204,7 @@ class OpenCodeClient:
                     directory=self._options.cwd,
                 )
         except BaseException:
-            await self._http.aclose()
-            self._http = None
+            await self.disconnect()
             raise
 
     async def _load_context_window(self) -> None:
@@ -487,15 +499,26 @@ class OpenCodeClient:
         return out
 
     async def disconnect(self) -> None:
-        if self._bridge is not None:
-            await self._bridge.stop()
-            self._bridge = None
-        if self._bus is not None and self._session_id is not None:
-            self._bus.unsubscribe(self._session_id)
+        bridge, bus, http = self._bridge, self._bus, self._http
+        session_id = self._session_id
+        self._bridge = None
+        self._bus = None
+        self._http = None
+        self._server = None
+        self._session_id = None
         self._events = None
-        if self._http is not None:
-            await self._http.aclose()
-            self._http = None
+        try:
+            if bridge is not None:
+                await bridge.stop()
+        finally:
+            try:
+                if bus is not None:
+                    if session_id is not None:
+                        bus.unsubscribe(session_id)
+                    await _release_bus(bus)
+            finally:
+                if http is not None:
+                    await http.aclose()
 
     async def query(self, prompt: str) -> None:
         if self._http is None or self._session_id is None:
@@ -1014,9 +1037,7 @@ class OpenCodeClient:
                     if not payload.cancelled():
                         exc = payload.exception()
                         if exc is not None:
-                            logger.warning(
-                                "OpenCode response producer failed: %r", exc
-                            )
+                            raise exc
                     continue
 
                 msg = payload
@@ -1040,6 +1061,7 @@ class OpenCodeClient:
         finally:
             for task in producers:
                 task.cancel()
+            await asyncio.gather(*producers, return_exceptions=True)
 
     async def _drain_child_session(
         self,
@@ -1073,6 +1095,8 @@ class OpenCodeClient:
                     pass
                 sink.write_message(msg)
                 await merge.put(("msg", msg))
+        except CLIConnectionError:
+            raise
         except Exception:
             logger.exception(
                 "Subagent drain failed for child session %s", child_session_id,

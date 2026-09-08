@@ -758,6 +758,12 @@ async def run_bot(
             logger.warning("Error shutting down login session", exc_info=True)
         stop_idle_sweep()
         await close_all_sessions()
+        from open_shrimp.backend.opencode.client import _shutdown_buses
+        try:
+            async with asyncio.timeout(10):
+                await _shutdown_buses()
+        except (Exception, TimeoutError):
+            logger.warning("Error shutting down OpenCode SSE buses", exc_info=True)
         # Stop all sandbox managers.  Each stop_backend() is wrapped in a
         # timeout because closing a wedged libvirt connection can block
         # indefinitely, and we'd rather lose that reaper cleanup than
