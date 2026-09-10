@@ -47,7 +47,7 @@ _ASK_BY_DEFAULT_MCP_PERMS = frozenset({
     "openshrimp_create_schedule",
     "openshrimp_delete_schedule",
 })
-_ALWAYS_ALLOWED_OPENCODE_PERMS = frozenset({"question", "todowrite"})
+_ALWAYS_ALLOWED_OPENCODE_PERMS = frozenset({"question", "task", "todowrite"})
 
 
 _BUS_REGISTRY: dict[tuple[str, str, str], tuple[EventBus, int]] = {}
@@ -430,12 +430,6 @@ class OpenCodeClient:
             rules.append({"permission": permission, "pattern": "*", "action": "ask"})
         rules.extend(self._rules_from_allowed_tools(include=_ASK_BY_DEFAULT_MCP_PERMS))
         rules.extend(self._rules_from_add_dirs())
-        # OpenCode-native subagents (the ``task`` tool) are the delegation
-        # path for the OpenCode backend. The tool inherits the ``*`` ask
-        # baseline above, so each invocation routes through can_use_tool;
-        # the child session is then drained and surfaced (see
-        # ``receive_response``).
-        #
         # Deny rules go last: OpenCode's evaluator picks the LAST matching
         # rule, and a ``deny`` on pattern ``*`` also removes the tool from
         # the model's tool list entirely.

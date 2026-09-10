@@ -62,3 +62,17 @@ def test_no_disallowed_tools_keeps_ask_baseline():
     rules = _rules()
     assert _last_matching(rules, "websearch")["action"] == "ask"
     assert not any(r["action"] == "deny" for r in rules)
+
+
+def test_task_is_allowed_by_default():
+    rules = _rules()
+    assert _last_matching(rules, "task") == {
+        "permission": "task", "pattern": "*", "action": "allow",
+    }
+    assert _last_matching(rules, "bash")["action"] == "ask"
+    assert _last_matching(rules, "edit")["action"] == "ask"
+
+
+def test_task_can_be_explicitly_disallowed():
+    rules = _rules(disallowed_tools=["task"])
+    assert _last_matching(rules, "task")["action"] == "deny"
