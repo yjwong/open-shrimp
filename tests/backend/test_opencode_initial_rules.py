@@ -8,6 +8,8 @@ also removes the tool from the model's tool list entirely).
 
 from __future__ import annotations
 
+import pytest
+
 from open_shrimp.backend.opencode.client import OpenCodeClient
 from open_shrimp.backend.protocol import BackendOptions
 
@@ -64,15 +66,17 @@ def test_no_disallowed_tools_keeps_ask_baseline():
     assert not any(r["action"] == "deny" for r in rules)
 
 
-def test_task_is_allowed_by_default():
+@pytest.mark.parametrize("permission", ["task", "skill"])
+def test_tool_is_allowed_by_default(permission):
     rules = _rules()
-    assert _last_matching(rules, "task") == {
-        "permission": "task", "pattern": "*", "action": "allow",
+    assert _last_matching(rules, permission) == {
+        "permission": permission, "pattern": "*", "action": "allow",
     }
     assert _last_matching(rules, "bash")["action"] == "ask"
     assert _last_matching(rules, "edit")["action"] == "ask"
 
 
-def test_task_can_be_explicitly_disallowed():
-    rules = _rules(disallowed_tools=["task"])
-    assert _last_matching(rules, "task")["action"] == "deny"
+@pytest.mark.parametrize("permission", ["task", "skill"])
+def test_default_allowed_tool_can_be_explicitly_disallowed(permission):
+    rules = _rules(disallowed_tools=[permission])
+    assert _last_matching(rules, permission)["action"] == "deny"

@@ -47,7 +47,7 @@ _ASK_BY_DEFAULT_MCP_PERMS = frozenset({
     "openshrimp_create_schedule",
     "openshrimp_delete_schedule",
 })
-_ALWAYS_ALLOWED_OPENCODE_PERMS = frozenset({"question", "task", "todowrite"})
+_ALWAYS_ALLOWED_OPENCODE_PERMS = frozenset({"question", "skill", "task", "todowrite"})
 
 
 _BUS_REGISTRY: dict[tuple[str, str, str], tuple[EventBus, int]] = {}
