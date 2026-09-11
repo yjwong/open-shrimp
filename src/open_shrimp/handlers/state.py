@@ -559,6 +559,7 @@ class _QuestionState:
     options: list[dict[str, Any]]
     multi_select: bool
     future: asyncio.Future[str]
+    text: str = ""
     selected: set[int] = field(default_factory=set)
     other_texts: list[str] = field(default_factory=list)
     message_id: int | None = None
@@ -579,6 +580,7 @@ class _QuestionState:
 
 # Pending question states: question_id -> _QuestionState
 _question_states: dict[str, _QuestionState] = {}
+_question_batches: dict[str, list[_QuestionState]] = {}
 
 # Pending "Other" text input: scope -> question_id.
 # When message_handler sees a text message for a scope with a pending "Other"

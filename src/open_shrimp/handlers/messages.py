@@ -1013,6 +1013,9 @@ async def _start_agent_task(
                     text: str,
                     options: list[dict[str, Any]],
                     multi_select: bool,
+                    batch_id: str,
+                    question_index: int,
+                    question_count: int,
                 ) -> None:
                     await notify_agent_status(
                         context.bot_data, config, db, scope, "running",
@@ -1022,6 +1025,9 @@ async def _start_agent_task(
                         awaiting_id=question_id,
                         question_options=options,
                         multi_select=multi_select,
+                        question_batch_id=batch_id,
+                        question_index=question_index,
+                        question_count=question_count,
                         todos=_scope_todos.get(scope),
                     )
 

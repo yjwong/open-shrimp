@@ -40,6 +40,8 @@ object AgentStatusNotifier {
     const val CHANNEL_ID = "agent_status"
     private const val GROUP_KEY = "place.wong.shrimp.companion.AGENT_STATUS"
     private const val SUMMARY_ID = 0x5A0001
+    private const val EXTRA_AWAITING_ID = "openshrimp.awaiting_id"
+    @Volatile var foregroundBatchId: String? = null
 
     private const val PHASE_RUNNING = "running"
     private const val PHASE_DONE = "done"
@@ -64,7 +66,7 @@ object AgentStatusNotifier {
     private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
 
     /** Dispatch an ``agent_status`` FCM data message to the notification shade. */
-    fun handle(context: Context, data: Map<String, String>) {
+    @Synchronized fun handle(context: Context, data: Map<String, String>) {
         val phase = data["phase"] ?: return
         val notificationId = notificationId(data) ?: return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -106,11 +108,15 @@ object AgentStatusNotifier {
      * ``running`` event arrives, so a tapped button stops offering itself the
      * moment it is tapped.
      */
-    fun markResolved(context: Context, notificationId: Int, text: String) {
+    @Synchronized fun markResolved(context: Context, notificationId: Int, awaitingId: String, text: String) {
         if (notificationId == 0) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        ensureChannel(manager)
-        manager.notify(notificationId, baseBuilder(context, "OpenShrimp", text).build())
+        val current = manager.activeNotifications.firstOrNull { it.id == notificationId }
+            ?.notification ?: return
+        if (current.extras.getString(EXTRA_AWAITING_ID) != awaitingId) return
+        manager.notify(notificationId, baseBuilder(context, "OpenShrimp", text)
+            .setContentIntent(current.contentIntent)
+            .build())
     }
 
     private fun build(
@@ -129,16 +135,22 @@ object AgentStatusNotifier {
             notificationId = notificationId,
             deepLink = deepLink,
         )
+        builder.addExtras(android.os.Bundle().apply {
+            putString(EXTRA_AWAITING_ID, question?.questionId ?: toolUseId)
+        })
         if (question != null) {
             // A question is new information rather than a progress tick, so it
             // takes the tap target, alerts on arrival, and gets the whole
             // sentence: the collapsed notification would cut it off exactly
             // where it stops making sense.
             builder.setCategory(Notification.CATEGORY_MESSAGE)
-                .setOnlyAlertOnce(false)
+                .setOnlyAlertOnce(question.batchId == foregroundBatchId)
                 .setContentIntent(sheetIntent(context, question))
                 .setStyle(Notification.BigTextStyle().bigText(text))
             addQuestionActions(context, builder, question)
+            if (question.batchId == foregroundBatchId) {
+                builder.setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY)
+            }
         } else if (!toolUseId.isNullOrEmpty()) {
             builder.addAction(action(context, notificationId, toolUseId, "approve", "Approve"))
             builder.addAction(action(context, notificationId, toolUseId, "deny", "Deny"))
@@ -238,6 +250,8 @@ object AgentStatusNotifier {
             .setContentTitle("OpenShrimp agents")
             .setGroup(GROUP_KEY)
             .setGroupSummary(true)
+            .setGroupAlertBehavior(Notification.GROUP_ALERT_CHILDREN)
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .build()
     }
@@ -261,12 +275,12 @@ object AgentStatusNotifier {
         builder: Notification.Builder,
         question: AgentQuestion,
     ) {
-        val fitsInline = !question.multiSelect &&
+        val fitsInline = question.questionCount == 1 && !question.multiSelect &&
             question.options.size in 1..MAX_ACTIONS
         if (!fitsInline) {
             builder.addAction(
                 notificationAction(
-                    context, "Answer…", android.R.drawable.ic_menu_edit,
+                    context, if (question.questionCount > 1) "Answer questions" else "Answer…", android.R.drawable.ic_menu_edit,
                     sheetIntent(context, question),
                 ),
             )
@@ -315,7 +329,7 @@ object AgentStatusNotifier {
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         return PendingIntent.getActivity(
             context,
-            question.questionId.hashCode(),
+            question.batchId.hashCode(),
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )

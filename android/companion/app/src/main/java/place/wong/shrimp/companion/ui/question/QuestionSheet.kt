@@ -31,9 +31,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.key
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -59,133 +59,158 @@ import place.wong.shrimp.companion.data.AgentQuestion
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun QuestionSheet(
-    question: AgentQuestion,
+    question: AgentQuestion?,
     submitting: Boolean,
     error: String?,
+    onRetry: () -> Unit,
     onAnswer: (optionIndexes: List<Int>, otherTexts: List<String>) -> Unit,
     onOpenConversation: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
-    val ticked = remember { mutableStateMapOf<Int, Boolean>() }
-    var otherText by remember { mutableStateOf("") }
-    val selected = ticked.filterValues { it }.keys.sorted()
-
-    // Whatever is typed always rides along, so every surface here — an option
-    // tap, the keyboard's Send, the multi-select button — submits the same way
-    // and cannot disagree about what the answer was.
-    fun submit(indexes: List<Int> = emptyList()) = onAnswer(
-        indexes,
-        listOfNotNull(otherText.trim().ifEmpty { null }),
-    )
-
     ModalBottomSheet(
-        // Tapping the scrim leaves the sheet on screen until it has animated
-        // down; finishing on the spot would blink the transparent window away
-        // with the sheet still drawn on it.
         onDismissRequest = {
             scope.launch { sheetState.hide() }.invokeOnCompletion { onDismiss() }
         },
         sheetState = sheetState,
     ) {
-        Column(
-            modifier = Modifier
-                .verticalScroll(rememberScrollState())
-                .navigationBarsPadding()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(
-                text = question.title,
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Text(
-                text = question.text,
-                style = MaterialTheme.typography.headlineSmall,
-            )
-            if (question.multiSelect) {
-                Text(
-                    text = "Pick as many as apply.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        if (question == null) {
+            Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Loading questions")
+                if (error == null) CircularProgressIndicator() else {
+                    Text(error, color = MaterialTheme.colorScheme.error)
+                    Button(onClick = onRetry) { Text("Retry") }
+                }
             }
+        } else key(question.batchId, question.questionId) {
+            QuestionContent(question, submitting, error, onRetry, onAnswer, onOpenConversation)
+        }
+    }
+}
 
-            question.options.forEachIndexed { index, option ->
-                OptionCard(
-                    label = option.label,
-                    description = option.description,
-                    multiSelect = question.multiSelect,
-                    checked = ticked[index] == true,
-                    enabled = !submitting,
-                    onClick = {
-                        if (question.multiSelect) {
-                            ticked[index] = ticked[index] != true
-                        } else {
-                            submit(listOf(index))
-                        }
-                    },
-                )
-            }
+@Composable
+private fun QuestionContent(
+    question: AgentQuestion,
+    submitting: Boolean,
+    error: String?,
+    onRetry: () -> Unit,
+    onAnswer: (List<Int>, List<String>) -> Unit,
+    onOpenConversation: () -> Unit,
+) {
+    var selected by rememberSaveable { mutableStateOf(listOf<Int>()) }
+    var otherText by rememberSaveable { mutableStateOf("") }
 
-            OutlinedTextField(
-                value = otherText,
-                onValueChange = { otherText = it },
-                modifier = Modifier.fillMaxWidth(),
+    // Whatever is typed always rides along, so every surface here — an option
+    // tap, the keyboard's Send, the multi-select button — submits the same way
+    // and cannot disagree about what the answer was.
+    fun submit(indexes: List<Int> = emptyList()) {
+        if (submitting) return
+        if (!question.multiSelect) selected = indexes
+        onAnswer(indexes.sorted(), listOfNotNull(otherText.trim().ifEmpty { null }))
+    }
+
+    Column(
+        modifier = Modifier
+            .verticalScroll(rememberScrollState())
+            .navigationBarsPadding()
+            .padding(horizontal = 24.dp)
+            .padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Question ${question.questionIndex + 1} of ${question.questionCount}")
+        Text(
+            text = question.title,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            text = question.text,
+            style = MaterialTheme.typography.headlineSmall,
+        )
+        if (question.multiSelect) {
+            Text(
+                text = "Pick as many as apply.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        question.options.forEachIndexed { index, option ->
+            OptionCard(
+                label = option.label,
+                description = option.description,
+                multiSelect = question.multiSelect,
+                checked = index in selected,
                 enabled = !submitting,
-                label = { Text("Something else") },
-                singleLine = false,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(
-                    onSend = {
-                        if (otherText.isNotBlank() && !question.multiSelect) submit()
-                    },
-                ),
-                trailingIcon = {
-                    // Single-select sends the typed answer on its own; in a
-                    // multi-select it joins the ticked options at Send below.
-                    if (!question.multiSelect) {
-                        IconButton(
-                            onClick = { submit() },
-                            enabled = otherText.isNotBlank() && !submitting,
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
-                        }
+                onClick = {
+                    if (question.multiSelect) {
+                        selected = if (index in selected) selected - index else selected + index
+                    } else {
+                        submit(listOf(index))
                     }
                 },
             )
+        }
 
-            if (error != null) {
-                Text(
-                    text = error,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (question.deepLink != null) {
-                    TextButton(onClick = onOpenConversation, enabled = !submitting) {
-                        Text("Open in Telegram")
+        OutlinedTextField(
+            value = otherText,
+            onValueChange = { otherText = it },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !submitting,
+            label = { Text("Something else") },
+            singleLine = false,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(
+                onSend = {
+                    if (otherText.isNotBlank() && !question.multiSelect) submit()
+                },
+            ),
+            trailingIcon = {
+                // Single-select sends the typed answer on its own; in a
+                // multi-select it joins the ticked options at Send below.
+                if (!question.multiSelect) {
+                    IconButton(
+                        onClick = { submit() },
+                        enabled = otherText.isNotBlank() && !submitting,
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
                 }
-                Spacer(Modifier.weight(1f))
-                if (submitting) {
-                    CircularProgressIndicator(Modifier.height(24.dp).width(24.dp))
-                } else if (question.multiSelect) {
-                    Button(
-                        onClick = { submit(selected) },
-                        enabled = selected.isNotEmpty() || otherText.isNotBlank(),
-                    ) {
-                        Text(if (selected.isEmpty()) "Send" else "Send ${selected.size}")
-                    }
+            },
+        )
+
+        if (error != null) {
+            Text(
+                text = error,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = onRetry, enabled = !submitting) { Text("Refresh questions") }
+            if (!question.multiSelect && (selected.isNotEmpty() || otherText.isNotBlank())) {
+                Button(onClick = { submit(selected) }, enabled = !submitting) { Text("Retry answer") }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (question.deepLink != null) {
+                TextButton(onClick = onOpenConversation, enabled = !submitting) {
+                    Text("Open in Telegram")
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            if (submitting) {
+                CircularProgressIndicator(Modifier.height(24.dp).width(24.dp))
+            } else if (question.multiSelect) {
+                Button(
+                    onClick = { submit(selected) },
+                    enabled = selected.isNotEmpty() || otherText.isNotBlank(),
+                ) {
+                    Text(if (selected.isEmpty()) "Send" else "Send ${selected.size}")
                 }
             }
         }

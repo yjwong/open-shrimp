@@ -23,6 +23,7 @@ from open_shrimp.handlers.approval import _close_card
 from open_shrimp.handlers.state import (
     _QuestionState,
     _pending_other_input,
+    _question_batches,
     _question_states,
 )
 from open_shrimp.handlers.utils import _is_authorized
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 # The agent-status push needs a Config and a database handle that this module
 # has no reason to hold, so the caller supplies the two edges instead.
 QuestionOpened = Callable[
-    [str, str, list[dict[str, Any]], bool], Awaitable[None]
+    [str, str, list[dict[str, Any]], bool, str, int, int], Awaitable[None]
 ]
 QuestionsClosed = Callable[[], Awaitable[None]]
 
@@ -126,58 +127,94 @@ def _format_question_text(question: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _register_question_batch(
+    bot: Bot, scope: ChatScope, questions: list[dict[str, Any]],
+) -> str:
+    batch_id = uuid.uuid4().hex
+    states = [
+        _QuestionState(
+            question_id=uuid.uuid4().hex,
+            scope=scope,
+            options=q.get("options", []),
+            multi_select=bool(q.get("multiSelect", False)),
+            future=asyncio.get_running_loop().create_future(),
+            text=q.get("question") or q.get("header") or "",
+            bot=bot,
+        )
+        for q in questions
+    ]
+    _question_batches[batch_id] = states
+    for state in states:
+        _question_states[state.question_id] = state
+    return batch_id
+
+
+def _remove_question_batch(batch_id: str) -> None:
+    for state in _question_batches.pop(batch_id, []):
+        _question_states.pop(state.question_id, None)
+        if _pending_other_input.get(state.scope) == state.question_id:
+            _pending_other_input.pop(state.scope, None)
+        state.waiting_for_other = False
+        state.other_query = None
+        if not state.future.done():
+            state.future.cancel()
+
+
 async def _send_question_keyboard(
     bot: Bot,
     scope: ChatScope,
     question: dict[str, Any],
     on_open: QuestionOpened | None = None,
+    *,
+    batch_id: str | None = None,
+    question_index: int = 0,
 ) -> str:
     """Present a question via inline keyboard and wait for the user's answer.
 
     Returns the selected option label (or custom "Other" text).
     """
-    options = question.get("options", [])
-    multi_select = question.get("multiSelect", False)
-    question_id = uuid.uuid4().hex[:8]
-
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[str] = loop.create_future()
-
-    state = _QuestionState(
-        question_id=question_id,
-        scope=scope,
-        options=options,
-        multi_select=multi_select,
-        future=future,
-        bot=bot,
-    )
-    _question_states[question_id] = state
-
-    keyboard = _build_question_keyboard(state)
-    text = _format_question_text(question)
-
-    msg = await send_rich(
-        bot, scope.chat_id, text,
-        thread_id=scope.thread_id,
-        reply_markup=keyboard,
-    )
-    state.message_id = msg.message_id
-    state.original_text_md = text
-
-    # Announced only once the card is up and the id is resolvable, so a phone
-    # answering the instant the push lands finds the state it names.
-    if on_open is not None:
-        await on_open(
-            question_id,
-            question.get("question") or question.get("header") or text,
-            options,
-            bool(multi_select),
-        )
-
+    owns_batch = batch_id is None
+    if batch_id is None:
+        batch_id = _register_question_batch(bot, scope, [question])
+    states = _question_batches[batch_id]
+    state = states[question_index]
     try:
-        return await future
+        if state.future.done():
+            return state.future.result()
+        text = _format_question_text(question)
+        state.original_text_md = text
+        msg = await send_rich(
+            bot, scope.chat_id, text,
+            thread_id=scope.thread_id,
+            reply_markup=_build_question_keyboard(state),
+        )
+        state.message_id = msg.message_id
+        # A device can resolve this question while Telegram is sending it.
+        if state.future.done():
+            answer = state.future.result()
+            await _close_card(
+                bot, scope.chat_id, msg.message_id,
+                text + f"\n\n\u2705 **Answer:** {escape_rich(answer)}",
+            )
+            return answer
+        if on_open is not None:
+            await on_open(
+                state.question_id, state.text, state.options, state.multi_select,
+                batch_id, question_index, len(states),
+            )
+        return await state.future
+    except BaseException:
+        # Reject answers to the whole call before Telegram cleanup can suspend.
+        _remove_question_batch(batch_id)
+        if state.message_id is not None:
+            await _close_card(
+                bot, scope.chat_id, state.message_id,
+                state.original_text_md + "\n\n*Question closed.*",
+            )
+        raise
     finally:
-        _question_states.pop(question_id, None)
+        if owns_batch:
+            _remove_question_batch(batch_id)
 
 
 async def _handle_ask_user_questions(
@@ -196,16 +233,18 @@ async def _handle_ask_user_questions(
     rather than between them: closing per question drops a three-question
     batch back to "Running" and re-alerts twice on the way through.
     """
-    await finalize_and_reset(bot, draft_state)
-
+    batch_id = _register_question_batch(bot, scope, questions)
     answers: dict[str, str] = {}
     try:
-        for q in questions:
+        await finalize_and_reset(bot, draft_state)
+        for index, q in enumerate(questions):
             question_text = q.get("question", "")
             answers[question_text] = await _send_question_keyboard(
                 bot, scope, q, on_open=on_question_open,
+                batch_id=batch_id, question_index=index,
             )
     finally:
+        _remove_question_batch(batch_id)
         if on_questions_closed is not None:
             await on_questions_closed()
 
@@ -259,6 +298,8 @@ async def _complete_other_input(
     For multi-select, adds the text to other_texts and updates the keyboard
     so the user can continue selecting or press Done.
     """
+    if state.future.done():
+        return
     query = state.other_query
     state.other_query = None
 
@@ -275,6 +316,8 @@ async def _complete_other_input(
                     original_md,
                     reply_markup=keyboard,
                 )
+                if state.future.done():
+                    await query.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 logger.exception("Failed to restore question keyboard after Other")
     else:
@@ -362,6 +405,8 @@ async def _handle_question_callback(
             if query.message:
                 try:
                     await query.message.edit_reply_markup(reply_markup=keyboard)
+                    if state.future.done():
+                        await query.message.edit_reply_markup(reply_markup=None)
                 except Exception:
                     logger.exception("Failed to update question keyboard")
         return True
@@ -392,6 +437,8 @@ async def _handle_question_callback(
         # message_handler that needs to deliver the typed text.
         await query.answer()
 
+        if state.future.done():
+            return True
         state.waiting_for_other = True
         state.other_query = query
         _pending_other_input[state.scope] = question_id

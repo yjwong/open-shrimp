@@ -513,3 +513,63 @@ def test_android_question_rejects_unsigned_request(tmp_path: Path) -> None:
     finally:
         client.close()
         asyncio.run(db.close())
+
+
+def test_android_question_batch_full_text_auth_answers_and_expiry(tmp_path: Path) -> None:
+    from open_shrimp.db import ChatScope
+    from open_shrimp.handlers.questions import _register_question_batch, _remove_question_batch
+
+    client, db = _make_client(tmp_path)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    device_id = "android-batch"
+    text, label, description = "question " * 1000, "label " * 100, "description " * 100
+
+    async def register():
+        return _register_question_batch(None, ChatScope(1), [
+            {"question": text, "options": [{"label": label, "description": description}]},
+            {"question": "Later", "options": [{}], "multiSelect": True},
+        ])
+
+    batch_id = asyncio.run(register())
+    path = f"/api/agent/question-batches/{batch_id}"
+
+    def get(nonce):
+        return client.get(path, headers=android_headers(
+            private_key, device_id=device_id, method="GET", path=path,
+            body=b"", nonce=nonce,
+        ))
+
+    try:
+        assert client.get(path).status_code == 401
+        _pair(client, private_key, device_id)
+        response = get("batch-get-1")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["batch_id"] == batch_id
+        first, second = body["questions"]
+        assert first == {
+            "question_id": first["question_id"], "text": text,
+            "options": [{"label": label, "description": description}],
+            "multi_select": False, "answered": False,
+        }
+        assert second == {
+            "question_id": second["question_id"], "text": "Later",
+            "options": [{"label": "Option 1", "description": ""}],
+            "multi_select": True, "answered": False,
+        }
+        response = _post_answer(client, private_key, device_id, second["question_id"],
+                                b'{"option_indexes":[0]}', "batch-answer")
+        assert response.json() == {"status": "resolved", "answer": "Option 1"}
+        updated = get("batch-get-2").json()["questions"]
+        assert [entry["question_id"] for entry in updated] == [first["question_id"], second["question_id"]]
+        assert [entry["answered"] for entry in updated] == [False, True]
+        assert _post_answer(client, private_key, device_id, second["question_id"],
+                            b'{"option_indexes":[0]}', "batch-duplicate").json() == {"status": "expired"}
+        _remove_question_batch(batch_id)
+        assert get("batch-get-expired").status_code == 404
+        assert _post_answer(client, private_key, device_id, first["question_id"],
+                            b'{"option_indexes":[0]}', "batch-expired").json() == {"status": "expired"}
+    finally:
+        _remove_question_batch(batch_id)
+        client.close()
+        asyncio.run(db.close())

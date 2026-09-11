@@ -20,9 +20,11 @@ class AgentApprovalReceiver : BroadcastReceiver() {
         sendAgentAnswer(
             context,
             intent.getIntExtra(EXTRA_NOTIFICATION_ID, 0),
+            toolUseId,
             if (decision == "approve") "Approved — resuming…" else "Denied — resuming…",
         ) { baseUrl, deviceId ->
-            approveAgentTool(baseUrl, deviceId, toolUseId, decision)
+            check(approveAgentTool(baseUrl, deviceId, toolUseId, decision))
+            false
         }
     }
 

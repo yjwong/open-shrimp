@@ -47,7 +47,7 @@
             android:name=".QuestionSheetActivity"
             android:exported="false"
             android:excludeFromRecents="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:taskAffinity=""
             android:theme="@style/SheetTheme" />
 

@@ -111,8 +111,46 @@ async def answer_agent_question_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"status": "resolved", "answer": answer})
 
 
+async def get_agent_question_batch_endpoint(request: Request) -> JSONResponse:
+    """Return every question in an active call, with untruncated option text."""
+    try:
+        await authenticate_android_request(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    from open_shrimp.handlers.questions import option_label
+    from open_shrimp.handlers.state import _question_batches
+
+    batch_id = request.path_params["batch_id"]
+    states = _question_batches.get(batch_id)
+    if states is None:
+        return JSONResponse({"error": "Question batch has expired"}, status_code=404)
+    return JSONResponse({
+        "batch_id": batch_id,
+        "questions": [
+            {
+                "question_id": state.question_id,
+                "text": state.text,
+                "options": [
+                    {"label": option_label(state.options, i),
+                     "description": option.get("description", "")}
+                    for i, option in enumerate(state.options)
+                ],
+                "multi_select": state.multi_select,
+                "answered": state.future.done() and not state.future.cancelled(),
+            }
+            for state in states
+        ],
+    })
+
+
 def create_agent_status_routes() -> list[Route]:
     return [
+        Route(
+            "/api/agent/question-batches/{batch_id}",
+            get_agent_question_batch_endpoint,
+            methods=["GET"],
+        ),
         Route(
             "/api/agent/approvals/{tool_use_id}",
             resolve_agent_approval_endpoint,

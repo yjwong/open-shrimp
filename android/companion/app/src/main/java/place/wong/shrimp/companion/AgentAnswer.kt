@@ -12,27 +12,29 @@ import place.wong.shrimp.companion.data.ServerApi
  * Approvals and questions are different decisions and answer to different
  * endpoints, but the plumbing around them is identical: keep the broadcast
  * alive past [BroadcastReceiver.onReceive], get off the main thread, look up
- * the pairing, swallow whatever the network did, and strip the notification's
- * actions either way. That last part is why failures are silent — the host is
- * still waiting and both the Telegram card and the sheet can still answer, so
- * a toast here would report a problem the user has three other ways to solve.
+ * the pairing, and update only the notification still awaiting this answer.
+ * Transport failures retain its actions for retry.
  */
 internal fun BroadcastReceiver.sendAgentAnswer(
     context: Context,
     notificationId: Int,
+    awaitingId: String,
     resolvedText: String,
-    send: suspend ServerApi.(baseUrl: String, deviceId: String) -> Unit,
+    send: suspend ServerApi.(baseUrl: String, deviceId: String) -> Boolean,
 ) {
     val appContext = context.applicationContext
     val pending = goAsync()
     Thread {
         try {
             Prefs(appContext).pairedServer?.let { (baseUrl, deviceId) ->
-                runBlocking { ServerApi().send(baseUrl, deviceId) }
+                val expired = runBlocking { ServerApi().send(baseUrl, deviceId) }
+                AgentStatusNotifier.markResolved(
+                    appContext, notificationId, awaitingId,
+                    if (expired) "No longer awaiting this answer" else resolvedText,
+                )
             }
         } catch (_: Exception) {
         } finally {
-            AgentStatusNotifier.markResolved(appContext, notificationId, resolvedText)
             pending.finish()
         }
     }.start()

@@ -169,8 +169,7 @@ class ServerApi(private val http: OkHttpClient = defaultClient()) {
      * label, so an answer cannot miss by a character or a truncation. A
      * single-select question sends exactly one entry across the two lists; a
      * multi-select sends as many as were ticked, and an empty pair is the
-     * host's "None selected". Returns true if the host accepted the answer
-     * (resolved, or already expired); false on transport/HTTP error.
+     * host's "None selected". Transport and protocol failures throw.
      */
     suspend fun answerAgentQuestion(
         baseUrl: String,
@@ -178,16 +177,32 @@ class ServerApi(private val http: OkHttpClient = defaultClient()) {
         questionId: String,
         optionIndexes: List<Int>,
         otherTexts: List<String>,
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): QuestionAnswerResult = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("option_indexes", JSONArray(optionIndexes))
             .put("other_texts", JSONArray(otherTexts))
             .toString()
-        signedPostSuccess(
+        QuestionAnswerResult.parse(signedPost(
             "$baseUrl/api/agent/questions/${urlEncode(questionId)}",
             deviceId,
+            "Question answer failed",
             body,
-        )
+        ))
+    }
+
+    suspend fun questionBatch(
+        baseUrl: String,
+        deviceId: String,
+        route: AgentQuestion,
+    ): List<AgentQuestion>? = withContext(Dispatchers.IO) {
+        val url = "$baseUrl/api/agent/question-batches/${urlEncode(route.batchId)}"
+        val request = SigningKeys.sign(Request.Builder().url(url), "GET", url, "", deviceId)
+            .get().build()
+        http.newCall(request).execute().use { response ->
+            if (response.code == 404) return@withContext null
+            check(response.isSuccessful) { "Question fetch failed: HTTP ${response.code}" }
+            AgentQuestion.parseBatch(response.body?.string().orEmpty(), route)
+        }
     }
 
     suspend fun pendingPortForwardSessions(

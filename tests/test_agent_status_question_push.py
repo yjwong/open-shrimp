@@ -111,11 +111,17 @@ async def test_question_overlay_names_its_kind(
         awaiting_id="q1",
         question_options=[{"label": "A"}, {"label": "B"}],
         multi_select=True,
+        question_batch_id="batch-1",
+        question_index=0,
+        question_count=3,
     )
 
     assert sender.data["awaiting_kind"] == "question"
     assert sender.data["awaiting_id"] == "q1"
     assert sender.data["multi_select"] == "1"
+    assert sender.data["question_batch_id"] == "batch-1"
+    assert sender.data["question_index"] == "0"
+    assert sender.data["question_count"] == "3"
     assert [o["label"] for o in json.loads(sender.data["question_options"])] == ["A", "B"]
     # A wait on the human is time-sensitive; the OS must not defer it.
     assert sender.high_priority is True

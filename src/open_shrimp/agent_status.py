@@ -20,9 +20,9 @@ answers it, and the endpoint follows from the kind:
   notification's approve/deny actions via ``/api/agent/approvals/{id}``.
 - ``question`` (+ ``question_options``, ``multi_select``) — an
   AskUserQuestion, answered by index via ``/api/agent/questions/{id}``.
-  The options ride in the push so the phone renders the whole choice
-  without calling back, and the answer is a list of positions in that
-  same list.
+   The push carries options for direct actions plus ``question_batch_id``,
+   ``question_index`` (zero-based), and ``question_count``. The phone fetches
+   the full call at ``/api/agent/question-batches/{question_batch_id}``.
 
 Events are delivered as FCM data messages, one stable notification per
 :class:`~open_shrimp.db.ChatScope`.  See the v2 contract in
@@ -166,6 +166,9 @@ async def notify_agent_status(
     tool_name: str | None = None,
     question_options: list[dict[str, Any]] | None = None,
     multi_select: bool = False,
+    question_batch_id: str | None = None,
+    question_index: int = 0,
+    question_count: int = 1,
     todos: list[dict[str, Any]] | None = None,
 ) -> None:
     """Push an agent-status event to every active FCM companion device.
@@ -228,6 +231,9 @@ async def notify_agent_status(
                 question_options or [],
             )
             data["multi_select"] = "1" if multi_select else "0"
+            data["question_batch_id"] = question_batch_id or ""
+            data["question_index"] = str(question_index)
+            data["question_count"] = str(question_count)
 
     high_priority = awaiting_kind is not None
     for device in fcm_devices:

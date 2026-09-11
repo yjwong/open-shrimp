@@ -22,9 +22,10 @@ class AgentQuestionReceiver : BroadcastReceiver() {
         sendAgentAnswer(
             context,
             intent.getIntExtra(EXTRA_NOTIFICATION_ID, 0),
+            questionId,
             "Answered — resuming…",
         ) { baseUrl, deviceId ->
-            answerAgentQuestion(baseUrl, deviceId, questionId, listOf(index), emptyList())
+            answerAgentQuestion(baseUrl, deviceId, questionId, listOf(index), emptyList()).expired
         }
     }
 
