@@ -13,7 +13,15 @@ from open_shrimp.backend.opencode import sse
 from open_shrimp.backend.opencode.process import OpenCodeEndpoint
 from open_shrimp.backend.opencode.sse import EventBus, EventQueueClosed
 from open_shrimp.backend.protocol import BackendOptions
-from open_shrimp.backend.types import Message, TaskStartedMessage
+from open_shrimp.backend.types import (
+    AssistantMessage,
+    Message,
+    PermissionResultAllow,
+    ResultMessage,
+    TaskStartedMessage,
+    TextBlock,
+    ToolUseBlock,
+)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -505,6 +513,174 @@ async def test_receive_response_awaits_sibling_cancellation(
         assert messages == [started]
         assert len(producer_tasks) == 2
         assert all(task.done() for task in producer_tasks)
+    finally:
+        finish_cleanup.set()
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume_during_cleanup", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("first_failed", [False, True])
+async def test_receive_response_resumes_child_with_permissions(
+    monkeypatch, make_client, resume_during_cleanup: bool, cancelled: bool,
+    first_failed: bool,
+) -> None:
+    client = make_client()
+    await client.connect()
+    parent_id = client.session_id
+    bus = client._bus
+    client._options.can_use_tool = AsyncMock(return_value=PermissionResultAllow())
+    approved = asyncio.Event()
+
+    async def reply(*args: Any, **kwargs: Any) -> Mock:
+        approved.set()
+        return Mock(status_code=200)
+
+    post = AsyncMock(side_effect=reply)
+    monkeypatch.setattr(client._http, "post", post)
+    sinks = [Mock(), Mock()]
+    sink_factory = Mock(side_effect=sinks)
+    monkeypatch.setattr(oc, "_ChildTranscriptSink", sink_factory)
+    bridges = []
+    bridge_ready = [asyncio.Event(), asyncio.Event()]
+    cleanup_started = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    stopped = [asyncio.Event(), asyncio.Event()]
+    create_bridge = client.create_permission_bridge
+
+    def tracked_bridge(session_id: str) -> oc.PermissionBridge:
+        index = len(bridges)
+        if index == 1:
+            assert stopped[0].is_set()
+        bridge = create_bridge(session_id)
+        stop = bridge.stop
+
+        async def tracked_stop() -> None:
+            if index == 0:
+                cleanup_started.set()
+                if resume_during_cleanup:
+                    await finish_cleanup.wait()
+            await stop()
+            stopped[index].set()
+
+        monkeypatch.setattr(bridge, "stop", tracked_stop)
+        bridges.append(bridge)
+        bridge_ready[index].set()
+        return bridge
+
+    monkeypatch.setattr(client, "create_permission_bridge", tracked_bridge)
+    messages = []
+
+    async def consume() -> None:
+        async for message in client.receive_response():
+            messages.append(message)
+
+    def dispatch(event_type: str, session_id: str, **props: Any) -> None:
+        bus._dispatch({
+            "type": event_type,
+            "properties": {"sessionID": session_id, **props},
+        })
+
+    def task_part(call_id: str, status: str) -> None:
+        dispatch("message.part.updated", parent_id, part={
+            "id": call_id, "type": "tool", "tool": "task", "callID": call_id,
+            "state": {
+                "status": status,
+                "input": {"description": call_id, "task_id": "child" if call_id == "resume" else ""},
+                "metadata": {"sessionId": "child"},
+                "output": "done",
+                "error": "child failed" if status == "error" else "",
+            },
+        })
+
+    consumer = asyncio.create_task(consume())
+    try:
+        async with asyncio.timeout(2):
+            task_part("initial", "running")
+            task_part("initial", "running")
+            await bridge_ready[0].wait()
+            child_queue = bus._subscribers["child"]
+            if first_failed:
+                dispatch("session.error", "child", error={"message": "child failed"})
+            else:
+                dispatch("message.part.delta", "child", partID="first", field="text", delta="first answer")
+            dispatch("session.idle", "child")
+            task_part("initial", "error" if first_failed else "completed")
+            await cleanup_started.wait()
+            if not resume_during_cleanup:
+                await stopped[0].wait()
+
+            task_part("resume", "running")
+            task_part("resume", "running")
+            # These events must survive the gap between child invocations,
+            # including an old bridge whose stop() has not finished yet.
+            dispatch("message.part.updated", "child", part={
+                "id": "read-part", "type": "tool", "tool": "read", "callID": "read-call",
+                "state": {"status": "running", "input": {"filePath": "/workspace/file"}},
+            })
+            dispatch("permission.asked", "child", id="read-permission", permission="read",
+                     tool={"callID": "read-call"})
+            if resume_during_cleanup:
+                await asyncio.sleep(0)
+                assert len(bridges) == 1
+                assert not approved.is_set()
+            finish_cleanup.set()
+            await bridge_ready[1].wait()
+            await approved.wait()
+            assert bus._subscribers["child"] is child_queue
+            client._options.can_use_tool.assert_awaited_once()
+            name, tool_input, context = client._options.can_use_tool.call_args.args
+            assert (name, tool_input, context.tool_use_id) == (
+                "read", {"filePath": "/workspace/file"}, "read-call",
+            )
+            assert bridges[1]._session_id == "child"
+            post.assert_awaited_once_with(
+                "/permission/read-permission/reply",
+                params={"directory": "/workspace"}, json={"reply": "once"},
+            )
+            if cancelled:
+                consumer.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await consumer
+            else:
+                dispatch("message.part.delta", "child", partID="second", field="text", delta="second answer")
+                dispatch("session.idle", "child")
+                task_part("resume", "completed")
+                dispatch("session.idle", parent_id)
+                await consumer
+
+            assert len(bridges) == 2
+            assert all(event.is_set() for event in stopped)
+            assert all(not bridge._tasks for bridge in bridges)
+            assert set(bus._subscribers) == {parent_id}
+            with pytest.raises(EventQueueClosed):
+                await child_queue.get()
+            assert client.session_id == parent_id
+            starts = [message for message in messages if isinstance(message, TaskStartedMessage)]
+            assert [message.tool_use_id for message in starts] == ["initial", "resume"]
+            reads = [
+                message for message in messages if isinstance(message, AssistantMessage)
+                and any(isinstance(block, ToolUseBlock) and block.id == "read-call"
+                        for block in message.content)
+            ]
+            assert len(reads) == 1
+            assert reads[0].parent_tool_use_id == "resume"
+            answers = [
+                (message.parent_tool_use_id, block.text)
+                for message in messages if isinstance(message, AssistantMessage)
+                for block in message.content if isinstance(block, TextBlock)
+            ]
+            expected_answers = [] if first_failed else [("initial", "first answer")]
+            if not cancelled:
+                expected_answers.append(("resume", "second answer"))
+            assert answers == expected_answers
+            results = [message for message in messages if isinstance(message, ResultMessage)]
+            assert [message.session_id for message in results] == ([] if cancelled else [parent_id])
+            assert sink_factory.call_count == 2
+            for sink in sinks:
+                sink.close.assert_called_once()
     finally:
         finish_cleanup.set()
         consumer.cancel()

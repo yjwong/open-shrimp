@@ -1001,14 +1001,15 @@ class OpenCodeClient:
         # foreground subagent's transcript fully drains before the turn ends.
         merge: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         producers: set[asyncio.Task[None]] = set()
-        seen_children: set[str] = set()
+        child_drains: dict[str, tuple[str, asyncio.Task[None]]] = {}
 
-        def _spawn(coro: Any) -> None:
+        def _spawn(coro: Any) -> asyncio.Task[None]:
             task = asyncio.create_task(coro)
             producers.add(task)
             task.add_done_callback(
                 lambda t: merge.put_nowait(("producer_done", t))
             )
+            return task
 
         async def _produce_parent() -> None:
             async for msg in _iter_response(
@@ -1042,20 +1043,35 @@ class OpenCodeClient:
                     isinstance(msg, TaskStartedMessage)
                     and msg.task_id
                     and msg.tool_use_id
-                    and msg.task_id not in seen_children
                 ):
-                    seen_children.add(msg.task_id)
-                    _spawn(
-                        self._drain_child_session(
-                            msg.task_id, msg.tool_use_id, msg.description, merge,
+                    previous = child_drains.get(msg.task_id)
+                    if previous is not None and previous[0] == msg.tool_use_id:
+                        logger.debug(
+                            "Ignoring duplicate child start: session=%s callID=%s",
+                            msg.task_id, msg.tool_use_id,
                         )
-                    )
+                    else:
+                        if previous is not None:
+                            # Finish the previous invocation before consuming
+                            # the same queue with the resumed call's lineage.
+                            await asyncio.shield(previous[1])
+                        queue = self.subscribe_session(msg.task_id)
+                        task = _spawn(
+                            self._drain_child_session(
+                                msg.task_id, msg.tool_use_id, msg.description, merge, queue,
+                            )
+                        )
+                        child_drains[msg.task_id] = (msg.tool_use_id, task)
 
                 yield msg
         finally:
             for task in producers:
                 task.cancel()
             await asyncio.gather(*producers, return_exceptions=True)
+            # Keep subscriptions between invocations so a resumed child's
+            # events remain queued while its previous bridge finishes cleanup.
+            for child_session_id in child_drains:
+                self.unsubscribe_session(child_session_id)
 
     async def _drain_child_session(
         self,
@@ -1063,6 +1079,7 @@ class OpenCodeClient:
         call_id: str,
         description: str | None,
         merge: asyncio.Queue[tuple[str, Any]],
+        queue: EventQueue,
     ) -> None:
         """Drain a subagent's child session into the parent's merge queue.
 
@@ -1074,32 +1091,47 @@ class OpenCodeClient:
         ``stream.py``; ending the async-for on it is enough. The rendered
         turns are also teed to a transcript file for the Terminal Mini App.
         """
-        queue = self.subscribe_session(child_session_id)
+        logger.debug(
+            "Starting child drain: session=%s callID=%s", child_session_id, call_id,
+        )
         bridge = self.create_permission_bridge(child_session_id)
         sink = _ChildTranscriptSink(child_session_id, description)
         try:
-            async for msg in self.iter_session_response(
-                child_session_id, queue, bridge=bridge,
-            ):
-                if isinstance(msg, ResultMessage):
-                    break
+            while True:
                 try:
-                    msg.parent_tool_use_id = call_id
-                except (AttributeError, TypeError):
-                    pass
-                sink.write_message(msg)
-                await merge.put(("msg", msg))
+                    async for msg in self.iter_session_response(
+                        child_session_id, queue, bridge=bridge,
+                    ):
+                        if isinstance(msg, ResultMessage):
+                            return
+                        try:
+                            msg.parent_tool_use_id = call_id
+                        except (AttributeError, TypeError):
+                            pass
+                        sink.write_message(msg)
+                        await merge.put(("msg", msg))
+                    break
+                except ProcessError as exc:
+                    # session.error precedes session.idle. Consume the idle
+                    # before handing the retained queue to another invocation.
+                    logger.warning(
+                        "Subagent session error: session=%s callID=%s: %s",
+                        child_session_id, call_id, exc,
+                    )
         except CLIConnectionError:
             raise
         except Exception:
             logger.exception(
                 "Subagent drain failed for child session %s", child_session_id,
             )
+            raise
         finally:
             if bridge is not None:
                 await bridge.stop()
-            self.unsubscribe_session(child_session_id)
             sink.close()
+            logger.debug(
+                "Stopped child drain: session=%s callID=%s", child_session_id, call_id,
+            )
 
 
 class _ChildTranscriptSink:

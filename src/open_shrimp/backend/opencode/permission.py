@@ -196,9 +196,9 @@ class PermissionBridge:
         cached = self._get_call_approval(str(call_id), tool_name, tool_input)
         if cached is not None:
             logger.info(
-                "Permission asked: category=%s tool=%s callID=%s "
+                "Permission asked: category=%s tool=%s callID=%s sessionID=%s requestID=%s "
                 "(reusing prior call approval)",
-                category, tool_name, call_id,
+                category, tool_name, call_id, session_id, request_id,
             )
             await self._send_reply(request_id, cached)
             return
@@ -210,8 +210,8 @@ class PermissionBridge:
         )
 
         logger.info(
-            "Permission asked: category=%s tool=%s callID=%s",
-            category, tool_name, call_id,
+            "Permission asked: category=%s tool=%s callID=%s sessionID=%s requestID=%s",
+            category, tool_name, call_id, session_id, request_id,
         )
 
         try:
