@@ -1,4 +1,4 @@
-"""Keep every test off the real binary cache.
+"""Keep every test off the real binary cache and off each other's rate budgets.
 
 The other half of this — keeping tests off the network — is `pytest-socket`,
 configured in `pyproject.toml`'s `addopts`. Both guard the same silent
@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 import open_shrimp.binaries as binaries
+from open_shrimp.rich_message import _draft_budgets
 
 
 @pytest.fixture(autouse=True)
@@ -32,3 +33,17 @@ def managed_bin_dir(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     monkeypatch.setattr(binaries, "BIN_DIR", bin_dir)
     return bin_dir
+
+
+@pytest.fixture(autouse=True)
+def clean_draft_budgets():
+    """Clear the per-chat draft budgets, which are module state.
+
+    ``send_rich_draft`` charges ``_draft_budgets[chat_id]`` on the real
+    monotonic clock, so a suite that runs enough streamed turns against one
+    ``chat_id`` spends the tier and every later draft is refused — tests
+    asserting on drafts then fail on test order rather than behaviour.
+    """
+    _draft_budgets.clear()
+    yield
+    _draft_budgets.clear()

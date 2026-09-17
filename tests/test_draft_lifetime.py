@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dtm
 import time
-from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -31,14 +30,6 @@ from open_shrimp.stream import (
     _DraftState,
     _send_draft,
 )
-
-
-@pytest.fixture(autouse=True)
-def _clean_budgets() -> Any:
-    """The budgets are module state, shared across tests without this."""
-    _draft_budgets.clear()
-    yield
-    _draft_budgets.clear()
 
 
 def _spend(chat_id: int, times: list[float]) -> None:
