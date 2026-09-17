@@ -16,7 +16,8 @@ OpenCode SSE event                ``backend.types`` emitted
 ``message.part.updated`` tool     ``AssistantMessage([ToolUseBlock])`` (pending/
                                   running) / ``UserMessage([ToolResultBlock])``
                                   (completed/error)
-``message.part.updated`` reason   filtered (reasoning deltas dropped)
+``message.part.updated`` reason   learns ids; their deltas →
+                                  ``ThinkingDeltaEvent`` (draft-only)
 ``session.idle``                  ``ResultMessage`` (``num_steps`` → ``num_turns``)
 ``permission.asked``              bridge dispatch (no yield)
 ``question.asked``                callback dispatch (no yield)
@@ -47,6 +48,7 @@ from open_shrimp.backend.types import (
     TaskStartedMessage,
     TextBlock,
     TextDeltaEvent,
+    ThinkingDeltaEvent,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -118,9 +120,16 @@ async def _iter_response(
     # Reasoning parts surface as message.part.delta with field="text", same as
     # real text parts (opencode processor.ts emits updatePartDelta with
     # field:"text" for reasoning-delta). The delta payload itself doesn't
-    # carry the part type, so we learn it from message.part.updated and
-    # drop matching deltas to keep thinking traces out of Telegram.
+    # carry the part type, so we learn it from message.part.updated and route
+    # matching deltas to ThinkingDeltaEvent — draft-only reasoning that never
+    # reaches a real message.
     reasoning_part_ids: set[str] = set()
+    # Back-to-back reasoning parts each carry a new id, and ThinkingDeltaEvent
+    # has no block marker, so a new id mid-run gets an explicit paragraph
+    # break.  Tool calls and answer text end the run over in stream.py, so
+    # only the translator's own emissions clear the run.
+    reasoning_run_part: str | None = None
+    reasoning_run_open = False
     loop = asyncio.get_running_loop()
     turn_start_ms = int(loop.time() * 1000)
 
@@ -248,15 +257,28 @@ async def _iter_response(
 
         if etype == EVT_MESSAGE_PART_DELTA and props.get("field") == "text":
             part_id = _resolve_part_id(props)
-            if part_id in reasoning_part_ids:
-                continue
             delta = props.get("delta", "")
+            if part_id in reasoning_part_ids:
+                if isinstance(delta, str) and delta:
+                    if reasoning_run_open and part_id != reasoning_run_part:
+                        yield ThinkingDeltaEvent(
+                            text="\n\n",
+                            session_id=session_id,
+                        )
+                    reasoning_run_part = part_id
+                    reasoning_run_open = True
+                    yield ThinkingDeltaEvent(
+                        text=delta,
+                        session_id=session_id,
+                    )
+                continue
             if part_id is not None and isinstance(delta, str):
                 if part_id not in text_buffers:
                     text_buffers[part_id] = []
                     part_order.append(part_id)
                 text_buffers[part_id].append(delta)
                 if delta:
+                    reasoning_run_open = False
                     yield TextDeltaEvent(
                         text=delta,
                         session_id=session_id,
@@ -274,13 +296,19 @@ async def _iter_response(
                 elif part_type == _PART_TYPE_TOOL:
                     if bridge is not None:
                         bridge.observe_tool_part(part)
-                    for msg in _toolpart_messages(
+                    tool_msgs = _toolpart_messages(
                         part, tool_use_emitted, tool_result_emitted,
                         flush_text=_flush_text,
                         task_started=task_started,
                         parent_session_id=session_id,
-                    ):
+                    )
+                    for msg in tool_msgs:
                         yield msg
+                    if tool_msgs:
+                        # A ToolUseBlock ends the reasoning block over in
+                        # stream.py, so the next reasoning part needs no
+                        # boundary from us.
+                        reasoning_run_open = False
             continue
 
         if etype == EVT_PERMISSION_ASKED:
