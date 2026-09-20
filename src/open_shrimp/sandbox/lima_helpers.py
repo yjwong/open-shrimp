@@ -283,6 +283,18 @@ def state_dir_for(context_name: str) -> Path:
     return _data_dir() / "lima-state" / context_name
 
 
+def lima_guest_home(guest_os: str = "linux") -> str:
+    """The home directory of the user ``limactl shell`` lands in.
+
+    Lima creates the guest user as ``<host user>.guest``, under ``/home`` in a
+    Linux guest and ``/Users`` in a macOS one.  ``getpass.getuser()``, not
+    ``os.getlogin()`` — the latter returns "root" under launchd (the macOS
+    ``.app``), naming a home no mount lands at.
+    """
+    root = "/Users" if guest_os == "macos" else "/home"
+    return f"{root}/{getpass.getuser()}.guest"
+
+
 def vnc_host_port(context_name: str) -> int:
     """Return a deterministic VNC host port for a context.
 
@@ -333,6 +345,7 @@ def lima_template(
     computer_use: bool = False,
     *,
     context_name: str = "",
+    agent_home_mounts: "tuple[tuple[str, str], ...]" = (),
     served_home_mounts: "tuple[GuestMount, ...]" = (),
     task_tmp_guest_path: str,
 ) -> dict:
@@ -346,7 +359,9 @@ def lima_template(
     mounts = _build_mounts(
         sdir, project_dir, additional_directories, computer_use,
         task_tmp_guest_path=task_tmp_guest_path,
-        context_name=context_name, served_home_mounts=served_home_mounts,
+        context_name=context_name,
+        agent_home_mounts=agent_home_mounts,
+        served_home_mounts=served_home_mounts,
     )
     provision = _build_provision_scripts(config, computer_use)
 
@@ -407,10 +422,15 @@ def _build_mounts(
     computer_use: bool = False,
     *,
     context_name: str = "",
+    agent_home_mounts: "tuple[tuple[str, str], ...]" = (),
     served_home_mounts: "tuple[GuestMount, ...]" = (),
     task_tmp_guest_path: str,
 ) -> list[dict]:
     """Build Lima mount entries.
+
+    *agent_home_mounts* is ``(host dir, guest path)`` per wrapped-CLI runtime's
+    agent home — the dir the CLI reads its credentials and writes its session
+    corpus in.
 
     Each :class:`GuestMount` in *served_home_mounts* is appended as a virtiofs
     mount so the runtime's ``inject``-written host dirs (provider
@@ -431,18 +451,16 @@ def _build_mounts(
     for d in additional_directories or []:
         mounts.append({"location": d, "writable": True})
 
-    # Host-side .claude home (shared into VM).
-    # Lima creates the VM user as <username> with home /home/<username>.guest.
-    # getpass.getuser(), not os.getlogin() — the latter returns "root"
-    # under launchd (macOS .app), producing a wrong mount point.
-    vm_home = f"/home/{getpass.getuser()}.guest"
-    claude_home = str(sdir / "claude-home")
-    Path(claude_home).mkdir(parents=True, exist_ok=True)
-    mounts.append({
-        "location": claude_home,
-        "mountPoint": f"{vm_home}/.claude",
-        "writable": True,
-    })
+    # Each wrapped-CLI runtime's agent home, shared into the VM at the path it
+    # resolves from the guest user's own home.
+    vm_home = lima_guest_home()
+    for host_dir, guest_path in agent_home_mounts:
+        Path(host_dir).mkdir(parents=True, exist_ok=True)
+        mounts.append({
+            "location": host_dir,
+            "mountPoint": guest_path,
+            "writable": True,
+        })
 
     host_skills = Path.home() / ".claude" / "skills"
     if host_skills.is_dir():
@@ -1074,11 +1092,16 @@ def build_cli_wrapper(
     limactl_path: str,
     project_dir: str,
     inst_name: str,
-    claude_home_dir: Path | None = None,
     *,
+    argv0: str,
     guest_os: str = "linux",
 ) -> str:
-    """Generate a bash wrapper that uses ``limactl shell`` to run Claude CLI.
+    """Generate a bash wrapper that uses ``limactl shell`` to run an agent CLI.
+
+    *argv0* is the CLI's own name on the guest ``PATH``, off the runtime's
+    image bundle.  Host-side credentials reach the guest through the runtime's
+    ``provision_credentials`` hook, which ``provision_workspace`` runs into
+    that runtime's shared agent home before every dispatch.
 
     Returns the absolute path to the generated wrapper script.
     """
@@ -1086,21 +1109,8 @@ def build_cli_wrapper(
         from open_shrimp.sandbox.lima_macos_helpers import build_cli_wrapper_macos
         return build_cli_wrapper_macos(
             context_name, sdir, limactl_path, project_dir,
-            inst_name, claude_home_dir,
+            inst_name, argv0=argv0,
         )
-
-    # Credential copy block — extract from macOS Keychain into host-side
-    # VirtioFS-shared directory so the Linux VM can pick it up.
-    cred_block = ""
-    if claude_home_dir is not None:
-        cred_dest = shlex.quote(str(claude_home_dir / ".credentials.json"))
-        cred_block = textwrap.dedent(f"""\
-            # Extract fresh credentials from macOS Keychain.
-            CRED_JSON=$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null) || true
-            if [ -n "$CRED_JSON" ]; then
-                printf '%s' "$CRED_JSON" > {cred_dest}
-            fi
-        """)
 
     # Git identity — read from host and export in the remote shell.
     git_env_parts: list[str] = []
@@ -1166,11 +1176,11 @@ def build_cli_wrapper(
             done
         fi
 
-    """) + cred_block + textwrap.dedent(f"""\
+    """) + textwrap.dedent(f"""\
 
         # Build remote command with proper shell-escaping.
         # Source /etc/profile for full PATH (needed for npx / Playwright MCP).
-        REMOTE_CMD=". /etc/profile{api_key_export}{git_env_export} && cd {shlex.quote(project_dir)} && claude"
+        REMOTE_CMD=". /etc/profile{api_key_export}{git_env_export} && cd {shlex.quote(project_dir)} && {shlex.quote(argv0)}"
         for arg in "$@"; do
             REMOTE_CMD+=" $(printf '%q' "$arg")"
         done

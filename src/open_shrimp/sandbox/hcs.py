@@ -66,6 +66,10 @@ from open_shrimp.sandbox.agent_runtime import (
     ServedEndpoint,
     ServedSlot,
     WrappedCLI,
+    agent_argv0,
+    agent_home_guest_dir,
+    agent_home_shares,
+    rebase_guest_path,
     run_served_endpoint,
     served_home_mounts,
     task_tmp_guest_paths,
@@ -246,36 +250,21 @@ def _chroot_guest_path(guest_path: str, guest_home: str, *, owner: str) -> str:
     guest paths inside its env — under the image bundle's ``guest_home``
     (``/home/claude/…``, ``/home/openshrimp/…``).  The HCS chroot has no such
     user; everything runs as root with ``HOME=CHROOT_HOME``.  So the
-    *home-relative* tail is re-rooted there.  Re-rooting the tail rather than
-    taking its basename is what keeps an XDG-shaped path
-    (``.local/share/<agent>``) resolvable from ``HOME``.
+    *home-relative* tail is re-rooted there.
     """
-    try:
-        tail = PurePosixPath(guest_path).relative_to(guest_home)
-    except ValueError:
-        raise RuntimeError(
-            f"Agent runtime {owner!r} declares guest path {guest_path!r}, "
-            f"which is not under its image bundle's guest home "
-            f"{guest_home!r}; the HCS backend cannot re-root it at "
-            f"{H.CHROOT_HOME}."
-        ) from None
-    return str(PurePosixPath(H.CHROOT_HOME) / tail)
+    return rebase_guest_path(
+        guest_path, guest_home, target_home=H.CHROOT_HOME, owner=owner,
+    )
 
 
-def _chroot_agent_home(runtime: AgentRuntime | None) -> str:
+def _chroot_agent_home(runtime: AgentRuntime) -> str:
     """The chroot path *runtime*'s agent-home share binds to.
 
     Distinct per runtime (``/root/.claude`` against
     ``/root/.local/share/opencode``), which is what lets one guest hold both
     homes at once.
     """
-    if runtime is None or runtime.image_bundle is None:
-        return f"{H.CHROOT_HOME}/.claude"
-    return _chroot_guest_path(
-        runtime.home_mount.guest_dir,
-        runtime.image_bundle.guest_home,
-        owner=runtime.name,
-    )
+    return agent_home_guest_dir(runtime, H.CHROOT_HOME)
 
 
 @dataclass(frozen=True)
@@ -425,46 +414,18 @@ class HcsSandbox:
     def add_runtime(self, runtime: AgentRuntime) -> None:
         self._runtimes.setdefault(runtime.name, runtime)
 
-    def _agent_home_dir(self, runtime: AgentRuntime | None) -> Path:
-        """Host side of *runtime*'s agent-home share.
+    @property
+    def runtime_names(self) -> set[str]:
+        return set(self._runtimes)
 
-        It must be the very dir the runtime's ``inject`` writes to, or the
-        guest never sees the injected credentials; with no runtime there is
-        nothing to inject and the per-context state dir stands in.
-        """
-        if runtime is None:
-            return self._sdir / "claude-home"
-        return Path(runtime.home_mount.host_dir)
-
-    def _agent_home_shares(self) -> list[tuple[AgentRuntime | None, Path]]:
+    def _agent_home_shares(self) -> list[tuple[AgentRuntime, Path]]:
         """Every registered runtime's agent home, one share each, with its
-        owner — the only one that can say which chroot path it binds to.
-
-        Ordered by host dir rather than by registration: registration order is
-        whichever ChatScope dispatched first and nothing persists it, so an
-        arrival-ordered plan would put the same two runtimes on different
-        vsock ports from one process start to the next.
-        """
-        by_host_dir = sorted(
-            self._runtimes.values(),
-            key=lambda runtime: str(self._agent_home_dir(runtime)),
-        )
-        return [
-            (runtime, self._agent_home_dir(runtime)) for runtime in by_host_dir
-        ] or [(None, self._agent_home_dir(None))]
+        owner — the only one that can say which chroot path it binds to."""
+        return agent_home_shares(self._runtimes.values())
 
     def _agent_home_dirs(self) -> list[Path]:
         """Host side of every registered runtime's agent home."""
         return [home for _runtime, home in self._agent_home_shares()]
-
-    def _agent_argv0(self, runtime: AgentRuntime) -> str:
-        """argv[0] the launcher execs in the guest for *runtime*.
-
-        The CLI's own name on ``PATH``, off the runtime's bundle, so the
-        sandbox layer never spells an agent's name.
-        """
-        bundle = runtime.image_bundle
-        return bundle.guest_argv0 if bundle is not None else "claude"
 
     def _task_tmp_guest_paths(self) -> list[str]:
         """Chroot paths the hosted agents write background-task output to.
@@ -562,15 +523,20 @@ class HcsSandbox:
         and the one task-output dir is bound at every path they write to.  Only
         the first home keeps :data:`hcs_helpers.P9_PORT_HOME`; the rest run on
         from the extra range behind the additional directories, the same way
-        the served mounts already do.
+        the served mounts already do.  A home belongs to an agent, so a sandbox
+        built for none — the lifecycle-only shape ``create_sandbox`` returns
+        when no runtime is resolved — carries no home share at all.
         """
         homes = self._agent_home_shares()
-        first_runtime, first_home = homes[0]
+        first_home = [
+            _Share("home", str(home), H.P9_PORT_HOME,
+                   H.MNT_HOME, (_chroot_agent_home(runtime),))
+            for runtime, home in homes[:1]
+        ]
         plan = [
             _Share("ws", self._project_dir, H.P9_PORT_WORKSPACE,
                    H.MNT_WORKSPACE, (self._guest_workspace(),)),
-            _Share("home", str(first_home), H.P9_PORT_HOME,
-                   H.MNT_HOME, (_chroot_agent_home(first_runtime),)),
+            *first_home,
             _Share("cfg", str(self._cfg_dir), H.P9_PORT_CFG,
                    H.MNT_CFG, (H.CHROOT_CFG_DIR,)),
             _Share("tasktmp", str(self._tmp_dir), H.P9_PORT_TASK_TMP,
@@ -1248,7 +1214,7 @@ class HcsSandbox:
             if bundle is not None and bundle.hcs_install is not None:
                 bundle.hcs_install(self)
             if runtime.provision_credentials is not None:
-                runtime.provision_credentials(self._agent_home_dir(runtime))
+                runtime.provision_credentials(runtime.home_mount.host_dir)
 
     # Two TCP relays run between host and guest.  They are mirror images and
     # must not be confused:
@@ -1509,7 +1475,7 @@ class HcsSandbox:
         code, out = self.guest_exec(
             [
                 "/bin/sh", "-c", _SERVE_REAP,
-                _serve_pidfile(runtime.name), self._agent_argv0(runtime),
+                _serve_pidfile(runtime.name), agent_argv0(runtime),
             ],
             read_timeout=30.0,
         )
@@ -1547,7 +1513,7 @@ class HcsSandbox:
             "cwd": self._guest_workspace(),
             "env": env,
             "env_passthrough": ["ANTHROPIC_API_KEY"],
-            "argv_prefix": [self._agent_argv0(runtime)],
+            "argv_prefix": [agent_argv0(runtime)],
             "connect_timeout_s": 30.0,
         }
         self._launch_json_file().write_text(

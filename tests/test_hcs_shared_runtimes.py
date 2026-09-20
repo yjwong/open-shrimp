@@ -146,11 +146,14 @@ def test_one_runtime_keeps_the_layout_that_ships_today(tmp_path, monkeypatch):
     )
 
 
-def test_a_runtime_less_guest_still_has_a_home_share(tmp_path, monkeypatch):
-    """``create_sandbox`` passes ``runtimes=[]`` when no runtime is resolved."""
+def test_a_runtime_less_guest_has_no_home_share(tmp_path, monkeypatch):
+    """``create_sandbox`` passes ``runtimes=[]`` when no runtime is resolved —
+    the lifecycle-only shape, which stops and cleans up a guest rather than
+    running an agent in one.  A home belongs to an agent, so there is none to
+    share; the task-output dir still falls back to the shipped slug."""
     sb = _sandbox(tmp_path, monkeypatch)
 
-    assert _shares(sb)["home"][0] == str(sb._sdir / "claude-home")
+    assert "home" not in _shares(sb)
     assert sb._task_tmp_guest_paths() == [f"/tmp/claude-{H.CHROOT_UID}"]
 
 

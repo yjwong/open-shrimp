@@ -64,12 +64,16 @@ def _sandbox_home_mount(
         or not ctx.sandbox.enabled
     ):
         return None
-    from open_shrimp.backend.claude_sdk.runtime import claude_runtime
+    from open_shrimp.backend.claude_sdk.runtime import (
+        claude_home_dir,
+        claude_runtime,
+    )
 
     mgr = sandbox_managers.get(ctx.sandbox.backend)
     if mgr is None:
         return None
-    return claude_runtime(mgr.agent_home_dir(ctx_name)).home_mount
+    home_dir = claude_home_dir(mgr.context_state_dir(ctx_name))
+    return claude_runtime(home_dir).home_mount
 
 
 class ClaudeSdkBackend:
@@ -110,7 +114,7 @@ class ClaudeSdkBackend:
 
     def make_runtime(
         self,
-        home_dir: Path,
+        state_dir: Path,
         *,
         context_name: str,
         model: str | None = None,
@@ -118,11 +122,14 @@ class ClaudeSdkBackend:
         """The Claude wrapped-CLI launch profile.
 
         ``context_name`` and ``model`` are unused — the wrapped-CLI runtime
-        needs only the host-side home dir.
+        needs only the host-side home dir, which hangs off *state_dir*.
         """
-        from open_shrimp.backend.claude_sdk.runtime import claude_runtime
+        from open_shrimp.backend.claude_sdk.runtime import (
+            claude_home_dir,
+            claude_runtime,
+        )
 
-        return claude_runtime(home_dir)
+        return claude_runtime(claude_home_dir(state_dir))
 
     def make_tool_server(
         self, tools: ToolFactory

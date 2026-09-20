@@ -387,7 +387,7 @@ async def _launch_target_sandbox(
     lock = _context_locks.setdefault(target, asyncio.Lock())
     async with lock:
         runtime = backend.make_runtime(
-            manager.agent_home_dir(target),
+            manager.context_state_dir(target),
             context_name=target,
             model=ctx.model,
         )

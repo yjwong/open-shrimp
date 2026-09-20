@@ -115,6 +115,17 @@ class Sandbox(Protocol):
         ...
 
     @property
+    def runtime_names(self) -> set[str]:
+        """The names of the runtimes this guest hosts.
+
+        The sandbox is the only record of it — nothing persists the hosted set
+        across process starts — so ``SandboxManager`` asks the cached sandbox
+        rather than keeping a second table that has to be invalidated in step
+        with the cache.
+        """
+        ...
+
+    @property
     def host_address(self) -> str:
         """IP or hostname the sandbox should use to reach the host.
 

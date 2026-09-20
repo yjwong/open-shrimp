@@ -227,10 +227,10 @@ class _FakeSandboxManager:
     def __init__(self) -> None:
         self.sandbox = _FakeSandbox()
 
-    def agent_home_dir(self, context_name: str):
+    def context_state_dir(self, context_name: str):
         from pathlib import Path
 
-        return Path("/tmp") / f"agent-home-{context_name}"
+        return Path("/tmp") / f"state-{context_name}"
 
     def create_sandbox(self, context_name, context, *, runtime):
         self.context_name = context_name

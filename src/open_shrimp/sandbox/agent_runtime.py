@@ -28,7 +28,7 @@ import secrets
 import threading
 from collections.abc import Container, Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 if TYPE_CHECKING:
@@ -298,6 +298,84 @@ class AgentHandle:
     cli_path: str | None = None
     cleanup_paths: list[str] = field(default_factory=list)
     endpoint: Any = None
+
+
+def agent_home_shares(
+    runtimes: "Iterable[AgentRuntime]",
+) -> list[tuple[AgentRuntime, Path]]:
+    """Every runtime's agent home, one share each, with its owner.
+
+    The host dir is the very one the runtime's ``inject`` and
+    ``provision_credentials`` write to (``home_mount.host_dir``), or the guest
+    never sees the injected credentials.  The owner comes back with it because
+    the guest path the share lands at is spelled under *that* runtime's guest
+    home, so only its owner can re-root it (:func:`agent_home_guest_dir`).
+
+    Ordered by host dir rather than by registration, for the reason
+    :func:`served_home_mounts` is: registration order is whichever ChatScope
+    dispatched first and nothing persists it, so an arrival-ordered plan would
+    move a runtime's home to a different vsock port, virtiofs tag or mount slot
+    from one process start to the next.
+    """
+    return [
+        (runtime, Path(runtime.home_mount.host_dir))
+        for runtime in sorted(
+            runtimes, key=lambda r: str(r.home_mount.host_dir),
+        )
+    ]
+
+
+def rebase_guest_path(
+    guest_path: str, guest_home: str, *, target_home: str, owner: str,
+) -> str:
+    """Re-root *guest_path*, spelled under *guest_home*, at *target_home*.
+
+    A runtime spells its guest paths under its image bundle's ``guest_home``;
+    a sandbox that runs the agent from a different home (another user's, a
+    chroot's) moves the home-relative *tail*, not the basename, so
+    ``$HOME/.local/share/opencode`` stays resolvable from the home the agent
+    actually gets.
+    """
+    try:
+        tail = PurePosixPath(guest_path).relative_to(guest_home)
+    except ValueError:
+        raise RuntimeError(
+            f"Agent runtime {owner!r} declares guest path {guest_path!r}, "
+            f"which is not under its image bundle's guest home "
+            f"{guest_home!r}; it cannot be re-rooted at {target_home!r}."
+        ) from None
+    return str(PurePosixPath(target_home) / tail)
+
+
+def agent_home_guest_dir(runtime: AgentRuntime, target_home: str) -> str:
+    """Where *runtime*'s agent home lands in a guest whose home is
+    *target_home*.
+
+    With no image bundle there is no guest home to re-root from and the
+    runtime's declared path stands.
+    """
+    bundle = runtime.image_bundle
+    if bundle is None:
+        return runtime.home_mount.guest_dir
+    return rebase_guest_path(
+        runtime.home_mount.guest_dir,
+        bundle.guest_home,
+        target_home=target_home,
+        owner=runtime.name,
+    )
+
+
+def agent_argv0(runtime: AgentRuntime) -> str:
+    """argv[0] a guest launcher execs for *runtime*.
+
+    The CLI's own name on ``PATH``, off the runtime's bundle, so the sandbox
+    layer never spells an agent.  With no bundle the caller gets
+    :attr:`ImageBundle.guest_argv0`'s own default.
+    """
+    bundle = runtime.image_bundle
+    if bundle is None:
+        bundle = ImageBundle(guest_home="")
+    return bundle.guest_argv0
 
 
 def served_home_mounts(

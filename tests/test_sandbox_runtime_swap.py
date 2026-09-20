@@ -57,6 +57,10 @@ class _FakeSandbox:
         if all(r.name != runtime.name for r in self.runtimes):
             self.runtimes.append(runtime)
 
+    @property
+    def runtime_names(self) -> set[str]:
+        return {r.name for r in self.runtimes}
+
     def stop(self) -> None:
         self.stopped = True
 
@@ -112,7 +116,9 @@ def test_a_shared_guest_takes_the_second_runtime_on(monkeypatch, build_manager):
     assert opencode_sb is claude_sb
     assert claude_sb.stopped is False
     assert [r.name for r in claude_sb.runtimes] == ["claude", "opencode"]
-    assert mgr._sandbox_runtime["dev"] == {"claude", "opencode"}
+    # What the guest hosts is the guest's own answer: the manager keeps no
+    # second table to fall out of step with the cache.
+    assert claude_sb.runtime_names == {"claude", "opencode"}
 
 
 def test_a_shared_guest_is_not_re_registered(monkeypatch):

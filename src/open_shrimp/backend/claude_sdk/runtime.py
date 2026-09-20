@@ -30,14 +30,26 @@ from open_shrimp.sandbox.agent_runtime import (
 logger = logging.getLogger(__name__)
 
 
+def claude_home_dir(state_dir: Path) -> Path:
+    """The host dir a sandbox mounts as Claude's ``~/.claude``.
+
+    Derived from the context's state dir
+    (:meth:`SandboxManager.context_state_dir`) so the sandbox layer never
+    spells an agent's name.  The leaf is fixed: it holds the resumable session
+    corpus under ``projects/``, which ``/resume`` lists and which
+    ``terminal/log_source.py`` resolves a guest ``.output`` symlink against.
+    """
+    return state_dir / "claude-home"
+
+
 def claude_runtime(
     home_dir: Path, *, guest_dir: str = "/home/claude/.claude",
 ) -> AgentRuntime:
     """Build the Claude :class:`AgentRuntime`.
 
-    ``home_dir`` is the host-side agent home from
-    :meth:`SandboxManager.agent_home_dir`; for Claude the resumable session
-    corpus lives under ``home_dir/projects``.  ``env`` declares the
+    ``home_dir`` is the host-side agent home (:func:`claude_home_dir`); for
+    Claude the resumable session corpus lives under
+    ``home_dir/projects``.  ``env`` declares the
     ``ANTHROPIC_API_KEY`` forwarding contract; the wrappers do the actual
     forwarding.
     """

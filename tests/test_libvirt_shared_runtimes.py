@@ -18,6 +18,12 @@ import pytest
 from open_shrimp import paths
 from open_shrimp.backend.claude_sdk.runtime import claude_runtime
 from open_shrimp.backend.opencode.runtime import opencode_runtime
+from open_shrimp.sandbox.agent_runtime import (
+    AgentRuntime,
+    HomeMount,
+    ImageBundle,
+    WrappedCLI,
+)
 from open_shrimp.sandbox import libvirt_helpers
 from open_shrimp.sandbox.libvirt import LibvirtSandbox
 from open_shrimp.sandbox.libvirt_helpers import _fs_tag_for_dir, ensure_mounts
@@ -42,7 +48,6 @@ def _sandbox(tmp_path: Path, *runtimes: Any) -> LibvirtSandbox:
     sb._screenshots_dir = None
     sb._sdir = tmp_path / "vm"
     sb._tmp_dir = sb._sdir / "tmp"
-    sb._agent_home_dir = sb._sdir / "claude-home"
     sb._runtimes = {r.name: r for r in runtimes}
     return sb
 
@@ -90,15 +95,17 @@ def test_a_sandbox_with_no_runtime_keeps_the_default_task_tmp_path(tmp_path):
 
 
 def test_both_runtimes_get_their_own_home_in_one_guest(tmp_path):
-    """The wrapped-CLI runtime's home is the claude-home share; the served
-    runtime's comes from its launch's home mounts.  Neither displaces the
-    other."""
-    opencode = _opencode()
-    sb = _sandbox(tmp_path, _claude(tmp_path), opencode)
+    """The wrapped-CLI runtime's home is shared at the guest user's own
+    ``.claude``; the served runtime's comes from its launch's home mounts.
+    Neither displaces the other."""
+    claude, opencode = _claude(tmp_path), _opencode()
+    sb = _sandbox(tmp_path, claude, opencode)
 
     all_dirs, mounts, _ = sb._shared_dirs_and_overrides()
 
-    assert mounts[str(sb._agent_home_dir)] == [f"{SANDBOX_HOME}/.claude"]
+    assert mounts[str(claude.home_mount.host_dir)] == [
+        f"{SANDBOX_HOME}/.claude"
+    ]
     for mount in opencode.launch.home_mounts:
         assert mounts[str(mount.host_dir)] == [mount.guest_mount_point]
         assert str(mount.host_dir) in all_dirs
@@ -120,6 +127,60 @@ def test_the_tag_set_does_not_depend_on_which_topic_dispatched_first(tmp_path):
     }
     assert a_mounts == b_mounts
     assert a_ro == b_ro
+
+
+def _second_cli(tmp_path: Path) -> Any:
+    """A second wrapped-CLI agent: its own host home, guest home and argv0."""
+    return AgentRuntime(
+        name="other",
+        home_mount=HomeMount(
+            host_dir=tmp_path / "vm" / "other-home",
+            guest_dir="/home/other/.config/other",
+            holds_session_state=True,
+        ),
+        inject=lambda home: None,
+        env={},
+        launch=WrappedCLI(),
+        image_bundle=ImageBundle(
+            guest_home="/home/other",
+            guest_argv0="other",
+            task_tmp_prefix="other",
+        ),
+    )
+
+
+def test_a_second_wrapped_cli_agent_gets_a_home_of_its_own(tmp_path):
+    """One home share per wrapped-CLI runtime, each at the guest path that
+    runtime resolves from the guest user's home — the home-relative tail, so
+    an XDG-shaped home stays where the CLI looks for it."""
+    claude, other = _claude(tmp_path), _second_cli(tmp_path)
+    sb = _sandbox(tmp_path, claude, other)
+
+    _all_dirs, mounts, _ = sb._shared_dirs_and_overrides()
+
+    assert mounts[str(claude.home_mount.host_dir)] == [
+        f"{SANDBOX_HOME}/.claude"
+    ]
+    assert mounts[str(other.home_mount.host_dir)] == [
+        f"{SANDBOX_HOME}/.config/other"
+    ]
+
+
+def test_the_wrapper_execs_the_runtimes_own_cli(tmp_path):
+    """The generated script is per-runtime: a guest hosting two wrapped CLIs
+    gets one wrapper each, and each has to exec its own binary."""
+    sb = _sandbox(tmp_path, _claude(tmp_path), _second_cli(tmp_path))
+    sb._context_name = "dev"
+    sb._instance_prefix = "openshrimp"
+    sb._ssh_port = 2222
+
+    scripts = {
+        runtime.name: Path(sb.build_cli_wrapper(runtime)[0]).read_text()
+        for runtime in sb._runtimes.values()
+    }
+
+    assert "&& claude\"" in scripts["claude"]
+    assert "&& other\"" in scripts["other"]
 
 
 # -- ensure_mounts --------------------------------------------------------

@@ -35,6 +35,9 @@ from open_shrimp.sandbox.agent_runtime import (
     ServedEndpoint,
     ServedSlot,
     WrappedCLI,
+    agent_argv0,
+    agent_home_guest_dir,
+    agent_home_shares,
     run_served_endpoint,
     served_home_mounts,
     task_tmp_guest_paths,
@@ -63,6 +66,7 @@ from open_shrimp.sandbox.lima_helpers import (
     guest_mount_point,
     instance_mounts,
     instance_name as _instance_name,
+    lima_guest_home,
     lima_template,
     limactl_create,
     limactl_delete,
@@ -152,7 +156,6 @@ class LimaSandbox:
 
         self._sdir = state_dir_for(context_name)
         self._inst_name = _instance_name(context_name, instance_prefix)
-        self._claude_home_dir = self._sdir / "claude-home"
         self._tmp_dir = self._sdir / "tmp"
         self._env = _lima_env()  # cached — LIMA_HOME doesn't change
 
@@ -179,6 +182,10 @@ class LimaSandbox:
     def add_runtime(self, runtime: AgentRuntime) -> None:
         self._runtimes.setdefault(runtime.name, runtime)
 
+    @property
+    def runtime_names(self) -> set[str]:
+        return set(self._runtimes)
+
     def _task_tmp_guest_paths(self) -> list[str]:
         """The guest paths the hosted agents write background-task output to.
 
@@ -194,6 +201,23 @@ class LimaSandbox:
         written into the generated Lima YAML."""
         return tuple(
             mount for _rt, mount in served_home_mounts(self._runtimes.values())
+        )
+
+    def _agent_home_mounts(self) -> tuple[tuple[str, str], ...]:
+        """``(host dir, guest path)`` per wrapped-CLI runtime's agent home.
+
+        The guest path is the runtime's own home re-rooted at the Lima guest
+        user's home, which is where a ``limactl shell`` lands.  A served
+        runtime is left to :meth:`_served_home_mounts`: its serve process is
+        given a ``HOME`` of its own and its home has to arrive under *that*,
+        and Lima merges mount entries by ``location``, so one host dir gets
+        one guest path either way.
+        """
+        guest_home = lima_guest_home(self._guest_os)
+        return tuple(
+            (str(home), agent_home_guest_dir(runtime, guest_home))
+            for runtime, home in agent_home_shares(self._runtimes.values())
+            if isinstance(runtime.launch, WrappedCLI)
         )
 
     def environment_ready(self) -> bool:
@@ -256,7 +280,8 @@ class LimaSandbox:
         _log(log_file, f"Setting up Lima VM for '{self._context_name}'...")
 
         # Ensure shared directories exist on host.
-        self._claude_home_dir.mkdir(parents=True, exist_ok=True)
+        for home, _guest_path in self._agent_home_mounts():
+            Path(home).mkdir(parents=True, exist_ok=True)
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
         # Create the instance (this downloads the image + boots for cloud-init).
@@ -289,11 +314,14 @@ class LimaSandbox:
         if self._guest_os == "macos":
             from open_shrimp.sandbox.lima_macos_helpers import lima_template_macos
             return lima_template_macos(
-                *args, task_tmp_guest_path=task_tmp_guest_path,
+                *args,
+                agent_home_mounts=self._agent_home_mounts(),
+                task_tmp_guest_path=task_tmp_guest_path,
             )
         return lima_template(
             *args,
             context_name=self._context_name,
+            agent_home_mounts=self._agent_home_mounts(),
             served_home_mounts=self._served_home_mounts(),
             task_tmp_guest_path=task_tmp_guest_path,
         )
@@ -512,8 +540,8 @@ class LimaSandbox:
             if bundle is not None and bundle.lima_install is not None:
                 bundle.lima_install(self._limactl, self._inst_name, self._guest_os)
 
-            # Each runtime's credentials land in its own home, which for the
-            # wrapped-CLI runtime is this instance's ``claude-home`` share.
+            # Each runtime's credentials land in its own home — the very dir
+            # the guest mounts as that agent's home.
             if runtime.provision_credentials is not None:
                 runtime.provision_credentials(runtime.home_mount.host_dir)
 
@@ -684,17 +712,13 @@ class LimaSandbox:
         return AgentHandle(endpoint=endpoint)
 
     def build_cli_wrapper(self, runtime: AgentRuntime) -> tuple[str, list[str]]:
-        # The generated script still hardcodes the ``claude`` argv0 and the
-        # ``claude-home`` share, so *runtime* goes unread: this backend has one
-        # wrapped-CLI runtime.  A second one needs ``guest_argv0`` and
-        # ``home_mount.host_dir`` threaded into ``_build_cli_wrapper``.
         path = _build_cli_wrapper(
             self._context_name,
             self._sdir,
             self._limactl,
             project_dir=self._project_dir,
             inst_name=self._inst_name,
-            claude_home_dir=self._claude_home_dir,
+            argv0=agent_argv0(runtime),
             guest_os=self._guest_os,
         )
         return path, [path]

@@ -8,7 +8,6 @@ guest VMs running under Lima with Apple Virtualization.framework.
 
 from __future__ import annotations
 
-import getpass
 import logging
 import os
 import shlex
@@ -23,6 +22,7 @@ from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.lima_helpers import (
     _lima_state_dir,
     _run_limactl,
+    lima_guest_home,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ def lima_template_macos(
     additional_directories: list[str] | None = None,
     computer_use: bool = False,
     *,
+    agent_home_mounts: "tuple[tuple[str, str], ...]" = (),
     task_tmp_guest_path: str,
 ) -> dict:
     """The Lima instance template for a macOS guest, as a dict.
@@ -58,6 +59,7 @@ def lima_template_macos(
         "mountType": "virtiofs",
         "mounts": _build_mounts_macos(
             sdir, project_dir, additional_directories, computer_use,
+            agent_home_mounts=agent_home_mounts,
             task_tmp_guest_path=task_tmp_guest_path,
         ),
         "provision": _build_provision_scripts_macos(config, computer_use),
@@ -99,6 +101,7 @@ def _build_mounts_macos(
     additional_directories: list[str] | None,
     computer_use: bool = False,
     *,
+    agent_home_mounts: "tuple[tuple[str, str], ...]" = (),
     task_tmp_guest_path: str,
 ) -> list[dict]:
     """Build Lima mount entries for a macOS guest.
@@ -118,16 +121,16 @@ def _build_mounts_macos(
     for d in additional_directories or []:
         mounts.append({"location": d, "writable": True})
 
-    # Host-side .claude home (shared into VM).
-    # macOS Lima guest user home is /Users/<username>.guest.
-    vm_home = f"/Users/{getpass.getuser()}.guest"
-    claude_home = str(sdir / "claude-home")
-    Path(claude_home).mkdir(parents=True, exist_ok=True)
-    mounts.append({
-        "location": claude_home,
-        "mountPoint": f"{vm_home}/.claude",
-        "writable": True,
-    })
+    # Each wrapped-CLI runtime's agent home, shared into the VM at the path it
+    # resolves from the guest user's own home.
+    vm_home = lima_guest_home("macos")
+    for host_dir, guest_path in agent_home_mounts:
+        Path(host_dir).mkdir(parents=True, exist_ok=True)
+        mounts.append({
+            "location": host_dir,
+            "mountPoint": guest_path,
+            "writable": True,
+        })
 
     host_skills = Path.home() / ".claude" / "skills"
     if host_skills.is_dir():
@@ -499,26 +502,19 @@ def build_cli_wrapper_macos(
     limactl_path: str,
     project_dir: str,
     inst_name: str,
-    claude_home_dir: Path | None = None,
+    *,
+    argv0: str,
 ) -> str:
-    """Generate a bash wrapper that uses ``limactl shell`` to run Claude CLI
+    """Generate a bash wrapper that uses ``limactl shell`` to run an agent CLI
     inside a macOS guest VM.
+
+    *argv0* is the CLI's own name on the guest ``PATH``, off the runtime's
+    image bundle.  Host-side credentials reach the guest through the runtime's
+    ``provision_credentials`` hook, which ``provision_workspace`` runs into
+    that runtime's shared agent home before every dispatch.
 
     Returns the absolute path to the generated wrapper script.
     """
-    # Credential copy block — extract from macOS Keychain into host-side
-    # VirtioFS-shared directory so the macOS VM can pick it up.
-    cred_block = ""
-    if claude_home_dir is not None:
-        cred_dest = shlex.quote(str(claude_home_dir / ".credentials.json"))
-        cred_block = textwrap.dedent(f"""\
-            # Extract fresh credentials from macOS Keychain.
-            CRED_JSON=$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null) || true
-            if [ -n "$CRED_JSON" ]; then
-                printf '%s' "$CRED_JSON" > {cred_dest}
-            fi
-        """)
-
     # Git identity — read from host and export in the remote shell.
     git_env_parts: list[str] = []
     for git_key, env_vars in [
@@ -583,11 +579,11 @@ def build_cli_wrapper_macos(
             done
         fi
 
-    """) + cred_block + textwrap.dedent(f"""\
+    """) + textwrap.dedent(f"""\
 
         # Build remote command with proper shell-escaping.
         # Source shell profile for full PATH (Homebrew, npm, etc.).
-        REMOTE_CMD="source ~/.zprofile 2>/dev/null || true{api_key_export}{git_env_export} && cd {shlex.quote(project_dir)} && claude"
+        REMOTE_CMD="source ~/.zprofile 2>/dev/null || true{api_key_export}{git_env_export} && cd {shlex.quote(project_dir)} && {shlex.quote(argv0)}"
         for arg in "$@"; do
             REMOTE_CMD+=" $(printf '%q' "$arg")"
         done

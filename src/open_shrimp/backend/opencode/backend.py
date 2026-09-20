@@ -75,7 +75,7 @@ class OpenCodeBackend:
 
     def make_runtime(
         self,
-        home_dir: Path,
+        state_dir: Path,
         *,
         context_name: str,
         model: str | None = None,
@@ -84,7 +84,8 @@ class OpenCodeBackend:
 
         Parses the provider id from ``model`` (``provider/model``) to filter the
         injected host ``auth.json``; ``context_name`` lets the runtime resolve
-        the per-context host dirs the sandbox actually bind-mounts.
+        the per-context host dirs the sandbox actually bind-mounts, so
+        *state_dir* goes unread.
         """
         from open_shrimp.backend.opencode.options import split_provider_model
         from open_shrimp.backend.opencode.runtime import opencode_runtime

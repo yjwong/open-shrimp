@@ -120,14 +120,17 @@ def _resolve_guest_symlink(
     Agent task ``.output`` files are symlinks to ``.jsonl`` session files
     under ``<guest-home>/.claude/projects/…``, which don't exist on the host
     at that path.  This function translates the guest path back to the host
-    equivalent: *context_dir* holds a ``claude-home/`` subdirectory that is
-    shared into the guest as ``<guest-home>/.claude``.
+    equivalent: *context_dir* holds the agent home
+    (``claude_sdk.runtime.claude_home_dir``), which is shared into the guest
+    as ``<guest-home>/.claude``.
 
     The guest home varies by backend and user (``/home/openshrimp`` for
     libvirt and HCS, ``/home/<user>.guest`` for Lima), so the stable
     ``/.claude/`` marker is what the translation keys off rather than a
     hardcoded prefix.
     """
+    from open_shrimp.backend.claude_sdk.runtime import claude_home_dir
+
     try:
         target = os.readlink(symlink)
     except OSError:
@@ -137,7 +140,7 @@ def _resolve_guest_symlink(
     idx = target.find(marker)
     if idx != -1:
         relative = target[idx + len(marker):]
-        host_path = context_dir / "claude-home" / relative
+        host_path = claude_home_dir(context_dir) / relative
         if host_path.is_file():
             return host_path
 

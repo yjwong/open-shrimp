@@ -22,6 +22,7 @@ from open_shrimp.sandbox.agent_runtime import (
     HomeMount,
     ImageBundle,
     WrappedCLI,
+    agent_argv0,
 )
 from open_shrimp.sandbox.hcs import HcsSandbox, _chroot_agent_home
 
@@ -99,10 +100,6 @@ def _make_sandbox_multi(tmp_path, monkeypatch, runtimes, **config_extra):
 def test_claude_home_keeps_its_established_chroot_path():
     # The guest layout that ships today must not move.
     assert _chroot_agent_home(_claude_runtime()) == "/root/.claude"
-
-
-def test_a_runtime_less_sandbox_falls_back_to_the_shipped_layout():
-    assert _chroot_agent_home(None) == "/root/.claude"
 
 
 def test_an_xdg_shaped_home_keeps_its_tail_under_the_chroot_home():
@@ -221,13 +218,11 @@ def test_a_two_runtime_guest_keeps_each_runtime_its_own_layout(
     claude, opencode = _claude_runtime(), _opencode_runtime()
     sb = _make_sandbox_multi(tmp_path, monkeypatch, [claude, opencode])
 
-    assert sb._agent_home_dir(claude) == Path("/host/claude-home")
-    assert sb._agent_home_dir(opencode) == Path("/host/opencode-home")
     assert sb._agent_home_dirs() == [
         Path("/host/claude-home"), Path("/host/opencode-home"),
     ]
-    assert sb._agent_argv0(claude) == "claude"
-    assert sb._agent_argv0(opencode) == "opencode"
+    assert agent_argv0(claude) == "claude"
+    assert agent_argv0(opencode) == "opencode"
     assert _chroot_agent_home(claude) == "/root/.claude"
     assert _chroot_agent_home(opencode) == "/root/.local/share/opencode"
 
@@ -242,7 +237,7 @@ def test_a_second_runtime_joins_the_guest_it_was_not_built_with(
     sb.add_runtime(_opencode_runtime())
 
     assert list(sb._runtimes) == ["claude", "opencode"]
-    assert sb._agent_home_dir(opencode) == Path("/host/opencode-home")
+    assert Path("/host/opencode-home") in sb._agent_home_dirs()
 
 
 # -- the directory csc compiles in -------------------------------------------

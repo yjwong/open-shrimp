@@ -23,10 +23,17 @@ import yaml
 from open_shrimp import paths
 from open_shrimp.backend.claude_sdk.runtime import claude_runtime
 from open_shrimp.backend.opencode.runtime import opencode_runtime
+from open_shrimp.sandbox.agent_runtime import (
+    AgentRuntime,
+    HomeMount,
+    ImageBundle,
+    WrappedCLI,
+)
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox import lima_helpers
 from open_shrimp.sandbox.lima import LimaSandbox
-from open_shrimp.sandbox.lima_helpers import LIMA_GUEST_UID
+from open_shrimp.sandbox.lima_helpers import LIMA_GUEST_UID, lima_guest_home
+from open_shrimp.sandbox.skill_paths import SANDBOX_HOME
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +66,6 @@ def _sandbox(tmp_path: Path, *runtimes: Any) -> LimaSandbox:
     sb._inst_name = "openshrimp-dev"
     sb._sdir = tmp_path / "vm"
     sb._tmp_dir = sb._sdir / "tmp"
-    sb._claude_home_dir = sb._sdir / "claude-home"
     sb._runtimes = {r.name: r for r in runtimes}
     return sb
 
@@ -157,15 +163,17 @@ def test_a_sandbox_with_no_runtime_keeps_the_default_task_tmp_path(tmp_path):
 
 
 def test_both_runtimes_get_their_own_home_in_one_guest(tmp_path):
-    """The wrapped-CLI runtime's home is the claude-home share; the served
-    runtime's comes from its launch's home mounts.  Neither displaces the
-    other."""
-    opencode = _opencode()
-    sb = _sandbox(tmp_path, _claude(tmp_path), opencode)
+    """The wrapped-CLI runtime's home is mounted under the guest user's own
+    home; the served runtime's comes from its launch's home mounts, under the
+    ``HOME`` its serve process is given.  Neither displaces the other."""
+    claude, opencode = _claude(tmp_path), _opencode()
+    sb = _sandbox(tmp_path, claude, opencode)
 
     mounts = _mounts(sb)
 
-    assert mounts[str(sb._claude_home_dir)]["mountPoint"].endswith("/.claude")
+    assert mounts[str(claude.home_mount.host_dir)]["mountPoint"] == (
+        f"{lima_guest_home()}/.claude"
+    )
     for mount in opencode.launch.home_mounts:
         assert mounts[str(mount.host_dir)]["mountPoint"] == mount.guest_mount_point
 
@@ -219,6 +227,73 @@ def test_the_link_targets_the_path_the_running_guest_actually_mounts(
         f"ln -sfn /tmp/claude-{LIMA_GUEST_UID} /tmp/openshrimp-{LIMA_GUEST_UID}"
         in commands[0]
     )
+
+
+def _second_cli(tmp_path: Path) -> Any:
+    """A second wrapped-CLI agent: its own host home, guest home and argv0."""
+    return AgentRuntime(
+        name="other",
+        home_mount=HomeMount(
+            host_dir=tmp_path / "vm" / "other-home",
+            guest_dir="/home/other/.config/other",
+            holds_session_state=True,
+        ),
+        inject=lambda home: None,
+        env={},
+        launch=WrappedCLI(),
+        image_bundle=ImageBundle(
+            guest_home="/home/other",
+            guest_argv0="other",
+            task_tmp_prefix="other",
+        ),
+    )
+
+
+def test_a_second_wrapped_cli_agent_gets_a_home_of_its_own(tmp_path):
+    """One mount per wrapped-CLI runtime's home, each under the guest user's
+    own home — which is where ``limactl shell`` lands."""
+    claude, other = _claude(tmp_path), _second_cli(tmp_path)
+    sb = _sandbox(tmp_path, claude, other)
+
+    mounts = _mounts(sb)
+
+    assert mounts[str(claude.home_mount.host_dir)]["mountPoint"] == (
+        f"{lima_guest_home()}/.claude"
+    )
+    assert mounts[str(other.home_mount.host_dir)]["mountPoint"] == (
+        f"{lima_guest_home()}/.config/other"
+    )
+
+
+def test_the_served_runtimes_home_stays_under_the_home_it_serves_with(tmp_path):
+    """``run_served_endpoint`` gives the serve process ``HOME=SANDBOX_HOME``,
+    not the Lima guest user's home, so its data dir has to arrive under that
+    one — and Lima merges by ``location``, so it cannot also be mounted at the
+    guest user's."""
+    opencode = _opencode()
+    sb = _sandbox(tmp_path, _claude(tmp_path), opencode)
+
+    mounts = _mounts(sb)
+
+    for mount in opencode.launch.home_mounts:
+        assert mounts[str(mount.host_dir)]["mountPoint"] == (
+            mount.guest_mount_point
+        )
+        assert mount.guest_mount_point.startswith(SANDBOX_HOME)
+
+
+def test_the_wrapper_execs_the_runtimes_own_cli(tmp_path):
+    """The generated script is per-runtime: a guest hosting two wrapped CLIs
+    gets one wrapper each, and each has to exec its own binary."""
+    sb = _sandbox(tmp_path, _claude(tmp_path), _second_cli(tmp_path))
+
+    scripts = {
+        runtime.name: Path(sb.build_cli_wrapper(runtime)[0]).read_text()
+        for runtime in sb._runtimes.values()
+    }
+
+    assert "&& claude\"" in scripts["claude"]
+    assert "&& other\"" in scripts["other"]
 
 
 # -- drift ----------------------------------------------------------------

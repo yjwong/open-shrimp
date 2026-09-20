@@ -29,6 +29,9 @@ from open_shrimp.sandbox.agent_runtime import (
     ServedEndpoint,
     ServedSlot,
     WrappedCLI,
+    agent_argv0,
+    agent_home_guest_dir,
+    agent_home_shares,
     run_served_endpoint,
     served_home_mounts,
     task_tmp_guest_paths,
@@ -224,7 +227,6 @@ class LibvirtSandbox:
         # can read them.  Every runtime shares this one task-output dir — see
         # ``_shared_dirs_and_overrides``.
         self._tmp_dir = self._sdir / "tmp"
-        self._agent_home_dir = self._sdir / "claude-home"
 
         self._port_forwards = PortForwardRegistry()
 
@@ -246,11 +248,30 @@ class LibvirtSandbox:
     def add_runtime(self, runtime: AgentRuntime) -> None:
         self._runtimes.setdefault(runtime.name, runtime)
 
+    @property
+    def runtime_names(self) -> set[str]:
+        return set(self._runtimes)
+
     def _served_home_mounts(self) -> tuple[GuestMount, ...]:
         """The union of every registered runtime's served-launch host dirs."""
         return tuple(
             mount for _rt, mount in served_home_mounts(self._runtimes.values())
         )
+
+    def _agent_home_shares(self) -> list[tuple[AgentRuntime, Path]]:
+        """Host dir ⇄ guest path for every wrapped-CLI runtime's agent home.
+
+        A served runtime's home reaches the guest through its launch's own
+        mounts (:meth:`_served_home_mounts`), at the guest path the ``HOME``
+        its serve process is given names — the guest user's home is not it.
+        Giving it a second share here would declare two virtiofs devices for
+        one host dir.
+        """
+        return [
+            (runtime, home)
+            for runtime, home in agent_home_shares(self._runtimes.values())
+            if isinstance(runtime.launch, WrappedCLI)
+        ]
 
     def environment_ready(self) -> bool:
         """Check if the VM environment (overlay, cloud-init, SSH key) exists."""
@@ -344,7 +365,8 @@ class LibvirtSandbox:
 
         # Ensure host-side shared directories exist.
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
-        self._agent_home_dir.mkdir(parents=True, exist_ok=True)
+        for _runtime, home in self._agent_home_shares():
+            home.mkdir(parents=True, exist_ok=True)
         for mount in self._served_home_mounts():
             mount.host_dir.mkdir(parents=True, exist_ok=True)
 
@@ -635,8 +657,8 @@ class LibvirtSandbox:
                     log_file=log_file,
                 )
 
-            # Each runtime's credentials land in its own home, which for the
-            # wrapped-CLI runtime is this guest's ``claude-home`` share.
+            # Each runtime's credentials land in its own home — the very dir
+            # the guest mounts as that agent's home.
             if runtime.provision_credentials is not None:
                 runtime.provision_credentials(runtime.home_mount.host_dir)
 
@@ -906,10 +928,6 @@ class LibvirtSandbox:
         return AgentHandle(endpoint=endpoint)
 
     def build_cli_wrapper(self, runtime: AgentRuntime) -> tuple[str, list[str]]:
-        # The generated script still hardcodes the ``claude`` argv0 and the
-        # ``claude-home`` share, so *runtime* goes unread: this backend has one
-        # wrapped-CLI runtime.  A second one needs ``guest_argv0`` and
-        # ``home_mount.host_dir`` threaded into ``_build_cli_wrapper``.
         assert self._ssh_port is not None
         path = _build_cli_wrapper(
             self._context_name,
@@ -917,7 +935,7 @@ class LibvirtSandbox:
             self._ssh_port,
             project_dir=self._project_dir,
             instance_prefix=self._instance_prefix,
-            claude_home_dir=self._agent_home_dir,
+            argv0=agent_argv0(runtime),
         )
         return path, [path]
 
@@ -1536,7 +1554,8 @@ class LibvirtSandbox:
             str(self._tmp_dir),
             *task_tmp_guest_paths(self._runtimes.values(), SANDBOX_UID),
         )
-        share(str(self._agent_home_dir), f"{SANDBOX_HOME}/.claude")
+        for runtime, home in self._agent_home_shares():
+            share(str(home), agent_home_guest_dir(runtime, SANDBOX_HOME))
         # Served-endpoint launch only: sync each declared host_dir into the
         # guest at its declared mount point.  The mount SOURCE is whatever
         # path the served runtime's ``inject`` writes to host-side (provider

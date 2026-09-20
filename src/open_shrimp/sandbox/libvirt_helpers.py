@@ -1772,16 +1772,16 @@ def build_cli_wrapper(
     ssh_port: int,
     project_dir: str,
     instance_prefix: str = _DOMAIN_PREFIX,
-    claude_home_dir: Path | None = None,
+    *,
+    argv0: str,
 ) -> str:
-    """Generate a bash wrapper script that SSHs into the VM to run Claude.
+    """Generate a bash wrapper script that SSHs into the VM to run an agent CLI.
 
     The wrapper:
     - Checks if the VM's SSH is reachable
     - Self-heals by starting the domain if needed
     - Forwards ``ANTHROPIC_API_KEY`` via ``SendEnv``
     - Enables SSH agent forwarding for git operations
-    - Copies fresh credentials before each invocation
 
     Args:
         context_name: Context name (used for domain name and temp file naming).
@@ -1790,45 +1790,18 @@ def build_cli_wrapper(
         project_dir: Host project directory path.  The VM mounts this at
             the same path, so ``cd`` targets the real host path.
         instance_prefix: Libvirt domain name prefix.
-        claude_home_dir: Host-side directory shared into the VM as
-            ``{SANDBOX_HOME}/.claude``.  When set, credentials are copied
-            directly to this directory (no SCP needed).
+        argv0: The agent CLI's own name on the guest ``PATH``
+            (``AgentRuntime``'s image bundle says which).
+
+    Host-side credentials reach the guest through the runtime's
+    ``provision_credentials`` hook, which ``provision_workspace`` runs into
+    that runtime's shared agent home before every dispatch.
 
     Returns:
         Absolute path to the generated wrapper script.
     """
     dom_name = domain_name(context_name, instance_prefix)
     ssh_key = sdir / "ssh_key"
-
-    # Detect host-side credentials for copying into VM.
-    claude_dir = Path.home() / ".claude"
-    host_credentials = claude_dir / ".credentials.json"
-
-    # Build the credential-copy block.  When claude_home_dir is set
-    # (virtiofs/9p shared), copy directly on the host — no SCP needed.
-    if claude_home_dir is not None:
-        cred_block = textwrap.dedent(f"""\
-            # Copy fresh credentials via host-side shared directory.
-            HOST_CREDENTIALS={shlex.quote(str(host_credentials))}
-            CLAUDE_HOME_DIR={shlex.quote(str(claude_home_dir))}
-            if [ -f "$HOST_CREDENTIALS" ]; then
-                cp "$HOST_CREDENTIALS" "$CLAUDE_HOME_DIR/.credentials.json" 2>/dev/null || true
-            fi
-        """)
-    else:
-        cred_block = textwrap.dedent(f"""\
-            # Copy fresh credentials if they exist on the host.
-            HOST_CREDENTIALS={shlex.quote(str(host_credentials))}
-            if [ -f "$HOST_CREDENTIALS" ]; then
-                scp -i "$SSH_KEY" -P "$VM_SSH_PORT" \\
-                    -o StrictHostKeyChecking=no \\
-                    -o UserKnownHostsFile=/dev/null \\
-                    -o LogLevel=ERROR \\
-                    "$HOST_CREDENTIALS" \\
-                    "$VM_USER@localhost:{SANDBOX_HOME}/.claude/.credentials.json" \\
-                    </dev/null 2>/dev/null || true
-            fi
-        """)
 
     # Git identity — read from host and export in the remote shell.
     git_env_parts: list[str] = []
@@ -1883,16 +1856,16 @@ def build_cli_wrapper(
             done
         fi
 
-    """) + cred_block + textwrap.dedent(f"""\
+    """) + textwrap.dedent(f"""\
 
-        # Forward ANTHROPIC_API_KEY, enable agent forwarding for git, exec Claude CLI.
+        # Forward ANTHROPIC_API_KEY, enable agent forwarding for git, exec the CLI.
         # Build a properly quoted remote command string.  SSH concatenates
         # remote args into a single string and passes it to ``$SHELL -c``,
         # so we must shell-escape each argument for the remote shell.
         # Source /etc/profile so the remote shell picks up the full PATH
         # (needed for npx / Playwright MCP).  SSH non-login shells get a
         # minimal PATH that may not include /usr/bin.
-        REMOTE_CMD=". /etc/profile{git_env_export} && cd {shlex.quote(project_dir)} && claude"
+        REMOTE_CMD=". /etc/profile{git_env_export} && cd {shlex.quote(project_dir)} && {shlex.quote(argv0)}"
         for arg in "$@"; do
             REMOTE_CMD+=" $(printf '%q' "$arg")"
         done

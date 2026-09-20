@@ -106,26 +106,27 @@ def _cached_sandbox_for(
     cached = mgr._sandbox_cache.get(context_name)
     if cached is None:
         return None
-    hosted: set[str] = mgr._sandbox_runtime.setdefault(context_name, set())
-    if runtime is None or runtime.name in hosted:
+    if runtime is None or runtime.name in cached.runtime_names:
         return cached
     cached.add_runtime(runtime)
-    hosted.add(runtime.name)
     logger.info(
         "Context '%s' on %s now hosts runtimes %s in one guest",
-        context_name, mgr._backend_label, ", ".join(sorted(hosted)),
+        context_name, mgr._backend_label,
+        ", ".join(sorted(cached.runtime_names)),
     )
     return cached
 
 
 def _register_sandbox(
-    mgr: Any, context_name: str, sandbox: Sandbox, runtime: "AgentRuntime | None",
+    mgr: Any, context_name: str, sandbox: Sandbox,
 ) -> Sandbox:
-    """Cache *sandbox* as *context_name*'s guest and record what it hosts."""
+    """Cache *sandbox* as *context_name*'s guest.
+
+    What it hosts is the sandbox's own answer
+    (:attr:`Sandbox.runtime_names`), off the ``runtimes=`` its constructor
+    already took.
+    """
     mgr._sandbox_cache[context_name] = sandbox
-    mgr._sandbox_runtime[context_name] = (
-        {runtime.name} if runtime is not None else set()
-    )
     return sandbox
 
 
@@ -255,16 +256,14 @@ class SandboxManager(Protocol):
         """Base directory for per-context sandbox state."""
         ...
 
-    def agent_home_dir(self, context_name: str) -> Path:
-        """Host-side directory mapped to the agent's home inside the sandbox.
+    def context_state_dir(self, context_name: str) -> Path:
+        """Per-context host state directory, the same one this backend's
+        :class:`Sandbox` writes its guest artifacts under.
 
-        Used to locate session ``.jsonl`` files without creating a full
-        :class:`Sandbox` instance (e.g. for ``/resume`` session listing).
-
-        For the Claude runtime this resolves to the per-context
-        ``claude-home`` dir (mapped to ``~/.claude`` inside the sandbox); the
-        name is the agent-neutral contract, the directory contents are the
-        active agent's.
+        A backend hangs its agent home off this (``backend.make_runtime``
+        takes it and each backend spells its own leaf), so a caller can reach
+        a context's session corpus without creating a full :class:`Sandbox` —
+        ``/resume`` session listing does.
         """
         ...
 
@@ -293,13 +292,15 @@ class LimaSandboxManager:
         self._instance_prefix = "openshrimp"
         self._limactl_path: str | None = None
         self._sandbox_cache: dict[str, Sandbox] = {}
-        self._sandbox_runtime: dict[str, set[str]] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
 
         self._build_log_dir = _build_log_dir()
-        self._state_dir = _data_dir() / "lima"
+        # The dir ``lima_helpers.state_dir_for`` hands each LimaSandbox, not a
+        # manager-private one: the agent homes and the task-output dirs the
+        # terminal mini app reads live under it.
+        self._state_dir = _data_dir() / "lima-state"
 
     # -- Instance naming ------------------------------------------------------
 
@@ -328,7 +329,6 @@ class LimaSandboxManager:
         """Stop all OpenShrimp-managed Lima instances."""
         if self._limactl_path is None:
             self._sandbox_cache.clear()
-            self._sandbox_runtime.clear()
             return
 
         from open_shrimp.sandbox.lima_helpers import (
@@ -347,12 +347,10 @@ class LimaSandboxManager:
                 logger.info("Stopped Lima instance %s", name)
 
         self._sandbox_cache.clear()
-        self._sandbox_runtime.clear()
 
     # -- Invalidation ----------------------------------------------------------
 
     def invalidate_sandbox(self, context_name: str) -> None:
-        self._sandbox_runtime.pop(context_name, None)
         cached = self._sandbox_cache.pop(context_name, None)
         if cached is not None:
             try:
@@ -383,8 +381,6 @@ class LimaSandboxManager:
                     exc_info=True,
                 )
 
-        from open_shrimp.sandbox.lima_helpers import state_dir_for
-        shutil.rmtree(state_dir_for(context_name), ignore_errors=True)
         shutil.rmtree(self._state_dir / context_name, ignore_errors=True)
 
         self.unregister_build(context_name)
@@ -393,16 +389,8 @@ class LimaSandboxManager:
     def cleanup_orphans(self, active_contexts: set[str]) -> None:
         seen: set[str] = set()
 
-        # Manager-level state dir (lima/).
         if self._state_dir.exists():
             for child in self._state_dir.iterdir():
-                if child.is_dir() and child.name not in active_contexts:
-                    seen.add(child.name)
-
-        # Per-context state dir (lima-state/).
-        lima_state_base = _data_dir() / "lima-state"
-        if lima_state_base.exists():
-            for child in lima_state_base.iterdir():
                 if child.is_dir() and child.name not in active_contexts:
                     seen.add(child.name)
 
@@ -444,7 +432,7 @@ class LimaSandboxManager:
             guest_os=context.sandbox.guest_os,
             runtimes=[runtime] if runtime is not None else [],
         )
-        return _register_sandbox(self, context_name, sandbox, runtime)
+        return _register_sandbox(self, context_name, sandbox)
 
     # -- Build logging --------------------------------------------------------
 
@@ -491,8 +479,8 @@ class LimaSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def agent_home_dir(self, context_name: str) -> Path:
-        return self._state_dir / context_name / "claude-home"
+    def context_state_dir(self, context_name: str) -> Path:
+        return self._state_dir / context_name
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +507,6 @@ class LibvirtSandboxManager:
         self._instance_prefix = "openshrimp"
         self._conn: "libvirt.virConnect | None" = None  # type: ignore[name-defined]
         self._sandbox_cache: dict[str, Sandbox] = {}
-        self._sandbox_runtime: dict[str, set[str]] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
@@ -668,7 +655,6 @@ class LibvirtSandboxManager:
                 pass
 
         self._sandbox_cache.clear()
-        self._sandbox_runtime.clear()
 
         # Kill any orphaned virtiofsd processes whose sockets live under
         # our state directory.
@@ -710,7 +696,6 @@ class LibvirtSandboxManager:
     # -- Invalidation ----------------------------------------------------------
 
     def invalidate_sandbox(self, context_name: str) -> None:
-        self._sandbox_runtime.pop(context_name, None)
         cached = self._sandbox_cache.pop(context_name, None)
         if cached is not None:
             try:
@@ -793,7 +778,7 @@ class LibvirtSandboxManager:
             phone_use=context.sandbox.phone_use,
             runtimes=[runtime] if runtime is not None else [],
         )
-        return _register_sandbox(self, context_name, sandbox, runtime)
+        return _register_sandbox(self, context_name, sandbox)
 
     # -- Build logging --------------------------------------------------------
 
@@ -840,8 +825,8 @@ class LibvirtSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def agent_home_dir(self, context_name: str) -> Path:
-        return self._state_dir / context_name / "claude-home"
+    def context_state_dir(self, context_name: str) -> Path:
+        return self._state_dir / context_name
 
 
 # ---------------------------------------------------------------------------
@@ -868,7 +853,6 @@ class HcsSandboxManager:
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
         self._sandbox_cache: dict[str, Sandbox] = {}
-        self._sandbox_runtime: dict[str, set[str]] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
@@ -904,12 +888,10 @@ class HcsSandboxManager:
             except Exception:
                 logger.debug("Error stopping HCS sandbox", exc_info=True)
         self._sandbox_cache.clear()
-        self._sandbox_runtime.clear()
 
     # -- Invalidation ----------------------------------------------------------
 
     def invalidate_sandbox(self, context_name: str) -> None:
-        self._sandbox_runtime.pop(context_name, None)
         cached = self._sandbox_cache.pop(context_name, None)
         if cached is not None:
             try:
@@ -965,7 +947,7 @@ class HcsSandboxManager:
             instance_prefix=self._instance_prefix,
             runtimes=[runtime] if runtime is not None else [],
         )
-        return _register_sandbox(self, context_name, sandbox, runtime)
+        return _register_sandbox(self, context_name, sandbox)
 
     # -- Build logging --------------------------------------------------------
 
@@ -1011,8 +993,8 @@ class HcsSandboxManager:
     def state_dir(self) -> Path:
         return self._state_dir
 
-    def agent_home_dir(self, context_name: str) -> Path:
-        return self._state_dir / context_name / "claude-home"
+    def context_state_dir(self, context_name: str) -> Path:
+        return self._state_dir / context_name
 
 
 # ---------------------------------------------------------------------------

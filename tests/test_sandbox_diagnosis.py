@@ -392,7 +392,7 @@ class _StubManager:
     def __init__(self, sandbox: _RefusingSandbox) -> None:
         self._sandbox = sandbox
 
-    def agent_home_dir(self, context_name: str) -> Path:
+    def context_state_dir(self, context_name: str) -> Path:
         return Path("/tmp") / context_name
 
     def create_sandbox(self, context_name, ctx, runtime=None) -> _RefusingSandbox:
