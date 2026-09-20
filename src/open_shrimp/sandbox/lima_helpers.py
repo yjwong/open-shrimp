@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Callable
 
 import yaml
 from open_shrimp.config import SandboxConfig
@@ -338,9 +338,9 @@ def lima_template(
 ) -> dict:
     """The Lima instance template for a Linux guest, as a dict.
 
-    One body behind the YAML that gets written, the fingerprints that detect
+    One body behind the YAML that gets written, the fingerprint that detects
     drift, and the mount set a remount rewrites — three readers of one
-    rendering, so a field added to the template cannot go missing from a
+    rendering, so a field added to the template cannot go missing from the
     fingerprint and rebuild the VM on every call.
     """
     mounts = _build_mounts(
@@ -697,53 +697,82 @@ def _build_computer_use_provisions() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-class Fingerprints(NamedTuple):
-    """What a rendered instance template hashes to.
+def config_fingerprint(template: dict) -> str:
+    """Hash *template* without its ``mounts:`` block.
 
-    ``whole`` moves whenever the template does; ``mount_free`` leaves out the
-    ``mounts:`` block, which is the only part registering a second agent
-    runtime touches.  A drift ``mount_free`` does not see is one the instance
-    absorbs by rewriting its mount list and restarting, instead of being
-    deleted and built again.
+    The mount set is left out because nothing persisted here could say which
+    runtimes the *running* instance was booted with: a process that starts
+    against a guest built for both agents and dispatches one of them would
+    read a hash of its own half-sized plan as drift.  The instance's own
+    ``lima.yaml`` already records the shares it carries, so mounts are
+    reconciled against that file (:func:`instance_mounts`) and every other
+    field — cpus, memory, disk, provision scripts, port forwards — is hashed
+    here, where a change means the VM is deleted and built again.
     """
-
-    whole: str
-    mount_free: str
-
-
-def config_fingerprints(template: dict) -> Fingerprints:
-    """Hash *template* with and without its mounts, rendering it once."""
-    def digest(body: dict) -> str:
-        content = yaml.dump(body, default_flow_style=False, sort_keys=False)
-        return hashlib.sha256(content.encode()).hexdigest()
-
-    whole = digest(template)
-    return Fingerprints(whole, digest({
-        key: value for key, value in template.items() if key != "mounts"
-    }))
+    body = {key: value for key, value in template.items() if key != "mounts"}
+    content = yaml.dump(body, default_flow_style=False, sort_keys=False)
+    return hashlib.sha256(content.encode()).hexdigest()
 
 
-def save_config_fingerprint(sdir: Path, fingerprints: Fingerprints) -> None:
-    """Persist the config fingerprints for drift detection, one per line."""
-    (sdir / "config.sha256").write_text(
-        "\n".join(fingerprints) + "\n", encoding="utf-8",
-    )
+def save_config_fingerprint(sdir: Path, fingerprint: str) -> None:
+    """Persist the config fingerprint for drift detection."""
+    (sdir / "config.sha256").write_text(fingerprint + "\n", encoding="utf-8")
 
 
-def load_config_fingerprint(sdir: Path) -> Fingerprints | None:
-    """Load the saved fingerprints, or ``None`` if absent or unreadable."""
+def load_config_fingerprint(sdir: Path) -> str | None:
+    """Load the saved fingerprint, or ``None`` if absent or unreadable."""
     fp_file = sdir / "config.sha256"
     if not fp_file.exists():
         return None
-    lines = fp_file.read_text(encoding="utf-8").split()
-    if len(lines) != len(Fingerprints._fields):
-        return None
-    return Fingerprints(*lines)
+    words = fp_file.read_text(encoding="utf-8").split()
+    return words[0] if len(words) == 1 else None
 
 
 def clear_config_fingerprint(sdir: Path) -> None:
-    """Drop the saved fingerprints, so the next call rebuilds or remounts."""
+    """Drop the saved fingerprint, so the next call rebuilds."""
     (sdir / "config.sha256").unlink(missing_ok=True)
+
+
+def guest_mount_point(entry: dict) -> str | None:
+    """The guest-side path a mount entry lands at, or ``None`` when it lands
+    at its own host path.
+
+    A share mounted at its own host path is one of the context's directories,
+    which is what the approval layer treats as the sandbox boundary.  Every
+    other share is an agent's machinery under a guest home — its data dir, its
+    plugin config, its task output.
+
+    The two are told apart by ``mountPoint`` rather than by where the host dir
+    lives, because Lima fills a missing ``mountPoint`` in with the location and
+    saves the filled config back to the instance: a context directory reaches
+    this function spelled both ways.
+    """
+    point = entry.get("mountPoint")
+    return point if point and point != entry["location"] else None
+
+
+def mount_location(entry: dict) -> str:
+    """The host dir a mount entry shares, through ``realpath``.
+
+    Lima re-saves the instance config with its own spelling of each path, and
+    a spelling difference read as drift would restart the VM every time the
+    mount set is reconciled.
+    """
+    return os.path.realpath(entry["location"])
+
+
+def mount_key(entry: dict) -> tuple[str, str, bool]:
+    """A mount entry as ``(host dir, guest path, writable)``.
+
+    The guest path is left verbatim — it names a directory in the guest, which
+    the host cannot resolve.
+    """
+    location = mount_location(entry)
+    return (
+        location,
+        guest_mount_point(entry) or location,
+        bool(entry.get("writable")),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +875,31 @@ def limactl_delete(limactl: str, name: str) -> None:
         limactl, ["delete", "--force", name], check=False, timeout=60,
     )
     logger.info("Deleted Lima instance %s", name)
+
+
+def instance_mounts(inst_name: str) -> list[dict] | None:
+    """The shares ``LIMA_HOME/<instance>/lima.yaml`` gives the guest.
+
+    This file is what Lima reads when it starts the VM, so it is the record of
+    which runtimes the instance was booted for — the one thing a process that
+    did not do the booting has no other way to learn.  ``None`` means there is
+    no instance config to read, which leaves the caller a fresh create.
+    """
+    config = _lima_state_dir() / inst_name / "lima.yaml"
+    try:
+        instance = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return None
+    except (OSError, yaml.YAMLError):
+        logger.warning(
+            "Could not read the mount set of Lima instance %s", inst_name,
+            exc_info=True,
+        )
+        return None
+    mounts = instance.get("mounts")
+    if not isinstance(mounts, list):
+        return None
+    return [m for m in mounts if isinstance(m, dict) and m.get("location")]
 
 
 def rewrite_instance_mounts(inst_name: str, mounts: list[dict]) -> None:

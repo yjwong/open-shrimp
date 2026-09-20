@@ -34,6 +34,9 @@ def test_lima_provision_continues_when_security_key_helper_install_fails(
     sandbox._computer_use = True
     sandbox._runtimes = {}
     sandbox._context_name = "test-context"
+    # Enough for the task-output link pass that follows the failed install:
+    # it resolves the guest path the instance mounts the context's ``tmp`` at.
+    sandbox._guest_os = "macos"
 
     def fail_install() -> None:
         raise RuntimeError("download failed")

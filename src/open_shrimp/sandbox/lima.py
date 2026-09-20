@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shlex
 import subprocess
 from collections.abc import Sequence
@@ -58,7 +59,9 @@ from open_shrimp.sandbox.lima_helpers import (
     _log,
     build_cli_wrapper as _build_cli_wrapper,
     clear_config_fingerprint,
-    config_fingerprints,
+    config_fingerprint,
+    guest_mount_point,
+    instance_mounts,
     instance_name as _instance_name,
     lima_template,
     limactl_create,
@@ -68,6 +71,8 @@ from open_shrimp.sandbox.lima_helpers import (
     limactl_start,
     limactl_stop,
     load_config_fingerprint,
+    mount_key,
+    mount_location,
     rewrite_instance_mounts,
     save_config_fingerprint,
     state_dir_for,
@@ -209,29 +214,22 @@ class LimaSandbox:
         No *progress*: ``limactl`` owns the image download on this path and
         reports it into *log_file* itself.
 
-        A drift confined to the mount set — what registering a second agent
-        runtime produces — is absorbed by rewriting the instance's mount list
-        and letting :meth:`ensure_running` restart it, so the guest disk and
-        the CLIs installed on it survive.  Anything else still rebuilds.
+        A drift in the mount set — what registering a second agent runtime
+        produces — is absorbed by rewriting the instance's mount list and
+        letting :meth:`ensure_running` restart it, so the guest disk and the
+        CLIs installed on it survive.  Anything else still rebuilds.
         """
         sdir = self._sdir
         sdir.mkdir(parents=True, mode=0o700, exist_ok=True)
 
-        # Detect config drift.
+        # Detect config drift outside the mount set.
         template = self._template()
-        desired = config_fingerprints(template)
+        desired = config_fingerprint(template)
         saved = load_config_fingerprint(sdir)
-        if saved is not None and saved.whole != desired.whole:
-            # Drop the fingerprints first: whichever branch below runs, a crash
-            # partway through must not leave one claiming the instance matches
-            # the desired config.
+        if saved is not None and saved != desired:
+            # Drop the fingerprint first: a crash partway through the rebuild
+            # must not leave one claiming the instance matches this config.
             clear_config_fingerprint(sdir)
-            if saved.mount_free == desired.mount_free and self._remount(
-                template, log_file=log_file,
-            ):
-                save_config_fingerprint(sdir, desired)
-                _log(log_file, "Lima VM environment ready.")
-                return
             _log(
                 log_file,
                 "Lima config changed — rebuilding VM from scratch...",
@@ -250,8 +248,8 @@ class LimaSandbox:
                 "Lima instance %s already exists (status: %s)",
                 self._inst_name, status,
             )
-            if saved != desired:
-                save_config_fingerprint(sdir, desired)
+            self._reconcile_mounts(template, log_file=log_file)
+            save_config_fingerprint(sdir, desired)
             _log(log_file, "Lima VM environment ready.")
             return
 
@@ -275,7 +273,7 @@ class LimaSandbox:
     def _template(self) -> dict:
         """The instance template for the runtimes registered so far.
 
-        The YAML that gets written, the fingerprints that detect drift and the
+        The YAML that gets written, the fingerprint that detects drift and the
         mount list a remount rewrites all read this one rendering — building
         the mount set costs a handful of ``mkdir`` calls and every dispatch
         goes through here.
@@ -300,6 +298,74 @@ class LimaSandbox:
             task_tmp_guest_path=task_tmp_guest_path,
         )
 
+    def _mount_plan(self, template: dict, carried: list[dict]) -> list[dict]:
+        """*template*'s shares, reconciled against the ones the instance has.
+
+        Two rules, split by whether a share is the sandbox boundary or an
+        agent's machinery:
+
+        A share the guest mounts at its own host path is a context directory,
+        and the approval layer treats the context's directories as the
+        boundary — so the plan carries exactly the ones the config still
+        lists.  Drop an ``additional_directories`` entry and the guest loses
+        the mount at the next start.
+
+        Every other share is mounted at a guest-side path an agent owns: its
+        home, its plugin config, its task-output dir.  Those the plan keeps
+        even when this process has not registered the runtime that asked for
+        them, because a guest booted for both agents is one whose next
+        dispatch may be either, and rebooting it to drop one agent's homes
+        costs a restart to lose what the dispatch after that asks back.
+
+        The task-output dir is the one share whose guest path is taken from
+        the instance rather than the template: Lima merges mount entries by
+        ``location``, so that one host dir gets one guest path, and
+        :meth:`_link_task_tmp_aliases` points every registered agent's
+        ``/tmp/<prefix>-<uid>`` at whichever path the boot happened to pick.
+        """
+        by_location = {mount_location(mount): mount for mount in carried}
+        task_tmp = os.path.realpath(self._tmp_dir)
+        plan: list[dict] = []
+        for entry in template["mounts"]:
+            mounted = by_location.get(mount_location(entry))
+            if (
+                mount_location(entry) == task_tmp
+                and mounted is not None
+                and guest_mount_point(mounted) is not None
+            ):
+                entry = {**entry, "mountPoint": mounted["mountPoint"]}
+            plan.append(entry)
+        planned = {mount_location(entry) for entry in plan}
+        plan.extend(
+            mount for mount in carried
+            if mount_location(mount) not in planned
+            and guest_mount_point(mount) is not None
+        )
+        return plan
+
+    def _reconcile_mounts(
+        self, template: dict, *, log_file: Path | None = None,
+    ) -> None:
+        """Give the existing instance the shares :meth:`_mount_plan` wants.
+
+        Reads the instance's own mount list rather than a hash of the last
+        plan written, so a process that starts against a guest another one
+        booted sees the shares that guest actually carries and leaves it
+        alone.
+        """
+        carried = instance_mounts(self._inst_name)
+        if carried is None:
+            return
+        plan = self._mount_plan(template, carried)
+        if {mount_key(m) for m in plan} == {mount_key(m) for m in carried}:
+            return
+        if not self._remount({**template, "mounts": plan}, log_file=log_file):
+            _log(
+                log_file,
+                "Lima mount set could not be rewritten — rebuilding VM...",
+            )
+            self._rebuild_vm(log_file=log_file)
+
     def _remount(self, template: dict, *, log_file: Path | None = None) -> bool:
         """Give the existing instance *template*'s mount set, or return False.
 
@@ -310,6 +376,11 @@ class LimaSandbox:
         seconds against the several minutes of deleting the instance and
         reinstalling both agents' CLIs into a fresh guest.
 
+        The VM is stopped before its config is rewritten, so the instance
+        config never describes shares a running guest does not have: a crash
+        between the two leaves a stopped instance whose old mount list the
+        next start reconciles again.
+
         ``False`` means the caller should rebuild — a macOS guest, whose
         mounts the guest agent materialises as symlinks at boot, a missing
         instance, or a write that failed.
@@ -319,6 +390,9 @@ class LimaSandbox:
         status = limactl_instance_status(self._limactl, self._inst_name)
         if status is None:
             return False
+        if status == "Running":
+            _log(log_file, "Agent shares changed — restarting the Lima VM...")
+            limactl_stop(self._limactl, self._inst_name)
         try:
             rewrite_instance_mounts(self._inst_name, template["mounts"])
         except (OSError, yaml.YAMLError):
@@ -330,9 +404,6 @@ class LimaSandbox:
         # Keep the generated template in step with the instance, so a later
         # rebuild starts from what is actually mounted.
         write_lima_yaml(self._sdir, template)
-        if status == "Running":
-            _log(log_file, "Agent shares changed — restarting the Lima VM...")
-            limactl_stop(self._limactl, self._inst_name)
         return True
 
     def running(self) -> bool:
@@ -458,12 +529,19 @@ class LimaSandbox:
         and the others reach it through a symlink; without one the second agent
         writes to guest-local disk and "View output" finds nothing.
 
+        Which path carries the mount is the booting runtime set's choice, not
+        this process's, so it is read back from the instance config: a guest
+        booted for both agents mounts at ``/tmp/claude-<uid>`` and still
+        serves a process that has registered only OpenCode.
+
         Runs on every dispatch because ``/tmp`` is emptied by a guest reboot.
         """
-        paths = self._task_tmp_guest_paths()
-        if len(paths) < 2 or self._guest_os != "linux":
+        if self._guest_os != "linux":
             return
-        mounted, aliases = paths[0], paths[1:]
+        mounted = self._mounted_task_tmp()
+        aliases = [p for p in self._task_tmp_guest_paths() if p != mounted]
+        if not aliases:
+            return
         # rmdir clears the empty directory an agent that started before the
         # link left behind; anything still standing after it — a live link, a
         # directory with output already in it — is left alone.
@@ -478,6 +556,18 @@ class LimaSandbox:
                 "Could not link task-output paths %s to %s in %s: %s",
                 ", ".join(aliases), mounted, self._inst_name, stderr.strip(),
             )
+
+    def _mounted_task_tmp(self) -> str:
+        """The guest path the instance gives the host task-output dir.
+
+        Falls back to the path this process's runtime set would pick, which is
+        what a guest about to be created from that set will carry.
+        """
+        task_tmp = os.path.realpath(self._tmp_dir)
+        for mount in instance_mounts(self._inst_name) or []:
+            if mount_location(mount) == task_tmp:
+                return guest_mount_point(mount) or mount["location"]
+        return self._task_tmp_guest_paths()[0]
 
     def _install_security_key_helper(self) -> None:
         if self._guest_os != "linux":

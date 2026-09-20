@@ -5,6 +5,11 @@ Lima fixes the guest's mount set when the VM boots and merges mount entries by
 guest path per host dir: the second agent's task-output path arrives as a
 symlink rather than a second mount, and gaining a runtime rewrites the
 instance's mount list and restarts it instead of deleting the VM.
+
+That plan is settled against ``LIMA_HOME/<instance>/lima.yaml`` rather than a
+saved hash of the last one written, because a hash cannot say which runtimes
+the *running* guest was booted for — and a bot process that restarts against a
+running guest registers its runtimes one dispatch at a time.
 """
 
 from __future__ import annotations
@@ -64,6 +69,61 @@ def _mounts(sb: LimaSandbox) -> dict[str, dict]:
     return {m["location"]: m for m in sb._template()["mounts"]}
 
 
+def _mounts_for(tmp_path: Path, *runtimes: Any) -> list[dict]:
+    """The mount set a guest booted for *runtimes* carries."""
+    return _sandbox(tmp_path, *runtimes)._template()["mounts"]
+
+
+def _instance_config(tmp_path: Path, monkeypatch, mounts: list[dict]) -> Path:
+    """Write ``LIMA_HOME/<instance>/lima.yaml`` for a guest carrying *mounts*.
+
+    Lima fills a missing ``mountPoint`` in with the location before saving, so
+    the file spells a context directory's share differently from the template
+    that asked for it.
+    """
+    inst_dir = tmp_path / "lima-home" / "openshrimp-dev"
+    inst_dir.mkdir(parents=True, exist_ok=True)
+    (inst_dir / "lima.yaml").write_text(
+        yaml.dump({
+            "cpus": 4,
+            "ssh": {"localPort": 60022},
+            "mounts": [
+                {"mountPoint": m["location"], **m} for m in mounts
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        lima_helpers, "_lima_state_dir", lambda: tmp_path / "lima-home",
+    )
+    return inst_dir / "lima.yaml"
+
+
+def _record_guest_commands(monkeypatch) -> list[str]:
+    commands: list[str] = []
+    monkeypatch.setattr(
+        LimaSandbox,
+        "_exec_in_vm_sync",
+        lambda self, cmd, **kw: (commands.append(cmd), (0, "", ""))[1],
+    )
+    return commands
+
+
+def _reconcile(sb: LimaSandbox, monkeypatch) -> list[dict] | None:
+    """The mount set ``_reconcile_mounts`` gives the instance, or ``None``
+    when it leaves the running guest alone."""
+    remounted: list[list[dict]] = []
+    monkeypatch.setattr(
+        LimaSandbox,
+        "_remount",
+        lambda self, template, **kw: (
+            remounted.append(template["mounts"]), True,
+        )[1],
+    )
+    sb._reconcile_mounts(sb._template())
+    return remounted[0] if remounted else None
+
+
 def test_the_task_output_dir_mounts_at_one_path_whoever_registered_first(
     tmp_path,
 ):
@@ -117,12 +177,7 @@ def test_the_second_agents_task_output_path_is_symlinked_onto_the_mounted_one(
     mounted twice; without the link OpenCode writes to guest-local disk and
     "View output" finds nothing."""
     sb = _sandbox(tmp_path, _claude(tmp_path), _opencode())
-    commands: list[str] = []
-    monkeypatch.setattr(
-        LimaSandbox,
-        "_exec_in_vm_sync",
-        lambda self, cmd, **kw: (commands.append(cmd), (0, "", ""))[1],
-    )
+    commands = _record_guest_commands(monkeypatch)
 
     sb._link_task_tmp_aliases()
 
@@ -144,31 +199,158 @@ def test_one_runtime_needs_no_link(tmp_path, monkeypatch):
     sb._link_task_tmp_aliases()
 
 
+def test_the_link_targets_the_path_the_running_guest_actually_mounts(
+    tmp_path, monkeypatch,
+):
+    """A guest booted for both agents mounts the task-output dir at
+    /tmp/claude-<uid>.  A process that has only registered OpenCode would pick
+    /tmp/openshrimp-<uid> for a fresh guest, and linking that path onto itself
+    leaves OpenCode's output on guest-local disk."""
+    sb = _sandbox(tmp_path, _opencode())
+    _instance_config(tmp_path, monkeypatch, _mounts_for(
+        tmp_path, _claude(tmp_path), _opencode(),
+    ))
+    commands = _record_guest_commands(monkeypatch)
+
+    sb._link_task_tmp_aliases()
+
+    assert len(commands) == 1
+    assert (
+        f"ln -sfn /tmp/claude-{LIMA_GUEST_UID} /tmp/openshrimp-{LIMA_GUEST_UID}"
+        in commands[0]
+    )
+
+
 # -- drift ----------------------------------------------------------------
 
 
-def _fingerprints(sb: LimaSandbox) -> lima_helpers.Fingerprints:
-    return lima_helpers.config_fingerprints(sb._template())
+def _fingerprint(sb: LimaSandbox) -> str:
+    return lima_helpers.config_fingerprint(sb._template())
 
 
-def test_gaining_a_runtime_moves_only_the_mounts(tmp_path):
-    """The mount-free fingerprint is what decides between a restart and a
-    rebuild, so a second runtime must move the whole fingerprint and leave
-    that one alone."""
-    before = _fingerprints(_sandbox(tmp_path, _claude(tmp_path)))
-    after = _fingerprints(_sandbox(tmp_path, _claude(tmp_path), _opencode()))
+def test_gaining_a_runtime_leaves_the_rebuild_trigger_alone(tmp_path):
+    """The fingerprint is what deletes the VM and builds it again, and nothing
+    it hashes may move with the runtime set: which agents a guest hosts is
+    settled against the instance's own mount list instead."""
+    before = _sandbox(tmp_path, _claude(tmp_path))
+    after = _sandbox(tmp_path, _claude(tmp_path), _opencode())
 
-    assert after.whole != before.whole
-    assert after.mount_free == before.mount_free
+    assert _fingerprint(after) == _fingerprint(before)
+    assert set(_mounts(after)) > set(_mounts(before))
 
 
-def test_more_memory_moves_the_mount_free_fingerprint_too(tmp_path):
+def test_more_memory_moves_the_fingerprint(tmp_path):
     """A config change outside the mount set still rebuilds the VM."""
     before = _sandbox(tmp_path, _claude(tmp_path))
     after = _sandbox(tmp_path, _claude(tmp_path))
     after._config = SandboxConfig(backend="lima", memory=before._config.memory * 2)
 
-    assert _fingerprints(after).mount_free != _fingerprints(before).mount_free
+    assert _fingerprint(after) != _fingerprint(before)
+
+
+def test_a_guest_booted_for_both_agents_survives_a_process_restart(
+    tmp_path, monkeypatch,
+):
+    """The case two VM restarts per process start came from: the bot comes back
+    up against a running guest and the first topic to dispatch has registered
+    one agent.  The guest already carries both agents' shares, so there is
+    nothing to rewrite — and the second topic's first dispatch, which registers
+    the other agent, must not rewrite anything either."""
+    _instance_config(tmp_path, monkeypatch, _mounts_for(
+        tmp_path, _claude(tmp_path), _opencode(),
+    ))
+
+    for registered in (
+        (_opencode(),),
+        (_claude(tmp_path),),
+        (_claude(tmp_path), _opencode()),
+    ):
+        sb = _sandbox(tmp_path, *registered)
+        assert _reconcile(sb, monkeypatch) is None
+
+
+def test_gaining_a_runtime_rewrites_the_mount_set(tmp_path, monkeypatch):
+    """A guest booted for one agent has no home for the other, and Lima cannot
+    hot-add one."""
+    _instance_config(tmp_path, monkeypatch, _mounts_for(tmp_path, _claude(tmp_path)))
+    opencode = _opencode()
+    sb = _sandbox(tmp_path, _claude(tmp_path), opencode)
+
+    plan = _reconcile(sb, monkeypatch)
+
+    assert plan is not None
+    locations = {m["location"] for m in plan}
+    for mount in opencode.launch.home_mounts:
+        assert str(mount.host_dir) in locations
+
+
+def test_a_removed_additional_directory_does_not_stay_mounted(
+    tmp_path, monkeypatch,
+):
+    """The approval layer treats the context's directories as the sandbox
+    boundary, so a directory dropped from the config must lose its share at the
+    next start — a guest carrying more than the plan is only tolerable for the
+    shares an agent owns."""
+    dropped = str(tmp_path / "notes")
+    booted = _sandbox(tmp_path, _claude(tmp_path))
+    booted._additional_directories = [dropped]
+    _instance_config(tmp_path, monkeypatch, booted._template()["mounts"])
+    sb = _sandbox(tmp_path, _claude(tmp_path))
+
+    plan = _reconcile(sb, monkeypatch)
+
+    assert plan is not None
+    assert dropped not in {m["location"] for m in plan}
+
+
+def test_a_boundary_rewrite_keeps_the_other_agents_shares(tmp_path, monkeypatch):
+    """Dropping a context directory from a guest booted for both agents must
+    not cost the un-registered agent its home: it would be rewritten back in,
+    and restarted for, on that agent's next dispatch."""
+    dropped = str(tmp_path / "notes")
+    opencode = _opencode()
+    booted = _sandbox(tmp_path, _claude(tmp_path), opencode)
+    booted._additional_directories = [dropped]
+    _instance_config(tmp_path, monkeypatch, booted._template()["mounts"])
+    sb = _sandbox(tmp_path, _claude(tmp_path))
+
+    plan = _reconcile(sb, monkeypatch)
+
+    assert plan is not None
+    locations = {m["location"] for m in plan}
+    assert dropped not in locations
+    for mount in opencode.launch.home_mounts:
+        assert str(mount.host_dir) in locations
+
+
+def test_the_task_output_share_keeps_the_guest_path_the_instance_gave_it(
+    tmp_path, monkeypatch,
+):
+    """One host dir, one guest path: a process that has registered only
+    OpenCode would pick /tmp/openshrimp-<uid> for a fresh guest, and moving a
+    running guest's share there buys nothing the symlink does not."""
+    _instance_config(tmp_path, monkeypatch, _mounts_for(
+        tmp_path, _claude(tmp_path), _opencode(),
+    ))
+    sb = _sandbox(tmp_path, _opencode())
+
+    plan = sb._mount_plan(sb._template(), lima_helpers.instance_mounts("openshrimp-dev"))
+
+    tmp_share = next(m for m in plan if m["location"] == str(sb._tmp_dir))
+    assert tmp_share["mountPoint"] == f"/tmp/claude-{LIMA_GUEST_UID}"
+
+
+def test_an_unreadable_instance_config_leaves_the_guest_alone(
+    tmp_path, monkeypatch,
+):
+    """A guest whose mount list cannot be read is not a guest missing a share;
+    restarting it would cost the session for nothing."""
+    monkeypatch.setattr(
+        lima_helpers, "_lima_state_dir", lambda: tmp_path / "lima-home",
+    )
+    sb = _sandbox(tmp_path, _claude(tmp_path), _opencode())
+
+    assert _reconcile(sb, monkeypatch) is None
 
 
 def test_a_remount_rewrites_the_instance_config_and_stops_the_vm(
