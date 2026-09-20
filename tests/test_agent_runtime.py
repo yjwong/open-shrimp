@@ -72,8 +72,7 @@ def test_start_agent_wrapped_cli_returns_handle(cls, tmp_path: Path):
 
 def test_libvirt_served_endpoint_forwards_ssh_agent(tmp_path: Path, monkeypatch):
     sb = object.__new__(LibvirtSandbox)
-    sb._served_proc = None
-    sb._served_endpoint = None
+    sb._served = {}
     sb._ssh_port = 2222
     sb._sdir = tmp_path
     sb._project_dir = "/workspace"

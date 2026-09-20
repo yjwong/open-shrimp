@@ -525,10 +525,12 @@ class LibvirtSandboxManager:
     """
 
     _backend_label = "libvirt"
-    # The domain XML declares one virtiofs device per shared dir at boot and
-    # one guest path per device, so a second runtime's task-tmp and served
-    # homes have nowhere to land in a running domain.
-    _shares_guest_across_runtimes = False
+    # ``LibvirtSandbox._shared_dirs_and_overrides`` unions every registered
+    # runtime's shares, so both agents have a home in one domain.  Registering
+    # the second one grows the domain's virtiofs tag set, which the drift check
+    # pays for with one restart; nothing persists the hosted set, so a process
+    # that starts against an already-running domain pays it again.
+    _shares_guest_across_runtimes = True
 
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"

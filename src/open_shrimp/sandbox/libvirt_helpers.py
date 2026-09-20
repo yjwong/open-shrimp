@@ -856,7 +856,7 @@ def ensure_mounts(
     ssh_key: Path,
     shared_dirs: list[str],
     fs_type: str = "virtiofs",
-    mount_overrides: dict[str, str] | None = None,
+    mount_overrides: dict[str, list[str]] | None = None,
     readonly_dirs: set[str] | None = None,
 ) -> None:
     """Ensure shared directories are mounted inside the VM via SSH.
@@ -875,12 +875,13 @@ def ensure_mounts(
         shared_dirs: Host directories that should be mounted at their
             original paths inside the VM.
         fs_type: ``"virtiofs"`` or ``"9p"``.
-        mount_overrides: Optional mapping of host directory path to
-            guest mount path.  When a host directory appears in this
-            dict, the systemd mount unit uses the override as the
-            guest-side ``Where=`` path instead of the host path.
-            The virtiofs/9p tag (``What=``) is still derived from
-            the host path so it matches the domain XML.
+        mount_overrides: Optional map of host directory to the guest paths it
+            is mounted at, instead of at its own path.  Several paths give one
+            host directory several mount units — which is how the single host
+            task-output dir reaches ``/tmp/claude-<uid>`` and
+            ``/tmp/openshrimp-<uid>`` at once.  The virtiofs/9p tag (``What=``)
+            comes from the host path so it matches the domain XML, so those
+            units share one tag.
     """
     ssh_opts = _ssh_common_opts(ssh_key, ssh_port)
 
@@ -890,23 +891,33 @@ def ensure_mounts(
             capture_output=True,
         )
 
-    # Build the desired set of mount units.
-    # Use systemd-escape to get correct unit names (e.g. paths with dashes
-    # need \x2d escaping — simple str.replace("/", "-") is wrong).
+    # Every (host dir, guest path) to mount: a host dir with no override mounts
+    # at its own path, one with several gets one unit per path, all sharing the
+    # tag derived from the host dir.
     _overrides = mount_overrides or {}
     _readonly = readonly_dirs or set()
-    desired: dict[str, tuple[str, str]] = {}  # unit_name -> (mount_path, unit_content)
-    for host_dir in shared_dirs:
-        tag = _fs_tag_for_dir(host_dir)
-        # Use override guest path if provided, otherwise mount at the
-        # same path as on the host.
-        guest_path = _overrides.get(host_dir, host_dir)
-        # systemd-escape --path produces the correct unit name stem.
+    plan = [
+        (host_dir, guest_path)
+        for host_dir in shared_dirs
+        for guest_path in _overrides.get(host_dir, [host_dir])
+    ]
+
+    # Unit names come from systemd-escape, since paths with dashes need \x2d
+    # escaping (a simple str.replace("/", "-") is wrong).  One call for every
+    # path: it escapes each argument and prints one line each, and rejects being
+    # called with none.
+    unit_names: list[str] = []
+    if plan:
         esc = subprocess.run(
-            ["systemd-escape", "--path", guest_path],
+            ["systemd-escape", "--path", *(guest for _host, guest in plan)],
             capture_output=True, text=True, check=True,
         )
-        unit_name = esc.stdout.strip() + ".mount"
+        unit_names = [f"{stem}.mount" for stem in esc.stdout.split()]
+        assert len(unit_names) == len(plan), "systemd-escape dropped a path"
+
+    desired: dict[str, tuple[str, str]] = {}  # unit_name -> (mount_path, unit_content)
+    for unit_name, (host_dir, guest_path) in zip(unit_names, plan):
+        tag = _fs_tag_for_dir(host_dir)
 
         opts: list[str] = []
         if fs_type == "9p":
@@ -1655,6 +1666,32 @@ def _scp_common_opts(ssh_key: Path, ssh_port: int) -> list[str]:
     ]
 
 
+_host_digests: dict[tuple[str, int, int], str] = {}
+
+
+def _host_binary_digest(host_binary_path: str) -> str:
+    """SHA-256 of *host_binary_path*, memoised on ``(path, mtime, size)``.
+
+    Every sandbox start compares each hosted runtime's CLI against the guest's
+    copy, and these binaries run to hundreds of megabytes, so re-reading them
+    per start costs whole seconds on the path a user is waiting on.  Keying on
+    mtime and size means a rebuilt or re-pinned binary still re-hashes.
+    """
+    st = os.stat(host_binary_path)
+    key = (host_binary_path, st.st_mtime_ns, st.st_size)
+    cached = _host_digests.get(key)
+    if cached is not None:
+        return cached
+
+    hasher = hashlib.sha256()
+    with open(host_binary_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
+    _host_digests[key] = digest
+    return digest
+
+
 def install_cli_via_ssh(
     binary_name: str,
     host_binary_path: str,
@@ -1671,7 +1708,6 @@ def install_cli_via_ssh(
     ``PATH`` is respected and never overwritten.  Installs by SCPing
     *host_binary_path* into ``/tmp``, then ``sudo mv`` + chmod.
     """
-    import hashlib
     import logging
     _logger = logging.getLogger(__name__)
 
@@ -1680,11 +1716,7 @@ def install_cli_via_ssh(
     remote = f"{ssh_user}@localhost"
     final_path = f"/usr/local/bin/{binary_name}"
 
-    hasher = hashlib.sha256()
-    with open(host_binary_path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            hasher.update(chunk)
-    local_hash = hasher.hexdigest()
+    local_hash = _host_binary_digest(host_binary_path)
 
     result = subprocess.run(
         ["ssh", *ssh_opts, remote, "sha256sum", final_path],

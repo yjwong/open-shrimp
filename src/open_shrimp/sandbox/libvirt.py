@@ -21,18 +21,17 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 from open_shrimp.sandbox.agent_runtime import (
     AgentHandle,
     AgentRuntime,
     GuestMount,
     ServedEndpoint,
+    ServedSlot,
     WrappedCLI,
-    primary_bundle,
     run_served_endpoint,
     served_home_mounts,
-    terminate_served_proc,
+    task_tmp_guest_paths,
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox.prefetch import ProgressFn, logged
@@ -221,17 +220,18 @@ class LibvirtSandbox:
             self._screenshots_dir.mkdir(parents=True, exist_ok=True)
 
         # Host-side directories shared into the VM: task output files and
-        # .claude session data are written to the host so the terminal mini
-        # app can read them.
+        # agent session data are written to the host so the terminal mini app
+        # can read them.  Every runtime shares this one task-output dir — see
+        # ``_shared_dirs_and_overrides``.
         self._tmp_dir = self._sdir / "tmp"
-        self._claude_home_dir = self._sdir / "claude-home"
+        self._agent_home_dir = self._sdir / "claude-home"
 
         self._port_forwards = PortForwardRegistry()
 
-        # Served-endpoint state.  ``_served_proc`` is read by the
-        # served-endpoint client's liveness check via the endpoint's ``owner``.
-        self._served_proc: subprocess.Popen[str] | None = None
-        self._served_endpoint: Any = None
+        # Served-endpoint state, one slot per runtime name: the slot is the
+        # endpoint's ``owner``, so two served runtimes in one guest cannot
+        # overwrite each other's liveness handle.
+        self._served: dict[str, ServedSlot] = {}
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -344,7 +344,7 @@ class LibvirtSandbox:
 
         # Ensure host-side shared directories exist.
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
-        self._claude_home_dir.mkdir(parents=True, exist_ok=True)
+        self._agent_home_dir.mkdir(parents=True, exist_ok=True)
         for mount in self._served_home_mounts():
             mount.host_dir.mkdir(parents=True, exist_ok=True)
 
@@ -862,9 +862,10 @@ class LibvirtSandbox:
         """
         from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
 
-        if self._served_proc is not None and self._served_proc.poll() is None:
-            if self._served_endpoint is not None:
-                return AgentHandle(endpoint=self._served_endpoint)
+        slot = self._served.setdefault(runtime.name, ServedSlot())
+        live = slot.live_handle()
+        if live is not None:
+            return live
 
         if self._ssh_port is None:
             raise RuntimeError("Cannot start served endpoint: libvirt VM is not running")
@@ -898,11 +899,10 @@ class LibvirtSandbox:
             launch,
             spawn=spawn,
             reach=self.reach,
-            owner=self,
+            owner=slot,
             log_label=f"Libvirt context '{self._context_name}'",
         )
-        self._served_proc = proc
-        self._served_endpoint = endpoint
+        slot.adopt(proc, endpoint)
         return AgentHandle(endpoint=endpoint)
 
     def build_cli_wrapper(self, runtime: AgentRuntime) -> tuple[str, list[str]]:
@@ -917,7 +917,7 @@ class LibvirtSandbox:
             self._ssh_port,
             project_dir=self._project_dir,
             instance_prefix=self._instance_prefix,
-            claude_home_dir=self._claude_home_dir,
+            claude_home_dir=self._agent_home_dir,
         )
         return path, [path]
 
@@ -974,11 +974,11 @@ class LibvirtSandbox:
         """Gracefully shutdown the VM (ACPI), with destroy fallback."""
         import libvirt
 
-        # Tear down any served process (the ssh -L tunnel is reaped below with
-        # the rest of the port forwards).
-        terminate_served_proc(self._served_proc)
-        self._served_proc = None
-        self._served_endpoint = None
+        # Tear down every served process; the ssh -L tunnels that reach them
+        # are reaped below with the rest of the port forwards.
+        for slot in self._served.values():
+            slot.close()
+        self._served.clear()
 
         # Reap forward subprocesses before the VM goes away — ssh would
         # die on its own but the Popen handles would linger as zombies.
@@ -1500,36 +1500,43 @@ class LibvirtSandbox:
 
     def _shared_dirs_and_overrides(
         self,
-    ) -> tuple[list[str], dict[str, str], set[str]]:
+    ) -> tuple[list[str], dict[str, list[str]], set[str]]:
         """Return ``(all_dirs, mount_overrides, readonly_dirs)`` for domain XML / mounts.
 
-        ``all_dirs`` is the list of host directories that need virtiofs/9p
-        filesystem devices.  ``mount_overrides`` maps host paths that
-        should be mounted at a *different* guest path (tmp and .claude).
-        ``readonly_dirs`` is the subset of ``all_dirs`` that should be
-        mounted read-only inside the guest.
+        ``all_dirs`` lists the host directories needing a virtiofs/9p device,
+        one entry each: the tag is a hash of the host path, so a repeat would
+        declare two devices under one tag and start two virtiofsd processes on
+        one socket.  ``mount_overrides`` maps a host directory to the guest
+        paths it is mounted at — several where one share serves two agents, as
+        the task-output dir does — and a directory absent from it mounts at its
+        own path.  ``readonly_dirs`` is the subset of ``all_dirs`` mounted
+        read-only inside the guest.
         """
-        all_dirs = [self._project_dir] + self._additional_directories
+        all_dirs: list[str] = []
+        mount_overrides: dict[str, list[str]] = {}
+        readonly_dirs: set[str] = set()
+
+        def share(
+            host_dir: str, *guest_paths: str, readonly: bool = False,
+        ) -> None:
+            """One device for *host_dir*, mounted at each of *guest_paths*."""
+            if host_dir not in all_dirs:
+                all_dirs.append(host_dir)
+            if guest_paths:
+                mount_overrides.setdefault(host_dir, []).extend(guest_paths)
+            if readonly:
+                readonly_dirs.add(host_dir)
+
+        share(self._project_dir)
+        for directory in self._additional_directories:
+            share(directory)
         if self._screenshots_dir is not None:
-            all_dirs.append(str(self._screenshots_dir))
-        all_dirs.append(str(self._tmp_dir))
-        all_dirs.append(str(self._claude_home_dir))
-        # The task-output share must mount at the guest path the agent CLI
-        # actually writes to (Claude → /tmp/claude-<uid>), not a vendor-neutral
-        # /tmp/<user>-<uid>; otherwise the CLI writes to an unshared guest path
-        # and the host terminal mini app finds nothing ("View output" 400s).
-        # ``mount_overrides`` maps a host dir to one guest path, so the shared
-        # tmp dir lands at the first registered runtime's task-tmp path.
-        bundle = primary_bundle(self._runtimes.values())
-        task_tmp_guest = (
-            bundle.guest_task_tmp(SANDBOX_UID)
-            if bundle is not None
-            else f"/tmp/claude-{SANDBOX_UID}"
+            share(str(self._screenshots_dir))
+        share(
+            str(self._tmp_dir),
+            *task_tmp_guest_paths(self._runtimes.values(), SANDBOX_UID),
         )
-        mount_overrides = {
-            str(self._tmp_dir): task_tmp_guest,
-            str(self._claude_home_dir): f"{SANDBOX_HOME}/.claude",
-        }
+        share(str(self._agent_home_dir), f"{SANDBOX_HOME}/.claude")
         # Served-endpoint launch only: sync each declared host_dir into the
         # guest at its declared mount point.  The mount SOURCE is whatever
         # path the served runtime's ``inject`` writes to host-side (provider
@@ -1537,16 +1544,14 @@ class LibvirtSandbox:
         # runs under its own ``HOME``) sees the synced files.  The wrapped-CLI
         # launch contributes ZERO new mounts here.
         for mount in self._served_home_mounts():
-            host_str = str(mount.host_dir)
-            all_dirs.append(host_str)
-            mount_overrides[host_str] = mount.guest_mount_point
-        readonly_dirs: set[str] = set()
+            share(str(mount.host_dir), mount.guest_mount_point)
         host_skills = Path.home() / ".claude" / "skills"
         if host_skills.is_dir():
-            host_skills_str = str(host_skills)
-            all_dirs.append(host_skills_str)
-            mount_overrides[host_skills_str] = f"{SANDBOX_HOME}/.claude/skills"
-            readonly_dirs.add(host_skills_str)
+            share(
+                str(host_skills),
+                f"{SANDBOX_HOME}/.claude/skills",
+                readonly=True,
+            )
         return all_dirs, mount_overrides, readonly_dirs
 
     def _virtiofs_socket_for(self, host_dir: str) -> Path:

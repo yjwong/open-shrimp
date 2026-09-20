@@ -6,8 +6,8 @@ down and rebuild, or the new agent is launched with no home to write to.  A
 backend that unions the two runtimes' shares hands the same guest back and
 lets the caller's provision pass mount and install the newcomer.
 
-These tests exercise the manager-level cache decision without touching
-libvirt by stubbing the concrete ``LibvirtSandbox`` constructor.
+These tests exercise the manager-level cache decision without touching a
+hypervisor, by stubbing each manager's concrete sandbox constructor.
 """
 
 from __future__ import annotations
@@ -19,9 +19,13 @@ from typing import Any
 import pytest
 
 import open_shrimp.sandbox.libvirt as libvirt_mod
+import open_shrimp.sandbox.lima as lima_mod
 from open_shrimp import paths
 from open_shrimp.config import SandboxConfig
-from open_shrimp.sandbox.manager import LibvirtSandboxManager
+from open_shrimp.sandbox.manager import (
+    LibvirtSandboxManager,
+    LimaSandboxManager,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +46,7 @@ class _FakeCtx:
 
 
 class _FakeSandbox:
-    """Minimal stand-in for LibvirtSandbox: records its runtimes and stop()."""
+    """Minimal stand-in for a concrete sandbox: records its runtimes and stop()."""
 
     def __init__(self, *, runtimes: Any, **_kw: Any) -> None:
         self.runtimes = list(runtimes)
@@ -68,6 +72,14 @@ def _manager(monkeypatch) -> LibvirtSandboxManager:
     return mgr
 
 
+def _lima_manager(monkeypatch) -> LimaSandboxManager:
+    monkeypatch.setattr(lima_mod, "LimaSandbox", _FakeSandbox)
+    mgr = LimaSandboxManager()
+    # create_sandbox refuses without limactl; the fake never runs it.
+    mgr._limactl_path = "limactl"
+    return mgr
+
+
 def test_same_runtime_reuses_cached_sandbox(monkeypatch):
     mgr = _manager(monkeypatch)
     ctx = _FakeCtx()
@@ -81,7 +93,7 @@ def test_same_runtime_reuses_cached_sandbox(monkeypatch):
 
 def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
     """A manager that has not adopted the union keeps the teardown."""
-    mgr = _manager(monkeypatch)
+    mgr = _lima_manager(monkeypatch)
     assert mgr._shares_guest_across_runtimes is False
     ctx = _FakeCtx()
 
@@ -99,12 +111,10 @@ def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
 
 
 def test_a_shared_guest_takes_the_second_runtime_on(monkeypatch):
-    """Once a backend unions the two runtimes' shares, the second runtime
-    joins the live guest instead of rebooting it."""
+    """libvirt unions the two runtimes' shares, so the second runtime joins
+    the live guest instead of rebooting it."""
     mgr = _manager(monkeypatch)
-    monkeypatch.setattr(
-        LibvirtSandboxManager, "_shares_guest_across_runtimes", True,
-    )
+    assert mgr._shares_guest_across_runtimes is True
     ctx = _FakeCtx()
 
     claude_sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
@@ -118,9 +128,6 @@ def test_a_shared_guest_takes_the_second_runtime_on(monkeypatch):
 
 def test_a_shared_guest_is_not_re_registered(monkeypatch):
     mgr = _manager(monkeypatch)
-    monkeypatch.setattr(
-        LibvirtSandboxManager, "_shares_guest_across_runtimes", True,
-    )
     ctx = _FakeCtx()
 
     sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))

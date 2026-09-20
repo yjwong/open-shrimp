@@ -338,6 +338,33 @@ def served_home_mounts(
     return [mounts[key] for key in sorted(mounts)]
 
 
+def task_tmp_guest_paths(
+    runtimes: "Iterable[AgentRuntime]", uid: int,
+) -> list[str]:
+    """Every guest path the hosted agents write background-task output to.
+
+    Each CLI picks its own ``/tmp/<prefix>-<uid>`` and a share mounted where
+    the CLI does not write leaves the host terminal mini app with nothing to
+    read.  The host side is one directory — ``terminal/log_source.py`` resolves
+    that output at a single ``<context state dir>/tmp`` — so a sandbox mounts
+    that one dir at every path in this list.
+
+    Sorted, for the reason ``served_home_mounts`` is: registration order is
+    whichever ChatScope dispatched first and nothing persists it, so an
+    arrival-ordered result would drift a guest's mount set after a restart that
+    dispatched the other way round.  With no bundle among the runtimes the
+    caller gets :attr:`ImageBundle.task_tmp_prefix`'s own default.
+    """
+    paths = sorted(
+        {
+            runtime.image_bundle.guest_task_tmp(uid)
+            for runtime in runtimes
+            if runtime.image_bundle is not None
+        }
+    )
+    return paths or [ImageBundle(guest_home="").guest_task_tmp(uid)]
+
+
 def primary_bundle(
     runtimes: "Iterable[AgentRuntime]",
 ) -> "ImageBundle | None":
@@ -352,6 +379,47 @@ def primary_bundle(
         if runtime.image_bundle is not None:
             return runtime.image_bundle
     return None
+
+
+class ServedSlot:
+    """One served runtime's process and endpoint, and the ``owner`` passed to
+    :func:`run_served_endpoint`.
+
+    A guest hosting two served runtimes cannot keep the served process on the
+    sandbox itself: the served client snapshots ``owner._served_proc`` when it
+    connects and calls itself dead once the owner's current one is a different
+    object, so a single attribute would make each runtime's relaunch look like
+    the other's death.  One slot per runtime name points that comparison at the
+    process actually serving the client; relaunching replaces the proc *inside*
+    the slot, which is what the stale client needs to see.
+
+    The attribute is spelled ``_served_proc`` because that is the name the
+    client reads; it stays private to the slot, which is why every caller goes
+    through the three methods below.
+    """
+
+    def __init__(self) -> None:
+        self._served_proc: "subprocess.Popen[str] | None" = None
+        self.endpoint: Any = None
+
+    def live_handle(self) -> "AgentHandle | None":
+        """The handle for an already-running server, or ``None`` to launch."""
+        if self._served_proc is None or self._served_proc.poll() is not None:
+            return None
+        if self.endpoint is None:
+            return None
+        return AgentHandle(endpoint=self.endpoint)
+
+    def adopt(self, proc: "subprocess.Popen[str]", endpoint: Any) -> None:
+        """Take ownership of a freshly launched server."""
+        self._served_proc = proc
+        self.endpoint = endpoint
+
+    def close(self) -> None:
+        """Terminate the server and drop it, marking any stale client dead."""
+        terminate_served_proc(self._served_proc)
+        self._served_proc = None
+        self.endpoint = None
 
 
 def run_served_endpoint(
