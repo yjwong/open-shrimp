@@ -302,9 +302,12 @@ class LimaSandboxManager:
     """
 
     _backend_label = "Lima"
-    # The instance YAML fixes one task-tmp mount point and one served-home
-    # mount set, so a second runtime has nowhere to land in a live instance.
-    _shares_guest_across_runtimes = False
+    # ``LimaSandbox`` writes the union of every registered runtime's shares
+    # into the instance YAML, so both agents have a home in one VM.  Lima
+    # fixes the mount set when the VM boots, so registering the second runtime
+    # costs a rewrite of the instance config and a restart — not the delete
+    # and rebuild a fresh instance would be.
+    _shares_guest_across_runtimes = True
 
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"

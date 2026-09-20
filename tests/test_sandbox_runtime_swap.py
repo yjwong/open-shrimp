@@ -18,11 +18,13 @@ from typing import Any
 
 import pytest
 
+import open_shrimp.sandbox.hcs as hcs_mod
 import open_shrimp.sandbox.libvirt as libvirt_mod
 import open_shrimp.sandbox.lima as lima_mod
 from open_shrimp import paths
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.manager import (
+    HcsSandboxManager,
     LibvirtSandboxManager,
     LimaSandboxManager,
 )
@@ -80,6 +82,11 @@ def _lima_manager(monkeypatch) -> LimaSandboxManager:
     return mgr
 
 
+def _hcs_manager(monkeypatch) -> HcsSandboxManager:
+    monkeypatch.setattr(hcs_mod, "HcsSandbox", _FakeSandbox)
+    return HcsSandboxManager()
+
+
 def test_same_runtime_reuses_cached_sandbox(monkeypatch):
     mgr = _manager(monkeypatch)
     ctx = _FakeCtx()
@@ -93,7 +100,7 @@ def test_same_runtime_reuses_cached_sandbox(monkeypatch):
 
 def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
     """A manager that has not adopted the union keeps the teardown."""
-    mgr = _lima_manager(monkeypatch)
+    mgr = _hcs_manager(monkeypatch)
     assert mgr._shares_guest_across_runtimes is False
     ctx = _FakeCtx()
 
@@ -110,10 +117,11 @@ def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
     assert mgr.get_active_sandbox("dev") is opencode_sb
 
 
-def test_a_shared_guest_takes_the_second_runtime_on(monkeypatch):
-    """libvirt unions the two runtimes' shares, so the second runtime joins
-    the live guest instead of rebooting it."""
-    mgr = _manager(monkeypatch)
+@pytest.mark.parametrize("build_manager", [_manager, _lima_manager])
+def test_a_shared_guest_takes_the_second_runtime_on(monkeypatch, build_manager):
+    """libvirt and Lima union the two runtimes' shares, so the second runtime
+    joins the live guest instead of rebuilding it."""
+    mgr = build_manager(monkeypatch)
     assert mgr._shares_guest_across_runtimes is True
     ctx = _FakeCtx()
 

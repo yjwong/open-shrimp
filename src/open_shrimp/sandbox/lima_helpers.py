@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import yaml
 from open_shrimp.config import SandboxConfig
@@ -127,6 +127,13 @@ _CLOUD_IMAGES: dict[str, str] = {
         "ubuntu-24.04-server-cloudimg-amd64.img"
     ),
 }
+
+# The uid Lima's guest user gets, and with it the ``/tmp/<prefix>-<uid>``
+# directory an agent CLI writes its background-task output to.  Distinct from
+# ``skill_paths.SANDBOX_UID``, which is the ``openshrimp`` user baked into the
+# libvirt and HCS guest images; Lima builds its own user and only happens to
+# land on the same number.
+LIMA_GUEST_UID = 1000
 
 # ---------------------------------------------------------------------------
 # Lima binary management (following tunnel.py pattern)
@@ -318,7 +325,7 @@ def _lima_env() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def generate_lima_yaml(
+def lima_template(
     sdir: Path,
     config: SandboxConfig,
     project_dir: str,
@@ -326,51 +333,42 @@ def generate_lima_yaml(
     computer_use: bool = False,
     *,
     context_name: str = "",
-    guest_os: str = "linux",
     served_home_mounts: "tuple[GuestMount, ...]" = (),
-    task_tmp_prefix: str = "claude",
-) -> Path:
-    """Generate a Lima YAML template file.
+    task_tmp_guest_path: str,
+) -> dict:
+    """The Lima instance template for a Linux guest, as a dict.
 
-    Writes to ``sdir/lima.yaml`` and returns the path.
-
-    Each :class:`GuestMount` in *served_home_mounts* is appended to the
-    ``mounts:`` block (see :func:`_build_mounts`), so the runtime's
-    ``inject``-written host dirs (provider ``auth.json``, plugin config)
-    reach the served process in the guest.
+    One body behind the YAML that gets written, the fingerprints that detect
+    drift, and the mount set a remount rewrites — three readers of one
+    rendering, so a field added to the template cannot go missing from a
+    fingerprint and rebuild the VM on every call.
     """
-    if guest_os == "macos":
-        from open_shrimp.sandbox.lima_macos_helpers import generate_lima_yaml_macos
-        return generate_lima_yaml_macos(
-            sdir, config, project_dir, additional_directories,
-            computer_use, context_name=context_name,
-            task_tmp_prefix=task_tmp_prefix,
-        )
-
-    sdir.mkdir(parents=True, exist_ok=True)
-
-    # Detect host architecture for cloud image selection.
-    machine = platform.machine()
-    if machine == "arm64":
-        arch = "aarch64"
-    else:
-        arch = "x86_64"
-
-    images = []
-    for img_arch, img_url in _CLOUD_IMAGES.items():
-        images.append({"location": img_url, "arch": img_arch})
-
-    # Build mounts.
     mounts = _build_mounts(
         sdir, project_dir, additional_directories, computer_use,
-        task_tmp_prefix=task_tmp_prefix,
+        task_tmp_guest_path=task_tmp_guest_path,
         context_name=context_name, served_home_mounts=served_home_mounts,
     )
-
-    # Build provision scripts.
     provision = _build_provision_scripts(config, computer_use)
 
-    # Port forwarding.
+    template: dict = {
+        "vmType": "vz",
+        "vmOpts": {
+            "vz": {"rosetta": {"enabled": True, "binfmt": True}},
+        },
+        "cpus": config.cpus,
+        "memory": f"{config.memory}MiB",
+        "disk": f"{config.disk_size}GiB",
+        "images": [
+            {"location": url, "arch": arch}
+            for arch, url in _CLOUD_IMAGES.items()
+        ],
+        "mountType": "virtiofs",
+        "mounts": mounts,
+        "provision": provision,
+        "containerd": {"system": False, "user": False},
+        "ssh": {"forwardAgent": True},
+    }
+
     port_forward: list[dict] = []
     if computer_use:
         # VNC server (wayvnc on guest port 5900).
@@ -384,28 +382,20 @@ def generate_lima_yaml(
             "guestPort": 9222,
             "hostIP": "127.0.0.1",
         })
-
-    template: dict = {
-        "vmType": "vz",
-        "vmOpts": {
-            "vz": {"rosetta": {"enabled": True, "binfmt": True}},
-        },
-        "cpus": config.cpus,
-        "memory": f"{config.memory}MiB",
-        "disk": f"{config.disk_size}GiB",
-        "images": images,
-        "mountType": "virtiofs",
-        "mounts": mounts,
-        "provision": provision,
-        "containerd": {"system": False, "user": False},
-        "ssh": {"forwardAgent": True},
-    }
-
     if port_forward:
         template["portForwards"] = port_forward
 
+    return template
+
+
+def write_lima_yaml(sdir: Path, template: dict) -> Path:
+    """Write *template* to ``sdir/lima.yaml`` and return the path."""
+    sdir.mkdir(parents=True, exist_ok=True)
     yaml_path = sdir / "lima.yaml"
-    yaml_path.write_text(yaml.dump(template, default_flow_style=False, sort_keys=False), encoding="utf-8")
+    yaml_path.write_text(
+        yaml.dump(template, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
     logger.info("Generated Lima YAML template at %s", yaml_path)
     return yaml_path
 
@@ -418,13 +408,19 @@ def _build_mounts(
     *,
     context_name: str = "",
     served_home_mounts: "tuple[GuestMount, ...]" = (),
-    task_tmp_prefix: str = "claude",
+    task_tmp_guest_path: str,
 ) -> list[dict]:
     """Build Lima mount entries.
 
     Each :class:`GuestMount` in *served_home_mounts* is appended as a virtiofs
     mount so the runtime's ``inject``-written host dirs (provider
     ``auth.json``, plugin config) reach the served process in the guest.
+
+    Lima keys its mount list by ``location`` and merges repeats, so one host
+    dir gets one guest path: *task_tmp_guest_path* is the single path the task
+    output share lands at, and a guest hosting a second agent that writes
+    somewhere else reaches it through a symlink
+    (:meth:`LimaSandbox._link_task_tmp_aliases`).
     """
     mounts = []
 
@@ -463,7 +459,7 @@ def _build_mounts(
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
     mounts.append({
         "location": tmp_dir,
-        "mountPoint": f"/tmp/{task_tmp_prefix}-1000",
+        "mountPoint": task_tmp_guest_path,
         "writable": True,
     })
 
@@ -701,96 +697,53 @@ def _build_computer_use_provisions() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def lima_config_fingerprint(
-    sdir: Path,
-    config: SandboxConfig,
-    project_dir: str,
-    additional_directories: list[str] | None,
-    computer_use: bool,
-    *,
-    context_name: str = "",
-    guest_os: str = "linux",
-    served_home_mounts: "tuple[GuestMount, ...]" = (),
-    task_tmp_prefix: str = "claude",
-) -> str:
-    """SHA-256 fingerprint of the Lima YAML template content.
+class Fingerprints(NamedTuple):
+    """What a rendered instance template hashes to.
 
-    Uses the real state directory so mount paths are stable across
-    invocations (matching the libvirt approach).  The YAML is rendered
-    in memory — no temporary files are created.
-
-    Must mirror :func:`generate_lima_yaml` exactly (incl. the
-    *served_home_mounts*) so the fingerprint matches the YAML actually
-    written — otherwise drift is detected on every call and the VM rebuilds
-    in a loop.
+    ``whole`` moves whenever the template does; ``mount_free`` leaves out the
+    ``mounts:`` block, which is the only part registering a second agent
+    runtime touches.  A drift ``mount_free`` does not see is one the instance
+    absorbs by rewriting its mount list and restarting, instead of being
+    deleted and built again.
     """
-    if guest_os == "macos":
-        from open_shrimp.sandbox.lima_macos_helpers import lima_config_fingerprint_macos
-        return lima_config_fingerprint_macos(
-            sdir, config, project_dir, additional_directories,
-            computer_use, context_name=context_name,
-            task_tmp_prefix=task_tmp_prefix,
-        )
 
-    # Build the same template that generate_lima_yaml() would produce,
-    # but dump to a string instead of writing a file.  Using the real
-    # sdir keeps host-side mount paths deterministic.
-    mounts = _build_mounts(
-        sdir, project_dir, additional_directories, computer_use,
-        context_name=context_name, served_home_mounts=served_home_mounts,
-        task_tmp_prefix=task_tmp_prefix,
+    whole: str
+    mount_free: str
+
+
+def config_fingerprints(template: dict) -> Fingerprints:
+    """Hash *template* with and without its mounts, rendering it once."""
+    def digest(body: dict) -> str:
+        content = yaml.dump(body, default_flow_style=False, sort_keys=False)
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    whole = digest(template)
+    return Fingerprints(whole, digest({
+        key: value for key, value in template.items() if key != "mounts"
+    }))
+
+
+def save_config_fingerprint(sdir: Path, fingerprints: Fingerprints) -> None:
+    """Persist the config fingerprints for drift detection, one per line."""
+    (sdir / "config.sha256").write_text(
+        "\n".join(fingerprints) + "\n", encoding="utf-8",
     )
-    provision = _build_provision_scripts(config, computer_use)
-
-    port_forward: list[dict] = []
-    if computer_use:
-        port_forward.append({
-            "guestPort": 5900,
-            "hostPort": vnc_host_port(context_name or sdir.name),
-            "hostIP": "127.0.0.1",
-        })
-        port_forward.append({
-            "guestPort": 9222,
-            "hostIP": "127.0.0.1",
-        })
-
-    template: dict = {
-        "vmType": "vz",
-        "vmOpts": {
-            "vz": {"rosetta": {"enabled": True, "binfmt": True}},
-        },
-        "cpus": config.cpus,
-        "memory": f"{config.memory}MiB",
-        "disk": f"{config.disk_size}GiB",
-        "images": [
-            {"location": url, "arch": arch}
-            for arch, url in _CLOUD_IMAGES.items()
-        ],
-        "mountType": "virtiofs",
-        "mounts": mounts,
-        "provision": provision,
-        "containerd": {"system": False, "user": False},
-        "ssh": {"forwardAgent": True},
-    }
-
-    if port_forward:
-        template["portForwards"] = port_forward
-
-    content = yaml.dump(template, default_flow_style=False, sort_keys=False)
-    return hashlib.sha256(content.encode()).hexdigest()
 
 
-def save_config_fingerprint(sdir: Path, fingerprint: str) -> None:
-    """Persist the config fingerprint for drift detection."""
-    (sdir / "config.sha256").write_text(fingerprint, encoding="utf-8")
-
-
-def load_config_fingerprint(sdir: Path) -> str | None:
-    """Load the saved config fingerprint, or ``None`` if absent."""
+def load_config_fingerprint(sdir: Path) -> Fingerprints | None:
+    """Load the saved fingerprints, or ``None`` if absent or unreadable."""
     fp_file = sdir / "config.sha256"
-    if fp_file.exists():
-        return fp_file.read_text(encoding="utf-8").strip()
-    return None
+    if not fp_file.exists():
+        return None
+    lines = fp_file.read_text(encoding="utf-8").split()
+    if len(lines) != len(Fingerprints._fields):
+        return None
+    return Fingerprints(*lines)
+
+
+def clear_config_fingerprint(sdir: Path) -> None:
+    """Drop the saved fingerprints, so the next call rebuilds or remounts."""
+    (sdir / "config.sha256").unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -893,6 +846,29 @@ def limactl_delete(limactl: str, name: str) -> None:
         limactl, ["delete", "--force", name], check=False, timeout=60,
     )
     logger.info("Deleted Lima instance %s", name)
+
+
+def rewrite_instance_mounts(inst_name: str, mounts: list[dict]) -> None:
+    """Replace the ``mounts:`` block of an existing instance's config.
+
+    Lima reads ``LIMA_HOME/<instance>/lima.yaml`` when it starts the VM and
+    fixes the mount set there — it has no hot-add — so a guest that gains a
+    second agent runtime takes the new shares through a stop and a start.
+    Only the mount list is replaced: everything ``limactl create`` resolved
+    into that file (the picked image, the ssh port) stays, which is what makes
+    this cheaper than deleting the instance and building it again.
+
+    Raises if the instance config is missing, which leaves the caller its
+    rebuild.
+    """
+    config = _lima_state_dir() / inst_name / "lima.yaml"
+    instance = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    instance["mounts"] = mounts
+    config.write_text(
+        yaml.dump(instance, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    logger.info("Rewrote the mount set of Lima instance %s", inst_name)
 
 
 def limactl_list_json(limactl: str) -> list[dict]:

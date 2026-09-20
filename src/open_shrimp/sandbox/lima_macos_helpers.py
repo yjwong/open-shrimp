@@ -9,7 +9,6 @@ guest VMs running under Lima with Apple Virtualization.framework.
 from __future__ import annotations
 
 import getpass
-import hashlib
 import logging
 import os
 import shlex
@@ -20,7 +19,6 @@ import tempfile
 import textwrap
 from pathlib import Path
 
-import yaml
 from open_shrimp.config import SandboxConfig
 from open_shrimp.sandbox.lima_helpers import (
     _lima_state_dir,
@@ -35,33 +33,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def generate_lima_yaml_macos(
+def lima_template_macos(
     sdir: Path,
     config: SandboxConfig,
     project_dir: str,
     additional_directories: list[str] | None = None,
     computer_use: bool = False,
     *,
-    context_name: str = "",
-    task_tmp_prefix: str = "claude",
-) -> Path:
-    """Generate a Lima YAML template for a macOS guest.
+    task_tmp_guest_path: str,
+) -> dict:
+    """The Lima instance template for a macOS guest, as a dict.
 
     Uses ``base: [template:_images/macos]`` to inherit the IPSW image
     URL, ``os: Darwin``, ``arch: aarch64``, and ``vmType: vz`` from
     Lima's built-in macOS template.
-
-    Writes to ``sdir/lima.yaml`` and returns the path.
     """
-    sdir.mkdir(parents=True, exist_ok=True)
-
-    mounts = _build_mounts_macos(
-        sdir, project_dir, additional_directories, computer_use,
-        task_tmp_prefix=task_tmp_prefix,
-    )
-    provision = _build_provision_scripts_macos(config, computer_use)
-
-    template: dict = {
+    return {
         "minimumLimaVersion": "2.1.0",
         "base": ["template:_images/macos"],
         "cpus": config.cpus,
@@ -69,18 +56,13 @@ def generate_lima_yaml_macos(
         "disk": f"{config.disk_size}GiB",
         "video": _video_config_macos(computer_use),
         "mountType": "virtiofs",
-        "mounts": mounts,
-        "provision": provision,
+        "mounts": _build_mounts_macos(
+            sdir, project_dir, additional_directories, computer_use,
+            task_tmp_guest_path=task_tmp_guest_path,
+        ),
+        "provision": _build_provision_scripts_macos(config, computer_use),
         "ssh": {"forwardAgent": True},
     }
-
-    yaml_path = sdir / "lima.yaml"
-    yaml_path.write_text(
-        yaml.dump(template, default_flow_style=False, sort_keys=False),
-        encoding="utf-8",
-    )
-    logger.info("Generated macOS Lima YAML template at %s", yaml_path)
-    return yaml_path
 
 
 def _video_config_macos(computer_use: bool) -> dict:
@@ -117,7 +99,7 @@ def _build_mounts_macos(
     additional_directories: list[str] | None,
     computer_use: bool = False,
     *,
-    task_tmp_prefix: str = "claude",
+    task_tmp_guest_path: str,
 ) -> list[dict]:
     """Build Lima mount entries for a macOS guest.
 
@@ -162,7 +144,7 @@ def _build_mounts_macos(
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
     mounts.append({
         "location": tmp_dir,
-        "mountPoint": f"/tmp/{task_tmp_prefix}-1000",
+        "mountPoint": task_tmp_guest_path,
         "writable": True,
     })
 
@@ -447,45 +429,6 @@ def reboot_if_first_provision(
         logger.warning("Shell not responsive after auto-login reboot")
 
     logger.info("macOS VM rebooted for auto-login")
-
-
-# ---------------------------------------------------------------------------
-# Config fingerprinting (drift detection)
-# ---------------------------------------------------------------------------
-
-
-def lima_config_fingerprint_macos(
-    sdir: Path,
-    config: SandboxConfig,
-    project_dir: str,
-    additional_directories: list[str] | None,
-    computer_use: bool,
-    *,
-    context_name: str = "",
-    task_tmp_prefix: str = "claude",
-) -> str:
-    """SHA-256 fingerprint of the macOS Lima YAML template content."""
-    mounts = _build_mounts_macos(
-        sdir, project_dir, additional_directories, computer_use,
-        task_tmp_prefix=task_tmp_prefix,
-    )
-    provision = _build_provision_scripts_macos(config, computer_use)
-
-    template: dict = {
-        "minimumLimaVersion": "2.1.0",
-        "base": ["template:_images/macos"],
-        "cpus": config.cpus,
-        "memory": f"{config.memory}MiB",
-        "disk": f"{config.disk_size}GiB",
-        "video": _video_config_macos(computer_use),
-        "mountType": "virtiofs",
-        "mounts": mounts,
-        "provision": provision,
-        "ssh": {"forwardAgent": True},
-    }
-
-    content = yaml.dump(template, default_flow_style=False, sort_keys=False)
-    return hashlib.sha256(content.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------

@@ -19,8 +19,8 @@ import shlex
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
+import yaml
 from open_shrimp.config import SandboxConfig
 from open_shrimp.security_key.vm_helper_binary import (
     BINARY_NAME as SECURITY_KEY_HELPER_BINARY,
@@ -32,11 +32,11 @@ from open_shrimp.sandbox.agent_runtime import (
     AgentRuntime,
     GuestMount,
     ServedEndpoint,
+    ServedSlot,
     WrappedCLI,
-    primary_bundle,
     run_served_endpoint,
     served_home_mounts,
-    terminate_served_proc,
+    task_tmp_guest_paths,
 )
 from open_shrimp.sandbox.base import (
     VNC_QUIRK_RFB_BGRA_PIXEL_FORMAT,
@@ -53,12 +53,14 @@ from open_shrimp.sandbox.port_forward import (
 )
 from open_shrimp.sandbox.skill_paths import SANDBOX_HOME
 from open_shrimp.sandbox.lima_helpers import (
+    LIMA_GUEST_UID,
     _lima_env,
     _log,
     build_cli_wrapper as _build_cli_wrapper,
-    generate_lima_yaml,
+    clear_config_fingerprint,
+    config_fingerprints,
     instance_name as _instance_name,
-    lima_config_fingerprint,
+    lima_template,
     limactl_create,
     limactl_delete,
     limactl_instance_status,
@@ -66,9 +68,11 @@ from open_shrimp.sandbox.lima_helpers import (
     limactl_start,
     limactl_stop,
     load_config_fingerprint,
+    rewrite_instance_mounts,
     save_config_fingerprint,
     state_dir_for,
     vnc_host_port,
+    write_lima_yaml,
 )
 from open_shrimp.vnc.rfb_snapshot import RfbSnapshotError, capture_to_png
 
@@ -152,10 +156,10 @@ class LimaSandbox:
 
         self._port_forwards = PortForwardRegistry()
 
-        # Served-endpoint state.  ``_served_proc`` is read by the
-        # served-endpoint client's liveness check via the endpoint's ``owner``.
-        self._served_proc: subprocess.Popen[str] | None = None
-        self._served_endpoint: Any = None
+        # Served-endpoint state, one slot per runtime name: the slot is the
+        # endpoint's ``owner``, so two served runtimes in one guest cannot
+        # overwrite each other's liveness handle.
+        self._served: dict[str, ServedSlot] = {}
 
     # -- Sandbox protocol -----------------------------------------------------
 
@@ -170,15 +174,15 @@ class LimaSandbox:
     def add_runtime(self, runtime: AgentRuntime) -> None:
         self._runtimes.setdefault(runtime.name, runtime)
 
-    def _task_tmp_prefix(self) -> str:
-        """The ``/tmp/<prefix>-<uid>`` slug the tmp share mounts at.
+    def _task_tmp_guest_paths(self) -> list[str]:
+        """The guest paths the hosted agents write background-task output to.
 
-        The generated Lima YAML gives the share one guest mount point, so it
-        follows the first registered runtime; the host terminal mini app reads
-        background-task output from under it.
+        Lima merges mount entries by ``location``, so the one host task-output
+        dir gets exactly one guest mount point — the first of these, which is
+        sorted and therefore the same whichever ChatScope dispatched first.
+        :meth:`_link_task_tmp_aliases` symlinks the rest onto it.
         """
-        bundle = primary_bundle(self._runtimes.values())
-        return bundle.task_tmp_prefix if bundle is not None else "claude"
+        return task_tmp_guest_paths(self._runtimes.values(), LIMA_GUEST_UID)
 
     def _served_home_mounts(self) -> tuple[GuestMount, ...]:
         """The union of every registered runtime's served-launch host dirs,
@@ -204,24 +208,30 @@ class LimaSandbox:
 
         No *progress*: ``limactl`` owns the image download on this path and
         reports it into *log_file* itself.
+
+        A drift confined to the mount set — what registering a second agent
+        runtime produces — is absorbed by rewriting the instance's mount list
+        and letting :meth:`ensure_running` restart it, so the guest disk and
+        the CLIs installed on it survive.  Anything else still rebuilds.
         """
         sdir = self._sdir
         sdir.mkdir(parents=True, mode=0o700, exist_ok=True)
 
         # Detect config drift.
-        desired_fp = lima_config_fingerprint(
-            sdir,
-            self._config,
-            self._project_dir,
-            self._additional_directories or None,
-            self._computer_use,
-            context_name=self._context_name,
-            guest_os=self._guest_os,
-            served_home_mounts=self._served_home_mounts(),
-            task_tmp_prefix=self._task_tmp_prefix(),
-        )
-        saved_fp = load_config_fingerprint(sdir)
-        if saved_fp is not None and saved_fp != desired_fp:
+        template = self._template()
+        desired = config_fingerprints(template)
+        saved = load_config_fingerprint(sdir)
+        if saved is not None and saved.whole != desired.whole:
+            # Drop the fingerprints first: whichever branch below runs, a crash
+            # partway through must not leave one claiming the instance matches
+            # the desired config.
+            clear_config_fingerprint(sdir)
+            if saved.mount_free == desired.mount_free and self._remount(
+                template, log_file=log_file,
+            ):
+                save_config_fingerprint(sdir, desired)
+                _log(log_file, "Lima VM environment ready.")
+                return
             _log(
                 log_file,
                 "Lima config changed — rebuilding VM from scratch...",
@@ -230,8 +240,6 @@ class LimaSandbox:
                 "Config fingerprint drifted for %s — triggering rebuild",
                 self._inst_name,
             )
-            # Delete fingerprint before rebuild.
-            (sdir / "config.sha256").unlink(missing_ok=True)
             self._rebuild_vm(log_file=log_file)
             return
 
@@ -242,7 +250,8 @@ class LimaSandbox:
                 "Lima instance %s already exists (status: %s)",
                 self._inst_name, status,
             )
-            save_config_fingerprint(sdir, desired_fp)
+            if saved != desired:
+                save_config_fingerprint(sdir, desired)
             _log(log_file, "Lima VM environment ready.")
             return
 
@@ -252,26 +261,79 @@ class LimaSandbox:
         self._claude_home_dir.mkdir(parents=True, exist_ok=True)
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate YAML template.
-        yaml_path = generate_lima_yaml(
-            sdir,
+        # Create the instance (this downloads the image + boots for cloud-init).
+        limactl_create(
+            self._limactl,
+            self._inst_name,
+            write_lima_yaml(sdir, template),
+            log_file=log_file,
+        )
+
+        save_config_fingerprint(sdir, desired)
+        _log(log_file, "Lima VM environment ready.")
+
+    def _template(self) -> dict:
+        """The instance template for the runtimes registered so far.
+
+        The YAML that gets written, the fingerprints that detect drift and the
+        mount list a remount rewrites all read this one rendering — building
+        the mount set costs a handful of ``mkdir`` calls and every dispatch
+        goes through here.
+        """
+        args = (
+            self._sdir,
             self._config,
             self._project_dir,
             self._additional_directories or None,
             self._computer_use,
+        )
+        task_tmp_guest_path = self._task_tmp_guest_paths()[0]
+        if self._guest_os == "macos":
+            from open_shrimp.sandbox.lima_macos_helpers import lima_template_macos
+            return lima_template_macos(
+                *args, task_tmp_guest_path=task_tmp_guest_path,
+            )
+        return lima_template(
+            *args,
             context_name=self._context_name,
-            guest_os=self._guest_os,
             served_home_mounts=self._served_home_mounts(),
-            task_tmp_prefix=self._task_tmp_prefix(),
+            task_tmp_guest_path=task_tmp_guest_path,
         )
 
-        # Create the instance (this downloads the image + boots for cloud-init).
-        limactl_create(
-            self._limactl, self._inst_name, yaml_path, log_file=log_file,
-        )
+    def _remount(self, template: dict, *, log_file: Path | None = None) -> bool:
+        """Give the existing instance *template*'s mount set, or return False.
 
-        save_config_fingerprint(sdir, desired_fp)
-        _log(log_file, "Lima VM environment ready.")
+        Registering a second agent runtime adds that runtime's home shares and
+        moves nothing else, and Lima fixes its mount set when the VM starts.
+        Rewriting the instance's own ``lima.yaml`` and stopping it leaves
+        :meth:`ensure_running` to bring it back with the new shares: tens of
+        seconds against the several minutes of deleting the instance and
+        reinstalling both agents' CLIs into a fresh guest.
+
+        ``False`` means the caller should rebuild — a macOS guest, whose
+        mounts the guest agent materialises as symlinks at boot, a missing
+        instance, or a write that failed.
+        """
+        if self._guest_os != "linux":
+            return False
+        status = limactl_instance_status(self._limactl, self._inst_name)
+        if status is None:
+            return False
+        try:
+            rewrite_instance_mounts(self._inst_name, template["mounts"])
+        except (OSError, yaml.YAMLError):
+            logger.warning(
+                "Could not rewrite the mount set of %s — falling back to a "
+                "rebuild", self._inst_name, exc_info=True,
+            )
+            return False
+        # Keep the generated template in step with the instance, so a later
+        # rebuild starts from what is actually mounted.
+        write_lima_yaml(self._sdir, template)
+        if status == "Running":
+            _log(log_file, "Agent shares changed — restarting the Lima VM...")
+            limactl_stop(self._limactl, self._inst_name)
+        return True
 
     def running(self) -> bool:
         """Check if the Lima instance is running and responsive."""
@@ -384,6 +446,39 @@ class LimaSandbox:
             if runtime.provision_credentials is not None:
                 runtime.provision_credentials(runtime.home_mount.host_dir)
 
+        self._link_task_tmp_aliases()
+
+    def _link_task_tmp_aliases(self) -> None:
+        """Point every other agent's task-output path at the mounted one.
+
+        Each CLI picks its own ``/tmp/<prefix>-<uid>`` — Claude writes
+        ``/tmp/claude-1000``, OpenCode ``/tmp/openshrimp-1000`` — and the host
+        reads both from one directory, the context's ``tmp``.  Lima merges
+        mount entries by ``location``, so that directory gets one mount point
+        and the others reach it through a symlink; without one the second agent
+        writes to guest-local disk and "View output" finds nothing.
+
+        Runs on every dispatch because ``/tmp`` is emptied by a guest reboot.
+        """
+        paths = self._task_tmp_guest_paths()
+        if len(paths) < 2 or self._guest_os != "linux":
+            return
+        mounted, aliases = paths[0], paths[1:]
+        # rmdir clears the empty directory an agent that started before the
+        # link left behind; anything still standing after it — a live link, a
+        # directory with output already in it — is left alone.
+        script = "; ".join(
+            f"rmdir {shlex.quote(alias)} 2>/dev/null; [ -e {shlex.quote(alias)} ] "
+            f"|| ln -sfn {shlex.quote(mounted)} {shlex.quote(alias)}"
+            for alias in aliases
+        )
+        rc, _stdout, stderr = self._exec_in_vm_sync(script)
+        if rc != 0:
+            logger.warning(
+                "Could not link task-output paths %s to %s in %s: %s",
+                ", ".join(aliases), mounted, self._inst_name, stderr.strip(),
+            )
+
     def _install_security_key_helper(self) -> None:
         if self._guest_os != "linux":
             logger.info(
@@ -458,9 +553,10 @@ class LimaSandbox:
         ``HOME={SANDBOX_HOME}``).  When the binary is absent, the serve process
         exits early and readiness wait raises.
         """
-        if self._served_proc is not None and self._served_proc.poll() is None:
-            if self._served_endpoint is not None:
-                return AgentHandle(endpoint=self._served_endpoint)
+        slot = self._served.setdefault(runtime.name, ServedSlot())
+        live = slot.live_handle()
+        if live is not None:
+            return live
 
         if limactl_instance_status(self._limactl, self._inst_name) != "Running":
             raise RuntimeError("Cannot start served endpoint: Lima VM is not running")
@@ -491,11 +587,10 @@ class LimaSandbox:
             launch,
             spawn=spawn,
             reach=self.reach,
-            owner=self,
+            owner=slot,
             log_label=f"Lima context '{self._context_name}'",
         )
-        self._served_proc = proc
-        self._served_endpoint = endpoint
+        slot.adopt(proc, endpoint)
         return AgentHandle(endpoint=endpoint)
 
     def build_cli_wrapper(self, runtime: AgentRuntime) -> tuple[str, list[str]]:
@@ -581,11 +676,10 @@ class LimaSandbox:
 
     def stop(self) -> None:
         """Stop the Lima instance and any SSH tunnels."""
-        # Tear down any served process (the ssh -L tunnel is reaped below with
-        # the rest of the port forwards).
-        terminate_served_proc(self._served_proc)
-        self._served_proc = None
-        self._served_endpoint = None
+        # Tear down every served process (the ssh -L tunnels are reaped below
+        # with the rest of the port forwards).
+        for slot in self._served.values():
+            slot.close()
 
         # Reap forward subprocesses before the VM goes away.
         self._port_forwards.cleanup()
