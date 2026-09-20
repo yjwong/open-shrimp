@@ -161,7 +161,7 @@ def test_an_empty_buffer_is_not_kept_alive() -> None:
 def test_reasoning_alone_is_worth_keeping_alive() -> None:
     """Thinking rides in the draft and nowhere else, so it has to survive."""
     state = _DraftState(chat_id=1)
-    state.thinking = "weighing two approaches"
+    state.append_thinking("weighing two approaches")
     state.last_draft_sent = time.monotonic() - 1000
     assert _draft_is_stale(state) is True
 

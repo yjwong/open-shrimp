@@ -132,10 +132,13 @@ class _Block:
     ``rich`` markup was built here and goes out untouched; everything else is
     GFM from the agent and is escaped on the way out, so a ``<details>`` the
     agent typed reads as text while the one this module built collapses.
+    ``thinking`` is a reasoning stretch, wrapped in ``<tg-thinking>`` for the
+    draft and skipped entirely by the builders that write real messages.
     """
 
     rich: bool
     text: str
+    thinking: bool = False
     #: ``render()``'s answer, and the ``text`` it was computed from.  Only the
     #: trailing block grows during a turn, so caching here turns the twice-a-
     #: second flush from one markdown parse per block into one per turn.
@@ -146,7 +149,14 @@ class _Block:
         if self.rich:
             return self.text
         if self._rendered_from != self.text:
-            self._rendered = gfm_to_rich_text(self.text)
+            if self.thinking:
+                self._rendered = (
+                    f"<tg-thinking>"
+                    f"{escape_rich(self.text.strip())}"
+                    f"</tg-thinking>"
+                )
+            else:
+                self._rendered = gfm_to_rich_text(self.text)
             self._rendered_from = self.text
         return self._rendered
 
@@ -183,10 +193,11 @@ class _DraftState:
     # Whether the last assistant turn has completed (AssistantMessage seen).
     # Used to start a fresh block for text from the next turn.
     turn_complete: bool = False
-    # Reasoning text for the turn in flight.  It rides in the draft's
-    # <tg-thinking> block and is dropped from the message that replaces the
-    # draft, so it never reaches the transcript.
-    thinking: str = ""
+    # Whether the reasoning block at the buffer's tail is still open.  A tool
+    # call closes it even when it leaves no row of its own (suppressed
+    # notifications, host escapes), so the next reasoning delta opens a block
+    # instead of running into the previous block's last word.
+    thinking_open: bool = False
     # Session ID captured as early as possible (from SystemMessage init or
     # ResultMessage) so it survives task cancellation.
     session_id: str | None = None
@@ -232,10 +243,34 @@ class _DraftState:
         Deltas arrive mid-word, so they have to land in the same run or a
         sentence would gain a paragraph break every few characters.
         """
-        if self.buffer and not self.buffer[-1].rich:
+        if (
+            self.buffer
+            and not self.buffer[-1].rich
+            and not self.buffer[-1].thinking
+        ):
             self.buffer[-1].text += text
         else:
             self.buffer.append(_Block(rich=False, text=text))
+
+    def append_thinking(self, text: str) -> None:
+        """Extend the reasoning block at the buffer's tail, or open a new one.
+
+        Reasoning renders where it arrived, so a stretch that lands between
+        two tool rows sits between them in the draft.  ``render()`` wraps the
+        block in ``<tg-thinking>``, which only a draft shows; the builders
+        that write real messages skip thinking blocks, keeping reasoning out
+        of the transcript.
+        """
+        if (
+            self.thinking_open
+            and self.buffer
+            and self.buffer[-1].thinking
+        ):
+            self.buffer[-1].text += text
+        else:
+            self.buffer.append(_Block(rich=False, text=text, thinking=True))
+            self.thinking_open = True
+        self.dirty = True
 
     def append_rich(self, markup: str) -> int:
         """Append markup built here and return its index for later rewriting."""
@@ -258,15 +293,26 @@ class _DraftState:
         self.dirty = False
         self.last_draft_sent = 0.0
         self.turn_complete = False
-        self.thinking = ""
+        self.thinking_open = False
         self.live_edit_message_id = None
         self.live_edit_last_text = ""
 
 
-def _build_full_text(state: _DraftState) -> str:
-    """Render the buffer into one rich-message body."""
-    parts = [block.render().strip() for block in state.buffer]
-    return "\n\n".join(part for part in parts if part)
+def _build_full_text(
+    state: _DraftState, *, include_thinking: bool = False,
+) -> str:
+    """Render the buffer into one rich-message body.
+
+    Reasoning blocks are draft-only, so they are dropped unless the caller
+    is building a draft; an empty block (a blanked card, whitespace-only
+    reasoning) contributes nothing either way.
+    """
+    parts = [
+        block.render().strip()
+        for block in state.buffer
+        if block.text.strip() and (include_thinking or not block.thinking)
+    ]
+    return "\n\n".join(parts)
 
 
 def _draft_is_stale(state: _DraftState) -> bool:
@@ -277,7 +323,7 @@ def _draft_is_stale(state: _DraftState) -> bool:
     """
     if state.drafts_disabled or not state.last_draft_sent:
         return False
-    if not state.has_content and not state.thinking:
+    if not state.has_content:
         return False
     return time.monotonic() - state.last_draft_sent >= DRAFT_KEEPALIVE_SECONDS
 
@@ -298,17 +344,7 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
         # The state stays dirty, so the next tick spends it on newer text.
         return
 
-    full_text = _build_full_text(state)
-    if state.thinking:
-        # <tg-thinking> renders in a draft and nowhere else, which is exactly
-        # the lifetime reasoning text should have.  It goes last because the
-        # buffer above it is already written: reasoning that arrives between
-        # two tool calls is newer than the answer's opening paragraph, and
-        # putting it on top pushes a whole turn of rows down under it.
-        thinking = (
-            f"<tg-thinking>{escape_rich(state.thinking.strip())}</tg-thinking>"
-        )
-        full_text = f"{full_text}\n\n{thinking}" if full_text else thinking
+    full_text = _build_full_text(state, include_thinking=True)
     if not full_text.strip():
         return
 
@@ -883,8 +919,7 @@ async def stream_response(
                         # carries no block boundary, so without a break here
                         # the next block's first delta runs into this one's
                         # last word: "…independently.I'll gather the manifest".
-                        if state.thinking:
-                            state.thinking = state.thinking.rstrip() + "\n\n"
+                        state.thinking_open = False
 
                         # Add tool invocation as an inline notification,
                         # but suppress tools whose output is shown directly.
@@ -980,9 +1015,6 @@ async def stream_response(
             elif isinstance(event, TextDeltaEvent):
                 text = event.text
                 if text:
-                    # The answer has started, so the reasoning that led to it
-                    # has no more claim on the draft.
-                    state.thinking = ""
                     if state.turn_complete:
                         # A new turn starts its own block, so its first delta
                         # can't run into the previous turn's last word.
@@ -995,14 +1027,19 @@ async def stream_response(
                     # cheap character count gates it.  Escaping only grows
                     # text, so a buffer under the ceiling in raw form can
                     # still overflow — the final split catches that.
-                    raw_length = sum(len(b.text) for b in state.buffer)
+                    # Reasoning is excluded: it never reaches the message
+                    # this overflow-split is protecting.
+                    raw_length = sum(
+                        len(b.text)
+                        for b in state.buffer
+                        if not b.thinking
+                    )
                     if raw_length > RICH_MAX_LENGTH:
                         await _finalize_current(bot, state)
 
             elif isinstance(event, ThinkingDeltaEvent):
                 if event.text:
-                    state.thinking += event.text
-                    state.dirty = True
+                    state.append_thinking(event.text)
 
             elif isinstance(event, ResultMessage):
                 # Turn-end checklist read: subagent tool calls never appear

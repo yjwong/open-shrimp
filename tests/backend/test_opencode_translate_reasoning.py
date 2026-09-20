@@ -138,7 +138,7 @@ async def test_back_to_back_reasoning_parts_get_a_paragraph_break():
 
 @pytest.mark.asyncio
 async def test_text_between_reasoning_parts_suppresses_the_break():
-    """Answer text clears the draft's thinking over in stream.py, so a break
+    """Answer text becomes its own buffer block in stream.py, so a break
     before the next reasoning part would be dead weight."""
     out = await _collect([
         _reasoning_open("r-1"),

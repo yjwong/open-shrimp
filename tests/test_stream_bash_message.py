@@ -15,6 +15,7 @@ from open_shrimp.backend.types import (
     AssistantMessage,
     ResultMessage,
     TextDeltaEvent,
+    ThinkingDeltaEvent,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -344,12 +345,12 @@ async def test_a_failed_read_folds_its_reason() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reasoning_trails_the_rows_it_follows() -> None:
-    """Reasoning between two tool calls is newer than the opening paragraph."""
+async def test_reasoning_renders_where_it_arrived() -> None:
+    """Reasoning between a paragraph and a tool row sits between them."""
     bot = _RecordingBot()
     state = _DraftState(chat_id=1)
-    state.thinking = "Now checking the second file."
     state.append_gfm("Starting the survey.")
+    state.append_thinking("Now checking the second file.")
     state.tool_cards["t1"] = state.append_rich("<details><summary>row</summary>x</details>")
 
     from open_shrimp.stream import _send_draft
@@ -358,15 +359,13 @@ async def test_reasoning_trails_the_rows_it_follows() -> None:
 
     body = [kw["text"] for kind, kw in bot.calls if kind == "draft"][0]
     assert body.index("Starting the survey.") < body.index("<tg-thinking>")
-    assert body.index("<details>") < body.index("<tg-thinking>")
+    assert body.index("<tg-thinking>") < body.index("<details>")
 
 
 @pytest.mark.asyncio
 async def test_reasoning_across_a_tool_call_keeps_a_paragraph_break() -> None:
     """ThinkingDeltaEvent carries no block boundary; the tool call is one."""
     import asyncio
-
-    from open_shrimp.backend.types import ThinkingDeltaEvent
 
     bot = _RecordingBot()
 
@@ -391,3 +390,23 @@ async def test_reasoning_across_a_tool_call_keeps_a_paragraph_break() -> None:
     assert "Checked independently." in body
     assert "I'll gather the manifest." in body
     assert "independently.I'll" not in body
+    # Two blocks, split around the card the command left behind.
+    assert body.index("Checked independently.") < body.index("<details>")
+    assert body.index("<details>") < body.index("I'll gather the manifest.")
+
+
+@pytest.mark.asyncio
+async def test_finalized_message_drops_reasoning() -> None:
+    """<tg-thinking> is a draft affordance; the transcript never sees it."""
+    bot = _RecordingBot()
+    await _run(
+        bot,
+        ThinkingDeltaEvent(session_id="sess-1", text="weighing <tags> & options"),
+        TextDeltaEvent(session_id="sess-1", text="the answer"),
+        ResultMessage(session_id="sess-1"),
+    )
+
+    assert all("tg-thinking" not in kw["text"] for kw in bot.sends)
+    body = bot.sends[0]["text"]
+    assert "the answer" in body
+    assert "weighing" not in body
