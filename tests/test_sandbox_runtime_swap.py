@@ -1,10 +1,9 @@
 """What a manager does with a cached sandbox when a second agent backend
 (runtime) asks for the same context.
 
-A backend whose mount plan pins one runtime per guest has to tear the guest
-down and rebuild, or the new agent is launched with no home to write to.  A
-backend that unions the two runtimes' shares hands the same guest back and
-lets the caller's provision pass mount and install the newcomer.
+Every backend unions the two runtimes' shares, so the same guest comes back
+and the caller's provision pass mounts and installs the newcomer — no
+manager tears a guest down to swap the agent running in it.
 
 These tests exercise the manager-level cache decision without touching a
 hypervisor, by stubbing each manager's concrete sandbox constructor.
@@ -98,31 +97,13 @@ def test_same_runtime_reuses_cached_sandbox(monkeypatch):
     assert first.stopped is False
 
 
-def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
-    """A manager that has not adopted the union keeps the teardown."""
-    mgr = _hcs_manager(monkeypatch)
-    assert mgr._shares_guest_across_runtimes is False
-    ctx = _FakeCtx()
-
-    claude_sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
-    opencode_sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("opencode"))
-
-    # A fresh sandbox is built for the new backend...
-    assert opencode_sb is not claude_sb
-    assert [r.name for r in opencode_sb.runtimes] == ["opencode"]
-    # ...and the stale one is torn down.
-    assert claude_sb.stopped is True
-    # The cache now tracks the new runtime alone.
-    assert mgr._sandbox_runtime["dev"] == {"opencode"}
-    assert mgr.get_active_sandbox("dev") is opencode_sb
-
-
-@pytest.mark.parametrize("build_manager", [_manager, _lima_manager])
+@pytest.mark.parametrize(
+    "build_manager", [_manager, _lima_manager, _hcs_manager],
+)
 def test_a_shared_guest_takes_the_second_runtime_on(monkeypatch, build_manager):
-    """libvirt and Lima union the two runtimes' shares, so the second runtime
+    """Every backend unions the two runtimes' shares, so the second runtime
     joins the live guest instead of rebuilding it."""
     mgr = build_manager(monkeypatch)
-    assert mgr._shares_guest_across_runtimes is True
     ctx = _FakeCtx()
 
     claude_sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))

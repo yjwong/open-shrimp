@@ -26,6 +26,7 @@ import hashlib
 import ipaddress
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path, PureWindowsPath
 
 # -- vsock port plan ---------------------------------------------------------
@@ -52,24 +53,26 @@ P9_PORT_TASK_TMP = 567
 P9_PORT_EXTRA_BASE = 568
 
 
-def reserved_vsock_ports(extra_shares: int = 0) -> frozenset[int]:
+def reserved_vsock_ports(share_ports: Iterable[int] = ()) -> frozenset[int]:
     """The vsock ports the backend's own channels occupy.
 
     A host→guest bridge addresses a guest service by reusing its TCP port
     number as the vsock port (the convention the in-guest RDP relay follows),
     so a guest service listening on one of these cannot be bridged — the
     guest-side bridge listener would collide with the channel already bound
-    there.  *extra_shares* is the count of additional-directory Plan9 shares,
-    whose ports run on from :data:`P9_PORT_EXTRA_BASE`.
+    there.  *share_ports* is the live share plan's own ports, which the caller
+    holds; the fixed four are named below so a caller with no plan to hand
+    still reserves them.
     """
     return frozenset({
         CONTROL_PORT, EXEC_PORT, RELAY_PORT, RDP_PORT,
         P9_PORT_WORKSPACE, P9_PORT_HOME, P9_PORT_CFG, P9_PORT_TASK_TMP,
-        *range(P9_PORT_EXTRA_BASE, P9_PORT_EXTRA_BASE + extra_shares),
+        *share_ports,
     })
 
 
-#: Guest-side mount points (outside the rootfs chroot).
+#: Guest-side mount points (outside the rootfs chroot).  A guest hosting two
+#: agents mounts the second one's home at ``/mnt/home1``, off the extra range.
 MNT_WORKSPACE = "/mnt/ws"
 MNT_HOME = "/mnt/home"
 MNT_CFG = "/mnt/cfg"
@@ -100,6 +103,10 @@ CHROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 #: home-relative layout is re-rooted here rather than at the runtime's own
 #: guest home.
 CHROOT_HOME = "/root"
+
+#: uid everything in the chroot runs as, which is what each agent CLI resolves
+#: its ``/tmp/<prefix>-<uid>`` background-task directory against.
+CHROOT_UID = 0
 
 #: Desktop bring-up script the computer-use rootfs template bakes in
 #: (weston-rdp + the vsock relay, self-supervising); the provision pass

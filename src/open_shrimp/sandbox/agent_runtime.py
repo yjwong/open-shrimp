@@ -321,10 +321,11 @@ def served_home_mounts(
     path.
 
     Ordered by ``(host_dir, guest_mount_point)`` rather than by registration:
-    the sequence feeds Lima's config fingerprint and libvirt's virtiofs tag
-    set, and registration order is whichever ChatScope dispatched first, so an
-    arrival-ordered union would rebuild the guest after a restart that
-    happened to dispatch the other way round.
+    the sequence feeds Lima's config fingerprint, libvirt's virtiofs tag set
+    and HCS's Plan9 port assignment, and registration order is whichever
+    ChatScope dispatched first, so an arrival-ordered union would rebuild or
+    restart the guest after a process start that happened to dispatch the
+    other way round.
     """
     mounts: dict[tuple[str, str], tuple[AgentRuntime, GuestMount]] = {}
     for runtime in runtimes:
@@ -363,22 +364,6 @@ def task_tmp_guest_paths(
         }
     )
     return paths or [ImageBundle(guest_home="").guest_task_tmp(uid)]
-
-
-def primary_bundle(
-    runtimes: "Iterable[AgentRuntime]",
-) -> "ImageBundle | None":
-    """The bundle behind the guest paths only one runtime can own.
-
-    A guest holds one task-tmp mount point and (on HCS) one fixed agent-home
-    share slot, so those follow the first registered runtime that carries a
-    bundle.  ``None`` when no registered runtime has one, which leaves each
-    caller's own default in place.
-    """
-    for runtime in runtimes:
-        if runtime.image_bundle is not None:
-            return runtime.image_bundle
-    return None
 
 
 class ServedSlot:

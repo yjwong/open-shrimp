@@ -31,6 +31,7 @@ from open_shrimp.sandbox.agent_runtime import (
 from open_shrimp.sandbox.hcs import HcsSandbox
 
 RID = "11111111-2222-3333-4444-555555555555"
+AGENT = "served-agent"
 GUEST_HOME = "/home/openshrimp"
 GUEST_CONFIG = f"{GUEST_HOME}/.local/share/openshrimp/managed/plugin.json"
 SERVE_ARGV = ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
@@ -117,7 +118,7 @@ def _served_runtime(tmp_path, *, endpoints: list | None = None) -> AgentRuntime:
         return endpoint
 
     return AgentRuntime(
-        name="served-agent",
+        name=AGENT,
         home_mount=HomeMount(
             host_dir=home,
             guest_dir=f"{GUEST_HOME}/.local/share/opencode",
@@ -201,7 +202,7 @@ def _make_sandbox(tmp_path, monkeypatch, runtime, **config_extra):
     real_popen = subprocess.Popen
 
     def popen(argv, **kw):
-        if str(argv[0]) != str(sb._served_launcher_exe()):
+        if str(argv[0]) != str(sb._served_launcher_exe(AGENT)):
             return real_popen(argv, **kw)
         procs.append(_FakeProc(argv, **kw))
         return procs[-1]
@@ -213,8 +214,13 @@ def _make_sandbox(tmp_path, monkeypatch, runtime, **config_extra):
 
 def _served_cfg(sb) -> dict:
     return json.loads(
-        sb._served_launch_json_file().read_text(encoding="utf-8")
+        sb._served_launch_json_file(AGENT).read_text(encoding="utf-8")
     )
+
+
+def _slot(sb):
+    """The runtime's served slot — the ``owner`` the liveness check reads."""
+    return sb._served[AGENT]
 
 
 # -- the launch ---------------------------------------------------------------
@@ -233,11 +239,11 @@ def test_the_serve_argv_runs_in_the_workspace_under_a_pid_recording_prologue(
     assert cfg["argv_prefix"][:2] == ["/bin/sh", "-c"]
     # The pidfile is $0 and the serve argv is "$@", so the prologue's exec
     # replaces the shell with the server and the recorded pid is the server's.
-    assert cfg["argv_prefix"][3] == hcs_mod._SERVE_PIDFILE
+    assert cfg["argv_prefix"][3] == hcs_mod._serve_pidfile(AGENT)
     assert cfg["argv_prefix"][4:] == SERVE_ARGV
     assert cfg["cwd"] == sb._guest_workspace()
     assert cfg["port"] == H.EXEC_PORT
-    assert handle.endpoint is sb._served_endpoint
+    assert handle.endpoint is _slot(sb).endpoint
     assert handle.cli_path is None
 
 
@@ -252,7 +258,7 @@ def test_the_endpoint_reaches_the_guest_port_over_a_host_bridge(
 
     host_port = sb._reached_ports[4096]
     assert handle.endpoint.base_url == f"http://127.0.0.1:{host_port}"
-    assert handle.endpoint.owner is sb
+    assert handle.endpoint.owner is _slot(sb)
     assert handle.endpoint.auth_header.startswith("Basic ")
 
 
@@ -265,7 +271,7 @@ def test_the_served_process_is_the_owner_the_liveness_check_reads(
 
     sb.start_agent(runtime)
 
-    assert sb._served_proc is sb._procs[0]
+    assert _slot(sb)._served_proc is sb._procs[0]
     assert sb._procs[0].kwargs["stdin"] is subprocess.DEVNULL
     assert sb._procs[0].kwargs["stdout"] is subprocess.PIPE
     assert sb._procs[0].kwargs["stderr"] is subprocess.STDOUT
@@ -286,7 +292,7 @@ def test_the_live_credential_never_lands_in_the_launch_config(
 
     password = sb._procs[0].env["AGENT_SERVER_PASSWORD"]
     assert password
-    on_disk = sb._served_launch_json_file().read_text(encoding="utf-8")
+    on_disk = sb._served_launch_json_file(AGENT).read_text(encoding="utf-8")
     assert password not in on_disk
     # The name is on disk; only the value is confined to the process.
     assert "AGENT_SERVER_PASSWORD" in _served_cfg(sb)["env_passthrough"]
@@ -300,7 +306,7 @@ def test_each_launch_mints_a_fresh_credential(tmp_path, monkeypatch):
 
     sb.start_agent(runtime)
     first = sb._procs[0].env["AGENT_SERVER_PASSWORD"]
-    sb._served_proc.terminate()
+    _slot(sb)._served_proc.terminate()
     sb.start_agent(runtime)
 
     assert sb._procs[1].env["AGENT_SERVER_PASSWORD"] != first
@@ -367,7 +373,7 @@ def test_the_wrapped_launcher_still_builds_after_a_served_launch(
     cli_path, _ = sb.build_cli_wrapper(runtime)
 
     assert cli_path == str(sb._launcher_exe())
-    assert sb._served_launcher_exe().exists()
+    assert sb._served_launcher_exe(AGENT).exists()
 
 
 # -- reuse, reap, teardown ----------------------------------------------------
@@ -395,11 +401,11 @@ def test_a_dead_served_process_is_relaunched(tmp_path, monkeypatch):
     sb = _make_sandbox(tmp_path, monkeypatch, runtime)
 
     sb.start_agent(runtime)
-    sb._served_proc.terminate()
+    _slot(sb)._served_proc.terminate()
     sb.start_agent(runtime)
 
     assert len(sb._procs) == 2
-    assert sb._served_proc is sb._procs[1]
+    assert _slot(sb)._served_proc is sb._procs[1]
 
 
 def test_a_stale_guest_serve_process_is_reaped_before_spawning(
@@ -416,7 +422,7 @@ def test_a_stale_guest_serve_process_is_reaped_before_spawning(
     assert argv[:3] == ["/bin/sh", "-c", hcs_mod._SERVE_REAP]
     # $0 is the pidfile the prologue writes; $1 is the argv the /proc entry is
     # checked against, so a pid reused after a reboot is left alone.
-    assert argv[3] == hcs_mod._SERVE_PIDFILE
+    assert argv[3] == hcs_mod._serve_pidfile(AGENT)
     assert argv[4] == "opencode"
     assert "/proc/$p/cmdline" in hcs_mod._SERVE_REAP
 
@@ -441,7 +447,7 @@ def test_stop_drops_the_served_process_before_flushing_the_guest(
     sb = _make_sandbox(tmp_path, monkeypatch, runtime)
     sb._rdp_session = SimpleNamespace(stop=lambda: events.append("rdp"))
     sb.start_agent(runtime)
-    proc = sb._served_proc
+    proc = _slot(sb)._served_proc
     monkeypatch.setattr(
         proc, "terminate",
         lambda: (events.append("served"), setattr(proc, "_returncode", -15))[0],
@@ -452,8 +458,8 @@ def test_stop_drops_the_served_process_before_flushing_the_guest(
     # Every host process holding an hvsocket goes before the flush, and the
     # flush stays adjacent to the terminate that follows it.
     assert events == ["rdp", "served", "flush"]
-    assert sb._served_proc is None
-    assert sb._served_endpoint is None
+    assert _slot(sb)._served_proc is None
+    assert _slot(sb).endpoint is None
 
 
 def test_stop_is_clean_when_nothing_was_served(tmp_path, monkeypatch):
@@ -462,7 +468,7 @@ def test_stop_is_clean_when_nothing_was_served(tmp_path, monkeypatch):
 
     sb.stop()
 
-    assert sb._served_proc is None
+    assert sb._served == {}
 
 
 # -- the served launch's extra shares -----------------------------------------
@@ -482,7 +488,11 @@ def test_served_home_mounts_get_their_own_shares_and_binds(
     assert shares["home"][0] == str(tmp_path / "agent-home")
     assert shares["srv0"][0] == str(tmp_path / "agent-data")
     assert shares["srv0"][1] == H.P9_PORT_EXTRA_BASE
-    assert sb._extra_share_count() == 1
+    # A guest service on a share's port cannot be bridged, so the reserved set
+    # has to carry every share the plan allocated.
+    assert shares["srv0"][1] in H.reserved_vsock_ports(
+        port for _n, _p, port, _f in sb._p9_shares()
+    )
 
 
 def test_served_share_ports_follow_the_additional_directories(
@@ -503,7 +513,6 @@ def test_served_share_ports_follow_the_additional_directories(
     shares = {name: port for name, _p, port, _f in sb._p9_shares()}
     assert shares["add0"] == H.P9_PORT_EXTRA_BASE
     assert shares["srv0"] == H.P9_PORT_EXTRA_BASE + 1
-    assert sb._extra_share_count() == 2
 
 
 def test_a_wrapped_cli_runtime_adds_no_served_shares(tmp_path, monkeypatch):

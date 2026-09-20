@@ -95,19 +95,13 @@ def destroy_contexts_background(
 def _cached_sandbox_for(
     mgr: Any, context_name: str, runtime: "AgentRuntime | None",
 ) -> Sandbox | None:
-    """The cached sandbox for *context_name* if it can serve *runtime*.
+    """The cached sandbox for *context_name*, hosting *runtime* as well.
 
     A sandbox already hosting *runtime* (or asked for no runtime at all) comes
-    back untouched.  One hosting only a different runtime either takes this one
-    on as well — the caller's provision pass then mounts its shares and
-    installs its CLI — or, on a backend still pinned to a single runtime per
-    guest, is stopped here and ``None`` is returned so the caller rebuilds.
-
-    The gate is *mgr*'s ``_shares_guest_across_runtimes``.  Both halves of
-    hosting two runtimes live in the concrete sandbox — a mount plan that
-    unions their shares, and a provision pass that installs both — so a
-    backend that has not grown them rebuilds rather than hand back a guest
-    with no home for the second agent.
+    back untouched.  One hosting only a different runtime takes this one on
+    too: every backend's mount plan is a union over its registered runtimes,
+    so the caller's provision pass mounts the newcomer's shares and installs
+    its CLI into the guest that is already there.
     """
     cached = mgr._sandbox_cache.get(context_name)
     if cached is None:
@@ -115,23 +109,11 @@ def _cached_sandbox_for(
     hosted: set[str] = mgr._sandbox_runtime.setdefault(context_name, set())
     if runtime is None or runtime.name in hosted:
         return cached
-    backend = mgr._backend_label
-    if not mgr._shares_guest_across_runtimes:
-        logger.info(
-            "Runtime changed for context '%s' on %s (%s -> %s); "
-            "rebuilding sandbox",
-            context_name, backend,
-            ", ".join(sorted(hosted)) or "none", runtime.name,
-        )
-        # ensure_environment then detects the mount drift and re-provisions;
-        # persistent disks are preserved.
-        mgr.invalidate_sandbox(context_name)
-        return None
     cached.add_runtime(runtime)
     hosted.add(runtime.name)
     logger.info(
         "Context '%s' on %s now hosts runtimes %s in one guest",
-        context_name, backend, ", ".join(sorted(hosted)),
+        context_name, mgr._backend_label, ", ".join(sorted(hosted)),
     )
     return cached
 
@@ -244,10 +226,8 @@ class SandboxManager(Protocol):
         selects the wrapped-CLI default.
 
         A cached sandbox already hosting *runtime* comes back untouched.  One
-        hosting a different runtime either takes this one on as well — the
-        caller's provision pass then mounts its shares and installs its CLI —
-        or, on a backend whose mount plan still pins a single runtime, is
-        stopped and rebuilt.
+        hosting a different runtime takes this one on as well, and the
+        caller's provision pass mounts its shares and installs its CLI.
         """
         ...
 
@@ -299,15 +279,15 @@ class LimaSandboxManager:
 
     Uses Lima (Apple Virtualization.framework via the VZ driver) for full
     VM isolation.  The ``limactl`` binary is auto-downloaded on first use.
+
+    ``LimaSandbox`` writes the union of every registered runtime's shares into
+    the instance YAML, so both agents have a home in one VM.  Lima fixes the
+    mount set when the VM boots, so registering the second runtime costs a
+    rewrite of the instance config and a restart — not the delete and rebuild
+    a fresh instance would be.
     """
 
     _backend_label = "Lima"
-    # ``LimaSandbox`` writes the union of every registered runtime's shares
-    # into the instance YAML, so both agents have a home in one VM.  Lima
-    # fixes the mount set when the VM boots, so registering the second runtime
-    # costs a rewrite of the instance config and a restart — not the delete
-    # and rebuild a fresh instance would be.
-    _shares_guest_across_runtimes = True
 
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
@@ -525,15 +505,15 @@ class LibvirtSandboxManager:
 
     Manages VM lifecycle via ``qemu:///session`` (rootless libvirt).
     One persistent ``libvirt.virConnect`` connection for the process lifetime.
+
+    ``LibvirtSandbox._shared_dirs_and_overrides`` unions every registered
+    runtime's shares, so both agents have a home in one domain.  Registering
+    the second one grows the domain's virtiofs tag set, which the drift check
+    pays for with one restart; nothing persists the hosted set, so a process
+    that starts against an already-running domain pays it again.
     """
 
     _backend_label = "libvirt"
-    # ``LibvirtSandbox._shared_dirs_and_overrides`` unions every registered
-    # runtime's shares, so both agents have a home in one domain.  Registering
-    # the second one grows the domain's virtiofs tag set, which the drift check
-    # pays for with one restart; nothing persists the hosted set, so a process
-    # that starts against an already-running domain pays it again.
-    _shares_guest_across_runtimes = True
 
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
@@ -875,13 +855,15 @@ class HcsSandboxManager:
     One HCS compute system per context, cached by ``context_name``.  The
     per-instance :class:`~open_shrimp.sandbox.hcs.HcsSandbox` refuses to
     construct off Windows, so importing this manager elsewhere is harmless.
+
+    The 9p share list is a union over the registered runtimes, one home share
+    each.  It still goes into ``create_compute_system`` at boot, so a runtime
+    that joins a live guest costs the reboot ``ensure_running`` takes when it
+    finds the guest missing a share the plan wants — not the rebuild that
+    reinstalls both CLIs into a fresh rootfs.
     """
 
     _backend_label = "HCS"
-    # The 9p share list goes into ``create_compute_system`` at boot and the
-    # fixed ``home`` slot holds one agent home, so a second runtime's home has
-    # nowhere to land in a running compute system.
-    _shares_guest_across_runtimes = False
 
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"

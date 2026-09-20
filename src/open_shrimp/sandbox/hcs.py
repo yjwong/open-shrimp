@@ -27,6 +27,10 @@ Lifecycle invariants:
   die only in ``destroy_context``.
 * There is no checkpoint/save path; the VM simply stays warm between
   sessions, and a rebuild is terminate + recreate.
+* The Plan9 share list is fixed at ``create_compute_system`` and there is no
+  hot-add, so one guest hosts every registered runtime by unioning their
+  shares.  A runtime that joins a guest already running is caught by reading
+  the guest's own mount table back, and costs a reboot rather than a rebuild.
 * Teardown flushes the guest (``sync`` + unmount) before
   ``HcsTerminateComputeSystem`` so the ext4 journals close cleanly.
 """
@@ -36,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -45,6 +50,7 @@ import time
 import urllib.parse
 import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
@@ -58,11 +64,11 @@ from open_shrimp.sandbox.agent_runtime import (
     AgentRuntime,
     GuestMount,
     ServedEndpoint,
+    ServedSlot,
     WrappedCLI,
-    primary_bundle,
     run_served_endpoint,
     served_home_mounts,
-    terminate_served_proc,
+    task_tmp_guest_paths,
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
 from open_shrimp.sandbox import hcs_assets as A
@@ -171,10 +177,16 @@ def ensure_initrd(
     )
 
 
-#: Guest path the served launch records its process id at.  It lives in the
-#: cfg share, so a launch and the reap that precedes the next one agree on it
-#: across bot restarts.
-_SERVE_PIDFILE = f"{H.CHROOT_CFG_DIR}/serve.pid"
+def _serve_pidfile(runtime_name: str) -> str:
+    """Guest path *runtime_name*'s served launch records its process id at.
+
+    It lives in the cfg share, so a launch and the reap that precedes the next
+    one agree on it across bot restarts.  One file per runtime: two served
+    agents in one guest would otherwise overwrite each other's pid, and the
+    reap before a relaunch would signal the wrong server.
+    """
+    return f"{H.CHROOT_CFG_DIR}/serve-{runtime_name}.pid"
+
 
 #: Prologue the served ``argv_prefix`` wraps the serve argv in: record the
 #: shell's pid, then ``exec`` the server over it, so the recorded pid *is* the
@@ -266,6 +278,64 @@ def _chroot_agent_home(runtime: AgentRuntime | None) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _Share:
+    """One Plan9 share: what the host exports, the vsock port the guest dials
+    it on, where the initramfs mounts it, and the chroot paths it binds to.
+
+    Three passes have to agree about a share — the list that goes into
+    ``create_compute_system``, the in-guest mount + bind sequence, and the
+    check that a running guest still carries what the plan wants — so they
+    read one set of rows rather than each re-deriving ports and paths.
+
+    ``binds`` are guest paths inside the chroot, relative to
+    :data:`hcs_helpers.MNT_ROOT`; a share with several binds reaches the same
+    host dir at each of them.  ``mkdir_first`` marks a mount point the
+    initramfs image does not already carry.
+    """
+
+    name: str
+    host_dir: str
+    port: int
+    guest_mnt: str
+    binds: tuple[str, ...]
+    mkdir_first: bool = False
+
+    def chroot_binds(self) -> list[tuple[str, str]]:
+        """``(source, target)`` per bind this share installs in the chroot."""
+        return [(self.guest_mnt, f"{H.MNT_ROOT}{bind}") for bind in self.binds]
+
+    def guest_mount_points(self) -> list[str]:
+        """Every path a guest carrying this share has mounted.
+
+        The provision pass installs exactly these and the drift check demands
+        exactly these, so they are one list: a bind target spelled differently
+        on the two sides would either reboot the guest forever or stop catching
+        a home that never arrived.
+        """
+        return [
+            self.guest_mnt,
+            *(target for _src, target in self.chroot_binds()),
+        ]
+
+
+#: The octal escapes the kernel writes into a ``/proc/mounts`` mount point.
+_MOUNT_ESCAPES = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
+_MOUNT_ESCAPE_RE = re.compile(r"\\(040|011|012|134)")
+
+
+def _unescape_mount_point(field: str) -> str:
+    """Decode one ``/proc/mounts`` mount-point field.
+
+    A Windows workspace path routinely contains spaces and the kernel writes
+    each as ``\\040``, so comparing the raw field would report every such
+    mount as absent.
+    """
+    if "\\" not in field:
+        return field
+    return _MOUNT_ESCAPE_RE.sub(lambda m: _MOUNT_ESCAPES[m.group(1)], field)
+
+
 class HcsSandbox:
     """One HCS compute system for a single context."""
 
@@ -330,10 +400,10 @@ class HcsSandbox:
         self._net_guid = self._stable_guid("net")
         self._ep_guid = self._stable_guid("ep")
 
-        # Served-endpoint state.  ``_served_proc`` is read by the served
-        # client's liveness check via the endpoint's ``owner``.
-        self._served_proc: subprocess.Popen[str] | None = None
-        self._served_endpoint: Any = None
+        # Served-endpoint state, one slot per runtime name: the slot is the
+        # endpoint's ``owner``, so two served runtimes in one guest cannot
+        # overwrite each other's liveness handle.
+        self._served: dict[str, ServedSlot] = {}
 
         # Live handles, populated by ensure_running.
         self._runtime_id: str | None = None
@@ -355,14 +425,6 @@ class HcsSandbox:
     def add_runtime(self, runtime: AgentRuntime) -> None:
         self._runtimes.setdefault(runtime.name, runtime)
 
-    def _primary_runtime(self) -> AgentRuntime | None:
-        """The runtime registered first on this guest.
-
-        Everything the guest can hold exactly one of — the fixed ``home`` 9p
-        slot, the single task-tmp bind — follows it.
-        """
-        return next(iter(self._runtimes.values()), None)
-
     def _agent_home_dir(self, runtime: AgentRuntime | None) -> Path:
         """Host side of *runtime*'s agent-home share.
 
@@ -374,11 +436,26 @@ class HcsSandbox:
             return self._sdir / "claude-home"
         return Path(runtime.home_mount.host_dir)
 
+    def _agent_home_shares(self) -> list[tuple[AgentRuntime | None, Path]]:
+        """Every registered runtime's agent home, one share each, with its
+        owner — the only one that can say which chroot path it binds to.
+
+        Ordered by host dir rather than by registration: registration order is
+        whichever ChatScope dispatched first and nothing persists it, so an
+        arrival-ordered plan would put the same two runtimes on different
+        vsock ports from one process start to the next.
+        """
+        by_host_dir = sorted(
+            self._runtimes.values(),
+            key=lambda runtime: str(self._agent_home_dir(runtime)),
+        )
+        return [
+            (runtime, self._agent_home_dir(runtime)) for runtime in by_host_dir
+        ] or [(None, self._agent_home_dir(None))]
+
     def _agent_home_dirs(self) -> list[Path]:
         """Host side of every registered runtime's agent home."""
-        return [
-            self._agent_home_dir(r) for r in self._runtimes.values()
-        ] or [self._agent_home_dir(None)]
+        return [home for _runtime, home in self._agent_home_shares()]
 
     def _agent_argv0(self, runtime: AgentRuntime) -> str:
         """argv[0] the launcher execs in the guest for *runtime*.
@@ -389,14 +466,16 @@ class HcsSandbox:
         bundle = runtime.image_bundle
         return bundle.guest_argv0 if bundle is not None else "claude"
 
-    def _task_tmp_prefix(self) -> str:
-        """The ``/tmp/<prefix>-0`` slug the task-tmp share binds at.
+    def _task_tmp_guest_paths(self) -> list[str]:
+        """Chroot paths the hosted agents write background-task output to.
 
-        One bind, so it follows the first registered runtime; the host
-        terminal mini app reads background-task output from under it.
+        Every guest process runs as :data:`hcs_helpers.CHROOT_UID`, so that is
+        the uid each CLI resolves its own slug against.  The one host dir
+        behind them is bound at every path in the list — binding a share twice
+        costs no share-list entry — so the host terminal mini app reads both
+        agents' output from one directory.
         """
-        bundle = primary_bundle(self._runtimes.values())
-        return bundle.task_tmp_prefix if bundle is not None else "claude"
+        return task_tmp_guest_paths(self._runtimes.values(), H.CHROOT_UID)
 
     def _served_mounts(self) -> list[tuple[AgentRuntime, GuestMount]]:
         """Every registered runtime's served-launch host dirs, paired with
@@ -422,11 +501,14 @@ class HcsSandbox:
     def _launcher_exe(self) -> Path:
         return self._sdir / "cli-launcher.exe"
 
-    def _served_launch_json_file(self) -> Path:
-        return self._sdir / "launch-served.json"
+    # One launcher variant per served runtime: the launch-config path is
+    # compiled into the exe, so two served agents sharing either file would
+    # run each other's argv.
+    def _served_launch_json_file(self, runtime_name: str) -> Path:
+        return self._sdir / f"launch-served-{runtime_name}.json"
 
-    def _served_launcher_exe(self) -> Path:
-        return self._sdir / "serve-launcher.exe"
+    def _served_launcher_exe(self, runtime_name: str) -> Path:
+        return self._sdir / f"serve-launcher-{runtime_name}.exe"
 
     # -- Sandbox protocol: identity ------------------------------------------
 
@@ -471,37 +553,53 @@ class HcsSandbox:
             return value
         return _chroot_guest_path(value, home, owner=runtime.name)
 
-    def _p9_shares(self) -> list[tuple[str, str, int, int]]:
-        """``(name, host_path, port, flags)`` per Plan9 share, in the order the
-        SCSI-agnostic mount pass consumes them."""
-        shares: list[tuple[str, str, int, int]] = [
-            ("ws", self._project_dir, H.P9_PORT_WORKSPACE, 0),
-            ("home", str(self._agent_home_dir(self._primary_runtime())),
-             H.P9_PORT_HOME, 0),
-            ("cfg", str(self._cfg_dir), H.P9_PORT_CFG, 0),
-            ("tasktmp", str(self._tmp_dir), H.P9_PORT_TASK_TMP, 0),
+    def _share_plan(self) -> list[_Share]:
+        """Every Plan9 share this guest needs, in the order the mount pass
+        consumes them.
+
+        The share list is fixed when the compute system is created, so this is
+        a union over the registered runtimes: each gets its own agent home,
+        and the one task-output dir is bound at every path they write to.  Only
+        the first home keeps :data:`hcs_helpers.P9_PORT_HOME`; the rest run on
+        from the extra range behind the additional directories, the same way
+        the served mounts already do.
+        """
+        homes = self._agent_home_shares()
+        first_runtime, first_home = homes[0]
+        plan = [
+            _Share("ws", self._project_dir, H.P9_PORT_WORKSPACE,
+                   H.MNT_WORKSPACE, (self._guest_workspace(),)),
+            _Share("home", str(first_home), H.P9_PORT_HOME,
+                   H.MNT_HOME, (_chroot_agent_home(first_runtime),)),
+            _Share("cfg", str(self._cfg_dir), H.P9_PORT_CFG,
+                   H.MNT_CFG, (H.CHROOT_CFG_DIR,)),
+            _Share("tasktmp", str(self._tmp_dir), H.P9_PORT_TASK_TMP,
+                   H.MNT_TASK_TMP, tuple(self._task_tmp_guest_paths())),
         ]
-        for i, extra in enumerate(self._additional_directories):
-            shares.append(
-                (f"add{i}", extra, H.P9_PORT_EXTRA_BASE + i, 0)
-            )
-        for i, (_runtime, mount) in enumerate(self._served_mounts()):
-            shares.append(
-                (f"srv{i}", str(mount.host_dir), self._served_share_port(i), 0)
-            )
-        return shares
+        extras: list[tuple[str, str, tuple[str, ...]]] = [
+            (f"add{i}", extra, (H.windows_to_guest_path(extra),))
+            for i, extra in enumerate(self._additional_directories)
+        ]
+        extras += [
+            (f"home{i}", str(home), (_chroot_agent_home(runtime),))
+            for i, (runtime, home) in enumerate(homes[1:], start=1)
+        ]
+        extras += [
+            (f"srv{i}", str(mount.host_dir),
+             (self._rebase_guest_path(mount.guest_mount_point, runtime),))
+            for i, (runtime, mount) in enumerate(self._served_mounts())
+        ]
+        plan += [
+            _Share(name, host_dir, H.P9_PORT_EXTRA_BASE + i,
+                   f"/mnt/{name}", binds, mkdir_first=True)
+            for i, (name, host_dir, binds) in enumerate(extras)
+        ]
+        return plan
 
-    def _served_share_port(self, index: int) -> int:
-        """Plan9 port of served mount *index* — the extra-share range continues
-        past the additional directories."""
-        return (
-            H.P9_PORT_EXTRA_BASE + len(self._additional_directories) + index
-        )
-
-    def _extra_share_count(self) -> int:
-        """Plan9 shares beyond the fixed four, whose ports run on from
-        :data:`hcs_helpers.P9_PORT_EXTRA_BASE`."""
-        return len(self._additional_directories) + len(self._served_mounts())
+    def _p9_shares(self) -> list[tuple[str, str, int, int]]:
+        """``(name, host_path, port, flags)`` per Plan9 share, as
+        ``compose_vm_config`` takes them."""
+        return [(s.name, s.host_dir, s.port, 0) for s in self._share_plan()]
 
     def _persistent_paths(self) -> list[str]:
         return list(self._config.persistent_paths)
@@ -725,20 +823,77 @@ class HcsSandbox:
         return False
 
     def ensure_running(self, *, log_file: Path | None = None) -> None:
-        from open_shrimp.sandbox import hcs_win as W
-
-        if self.running():
+        running = self.running()
+        rid = self._runtime_id if running else self._live_runtime_id()
+        if rid is None:
+            self._boot(log_file=log_file)
             return
-
-        # Reattach if the compute system is up but our exec agent isn't yet.
-        rid = self._live_runtime_id()
-        if rid is not None:
-            self._runtime_id = rid
+        self._runtime_id = rid
+        if self._stop_for_missing_shares(log_file=log_file):
+            self._boot(log_file=log_file)
+            return
+        if not running:
+            # The compute system is up but our exec agent isn't yet.
             self._log(log_file, "Reattaching to running HCS sandbox...")
             self._reattach_guest(log_file=log_file)
-            return
 
-        self._boot(log_file=log_file)
+    def _missing_guest_mounts(self) -> list[str]:
+        """Share mount points and binds the live guest does not carry.
+
+        HCS fixes the share list at ``create_compute_system``, so a runtime
+        registered after the boot has no home in the running guest and no way
+        to gain one short of a reboot.  Reading the guest's own mount table
+        back answers that without persisting a mount hash of any kind, and it
+        answers for a process that did not do the booting.
+
+        Only what the plan wants and the guest lacks counts: a guest carrying
+        *more* than the plan is one that booted for both agents and is now
+        serving a process that has so far dispatched one of them, and
+        rebooting it to drop the other's shares would cost a restart to lose
+        the very thing the next dispatch asks for.
+        """
+        from open_shrimp.sandbox import hcs_win as W
+
+        rid = self._runtime_id
+        if rid is None:
+            return []
+        ok, out = W.ControlChannel(rid, H.CONTROL_PORT).run(
+            "cat /proc/mounts", read_timeout=15.0,
+        )
+        if not ok:
+            # A probe that cannot answer is not an answer of "missing":
+            # rebooting a guest over a lost control connection would cost the
+            # session for nothing.
+            logger.warning(
+                "Could not read the mount table of HCS sandbox %s",
+                self._context_name,
+            )
+            return []
+        mounted = {
+            _unescape_mount_point(fields[1])
+            for fields in map(str.split, out.splitlines())
+            if len(fields) > 1
+        }
+        return [
+            point
+            for share in self._share_plan()
+            for point in share.guest_mount_points()
+            if point not in mounted
+        ]
+
+    def _stop_for_missing_shares(self, *, log_file: Path | None) -> bool:
+        """Stop the guest when its shares no longer cover the plan, reporting
+        whether the caller has to boot one."""
+        missing = self._missing_guest_mounts()
+        if not missing:
+            return False
+        self._log(
+            log_file,
+            "Agent shares changed — restarting the HCS sandbox "
+            f"(the running guest has no {', '.join(missing[:3])})...",
+        )
+        self.stop()
+        return True
 
     def _boot(self, *, log_file: Path | None) -> None:
         from open_shrimp.sandbox import hcs_win as W
@@ -752,9 +907,7 @@ class HcsSandbox:
         # RuntimeId; neither can span boots, and the serve process they front
         # dies with the guest.
         self._close_rdp_session()
-        terminate_served_proc(self._served_proc)
-        self._served_proc = None
-        self._served_endpoint = None
+        self._close_served_slots()
         self._teardown_stale()
 
         subnet = H.pick_subnet(W.hcn_network_prefixes())
@@ -847,21 +1000,11 @@ class HcsSandbox:
         opts = "version=9p2000.L,msize=262144,cache=mmap"
         # The share list is fixed for the life of this compute system (it went
         # into ``create_compute_system``), so mount and bind read one snapshot.
-        served_mounts = self._served_mounts()
-        for name, mnt, port in (
-            ("ws", H.MNT_WORKSPACE, H.P9_PORT_WORKSPACE),
-            ("home", H.MNT_HOME, H.P9_PORT_HOME),
-            ("cfg", H.MNT_CFG, H.P9_PORT_CFG),
-            ("tasktmp", H.MNT_TASK_TMP, H.P9_PORT_TASK_TMP),
-        ):
-            ctl(f"@mount {port} {name} {mnt} {opts}", expect="MOUNT-OK")
-        for i, extra in enumerate(self._additional_directories):
-            ctl(f"mkdir -p /mnt/add{i}")
-            ctl(f"@mount {H.P9_PORT_EXTRA_BASE + i} add{i} /mnt/add{i} {opts}",
-                expect="MOUNT-OK")
-        for i, (_runtime, mount) in enumerate(served_mounts):
-            ctl(f"mkdir -p /mnt/srv{i}")
-            ctl(f"@mount {self._served_share_port(i)} srv{i} /mnt/srv{i} {opts}",
+        plan = self._share_plan()
+        for share in plan:
+            if share.mkdir_first:
+                ctl(f"mkdir -p {share.guest_mnt}")
+            ctl(f"@mount {share.port} {share.name} {share.guest_mnt} {opts}",
                 expect="MOUNT-OK")
 
         # 2. Mount the rootfs VHDX by ext4 label, and proc/sys/dev inside it.
@@ -889,25 +1032,11 @@ class HcsSandbox:
                 expect="GUI-MOUNT-OK",
             )
 
-        # 3. Bind the shares into the chroot at their guest paths.
-        ws = self._guest_workspace()
-        primary = self._primary_runtime()
-        binds = [
-            (H.MNT_WORKSPACE, f"{H.MNT_ROOT}{ws}"),
-            (H.MNT_HOME, f"{H.MNT_ROOT}{_chroot_agent_home(primary)}"),
-            (H.MNT_CFG, f"{H.MNT_ROOT}{H.CHROOT_CFG_DIR}"),
-            (H.MNT_TASK_TMP, f"{H.MNT_ROOT}/tmp/{self._task_tmp_prefix()}-0"),
-        ]
-        for i, extra in enumerate(self._additional_directories):
-            binds.append(
-                (f"/mnt/add{i}", f"{H.MNT_ROOT}{H.windows_to_guest_path(extra)}")
-            )
-        for i, (runtime, mount) in enumerate(served_mounts):
-            binds.append((
-                f"/mnt/srv{i}",
-                f"{H.MNT_ROOT}"
-                f"{self._rebase_guest_path(mount.guest_mount_point, runtime)}",
-            ))
+        # 3. Bind the shares into the chroot at their guest paths.  A share
+        #    with several binds — the task-output dir, which each agent CLI
+        #    reads under its own /tmp slug — reaches the same host dir at each
+        #    of them.
+        binds = [bind for share in plan for bind in share.chroot_binds()]
         # Guest paths derive from user config (project dir, additional dirs),
         # which routinely contain spaces on Windows; every interpolated path is
         # shell-quoted so a space or quote cannot split the command or break out.
@@ -1167,7 +1296,9 @@ class HcsSandbox:
         """
         if guest_port in self._guest_bridge_ports:
             return
-        reserved = H.reserved_vsock_ports(self._extra_share_count())
+        reserved = H.reserved_vsock_ports(
+            share.port for share in self._share_plan()
+        )
         if guest_port in reserved:
             raise RuntimeError(
                 f"Guest port {guest_port} cannot be exposed: the HCS backend "
@@ -1291,12 +1422,10 @@ class HcsSandbox:
         ``env_passthrough``, so it lives exactly as long as the process — the
         same lifetime the SSH backends give it on their command line.
         """
-        if (
-            self._served_proc is not None
-            and self._served_proc.poll() is None
-            and self._served_endpoint is not None
-        ):
-            return AgentHandle(endpoint=self._served_endpoint)
+        slot = self._served.setdefault(runtime.name, ServedSlot())
+        live = slot.live_handle()
+        if live is not None:
+            return live
         if self._runtime_id is None:
             raise RuntimeError(
                 "Cannot start served endpoint: HCS sandbox is not running"
@@ -1321,17 +1450,16 @@ class HcsSandbox:
                 "env": {"HOME": H.CHROOT_HOME, "PATH": H.CHROOT_PATH},
                 "env_passthrough": sorted(guest_env),
                 "argv_prefix": [
-                    "/bin/sh", "-c", _SERVE_PROLOGUE, _SERVE_PIDFILE,
-                    *serve_argv,
+                    "/bin/sh", "-c", _SERVE_PROLOGUE,
+                    _serve_pidfile(runtime.name), *serve_argv,
                 ],
                 "connect_timeout_s": 30.0,
             }
-            self._served_launch_json_file().write_text(
-                json.dumps(launch_cfg), encoding="utf-8",
-            )
+            launch_json = self._served_launch_json_file(runtime.name)
+            launch_json.write_text(json.dumps(launch_cfg), encoding="utf-8")
             exe = self._build_launcher_exe(
-                launch_json=self._served_launch_json_file(),
-                exe=self._served_launcher_exe(),
+                launch_json=launch_json,
+                exe=self._served_launcher_exe(runtime.name),
             )
             return subprocess.Popen(
                 [str(exe)],
@@ -1350,12 +1478,21 @@ class HcsSandbox:
             launch,
             spawn=spawn,
             reach=self.reach,
-            owner=self,
+            owner=slot,
             log_label=f"HCS context '{self._context_name}'",
         )
-        self._served_proc = proc
-        self._served_endpoint = endpoint
+        slot.adopt(proc, endpoint)
         return AgentHandle(endpoint=endpoint)
+
+    def _close_served_slots(self) -> None:
+        """Terminate every served process this sandbox launched.
+
+        The slots themselves stay: a client still holding one reads its
+        emptied process through the endpoint's ``owner`` and calls itself
+        dead, which is what a boot or a teardown has to leave behind.
+        """
+        for slot in self._served.values():
+            slot.close()
 
     def _reap_served_process(self, runtime: AgentRuntime) -> None:
         """Kill a serve process *runtime* left behind by an earlier launcher.
@@ -1372,7 +1509,7 @@ class HcsSandbox:
         code, out = self.guest_exec(
             [
                 "/bin/sh", "-c", _SERVE_REAP,
-                _SERVE_PIDFILE, self._agent_argv0(runtime),
+                _serve_pidfile(runtime.name), self._agent_argv0(runtime),
             ],
             read_timeout=30.0,
         )
@@ -1486,9 +1623,7 @@ class HcsSandbox:
         # before touching the guest.  Both must go before the flush, so the
         # flush and the terminate that follows it stay adjacent.
         self._close_rdp_session()
-        terminate_served_proc(self._served_proc)
-        self._served_proc = None
-        self._served_endpoint = None
+        self._close_served_slots()
 
         rid = self._runtime_id or self._read_runtime_id()
         if rid is not None:

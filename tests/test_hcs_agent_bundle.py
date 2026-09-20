@@ -245,20 +245,6 @@ def test_a_second_runtime_joins_the_guest_it_was_not_built_with(
     assert sb._agent_home_dir(opencode) == Path("/host/opencode-home")
 
 
-def test_the_single_slot_guest_paths_follow_the_first_runtime(
-    tmp_path, monkeypatch,
-):
-    """The fixed ``home`` 9p slot and the one task-tmp bind can hold one
-    runtime each, so both follow the one registered first."""
-    sb = _make_sandbox_multi(
-        tmp_path, monkeypatch, [_claude_runtime(), _opencode_runtime()],
-    )
-
-    shares = {name: path for name, path, _port, _f in sb._p9_shares()}
-    assert shares["home"] == str(Path("/host/claude-home"))
-    assert sb._task_tmp_prefix() == "claude"
-
-
 # -- the directory csc compiles in -------------------------------------------
 
 

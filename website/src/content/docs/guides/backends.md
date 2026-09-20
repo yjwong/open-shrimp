@@ -76,4 +76,6 @@ contexts:
 
 OpenCode works inside every sandbox backend, and the guest gets the same pinned version as the host. A libvirt guest is handed the host's binary over ssh; a Lima or HCS guest downloads the Linux archive itself and checks it against the same sha256 the host would. A guest running an older build is upgraded on the next sandbox start.
 
+Two topics on one sandboxed context can run different backends at the same time: the guest holds both agents' home directories and both CLIs. The first dispatch of a backend a running guest does not yet host restarts it — every backend fixes its share set when the guest starts — but never rebuilds it, so the guest disk and everything installed on it survive.
+
 See the [VM Sandbox](/guides/vm-sandbox/), [Lima Sandbox](/guides/lima-sandbox/), and [HCS Sandbox](/guides/hcs-sandbox/) guides for sandbox setup, and the [Configuration Reference](/reference/config/) for all fields.
