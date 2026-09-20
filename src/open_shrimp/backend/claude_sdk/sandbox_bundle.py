@@ -22,7 +22,6 @@ from open_shrimp.sandbox.agent_runtime import ImageBundle
 def claude_image_bundle() -> ImageBundle:
     """Construct the wrapped-CLI Claude :class:`ImageBundle`."""
     return ImageBundle(
-        tag_suffix="claude",
         guest_home="/home/claude",
         # Claude Code hardcodes /tmp/claude-<uid> for background-task output.
         task_tmp_prefix="claude",

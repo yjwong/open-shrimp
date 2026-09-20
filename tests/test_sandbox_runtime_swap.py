@@ -1,9 +1,12 @@
-"""When the agent backend (runtime) for a sandboxed context changes, the
-cached sandbox is pinned to the old launch and must be torn down and rebuilt —
-otherwise the new agent is launched inside the previous backend's guest and
-fails.
+"""What a manager does with a cached sandbox when a second agent backend
+(runtime) asks for the same context.
 
-These tests exercise the manager-level cache invalidation without touching
+A backend whose mount plan pins one runtime per guest has to tear the guest
+down and rebuild, or the new agent is launched with no home to write to.  A
+backend that unions the two runtimes' shares hands the same guest back and
+lets the caller's provision pass mount and install the newcomer.
+
+These tests exercise the manager-level cache decision without touching
 libvirt by stubbing the concrete ``LibvirtSandbox`` constructor.
 """
 
@@ -39,11 +42,15 @@ class _FakeCtx:
 
 
 class _FakeSandbox:
-    """Minimal stand-in for LibvirtSandbox: records its runtime and stop()."""
+    """Minimal stand-in for LibvirtSandbox: records its runtimes and stop()."""
 
-    def __init__(self, *, runtime: Any, **_kw: Any) -> None:
-        self.runtime = runtime
+    def __init__(self, *, runtimes: Any, **_kw: Any) -> None:
+        self.runtimes = list(runtimes)
         self.stopped = False
+
+    def add_runtime(self, runtime: Any) -> None:
+        if all(r.name != runtime.name for r in self.runtimes):
+            self.runtimes.append(runtime)
 
     def stop(self) -> None:
         self.stopped = True
@@ -73,7 +80,9 @@ def test_same_runtime_reuses_cached_sandbox(monkeypatch):
 
 
 def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
+    """A manager that has not adopted the union keeps the teardown."""
     mgr = _manager(monkeypatch)
+    assert mgr._shares_guest_across_runtimes is False
     ctx = _FakeCtx()
 
     claude_sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
@@ -81,12 +90,44 @@ def test_runtime_swap_rebuilds_and_stops_old(monkeypatch):
 
     # A fresh sandbox is built for the new backend...
     assert opencode_sb is not claude_sb
-    assert opencode_sb.runtime.name == "opencode"
+    assert [r.name for r in opencode_sb.runtimes] == ["opencode"]
     # ...and the stale one is torn down.
     assert claude_sb.stopped is True
-    # The cache now tracks the new runtime.
-    assert mgr._sandbox_runtime["dev"] == "opencode"
+    # The cache now tracks the new runtime alone.
+    assert mgr._sandbox_runtime["dev"] == {"opencode"}
     assert mgr.get_active_sandbox("dev") is opencode_sb
+
+
+def test_a_shared_guest_takes_the_second_runtime_on(monkeypatch):
+    """Once a backend unions the two runtimes' shares, the second runtime
+    joins the live guest instead of rebooting it."""
+    mgr = _manager(monkeypatch)
+    monkeypatch.setattr(
+        LibvirtSandboxManager, "_shares_guest_across_runtimes", True,
+    )
+    ctx = _FakeCtx()
+
+    claude_sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
+    opencode_sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("opencode"))
+
+    assert opencode_sb is claude_sb
+    assert claude_sb.stopped is False
+    assert [r.name for r in claude_sb.runtimes] == ["claude", "opencode"]
+    assert mgr._sandbox_runtime["dev"] == {"claude", "opencode"}
+
+
+def test_a_shared_guest_is_not_re_registered(monkeypatch):
+    mgr = _manager(monkeypatch)
+    monkeypatch.setattr(
+        LibvirtSandboxManager, "_shares_guest_across_runtimes", True,
+    )
+    ctx = _FakeCtx()
+
+    sb = mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
+    mgr.create_sandbox("dev", ctx, runtime=_runtime("opencode"))
+    mgr.create_sandbox("dev", ctx, runtime=_runtime("claude"))
+
+    assert [r.name for r in sb.runtimes] == ["claude", "opencode"]
 
 
 def test_runtime_none_keeps_cached_sandbox(monkeypatch):

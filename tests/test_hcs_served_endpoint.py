@@ -100,7 +100,7 @@ def _fake_win(monkeypatch, events: list[str] | None = None):
 
 def _bundle() -> ImageBundle:
     return ImageBundle(
-        tag_suffix="served", guest_home=GUEST_HOME, guest_argv0="opencode",
+        guest_home=GUEST_HOME, guest_argv0="opencode",
     )
 
 
@@ -173,7 +173,7 @@ def _make_sandbox(tmp_path, monkeypatch, runtime, **config_extra):
     sb = HcsSandbox(
         "default", SandboxConfig(**defaults), str(tmp_path / "ws"),
         state_dir=tmp_path / "state",
-        runtime=runtime,
+        runtimes=[runtime] if runtime is not None else [],
     )
     sb._sdir.mkdir(parents=True, exist_ok=True)
     sb._runtime_id = RID
@@ -338,7 +338,7 @@ def test_the_two_launcher_flavours_do_not_clobber_each_other(
     runtime = _served_runtime(tmp_path)
     sb = _make_sandbox(tmp_path, monkeypatch, runtime)
 
-    cli_path, _cleanup = sb.build_cli_wrapper()
+    cli_path, _cleanup = sb.build_cli_wrapper(runtime)
     sb.start_agent(runtime)
 
     wrapped_json, wrapped_exe = sb._built[0]
@@ -364,7 +364,7 @@ def test_the_wrapped_launcher_still_builds_after_a_served_launch(
     sb = _make_sandbox(tmp_path, monkeypatch, runtime)
 
     sb.start_agent(runtime)
-    cli_path, _ = sb.build_cli_wrapper()
+    cli_path, _ = sb.build_cli_wrapper(runtime)
 
     assert cli_path == str(sb._launcher_exe())
     assert sb._served_launcher_exe().exists()
@@ -475,7 +475,7 @@ def test_served_home_mounts_get_their_own_shares_and_binds(
     sb = _make_sandbox(tmp_path, monkeypatch, runtime)
 
     # The agent home is already the "home" share; only the extra mount is new.
-    assert [m.guest_mount_point for m in sb._served_mounts] == [
+    assert [m.guest_mount_point for _rt, m in sb._served_mounts()] == [
         f"{GUEST_HOME}/.local/share/openshrimp",
     ]
     shares = {name: (path, port) for name, path, port, _f in sb._p9_shares()}
@@ -498,7 +498,7 @@ def test_served_share_ports_follow_the_additional_directories(
         str(tmp_path / "ws"),
         state_dir=tmp_path / "state",
         additional_directories=[str(extra)],
-        runtime=runtime,
+        runtimes=[runtime],
     )
     shares = {name: port for name, _p, port, _f in sb._p9_shares()}
     assert shares["add0"] == H.P9_PORT_EXTRA_BASE
@@ -508,7 +508,7 @@ def test_served_share_ports_follow_the_additional_directories(
 
 def test_a_wrapped_cli_runtime_adds_no_served_shares(tmp_path, monkeypatch):
     sb = _make_sandbox(tmp_path, monkeypatch, _wrapped_runtime(tmp_path))
-    assert sb._served_mounts == ()
+    assert sb._served_mounts() == []
     assert [n for n, _p, _port, _f in sb._p9_shares()] == [
         "ws", "home", "cfg", "tasktmp",
     ]

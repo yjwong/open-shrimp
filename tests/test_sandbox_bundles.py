@@ -9,10 +9,13 @@ from open_shrimp.backend.claude_sdk.sandbox_bundle import claude_image_bundle
 from open_shrimp.backend.opencode.sandbox_bundle import opencode_image_bundle
 
 
-def test_bundles_have_distinct_identities():
-    """``tag_suffix`` is the key a backend uses to tell two guests apart, so
-    two agents sharing one would silently reuse each other's guest."""
-    assert claude_image_bundle().tag_suffix != opencode_image_bundle().tag_suffix
+def test_bundles_have_distinct_guest_layouts():
+    """One guest hosts both agents at once, so nothing either bundle names
+    inside it may collide with the other's."""
+    claude, opencode = claude_image_bundle(), opencode_image_bundle()
+    assert claude.guest_home != opencode.guest_home
+    assert claude.guest_argv0 != opencode.guest_argv0
+    assert claude.task_tmp_prefix != opencode.task_tmp_prefix
 
 
 def test_claude_bundle_carries_guest_installers():

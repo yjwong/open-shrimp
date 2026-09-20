@@ -28,18 +28,23 @@ from open_shrimp.sandbox.hcs import HcsSandbox, _chroot_agent_home
 
 def _bundle(**overrides) -> ImageBundle:
     defaults: dict = {
-        "tag_suffix": "claude",
         "guest_home": "/home/claude",
     }
     defaults.update(overrides)
     return ImageBundle(**defaults)
 
 
-def _runtime(*, guest_dir: str, bundle: ImageBundle | None = None) -> AgentRuntime:
+def _runtime(
+    *,
+    guest_dir: str,
+    bundle: ImageBundle | None = None,
+    name: str = "test-agent",
+    host_dir: str = "/host/home",
+) -> AgentRuntime:
     return AgentRuntime(
-        name="test-agent",
+        name=name,
         home_mount=HomeMount(
-            host_dir=Path("/host/home"), guest_dir=guest_dir,
+            host_dir=Path(host_dir), guest_dir=guest_dir,
             holds_session_state=True,
         ),
         inject=lambda home: None,
@@ -50,17 +55,29 @@ def _runtime(*, guest_dir: str, bundle: ImageBundle | None = None) -> AgentRunti
 
 
 def _claude_runtime() -> AgentRuntime:
-    return _runtime(guest_dir="/home/claude/.claude")
+    return _runtime(
+        guest_dir="/home/claude/.claude",
+        name="claude", host_dir="/host/claude-home",
+    )
 
 
 def _opencode_runtime() -> AgentRuntime:
     return _runtime(
         guest_dir="/home/claude/.local/share/opencode",
-        bundle=_bundle(tag_suffix="opencode", guest_argv0="opencode"),
+        bundle=_bundle(guest_argv0="opencode", task_tmp_prefix="openshrimp"),
+        name="opencode", host_dir="/host/opencode-home",
     )
 
 
 def _make_sandbox(tmp_path, monkeypatch, runtime=None, **config_extra):
+    return _make_sandbox_multi(
+        tmp_path, monkeypatch,
+        [runtime] if runtime is not None else [],
+        **config_extra,
+    )
+
+
+def _make_sandbox_multi(tmp_path, monkeypatch, runtimes, **config_extra):
     monkeypatch.setattr(sys, "platform", "win32")
     defaults: dict = {
         "backend": "hcs",
@@ -70,7 +87,7 @@ def _make_sandbox(tmp_path, monkeypatch, runtime=None, **config_extra):
     sb = HcsSandbox(
         "default", SandboxConfig(**defaults), str(tmp_path / "ws"),
         state_dir=tmp_path / "state",
-        runtime=runtime,
+        runtimes=runtimes,
     )
     sb._runtime_id = "11111111-2222-3333-4444-555555555555"
     return sb
@@ -171,7 +188,7 @@ def _launch_cfg(tmp_path, monkeypatch, runtime) -> dict:
     monkeypatch.setattr(
         sb, "_build_launcher_exe", lambda *, launch_json, exe: exe,
     )
-    sb.build_cli_wrapper()
+    sb.build_cli_wrapper(runtime)
     return json.loads(sb._launch_json_file().read_text(encoding="utf-8"))
 
 
@@ -184,9 +201,62 @@ def test_argv_prefix_comes_from_the_bundle(tmp_path, monkeypatch):
     assert cfg["argv_prefix"] == ["opencode"]
 
 
-def test_argv_prefix_falls_back_when_no_runtime_is_bound(tmp_path, monkeypatch):
-    cfg = _launch_cfg(tmp_path, monkeypatch, None)
+def test_argv_prefix_falls_back_when_the_runtime_carries_no_bundle(
+    tmp_path, monkeypatch,
+):
+    rt = _runtime(guest_dir="/home/claude/.claude")
+    rt.image_bundle = None
+    cfg = _launch_cfg(tmp_path, monkeypatch, rt)
     assert cfg["argv_prefix"] == ["claude"]
+
+
+# -- two runtimes in one guest ------------------------------------------------
+
+
+def test_a_two_runtime_guest_keeps_each_runtime_its_own_layout(
+    tmp_path, monkeypatch,
+):
+    """Nothing the sandbox derives from a runtime may be read off "the"
+    runtime: each of the two has its own home, argv0 and chroot path."""
+    claude, opencode = _claude_runtime(), _opencode_runtime()
+    sb = _make_sandbox_multi(tmp_path, monkeypatch, [claude, opencode])
+
+    assert sb._agent_home_dir(claude) == Path("/host/claude-home")
+    assert sb._agent_home_dir(opencode) == Path("/host/opencode-home")
+    assert sb._agent_home_dirs() == [
+        Path("/host/claude-home"), Path("/host/opencode-home"),
+    ]
+    assert sb._agent_argv0(claude) == "claude"
+    assert sb._agent_argv0(opencode) == "opencode"
+    assert _chroot_agent_home(claude) == "/root/.claude"
+    assert _chroot_agent_home(opencode) == "/root/.local/share/opencode"
+
+
+def test_a_second_runtime_joins_the_guest_it_was_not_built_with(
+    tmp_path, monkeypatch,
+):
+    sb = _make_sandbox(tmp_path, monkeypatch, _claude_runtime())
+    opencode = _opencode_runtime()
+
+    sb.add_runtime(opencode)
+    sb.add_runtime(_opencode_runtime())
+
+    assert list(sb._runtimes) == ["claude", "opencode"]
+    assert sb._agent_home_dir(opencode) == Path("/host/opencode-home")
+
+
+def test_the_single_slot_guest_paths_follow_the_first_runtime(
+    tmp_path, monkeypatch,
+):
+    """The fixed ``home`` 9p slot and the one task-tmp bind can hold one
+    runtime each, so both follow the one registered first."""
+    sb = _make_sandbox_multi(
+        tmp_path, monkeypatch, [_claude_runtime(), _opencode_runtime()],
+    )
+
+    shares = {name: path for name, path, _port, _f in sb._p9_shares()}
+    assert shares["home"] == str(Path("/host/claude-home"))
+    assert sb._task_tmp_prefix() == "claude"
 
 
 # -- the directory csc compiles in -------------------------------------------

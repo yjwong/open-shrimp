@@ -18,7 +18,7 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from open_shrimp.config import Config, ContextConfig, is_sandboxed, sandbox_backend
 from open_shrimp.paths import build_log_dir as _build_log_dir, data_dir as _data_dir
@@ -90,6 +90,61 @@ def destroy_contexts_background(
                     )
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _cached_sandbox_for(
+    mgr: Any, context_name: str, runtime: "AgentRuntime | None",
+) -> Sandbox | None:
+    """The cached sandbox for *context_name* if it can serve *runtime*.
+
+    A sandbox already hosting *runtime* (or asked for no runtime at all) comes
+    back untouched.  One hosting only a different runtime either takes this one
+    on as well — the caller's provision pass then mounts its shares and
+    installs its CLI — or, on a backend still pinned to a single runtime per
+    guest, is stopped here and ``None`` is returned so the caller rebuilds.
+
+    The gate is *mgr*'s ``_shares_guest_across_runtimes``.  Both halves of
+    hosting two runtimes live in the concrete sandbox — a mount plan that
+    unions their shares, and a provision pass that installs both — so a
+    backend that has not grown them rebuilds rather than hand back a guest
+    with no home for the second agent.
+    """
+    cached = mgr._sandbox_cache.get(context_name)
+    if cached is None:
+        return None
+    hosted: set[str] = mgr._sandbox_runtime.setdefault(context_name, set())
+    if runtime is None or runtime.name in hosted:
+        return cached
+    backend = mgr._backend_label
+    if not mgr._shares_guest_across_runtimes:
+        logger.info(
+            "Runtime changed for context '%s' on %s (%s -> %s); "
+            "rebuilding sandbox",
+            context_name, backend,
+            ", ".join(sorted(hosted)) or "none", runtime.name,
+        )
+        # ensure_environment then detects the mount drift and re-provisions;
+        # persistent disks are preserved.
+        mgr.invalidate_sandbox(context_name)
+        return None
+    cached.add_runtime(runtime)
+    hosted.add(runtime.name)
+    logger.info(
+        "Context '%s' on %s now hosts runtimes %s in one guest",
+        context_name, backend, ", ".join(sorted(hosted)),
+    )
+    return cached
+
+
+def _register_sandbox(
+    mgr: Any, context_name: str, sandbox: Sandbox, runtime: "AgentRuntime | None",
+) -> Sandbox:
+    """Cache *sandbox* as *context_name*'s guest and record what it hosts."""
+    mgr._sandbox_cache[context_name] = sandbox
+    mgr._sandbox_runtime[context_name] = (
+        {runtime.name} if runtime is not None else set()
+    )
+    return sandbox
 
 
 @runtime_checkable
@@ -182,13 +237,17 @@ class SandboxManager(Protocol):
         multiple calls.  The sandbox's lifecycle is independent of
         individual sessions.
 
-        *runtime* is the :class:`AgentRuntime` the sandbox will host.  Its
+        *runtime* is the :class:`AgentRuntime` this call needs hosted.  Its
         :attr:`AgentRuntime.image_bundle` names the guest layout; its
         :attr:`AgentRuntime.launch` (for a :class:`ServedEndpoint`) provides
         the extra host-synced home mounts and the served guest port.  ``None``
-        selects the wrapped-CLI default.  A backend consults only the bundle's
-        identity for served-flavour host syncs; the guest binary itself is the
-        operator's precondition.
+        selects the wrapped-CLI default.
+
+        A cached sandbox already hosting *runtime* comes back untouched.  One
+        hosting a different runtime either takes this one on as well — the
+        caller's provision pass then mounts its shares and installs its CLI —
+        or, on a backend whose mount plan still pins a single runtime, is
+        stopped and rebuilt.
         """
         ...
 
@@ -242,13 +301,16 @@ class LimaSandboxManager:
     VM isolation.  The ``limactl`` binary is auto-downloaded on first use.
     """
 
+    _backend_label = "Lima"
+    # The instance YAML fixes one task-tmp mount point and one served-home
+    # mount set, so a second runtime has nowhere to land in a live instance.
+    _shares_guest_across_runtimes = False
+
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
         self._limactl_path: str | None = None
         self._sandbox_cache: dict[str, Sandbox] = {}
-        # Name of the agent runtime (backend) each cached sandbox was built
-        # for, so a backend swap invalidates the stale sandbox.
-        self._sandbox_runtime: dict[str, str] = {}
+        self._sandbox_runtime: dict[str, set[str]] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
@@ -371,26 +433,9 @@ class LimaSandboxManager:
         self, context_name: str, context: ContextConfig,
         *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
-        # VM backend: the guest binary is the operator's precondition, but a
-        # served-endpoint launch's extra home/data dirs are host-synced — so
-        # the runtime's launch is forwarded to gate those mounts.  VM
-        # backends otherwise ignore the image bundle.
-        cached = self._sandbox_cache.get(context_name)
+        cached = _cached_sandbox_for(self, context_name, runtime)
         if cached is not None:
-            if runtime is None or self._sandbox_runtime.get(context_name) == runtime.name:
-                return cached
-            # The agent backend (runtime) changed for this context.  A
-            # served-endpoint launch host-syncs different home mounts than a
-            # wrapped-CLI one, so the cached VM was built for the old launch.
-            # Rebuild against the new runtime (ensure_environment detects the
-            # mount drift and re-provisions; persistent disks are preserved).
-            logger.info(
-                "Runtime changed for context '%s' (%s -> %s); rebuilding sandbox",
-                context_name,
-                self._sandbox_runtime.get(context_name),
-                runtime.name,
-            )
-            self.invalidate_sandbox(context_name)
+            return cached
 
         if self._limactl_path is None:
             raise RuntimeError(
@@ -402,6 +447,9 @@ class LimaSandboxManager:
 
         from open_shrimp.sandbox.lima import LimaSandbox
 
+        # The runtime is forwarded whole: its bundle carries the in-guest
+        # installer and the task-tmp layout, and a served-endpoint launch's
+        # extra home/data dirs are host-synced into the guest.
         sandbox = LimaSandbox(
             context_name=context_name,
             config=context.sandbox,
@@ -411,12 +459,9 @@ class LimaSandboxManager:
             instance_prefix=self._instance_prefix,
             computer_use=context.sandbox.computer_use,
             guest_os=context.sandbox.guest_os,
-            runtime=runtime,
+            runtimes=[runtime] if runtime is not None else [],
         )
-        self._sandbox_cache[context_name] = sandbox
-        if runtime is not None:
-            self._sandbox_runtime[context_name] = runtime.name
-        return sandbox
+        return _register_sandbox(self, context_name, sandbox, runtime)
 
     # -- Build logging --------------------------------------------------------
 
@@ -479,13 +524,17 @@ class LibvirtSandboxManager:
     One persistent ``libvirt.virConnect`` connection for the process lifetime.
     """
 
+    _backend_label = "libvirt"
+    # The domain XML declares one virtiofs device per shared dir at boot and
+    # one guest path per device, so a second runtime's task-tmp and served
+    # homes have nowhere to land in a running domain.
+    _shares_guest_across_runtimes = False
+
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
         self._conn: "libvirt.virConnect | None" = None  # type: ignore[name-defined]
         self._sandbox_cache: dict[str, Sandbox] = {}
-        # Name of the agent runtime (backend) each cached sandbox was built
-        # for, so a backend swap invalidates the stale sandbox.
-        self._sandbox_runtime: dict[str, str] = {}
+        self._sandbox_runtime: dict[str, set[str]] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
@@ -730,26 +779,9 @@ class LibvirtSandboxManager:
         self, context_name: str, context: ContextConfig,
         *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
-        # VM backend: the guest binary is the operator's precondition, but a
-        # served-endpoint launch's extra home/data dirs are host-synced — so
-        # the runtime's launch is forwarded to gate those mounts.  VM
-        # backends otherwise ignore the image bundle.
-        cached = self._sandbox_cache.get(context_name)
+        cached = _cached_sandbox_for(self, context_name, runtime)
         if cached is not None:
-            if runtime is None or self._sandbox_runtime.get(context_name) == runtime.name:
-                return cached
-            # The agent backend (runtime) changed for this context.  A
-            # served-endpoint launch host-syncs different home mounts than a
-            # wrapped-CLI one, so the cached VM was built for the old launch.
-            # Rebuild against the new runtime (ensure_environment detects the
-            # mount drift and re-provisions; persistent disks are preserved).
-            logger.info(
-                "Runtime changed for context '%s' (%s -> %s); rebuilding sandbox",
-                context_name,
-                self._sandbox_runtime.get(context_name),
-                runtime.name,
-            )
-            self.invalidate_sandbox(context_name)
+            return cached
 
         if self._conn is None:
             raise RuntimeError(
@@ -761,6 +793,9 @@ class LibvirtSandboxManager:
 
         from open_shrimp.sandbox.libvirt import LibvirtSandbox
 
+        # The runtime is forwarded whole: its bundle carries the in-guest
+        # installer and the task-tmp layout, and a served-endpoint launch's
+        # extra home/data dirs are host-synced into the guest.
         sandbox = LibvirtSandbox(
             context_name=context_name,
             config=context.sandbox,
@@ -771,12 +806,9 @@ class LibvirtSandboxManager:
             computer_use=context.sandbox.computer_use,
             virgl=context.sandbox.virgl,
             phone_use=context.sandbox.phone_use,
-            runtime=runtime,
+            runtimes=[runtime] if runtime is not None else [],
         )
-        self._sandbox_cache[context_name] = sandbox
-        if runtime is not None:
-            self._sandbox_runtime[context_name] = runtime.name
-        return sandbox
+        return _register_sandbox(self, context_name, sandbox, runtime)
 
     # -- Build logging --------------------------------------------------------
 
@@ -840,10 +872,16 @@ class HcsSandboxManager:
     construct off Windows, so importing this manager elsewhere is harmless.
     """
 
+    _backend_label = "HCS"
+    # The 9p share list goes into ``create_compute_system`` at boot and the
+    # fixed ``home`` slot holds one agent home, so a second runtime's home has
+    # nowhere to land in a running compute system.
+    _shares_guest_across_runtimes = False
+
     def __init__(self) -> None:
         self._instance_prefix = "openshrimp"
         self._sandbox_cache: dict[str, Sandbox] = {}
-        self._sandbox_runtime: dict[str, str] = {}
+        self._sandbox_runtime: dict[str, set[str]] = {}
 
         self._active_builds: dict[str, Path] = {}
         self._active_builds_lock = threading.Lock()
@@ -923,17 +961,9 @@ class HcsSandboxManager:
         self, context_name: str, context: ContextConfig,
         *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
-        cached = self._sandbox_cache.get(context_name)
+        cached = _cached_sandbox_for(self, context_name, runtime)
         if cached is not None:
-            if runtime is None or self._sandbox_runtime.get(context_name) == runtime.name:
-                return cached
-            logger.info(
-                "Runtime changed for context '%s' (%s -> %s); rebuilding sandbox",
-                context_name,
-                self._sandbox_runtime.get(context_name),
-                runtime.name,
-            )
-            self.invalidate_sandbox(context_name)
+            return cached
 
         assert context.sandbox is not None
 
@@ -946,12 +976,9 @@ class HcsSandboxManager:
             state_dir=self._state_dir / context_name,
             additional_directories=context.additional_directories or None,
             instance_prefix=self._instance_prefix,
-            runtime=runtime,
+            runtimes=[runtime] if runtime is not None else [],
         )
-        self._sandbox_cache[context_name] = sandbox
-        if runtime is not None:
-            self._sandbox_runtime[context_name] = runtime.name
-        return sandbox
+        return _register_sandbox(self, context_name, sandbox, runtime)
 
     # -- Build logging --------------------------------------------------------
 

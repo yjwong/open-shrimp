@@ -19,6 +19,7 @@ import shlex
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,9 @@ from open_shrimp.sandbox.agent_runtime import (
     GuestMount,
     ServedEndpoint,
     WrappedCLI,
+    primary_bundle,
     run_served_endpoint,
+    served_home_mounts,
     terminate_served_proc,
 )
 from open_shrimp.sandbox.base import PortForward, VncQuirk
@@ -183,7 +186,7 @@ class LibvirtSandbox:
         computer_use: bool = False,
         virgl: bool = False,
         phone_use: bool = False,
-        runtime: AgentRuntime | None = None,
+        runtimes: Sequence[AgentRuntime] = (),
     ) -> None:
         self._context_name = context_name
         self._config = config
@@ -202,18 +205,9 @@ class LibvirtSandbox:
         self._virtiofsd_procs: list[subprocess.Popen[bytes]] = []
         self._use_virtiofs: bool = find_virtiofsd() is not None
 
-        # Served-endpoint launch's extra home mounts are synced into the
-        # guest (the runtime's data home, plugin-config dir, …) so the
-        # injected provider ``auth.json`` and the managed plugin config reach
-        # the served process.  The wrapped-CLI launch contributes none.  The
-        # mount SOURCE must match the inject TARGET (the runtime's host_dir)
-        # or the guest never sees the synced files.
-        self._runtime = runtime
-        launch = runtime.launch if runtime else None
-        if isinstance(launch, ServedEndpoint):
-            self._served_home_mounts: tuple[GuestMount, ...] = launch.home_mounts
-        else:
-            self._served_home_mounts = ()
+        # The agent runtimes this guest hosts, keyed by name and in
+        # registration order.
+        self._runtimes: dict[str, AgentRuntime] = {r.name: r for r in runtimes}
 
         self._sdir = state_dir_for(context_name)
         self._dom_name = _domain_name(context_name, instance_prefix)
@@ -248,6 +242,15 @@ class LibvirtSandbox:
     @property
     def host_address(self) -> str:
         return "10.0.2.2"
+
+    def add_runtime(self, runtime: AgentRuntime) -> None:
+        self._runtimes.setdefault(runtime.name, runtime)
+
+    def _served_home_mounts(self) -> tuple[GuestMount, ...]:
+        """The union of every registered runtime's served-launch host dirs."""
+        return tuple(
+            mount for _rt, mount in served_home_mounts(self._runtimes.values())
+        )
 
     def environment_ready(self) -> bool:
         """Check if the VM environment (overlay, cloud-init, SSH key) exists."""
@@ -342,7 +345,7 @@ class LibvirtSandbox:
         # Ensure host-side shared directories exist.
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._claude_home_dir.mkdir(parents=True, exist_ok=True)
-        for mount in self._served_home_mounts:
+        for mount in self._served_home_mounts():
             mount.host_dir.mkdir(parents=True, exist_ok=True)
 
         # Build shared_dirs list for domain XML: (host_dir, socket | None).
@@ -621,21 +624,21 @@ class LibvirtSandbox:
         if self._phone_use:
             self._ensure_waydroid_initialized(log_file=log_file)
 
-        if self._runtime is None:
-            return
-
         # Cloud-init creates a single ``SANDBOX_USER`` (openshrimp) user in the
         # guest with NOPASSWD sudo (see ``_build_cloud_init_user_data``); both
         # the Claude and OpenCode installers SSH in as that user.
-        bundle = self._runtime.image_bundle
-        if bundle is not None and bundle.libvirt_install is not None:
-            bundle.libvirt_install(
-                self._sdir / "ssh_key", self._ssh_port, SANDBOX_USER,
-                log_file=log_file,
-            )
+        for runtime in self._runtimes.values():
+            bundle = runtime.image_bundle
+            if bundle is not None and bundle.libvirt_install is not None:
+                bundle.libvirt_install(
+                    self._sdir / "ssh_key", self._ssh_port, SANDBOX_USER,
+                    log_file=log_file,
+                )
 
-        if self._runtime.provision_credentials is not None:
-            self._runtime.provision_credentials(self._claude_home_dir)
+            # Each runtime's credentials land in its own home, which for the
+            # wrapped-CLI runtime is this guest's ``claude-home`` share.
+            if runtime.provision_credentials is not None:
+                runtime.provision_credentials(runtime.home_mount.host_dir)
 
     def _ensure_waydroid_initialized(
         self, *, log_file: Path | None = None,
@@ -826,7 +829,7 @@ class LibvirtSandbox:
 
     def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
         if isinstance(runtime.launch, WrappedCLI):
-            cli_path, cleanup_paths = self.build_cli_wrapper()
+            cli_path, cleanup_paths = self.build_cli_wrapper(runtime)
             return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
         if isinstance(runtime.launch, ServedEndpoint):
             return self._start_served_endpoint(runtime, runtime.launch)
@@ -902,7 +905,11 @@ class LibvirtSandbox:
         self._served_endpoint = endpoint
         return AgentHandle(endpoint=endpoint)
 
-    def build_cli_wrapper(self) -> tuple[str, list[str]]:
+    def build_cli_wrapper(self, runtime: AgentRuntime) -> tuple[str, list[str]]:
+        # The generated script still hardcodes the ``claude`` argv0 and the
+        # ``claude-home`` share, so *runtime* goes unread: this backend has one
+        # wrapped-CLI runtime.  A second one needs ``guest_argv0`` and
+        # ``home_mount.host_dir`` threaded into ``_build_cli_wrapper``.
         assert self._ssh_port is not None
         path = _build_cli_wrapper(
             self._context_name,
@@ -1511,7 +1518,9 @@ class LibvirtSandbox:
         # actually writes to (Claude → /tmp/claude-<uid>), not a vendor-neutral
         # /tmp/<user>-<uid>; otherwise the CLI writes to an unshared guest path
         # and the host terminal mini app finds nothing ("View output" 400s).
-        bundle = self._runtime.image_bundle if self._runtime else None
+        # ``mount_overrides`` maps a host dir to one guest path, so the shared
+        # tmp dir lands at the first registered runtime's task-tmp path.
+        bundle = primary_bundle(self._runtimes.values())
         task_tmp_guest = (
             bundle.guest_task_tmp(SANDBOX_UID)
             if bundle is not None
@@ -1527,7 +1536,7 @@ class LibvirtSandbox:
         # ``auth.json``, managed plugin config), so the served process (which
         # runs under its own ``HOME``) sees the synced files.  The wrapped-CLI
         # launch contributes ZERO new mounts here.
-        for mount in self._served_home_mounts:
+        for mount in self._served_home_mounts():
             host_str = str(mount.host_dir)
             all_dirs.append(host_str)
             mount_overrides[host_str] = mount.guest_mount_point

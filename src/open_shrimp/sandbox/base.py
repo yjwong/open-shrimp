@@ -94,11 +94,24 @@ class Sandbox(Protocol):
         3. ``provision_workspace()`` — sync files into sandbox (idempotent)
         4. ``start_agent(runtime)`` — launch the agent (wrapped-CLI today)
         5. ``stop()`` — tear down runtime (VM, container, daemons)
+
+    A sandbox hosts a *set* of agent runtimes.  Nothing it derives from one —
+    home dir, guest argv0, task-tmp path — may be read off "the" runtime; each
+    is a union over the registered set or a lookup keyed by runtime name.
     """
 
     @property
     def context_name(self) -> str:
         """The context name this sandbox belongs to."""
+        ...
+
+    def add_runtime(self, runtime: "AgentRuntime") -> None:
+        """Register *runtime* alongside the ones this guest already hosts.
+
+        Idempotent by :attr:`AgentRuntime.name`.  The caller re-runs the
+        provision path afterwards to mount the newcomer's shares and install
+        its CLI.
+        """
         ...
 
     @property
@@ -180,6 +193,12 @@ class Sandbox(Protocol):
                 the build log so the terminal Mini App can tail progress.
 
         Idempotent — safe to call on every session start.
+
+        This installs *every* registered runtime's CLI, not only the one about
+        to be launched: each installer is itself idempotent and
+        version-probing, so a repeat call costs one version probe, while a
+        runtime whose CLI is missing when its topic dispatches would have to
+        install it mid-turn.
         """
         ...
 
@@ -198,11 +217,13 @@ class Sandbox(Protocol):
         """
         ...
 
-    def build_cli_wrapper(self) -> tuple[str, list[str]]:
-        """Generate a shell script that execs into the sandbox.
+    def build_cli_wrapper(self, runtime: "AgentRuntime") -> tuple[str, list[str]]:
+        """Generate a shell script that execs *runtime*'s CLI in the sandbox.
 
         Internal to the ``wrapped_cli`` branch of :meth:`start_agent` — callers
-        outside the sandbox layer should use :meth:`start_agent`.
+        outside the sandbox layer should use :meth:`start_agent`.  *runtime*
+        names which of the guest's runtimes to exec; a guest hosting two is
+        why it cannot be read off the instance.
 
         The script must:
         - Accept the agent CLI args as ``"$@"``

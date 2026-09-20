@@ -9,6 +9,7 @@ Covers both the same-context-but-backend-edited path and the
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -66,12 +67,35 @@ def _make_backend(name: str) -> Any:
     return backend
 
 
+def _sandboxed_session(runtime_name: str) -> Any:
+    """A live sandboxed session whose credential target is ``(runtime, ctx)``."""
+    client = MagicMock(spec=[])
+    client.disconnect = AsyncMock()
+    return cm.AgentSession(
+        client=client,
+        context_name="ctx",
+        sandbox=MagicMock(name="sandbox", spec=[]),
+        runtime=SimpleNamespace(name=runtime_name),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch: pytest.MonkeyPatch):
     cm._active_sessions.clear()
     monkeypatch.setattr(cm, "_default_backend", None, raising=False)
     yield
     cm._active_sessions.clear()
+
+
+@pytest.fixture
+def unregistered(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Collects the ``(runtime, context)`` pairs ``close_session`` retires."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cm, "unregister_cred_sandbox",
+        lambda runtime, ctx: calls.append((runtime, ctx)),
+    )
+    return calls
 
 
 async def test_close_session_disconnects_and_evicts():
@@ -99,6 +123,39 @@ async def test_close_session_disconnects_and_evicts():
 
     old_client.disconnect.assert_awaited_once()
     assert scope not in cm._active_sessions
+
+
+async def test_close_session_unregisters_only_its_own_credential_target(
+    unregistered: list[tuple[str, str]],
+):
+    """Two topics on one context can run different runtimes in one guest.
+
+    The credential watcher is keyed by ``(runtime, context)``, so closing the
+    Claude topic must retire the Claude target even though an OpenCode session
+    on the same context is still live — a context-only check would leave it
+    registered for a home nothing writes to any more.
+    """
+    claude_scope = ChatScope(chat_id=3, thread_id=11)
+    opencode_scope = ChatScope(chat_id=3, thread_id=22)
+    cm._active_sessions[claude_scope] = _sandboxed_session("claude")
+    cm._active_sessions[opencode_scope] = _sandboxed_session("opencode")
+
+    await cm.close_session(claude_scope)
+
+    assert unregistered == [("claude", "ctx")]
+
+
+async def test_close_session_keeps_a_target_a_sibling_topic_still_uses(
+    unregistered: list[tuple[str, str]],
+):
+    first = ChatScope(chat_id=4, thread_id=11)
+    second = ChatScope(chat_id=4, thread_id=22)
+    cm._active_sessions[first] = _sandboxed_session("claude")
+    cm._active_sessions[second] = _sandboxed_session("claude")
+
+    await cm.close_session(first)
+
+    assert unregistered == []
 
 
 async def test_backend_swap_clears_persisted_session(

@@ -23,7 +23,6 @@ from open_shrimp.sandbox.skill_paths import SANDBOX_HOME
 def opencode_image_bundle() -> ImageBundle:
     """Construct the served-endpoint OpenCode :class:`ImageBundle`."""
     return ImageBundle(
-        tag_suffix="opencode",
         guest_home=SANDBOX_HOME,
         guest_argv0="opencode",
         task_tmp_prefix="openshrimp",

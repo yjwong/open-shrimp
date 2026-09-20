@@ -1139,17 +1139,22 @@ async def close_session(scope: ChatScope) -> None:
     session = _active_sessions.pop(scope, None)
     if session is None:
         return
-    # Unregister from credential syncing if this was a sandboxed session.
-    # Check if any other active session still uses the same context before
-    # removing the sync target.
+    # Unregister from credential syncing if this was a sandboxed session.  The
+    # watcher target is keyed by (runtime, context), so a sibling topic on the
+    # *other* runtime must not keep this target alive for a home nothing
+    # writes to any more.
     if session.sandbox is not None and session.runtime is not None:
         ctx = session.context_name
+        rt = session.runtime.name
         still_used = any(
-            s.context_name == ctx and s.sandbox is not None
+            s.context_name == ctx
+            and s.sandbox is not None
+            and s.runtime is not None
+            and s.runtime.name == rt
             for s in _active_sessions.values()
         )
         if not still_used:
-            unregister_cred_sandbox(session.runtime.name, ctx)
+            unregister_cred_sandbox(rt, ctx)
     # Unregister proxied MCP servers when no other session needs them.
     if session.mcp_proxy is not None:
         ctx = session.context_name

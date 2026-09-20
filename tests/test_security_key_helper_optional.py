@@ -13,7 +13,7 @@ def test_libvirt_provision_continues_when_security_key_helper_install_fails(
     sandbox._ssh_port = 12345
     sandbox._computer_use = True
     sandbox._phone_use = False
-    sandbox._runtime = None
+    sandbox._runtimes = {}
     sandbox._context_name = "test-context"
 
     def fail_install() -> None:
@@ -32,7 +32,7 @@ def test_lima_provision_continues_when_security_key_helper_install_fails(
 ) -> None:
     sandbox = LimaSandbox.__new__(LimaSandbox)
     sandbox._computer_use = True
-    sandbox._runtime = None
+    sandbox._runtimes = {}
     sandbox._context_name = "test-context"
 
     def fail_install() -> None:

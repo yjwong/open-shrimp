@@ -17,6 +17,7 @@ import asyncio
 import logging
 import shlex
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,9 @@ from open_shrimp.sandbox.agent_runtime import (
     GuestMount,
     ServedEndpoint,
     WrappedCLI,
+    primary_bundle,
     run_served_endpoint,
+    served_home_mounts,
     terminate_served_proc,
 )
 from open_shrimp.sandbox.base import (
@@ -123,7 +126,7 @@ class LimaSandbox:
         instance_prefix: str = "openshrimp",
         computer_use: bool = False,
         guest_os: str = "linux",
-        runtime: AgentRuntime | None = None,
+        runtimes: Sequence[AgentRuntime] = (),
     ) -> None:
         self._context_name = context_name
         self._config = config
@@ -134,21 +137,9 @@ class LimaSandbox:
         self._computer_use = computer_use
         self._guest_os = guest_os
 
-        # Served-endpoint launch's extra home mounts are added to the
-        # generated Lima YAML so the injected provider ``auth.json`` and the
-        # managed plugin config reach the served process.  The wrapped-CLI
-        # launch contributes no extra mounts.
-        self._runtime = runtime
-        launch = runtime.launch if runtime else None
-        if isinstance(launch, ServedEndpoint):
-            self._served_home_mounts: tuple[GuestMount, ...] = launch.home_mounts
-        else:
-            self._served_home_mounts = ()
-
-        # The guest path the agent writes background-task output to; the tmp
-        # share must mount there so the host terminal mini app can read it.
-        bundle = runtime.image_bundle if runtime else None
-        self._task_tmp_prefix = bundle.task_tmp_prefix if bundle else "claude"
+        # The agent runtimes this guest hosts, keyed by name and in
+        # registration order.
+        self._runtimes: dict[str, AgentRuntime] = {r.name: r for r in runtimes}
 
         self._sdir = state_dir_for(context_name)
         self._inst_name = _instance_name(context_name, instance_prefix)
@@ -175,6 +166,26 @@ class LimaSandbox:
     @property
     def host_address(self) -> str:
         return "192.168.5.2"
+
+    def add_runtime(self, runtime: AgentRuntime) -> None:
+        self._runtimes.setdefault(runtime.name, runtime)
+
+    def _task_tmp_prefix(self) -> str:
+        """The ``/tmp/<prefix>-<uid>`` slug the tmp share mounts at.
+
+        The generated Lima YAML gives the share one guest mount point, so it
+        follows the first registered runtime; the host terminal mini app reads
+        background-task output from under it.
+        """
+        bundle = primary_bundle(self._runtimes.values())
+        return bundle.task_tmp_prefix if bundle is not None else "claude"
+
+    def _served_home_mounts(self) -> tuple[GuestMount, ...]:
+        """The union of every registered runtime's served-launch host dirs,
+        written into the generated Lima YAML."""
+        return tuple(
+            mount for _rt, mount in served_home_mounts(self._runtimes.values())
+        )
 
     def environment_ready(self) -> bool:
         """Check if the Lima instance exists (any status)."""
@@ -206,8 +217,8 @@ class LimaSandbox:
             self._computer_use,
             context_name=self._context_name,
             guest_os=self._guest_os,
-            served_home_mounts=self._served_home_mounts,
-            task_tmp_prefix=self._task_tmp_prefix,
+            served_home_mounts=self._served_home_mounts(),
+            task_tmp_prefix=self._task_tmp_prefix(),
         )
         saved_fp = load_config_fingerprint(sdir)
         if saved_fp is not None and saved_fp != desired_fp:
@@ -250,8 +261,8 @@ class LimaSandbox:
             self._computer_use,
             context_name=self._context_name,
             guest_os=self._guest_os,
-            served_home_mounts=self._served_home_mounts,
-            task_tmp_prefix=self._task_tmp_prefix,
+            served_home_mounts=self._served_home_mounts(),
+            task_tmp_prefix=self._task_tmp_prefix(),
         )
 
         # Create the instance (this downloads the image + boots for cloud-init).
@@ -363,15 +374,15 @@ class LimaSandbox:
                     exc,
                 )
 
-        if self._runtime is None:
-            return
+        for runtime in self._runtimes.values():
+            bundle = runtime.image_bundle
+            if bundle is not None and bundle.lima_install is not None:
+                bundle.lima_install(self._limactl, self._inst_name, self._guest_os)
 
-        bundle = self._runtime.image_bundle
-        if bundle is not None and bundle.lima_install is not None:
-            bundle.lima_install(self._limactl, self._inst_name, self._guest_os)
-
-        if self._runtime.provision_credentials is not None:
-            self._runtime.provision_credentials(self._claude_home_dir)
+            # Each runtime's credentials land in its own home, which for the
+            # wrapped-CLI runtime is this instance's ``claude-home`` share.
+            if runtime.provision_credentials is not None:
+                runtime.provision_credentials(runtime.home_mount.host_dir)
 
     def _install_security_key_helper(self) -> None:
         if self._guest_os != "linux":
@@ -417,7 +428,7 @@ class LimaSandbox:
 
     def start_agent(self, runtime: AgentRuntime) -> AgentHandle:
         if isinstance(runtime.launch, WrappedCLI):
-            cli_path, cleanup_paths = self.build_cli_wrapper()
+            cli_path, cleanup_paths = self.build_cli_wrapper(runtime)
             return AgentHandle(cli_path=cli_path, cleanup_paths=cleanup_paths)
         if isinstance(runtime.launch, ServedEndpoint):
             return self._start_served_endpoint(runtime, runtime.launch)
@@ -487,7 +498,11 @@ class LimaSandbox:
         self._served_endpoint = endpoint
         return AgentHandle(endpoint=endpoint)
 
-    def build_cli_wrapper(self) -> tuple[str, list[str]]:
+    def build_cli_wrapper(self, runtime: AgentRuntime) -> tuple[str, list[str]]:
+        # The generated script still hardcodes the ``claude`` argv0 and the
+        # ``claude-home`` share, so *runtime* goes unread: this backend has one
+        # wrapped-CLI runtime.  A second one needs ``guest_argv0`` and
+        # ``home_mount.host_dir`` threaded into ``_build_cli_wrapper``.
         path = _build_cli_wrapper(
             self._context_name,
             self._sdir,

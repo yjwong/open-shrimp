@@ -26,6 +26,7 @@ import base64
 import logging
 import secrets
 import threading
+from collections.abc import Container, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
@@ -157,8 +158,6 @@ class ImageBundle:
     ``if flavour == "..."`` branches, and so adding a third bundle touches one
     constructor in the runtime module.
 
-    ``tag_suffix`` is the per-bundle slug the sandboxes treat as an opaque
-    identity key: two runtimes with different suffixes cannot share a guest.
     ``guest_home`` is the agent's ``HOME`` inside the guest.  ``guest_argv0``
     is the command the guest launcher execs — the CLI's own name on ``PATH``,
     not a path, because where it was installed is the guest's business.
@@ -181,7 +180,6 @@ class ImageBundle:
     ``open_shrimp.backend.<agent>/``.
     """
 
-    tag_suffix: str
     guest_home: str
     guest_argv0: str = "claude"
     task_tmp_prefix: str = "claude"
@@ -300,6 +298,60 @@ class AgentHandle:
     cli_path: str | None = None
     cleanup_paths: list[str] = field(default_factory=list)
     endpoint: Any = None
+
+
+def served_home_mounts(
+    runtimes: "Iterable[AgentRuntime]",
+    *,
+    exclude: "Container[Path]" = (),
+) -> list[tuple[AgentRuntime, GuestMount]]:
+    """Every served-endpoint runtime's extra host dirs, paired with its owner.
+
+    A served launch declares host dirs to sync into the guest (its data home,
+    plugin-config dir, …) so the injected provider ``auth.json`` and the
+    managed plugin config reach the served process; a wrapped-CLI launch
+    declares none.  The mount SOURCE must match the inject TARGET (the
+    runtime's ``home_mount.host_dir``) or the guest never sees the synced
+    files.
+
+    The owner comes back with each mount because the guest mount point is
+    spelled under *that* runtime's guest home, so only its owner can re-root
+    it.  *exclude* drops host dirs that already have a share of their own (a
+    runtime's agent home), which would otherwise be mounted twice on one guest
+    path.
+
+    Ordered by ``(host_dir, guest_mount_point)`` rather than by registration:
+    the sequence feeds Lima's config fingerprint and libvirt's virtiofs tag
+    set, and registration order is whichever ChatScope dispatched first, so an
+    arrival-ordered union would rebuild the guest after a restart that
+    happened to dispatch the other way round.
+    """
+    mounts: dict[tuple[str, str], tuple[AgentRuntime, GuestMount]] = {}
+    for runtime in runtimes:
+        launch = runtime.launch
+        if not isinstance(launch, ServedEndpoint):
+            continue
+        for mount in launch.home_mounts:
+            if mount.host_dir in exclude:
+                continue
+            mounts[(str(mount.host_dir), mount.guest_mount_point)] = (runtime, mount)
+    return [mounts[key] for key in sorted(mounts)]
+
+
+def primary_bundle(
+    runtimes: "Iterable[AgentRuntime]",
+) -> "ImageBundle | None":
+    """The bundle behind the guest paths only one runtime can own.
+
+    A guest holds one task-tmp mount point and (on HCS) one fixed agent-home
+    share slot, so those follow the first registered runtime that carries a
+    bundle.  ``None`` when no registered runtime has one, which leaves each
+    caller's own default in place.
+    """
+    for runtime in runtimes:
+        if runtime.image_bundle is not None:
+            return runtime.image_bundle
+    return None
 
 
 def run_served_endpoint(
