@@ -187,6 +187,7 @@ _COMMANDS = [
     ("/clear", "clear_handler"),
     ("/status", "status_handler"),
     ("/model", "model_handler"),
+    ("/backend", "backend_handler"),
     ("/effort", "effort_handler"),
     ("/add_dir", "add_dir_handler"),
     ("/resume", "resume_handler"),

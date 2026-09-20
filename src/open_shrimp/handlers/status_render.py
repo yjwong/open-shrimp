@@ -76,6 +76,7 @@ class ScopeStatus:
     tasks: list[TrackedTask]
     model_overridden: bool = False
     effort_overridden: bool = False
+    backend_overridden: bool = False
 
 
 def status_keyboard(running: bool) -> InlineKeyboardMarkup:
@@ -136,7 +137,8 @@ def _context_block(status: ScopeStatus) -> str:
         + (override if status.model_overridden else ""),
         f"{EFFORT_ICON} `{status.ctx.effort or 'default'}`"
         + (override if status.effort_overridden else ""),
-        f"{BACKEND_ICON} `{effective_backend(status.ctx, status.config)}`",
+        f"{BACKEND_ICON} `{effective_backend(status.ctx, status.config)}`"
+        + (override if status.backend_overridden else ""),
     ])
 
 

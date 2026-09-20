@@ -361,6 +361,14 @@ def clear_session_approvals(scope: ChatScope, context_name: str) -> None:
     _session_approved_dirs.pop((scope, context_name), None)
 
 # ---------------------------------------------------------------------------
+# Per-scope backend override: scope -> backend name.  Set via /backend command.
+# Cleared on /clear or context switch.  Takes precedence over the context's
+# ``backend:`` key, which is what lets two topics bound to the same context run
+# different backends against the same working directory.
+# ---------------------------------------------------------------------------
+_backend_overrides: dict[ChatScope, str] = {}
+
+# ---------------------------------------------------------------------------
 # Per-scope model override: scope -> model name.  Set via /model command.
 # Cleared on /clear or context switch.  Takes precedence over context config.
 # ---------------------------------------------------------------------------
@@ -372,6 +380,20 @@ _model_overrides: dict[ChatScope, str] = {}
 # Takes precedence over context config.
 # ---------------------------------------------------------------------------
 _effort_overrides: dict[ChatScope, str] = {}
+
+
+def clear_scope_overrides(scope: ChatScope) -> None:
+    """Drop every per-scope override for *scope*.
+
+    One function drops the three so a caller never has to know there are
+    three, or that a fourth arrived.  Both routes out of a context — the
+    ``/context`` picker button and ``/context <name>`` — go through this, or
+    the same switch leaves a different amount behind depending on which the
+    user tapped.
+    """
+    _backend_overrides.pop(scope, None)
+    _model_overrides.pop(scope, None)
+    _effort_overrides.pop(scope, None)
 
 # ---------------------------------------------------------------------------
 # Per-scope additional directory overrides: (scope, context_name) -> dirs.
@@ -530,8 +552,7 @@ async def reset_scope(scope: ChatScope, ctx_name: str, db: Any) -> None:
     await close_session(scope)
     await delete_session(db, scope, ctx_name)
     clear_session_approvals(scope, ctx_name)
-    _model_overrides.pop(scope, None)
-    _effort_overrides.pop(scope, None)
+    clear_scope_overrides(scope)
     _active_bg_tasks.pop(scope, None)
     _finished_bg_tasks.pop(scope, None)
 

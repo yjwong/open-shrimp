@@ -1,5 +1,5 @@
 """Telegram command handlers (/start, /context, /clear, /status, /cancel, /model,
-/effort, /resume, /review, /mcp, /tasks, /usage, /login).
+/backend, /effort, /resume, /review, /mcp, /tasks, /usage, /login).
 """
 
 from __future__ import annotations
@@ -37,7 +37,11 @@ from open_shrimp.rich_message import (
 )
 from open_shrimp.tool_cards import plural
 from open_shrimp.db import ChatScope, get_session_id, set_session_id
-from open_shrimp.backend.factory import default_model_label, get_backend_by_name
+from open_shrimp.backend.factory import (
+    default_model_label,
+    get_backend_by_name,
+    known_backends,
+)
 from open_shrimp.android_companion import (
     create_pairing_code,
     get_or_create_server_id,
@@ -48,6 +52,7 @@ from open_shrimp.handlers.state import (
     _MCP_STATUS_EMOJI,
     _RESUME_LIST_LIMIT,
     _active_bg_tasks,
+    _backend_overrides,
     _effort_overrides,
     _injectable_sessions,
     _model_overrides,
@@ -56,6 +61,7 @@ from open_shrimp.handlers.state import (
     _resume_session_cache,
     _setup_queues,
     active_tasks,
+    clear_scope_overrides,
     clear_session_approvals,
     get_run_elapsed,
     get_running_turn,
@@ -92,6 +98,7 @@ from open_shrimp.handlers.utils import (
     no_context_text,
     reply_no_context,
     require_context,
+    scope_backend_name,
 )
 from open_shrimp.sandbox.status import describe_sandbox
 from open_shrimp.supervisor import resolve_context, selectable_contexts
@@ -287,8 +294,7 @@ async def handle_context_callback(
         # path must complete even when there is nothing to clear.
         if current is not None:
             clear_session_approvals(scope, current)
-        _model_overrides.pop(scope, None)
-        _effort_overrides.pop(scope, None)
+        clear_scope_overrides(scope)
         await close_session(scope)
 
         from open_shrimp.db import set_active_context
@@ -357,7 +363,7 @@ async def _post_model_picker(
     ctx = resolve_context(config, await _get_context_name(scope, config, db))
     if ctx is None:
         return False
-    backend = get_backend_by_name(effective_backend(ctx, config))
+    backend = get_backend_by_name(scope_backend_name(scope, ctx, config))
     text, markup = _build_model_page(
         backend, ctx.model, _model_overrides.get(scope),
     )
@@ -399,8 +405,7 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # nothing to clear when it was not bound before.
     if old_ctx_name is not None:
         clear_session_approvals(scope, old_ctx_name)
-    _model_overrides.pop(scope, None)
-    _effort_overrides.pop(scope, None)
+    clear_scope_overrides(scope)
     await close_session(scope)
 
     from open_shrimp.db import set_active_context
@@ -508,6 +513,7 @@ async def _gather_status(
         tasks=active_tasks(scope),
         model_overridden=scope in _model_overrides,
         effort_overridden=scope in _effort_overrides,
+        backend_overridden=scope in _backend_overrides,
     )
 
 
@@ -745,7 +751,7 @@ async def handle_model_callback(
     if ctx is None:
         await answer_no_context(query, config)
         return True
-    backend = get_backend_by_name(effective_backend(ctx, config))
+    backend = get_backend_by_name(scope_backend_name(scope, ctx, config))
 
     if data == "model_reset":
         _model_overrides.pop(scope, None)
@@ -798,7 +804,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await reply_no_context(message, config)
         return
     ctx_default_model = ctx.model
-    backend = get_backend_by_name(effective_backend(ctx, config))
+    backend = get_backend_by_name(scope_backend_name(scope, ctx, config))
     current_override = _model_overrides.get(scope)
     args = message.text.split() if message.text else []
 
@@ -836,6 +842,178 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         else "\n⚠️ Not a known alias or model ID — passing through as-is."
     )
     await reply_rich(message, f"Model overridden to {shown}.{warning} Use `/model reset` to revert.")
+
+
+# ── /backend ──
+
+
+def _build_backend_page(
+    scope: ChatScope, ctx: ContextConfig, config: Config
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Render the /backend status text plus a button per registered backend."""
+    ctx_default = effective_backend(ctx, config)
+    in_effect = scope_backend_name(scope, ctx, config)
+    overridden = scope in _backend_overrides
+
+    label = "override" if overridden else "context default"
+    lines = [f"**Backend:** `{in_effect}` ({label})"]
+    if overridden:
+        lines.append(f"**Context default:** `{ctx_default}`")
+
+    buttons: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                f"{'• ' if name == in_effect else ''}{name}",
+                callback_data=f"backend:{name}",
+            )
+        ]
+        for name in known_backends()
+    ]
+    if overridden:
+        buttons.append([
+            InlineKeyboardButton(
+                "↩ Revert to context default", callback_data="backend_reset"
+            )
+        ])
+
+    lines.append("")
+    lines.append(
+        "_The two backends keep separate conversation histories, so "
+        "switching starts a fresh session in this topic._"
+    )
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def _choose_backend(
+    scope: ChatScope, target: str, ctx: ContextConfig, config: Config
+) -> bool:
+    """Point *scope* at backend *target*; True when that was a change.
+
+    Naming the context's own backend clears the override rather than
+    recording it, so the page keeps saying "context default" for the state
+    that is one.  A selection that lands where the scope already is returns
+    False untouched: closing a live client to arrive where we are costs the
+    user a respawn and their /model pin for nothing.
+
+    A real change drops that pin, because aliases do not cross backends —
+    the SDK takes `sonnet`, OpenCode wants a provider-qualified
+    `openai/gpt-5.5`, so carrying one over hands the incoming binary a model
+    it has never heard of.  `/effort` survives; its levels are neutral.
+    """
+    pinned = None if target == effective_backend(ctx, config) else target
+    if _backend_overrides.get(scope) == pinned:
+        return False
+    if pinned is None:
+        _backend_overrides.pop(scope, None)
+    else:
+        _backend_overrides[scope] = pinned
+    _model_overrides.pop(scope, None)
+    await close_session(scope)
+    return True
+
+
+async def handle_backend_callback(
+    query: Any, data: str, config: Config, context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Handle /backend picker presses. Returns True if handled."""
+    if not (data.startswith("backend:") or data == "backend_reset"):
+        return False
+
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if not query.message:
+        await query.answer("Cannot determine chat.")
+        return True
+
+    scope = chat_scope_from_message(query.message)
+    ctx = resolve_context(config, await _get_context_name(scope, config, db))
+    if ctx is None:
+        await answer_no_context(query, config)
+        return True
+
+    if data == "backend_reset":
+        target = effective_backend(ctx, config)
+        answer = "Reverted to context default"
+    else:
+        target = data[len("backend:"):]
+        if target not in known_backends():
+            await query.answer(f"Unknown backend: {target}")
+            return True
+        answer = f"Backend set to {target}"
+
+    if not await _choose_backend(scope, target, ctx, config):
+        await query.answer(f"Already on {target}")
+        return True
+
+    text, markup = _build_backend_page(scope, ctx, config)
+    try:
+        await edit_message_rich(query.message, text, reply_markup=markup)
+    except Exception:
+        logger.exception("Failed to update backend message")
+
+    await query.answer(answer)
+    return True
+
+
+async def backend_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /backend command: show or override the backend for this chat.
+
+    Usage:
+        /backend            -- show the current backend and a picker
+        /backend <name>     -- run this topic on <name>
+        /backend reset      -- clear the override, revert to context default
+    """
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    message = update.effective_message
+    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    if not _is_private_chat(update):
+        await reply_rich(message, "This command can only be used in private chats.")
+        return
+
+    scope = chat_scope_from_message(message)
+    ctx = resolve_context(config, await _get_context_name(scope, config, db))
+    if ctx is None:
+        await reply_no_context(message, config)
+        return
+
+    ctx_default = effective_backend(ctx, config)
+    args = message.text.split() if message.text else []
+
+    if len(args) < 2:
+        text, markup = _build_backend_page(scope, ctx, config)
+        await reply_rich(message, text, reply_markup=markup)
+        return
+
+    # ``reset`` is the context default under another name, so both arrive at
+    # the same branch of _choose_backend rather than two that must agree.
+    target = args[1].lower()
+    if target == "reset":
+        target = ctx_default
+
+    if target not in known_backends():
+        names = ", ".join(f"`{n}`" for n in known_backends())
+        await reply_rich(
+            message, f"Unknown backend: `{target}`. Available: {names}"
+        )
+        return
+
+    if not await _choose_backend(scope, target, ctx, config):
+        await reply_rich(message, f"Already on `{target}`.")
+        return
+
+    if target == ctx_default:
+        await reply_rich(
+            message,
+            f"Backend override cleared. Using context default: `{ctx_default}`",
+        )
+        return
+    await reply_rich(
+        message,
+        f"Backend overridden to `{target}`. The next message starts a fresh "
+        f"session there. Use `/backend reset` to revert.",
+    )
 
 
 # ── /effort ──

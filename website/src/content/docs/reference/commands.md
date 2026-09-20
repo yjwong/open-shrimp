@@ -45,6 +45,22 @@ Show or change the model for the current session.
 
 Short names are supported: `sonnet`, `opus`, `haiku`. You can also use a full model ID.
 
+### `/backend [name|reset]`
+
+Show or change which agent backend serves this topic, independently of every other topic on the same project.
+
+- **No arguments** — shows the backend in effect, the context default, and a picker.
+- **With name** — pins this topic to `claude_sdk` or `opencode`.
+- **`reset`** — clears the pin and reverts to the context's `backend:` key.
+
+```
+/backend            # show current backend
+/backend opencode   # run this topic on OpenCode
+/backend reset      # revert to the context default
+```
+
+The two backends keep separate conversation histories, so switching closes the current session and the next message starts a fresh one. Any `/model` override goes with it — model names are backend-specific.
+
 ### `/resume [session_id]`
 
 List recent sessions or resume a specific one.

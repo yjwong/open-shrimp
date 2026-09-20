@@ -248,6 +248,7 @@ Or deploy as a systemd service for always-on access — see [Deployment](#deploy
 | `/status` | Show current context, session, and running state |
 | `/cancel` | Abort a running agent invocation |
 | `/model [name]` | Show or override the model for this chat |
+| `/backend [name]` | Show or override the agent backend for this chat (claude_sdk/opencode) |
 | `/effort [level]` | Show or override the thinking effort level (low/medium/high/xhigh/max) |
 | `/resume` | List and resume a previous session |
 | `/add_dir [path]` | Add, remove, or list extra working directories for the context |

@@ -42,8 +42,10 @@ from open_shrimp.events.pickup import handle_pickup_callback
 from open_shrimp.handlers.approval import handle_approval_callback
 from open_shrimp.handlers.commands import (
     add_dir_handler,
+    backend_handler,
     cancel_handler,
     handle_add_dir_callback,
+    handle_backend_callback,
     clear_handler,
     config_handler,
     context_handler,
@@ -114,6 +116,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     # /model picker selection and reset
     if await handle_model_callback(query, data, config, context):
+        return
+
+    # /backend picker selection and reset
+    if await handle_backend_callback(query, data, config, context):
         return
 
     # /resume session selection
@@ -378,6 +384,7 @@ def build_application(
     app.add_handler(CommandHandler("cancel", cancel_handler))
     app.add_handler(CommandHandler("resume", resume_handler))
     app.add_handler(CommandHandler("model", model_handler))
+    app.add_handler(CommandHandler("backend", backend_handler))
     app.add_handler(CommandHandler("effort", effort_handler))
     app.add_handler(CommandHandler("add_dir", add_dir_handler))
     app.add_handler(CommandHandler("review", review_handler))
@@ -560,6 +567,7 @@ async def run_bot(
     # global state and should not be visible/usable in group chats.
     private_commands = list(common_commands) + [
         BotCommand("model", "Show or override the model for this chat"),
+        BotCommand("backend", "Show or override the agent backend for this chat"),
         BotCommand("effort", "Show or override the thinking effort level"),
         BotCommand("add_dir", "Add a working directory to the context"),
         BotCommand("config", "Edit bot configuration"),

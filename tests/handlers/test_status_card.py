@@ -49,6 +49,7 @@ def clean_scope_state():
         state._injectable_sessions,
         state._setup_queues,
         state._active_bg_tasks,
+        state._backend_overrides,
         state._model_overrides,
         state._effort_overrides,
         state._pending_approvals,

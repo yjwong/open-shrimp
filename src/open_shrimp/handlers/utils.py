@@ -8,7 +8,7 @@ from typing import Any
 import aiosqlite
 from telegram import Bot, Message, Update
 
-from open_shrimp.config import Config, ContextConfig
+from open_shrimp.config import Config, ContextConfig, effective_backend
 from open_shrimp.markdown import escape_rich
 from open_shrimp.rich_message import (
     edit_rich_unchanged_ok,
@@ -24,6 +24,7 @@ from open_shrimp.db import (
 )
 from open_shrimp.handlers.state import (
     _additional_dir_cache,
+    _backend_overrides,
     _effort_overrides,
     _model_overrides,
 )
@@ -42,15 +43,19 @@ def chat_scope_from_message(message: Message) -> ChatScope:
 def get_backend_for_scope(bot_data: dict[str, Any], scope: ChatScope) -> Any | None:
     """Resolve the active backend for a ``ChatScope``.
 
-    Per-context overrides take precedence: if the scope has a live agent
-    session, that session's pinned backend is returned (so the capability
-    gate for ``/login``, ``/mcp``, ``/usage`` matches what is actually
-    serving the turn).  Otherwise falls back to the process-wide default
-    installed by ``run_bot``.  Returns ``None`` when no backend has been
-    installed at all.
+    A ``/backend`` override wins, so the capability gate for ``/login``,
+    ``/mcp`` and ``/usage`` follows the pick immediately rather than from the
+    next turn on.  Failing that, a live agent session's pinned backend is
+    returned (so the gate matches what is actually serving the turn), then
+    the process-wide default installed by ``run_bot``.  Returns ``None``
+    when no backend has been installed at all.
     """
+    from open_shrimp.backend.factory import get_backend_by_name
     from open_shrimp.client_manager import get_session
 
+    override = _backend_overrides.get(scope)
+    if override is not None:
+        return get_backend_by_name(override)
     existing = get_session(scope)
     if existing is not None and existing.backend is not None:
         return existing.backend
@@ -112,10 +117,10 @@ async def _get_context(
 ) -> tuple[str, ContextConfig] | None:
     """Get context name and config for a scope, or ``None`` if none is bound.
 
-    If a per-scope model or effort override is active (via ``/model`` or
-    ``/effort``), returns a shallow copy of the context config with the
-    overridden value.  Runtime additional directories (via ``/add_dir``)
-    are merged in.
+    If a per-scope backend, model or effort override is active (via
+    ``/backend``, ``/model`` or ``/effort``), returns a shallow copy of the
+    context config with the overridden value.  Runtime additional directories
+    (via ``/add_dir``) are merged in.
     """
     from dataclasses import replace
 
@@ -126,14 +131,17 @@ async def _get_context(
     if ctx is None:
         return None
 
+    backend_override = _backend_overrides.get(scope)
     model_override = _model_overrides.get(scope)
     effort_override = _effort_overrides.get(scope)
 
     # Merge runtime additional directories from DB cache.
     extra_dirs = await _get_runtime_dirs(scope, name, db)
 
-    if model_override or effort_override or extra_dirs:
+    if backend_override or model_override or effort_override or extra_dirs:
         kwargs: dict[str, Any] = {}
+        if backend_override:
+            kwargs["backend"] = backend_override
         if model_override:
             kwargs["model"] = model_override
         if effort_override:
@@ -143,6 +151,19 @@ async def _get_context(
         ctx = replace(ctx, **kwargs)
 
     return name, ctx
+
+
+def scope_backend_name(
+    scope: ChatScope, ctx: ContextConfig, config: Config
+) -> str:
+    """The backend name serving *scope*, ``/backend`` override included.
+
+    For callers holding the raw config entry rather than ``_get_context``'s
+    merged copy — a page showing the override and the context default side by
+    side needs both, so it cannot read the copy that has already folded one
+    into the other.
+    """
+    return _backend_overrides.get(scope) or effective_backend(ctx, config)
 
 
 # Said wherever a scope needs a project and has none.  Every branch names the

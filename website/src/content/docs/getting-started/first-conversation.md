@@ -57,7 +57,7 @@ See the full [Commands reference](/reference/commands/) for all available comman
 
 ## Forum topics
 
-If your bot is in a Telegram group with forum topics enabled, each topic gets its own independent session — separate context, conversation history, and approval state. The bot responds to all messages in forum topics without needing @mentions.
+If your bot is in a Telegram group with forum topics enabled, each topic gets its own independent session — separate context, conversation history, approval state, and choice of [agent backend](/guides/backends/). The bot responds to all messages in forum topics without needing @mentions.
 
 ## Next steps
 

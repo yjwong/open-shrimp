@@ -5,7 +5,7 @@ sidebar:
   order: 1.5
 ---
 
-An *agent backend* is the runtime that actually drives the coding agent behind OpenShrimp. The top-level `backend:` key selects it for the whole instance, and any context can override it with its own `backend:` key. Everything else — contexts, tool approval, sandboxes, sessions — works the same regardless of which backend is active.
+An *agent backend* is the runtime that actually drives the coding agent behind OpenShrimp. The top-level `backend:` key selects it for the whole instance, any context can override it with its own `backend:` key, and `/backend` in a topic overrides both for that topic alone. Everything else — contexts, tool approval, sandboxes, sessions — works the same regardless of which backend is active.
 
 Two backends ship:
 
@@ -31,6 +31,12 @@ There are **two** completely separate `backend:` settings. Don't conflate them:
 
 A context can set both at once, e.g. the `opencode` agent runtime running inside a `libvirt` sandbox.
 :::
+
+## Per-topic selection
+
+`/backend` pins one forum topic to a backend, ahead of both the context's `backend:` key and the global default. Two topics bound to the same project can therefore run different backends against the same working directory — ask OpenCode for a second opinion in one topic while Claude keeps the thread in another.
+
+The pin lasts until `/clear`, a context switch, or `/backend reset`, and it does not survive a bot restart. Switching closes the topic's session: the two backends keep separate conversation histories, so there is nothing to carry across. Any `/model` override is dropped at the same time, because model names are backend-specific.
 
 ## OpenCode setup
 
