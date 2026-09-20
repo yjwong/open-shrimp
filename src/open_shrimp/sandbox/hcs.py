@@ -355,9 +355,13 @@ class HcsSandbox:
         self._project_dir = project_dir
         self._additional_directories = additional_directories or []
         self._instance_prefix = instance_prefix
-        # The agent runtimes this guest hosts, keyed by name and in
-        # registration order.
+        # Every agent runtime this guest is laid out for, keyed by name: the
+        # compute system's 9p share list is fixed when it is created, so a
+        # share appearing later costs a guest restart.
         self._runtimes: dict[str, AgentRuntime] = {r.name: r for r in runtimes}
+        # The subset a caller has taken into use.  Only these get their CLI
+        # installed into the rootfs and their credentials written.
+        self._in_use: dict[str, AgentRuntime] = {}
 
         # The guest sees drive-relative POSIX paths (C:\a\b -> /a/b), and the
         # approval layer maps a guest path back with os.path.realpath, which on
@@ -412,11 +416,12 @@ class HcsSandbox:
     # -- registered runtimes --------------------------------------------------
 
     def add_runtime(self, runtime: AgentRuntime) -> None:
-        self._runtimes.setdefault(runtime.name, runtime)
+        self._runtimes[runtime.name] = runtime
+        self._in_use[runtime.name] = runtime
 
     @property
-    def runtime_names(self) -> set[str]:
-        return set(self._runtimes)
+    def runtimes_in_use(self) -> set[str]:
+        return set(self._in_use)
 
     def _agent_home_shares(self) -> list[tuple[AgentRuntime, Path]]:
         """Every registered runtime's agent home, one share each, with its
@@ -1207,9 +1212,9 @@ class HcsSandbox:
     # -- Sandbox protocol: provisioning + launch -----------------------------
 
     def provision_workspace(self, *, log_file: Path | None = None) -> None:
-        """Install every registered agent CLI into the rootfs and sync each
-        runtime's credentials into its own host-side agent home."""
-        for runtime in self._runtimes.values():
+        """Install the agent CLI of every runtime in use into the rootfs and
+        sync each one's credentials into its own host-side agent home."""
+        for runtime in self._in_use.values():
             bundle = runtime.image_bundle
             if bundle is not None and bundle.hcs_install is not None:
                 bundle.hcs_install(self)

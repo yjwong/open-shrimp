@@ -97,7 +97,13 @@ class Sandbox(Protocol):
 
     A sandbox hosts a *set* of agent runtimes.  Nothing it derives from one —
     home dir, guest argv0, task-tmp path — may be read off "the" runtime; each
-    is a union over the registered set or a lookup keyed by runtime name.
+    is a union over the runtimes the guest is laid out for, or a lookup keyed
+    by runtime name.
+
+    That layout set is wider than the set in use: the guest's shares are fixed
+    when it is defined, so it is laid out for every backend a context could
+    switch to and only the runtimes a caller actually takes into use get their
+    CLI installed.
     """
 
     @property
@@ -106,22 +112,23 @@ class Sandbox(Protocol):
         ...
 
     def add_runtime(self, runtime: "AgentRuntime") -> None:
-        """Register *runtime* alongside the ones this guest already hosts.
+        """Take *runtime* into use in this guest.
 
-        Idempotent by :attr:`AgentRuntime.name`.  The caller re-runs the
-        provision path afterwards to mount the newcomer's shares and install
-        its CLI.
+        Idempotent by :attr:`AgentRuntime.name`, and the caller's object wins:
+        it carries the live model and provider, which the layout set's
+        same-named runtime does not.  The guest is already laid out for it, so
+        the caller's provision pass has only its CLI left to install.
         """
         ...
 
     @property
-    def runtime_names(self) -> set[str]:
-        """The names of the runtimes this guest hosts.
+    def runtimes_in_use(self) -> set[str]:
+        """The names of the runtimes a caller has taken into use here.
 
-        The sandbox is the only record of it — nothing persists the hosted set
-        across process starts — so ``SandboxManager`` asks the cached sandbox
-        rather than keeping a second table that has to be invalidated in step
-        with the cache.
+        The sandbox is the only record of it — nothing persists the set across
+        process starts — so ``SandboxManager`` asks the cached sandbox rather
+        than keeping a second table that has to be invalidated in step with
+        the cache.
         """
         ...
 
@@ -205,11 +212,12 @@ class Sandbox(Protocol):
 
         Idempotent — safe to call on every session start.
 
-        This installs *every* registered runtime's CLI, not only the one about
+        This installs the CLI of every runtime *in use*, not only the one about
         to be launched: each installer is itself idempotent and
         version-probing, so a repeat call costs one version probe, while a
         runtime whose CLI is missing when its topic dispatches would have to
-        install it mid-turn.
+        install it mid-turn.  The runtimes the guest is merely laid out for are
+        not installed — that would put a download into every context's build.
         """
         ...
 

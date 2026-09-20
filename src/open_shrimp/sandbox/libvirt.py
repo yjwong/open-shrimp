@@ -207,9 +207,13 @@ class LibvirtSandbox:
         self._virtiofsd_procs: list[subprocess.Popen[bytes]] = []
         self._use_virtiofs: bool = find_virtiofsd() is not None
 
-        # The agent runtimes this guest hosts, keyed by name and in
-        # registration order.
+        # Every agent runtime this guest is laid out for, keyed by name: the
+        # domain's virtiofs device set is fixed when it is defined, so a tag
+        # appearing later costs an ACPI shutdown and a cold boot.
         self._runtimes: dict[str, AgentRuntime] = {r.name: r for r in runtimes}
+        # The subset a caller has taken into use.  Only these get their CLI
+        # installed into the guest and their credentials written.
+        self._in_use: dict[str, AgentRuntime] = {}
 
         self._sdir = state_dir_for(context_name)
         self._dom_name = _domain_name(context_name, instance_prefix)
@@ -246,11 +250,12 @@ class LibvirtSandbox:
         return "10.0.2.2"
 
     def add_runtime(self, runtime: AgentRuntime) -> None:
-        self._runtimes.setdefault(runtime.name, runtime)
+        self._runtimes[runtime.name] = runtime
+        self._in_use[runtime.name] = runtime
 
     @property
-    def runtime_names(self) -> set[str]:
-        return set(self._runtimes)
+    def runtimes_in_use(self) -> set[str]:
+        return set(self._in_use)
 
     def _served_home_mounts(self) -> tuple[GuestMount, ...]:
         """The union of every registered runtime's served-launch host dirs."""
@@ -649,7 +654,7 @@ class LibvirtSandbox:
         # Cloud-init creates a single ``SANDBOX_USER`` (openshrimp) user in the
         # guest with NOPASSWD sudo (see ``_build_cloud_init_user_data``); both
         # the Claude and OpenCode installers SSH in as that user.
-        for runtime in self._runtimes.values():
+        for runtime in self._in_use.values():
             bundle = runtime.image_bundle
             if bundle is not None and bundle.libvirt_install is not None:
                 bundle.libvirt_install(

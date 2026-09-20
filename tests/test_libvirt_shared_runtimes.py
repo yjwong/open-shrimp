@@ -49,6 +49,7 @@ def _sandbox(tmp_path: Path, *runtimes: Any) -> LibvirtSandbox:
     sb._sdir = tmp_path / "vm"
     sb._tmp_dir = sb._sdir / "tmp"
     sb._runtimes = {r.name: r for r in runtimes}
+    sb._in_use = {}
     return sb
 
 
@@ -127,6 +128,23 @@ def test_the_tag_set_does_not_depend_on_which_topic_dispatched_first(tmp_path):
     }
     assert a_mounts == b_mounts
     assert a_ro == b_ro
+
+
+def test_the_plan_covers_a_backend_nobody_has_launched(tmp_path):
+    """The domain's filesystem devices are fixed when it is defined, so the
+    plan is built from the runtimes the guest is laid out for and never
+    consults the ones in use.  A tag that arrived on a backend switch would
+    cost an ACPI shutdown and a cold boot, with the running agent going down
+    with the guest."""
+    claude, opencode = _claude(tmp_path), _opencode()
+    sb = _sandbox(tmp_path, claude, opencode)
+    sb.add_runtime(claude)
+
+    all_dirs, _mounts, _ro = sb._shared_dirs_and_overrides()
+
+    assert sb.runtimes_in_use == {"claude"}
+    for mount in opencode.launch.home_mounts:
+        assert str(mount.host_dir) in all_dirs
 
 
 def _second_cli(tmp_path: Path) -> Any:

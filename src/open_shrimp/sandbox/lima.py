@@ -150,9 +150,13 @@ class LimaSandbox:
         self._computer_use = computer_use
         self._guest_os = guest_os
 
-        # The agent runtimes this guest hosts, keyed by name and in
-        # registration order.
+        # Every agent runtime this guest is laid out for, keyed by name: the
+        # instance's mount set is settled when it is written, so a mount
+        # appearing later costs a stop and a restart of the VM.
         self._runtimes: dict[str, AgentRuntime] = {r.name: r for r in runtimes}
+        # The subset a caller has taken into use.  Only these get their CLI
+        # installed into the guest and their credentials written.
+        self._in_use: dict[str, AgentRuntime] = {}
 
         self._sdir = state_dir_for(context_name)
         self._inst_name = _instance_name(context_name, instance_prefix)
@@ -180,11 +184,12 @@ class LimaSandbox:
         return "192.168.5.2"
 
     def add_runtime(self, runtime: AgentRuntime) -> None:
-        self._runtimes.setdefault(runtime.name, runtime)
+        self._runtimes[runtime.name] = runtime
+        self._in_use[runtime.name] = runtime
 
     @property
-    def runtime_names(self) -> set[str]:
-        return set(self._runtimes)
+    def runtimes_in_use(self) -> set[str]:
+        return set(self._in_use)
 
     def _task_tmp_guest_paths(self) -> list[str]:
         """The guest paths the hosted agents write background-task output to.
@@ -535,7 +540,7 @@ class LimaSandbox:
                     exc,
                 )
 
-        for runtime in self._runtimes.values():
+        for runtime in self._in_use.values():
             bundle = runtime.image_bundle
             if bundle is not None and bundle.lima_install is not None:
                 bundle.lima_install(self._limactl, self._inst_name, self._guest_os)

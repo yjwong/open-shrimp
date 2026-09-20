@@ -86,11 +86,16 @@ class OpenCodeBackend:
         injected host ``auth.json``; ``context_name`` lets the runtime resolve
         the per-context host dirs the sandbox actually bind-mounts, so
         *state_dir* goes unread.
+
+        ``model=None`` builds the profile for its shares alone — what a sandbox
+        needs to lay a guest out for a backend nobody has launched yet.  No
+        provider is known then, so ``inject`` writes no ``auth.json``; a launch
+        still fails on an unqualified model, in ``to_opencode``.
         """
         from open_shrimp.backend.opencode.options import split_provider_model
         from open_shrimp.backend.opencode.runtime import opencode_runtime
 
-        provider_id = split_provider_model(model)[0]
+        provider_id = split_provider_model(model)[0] if model else None
         return opencode_runtime(
             context_name=context_name,
             provider_id=provider_id,

@@ -14,6 +14,7 @@ def test_libvirt_provision_continues_when_security_key_helper_install_fails(
     sandbox._computer_use = True
     sandbox._phone_use = False
     sandbox._runtimes = {}
+    sandbox._in_use = {}
     sandbox._context_name = "test-context"
 
     def fail_install() -> None:
@@ -33,6 +34,7 @@ def test_lima_provision_continues_when_security_key_helper_install_fails(
     sandbox = LimaSandbox.__new__(LimaSandbox)
     sandbox._computer_use = True
     sandbox._runtimes = {}
+    sandbox._in_use = {}
     sandbox._context_name = "test-context"
     # Enough for the task-output link pass that follows the failed install:
     # it resolves the guest path the instance mounts the context's ``tmp`` at.

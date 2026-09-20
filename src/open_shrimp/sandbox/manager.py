@@ -95,37 +95,79 @@ def destroy_contexts_background(
 def _cached_sandbox_for(
     mgr: Any, context_name: str, runtime: "AgentRuntime | None",
 ) -> Sandbox | None:
-    """The cached sandbox for *context_name*, hosting *runtime* as well.
+    """The cached sandbox for *context_name*, running *runtime* as well.
 
-    A sandbox already hosting *runtime* (or asked for no runtime at all) comes
-    back untouched.  One hosting only a different runtime takes this one on
-    too: every backend's mount plan is a union over its registered runtimes,
-    so the caller's provision pass mounts the newcomer's shares and installs
-    its CLI into the guest that is already there.
+    A sandbox already running *runtime* (or asked for no runtime at all) comes
+    back untouched.  One running only a different runtime takes this one on
+    too: the guest was laid out for every backend
+    (:func:`_runtimes_for_layout`), so the caller's provision pass has only
+    the newcomer's CLI left to install in the guest that is already there.
     """
     cached = mgr._sandbox_cache.get(context_name)
     if cached is None:
         return None
-    if runtime is None or runtime.name in cached.runtime_names:
+    if runtime is None or runtime.name in cached.runtimes_in_use:
         return cached
     cached.add_runtime(runtime)
     logger.info(
-        "Context '%s' on %s now hosts runtimes %s in one guest",
+        "Context '%s' on %s now runs %s in one guest",
         context_name, mgr._backend_label,
-        ", ".join(sorted(cached.runtime_names)),
+        ", ".join(sorted(cached.runtimes_in_use)),
     )
     return cached
 
 
+def _runtimes_for_layout(
+    state_dir: Path, context_name: str,
+) -> list["AgentRuntime"]:
+    """Every backend's runtime for *context_name*, built for its shares alone.
+
+    A guest's share plan is fixed when the guest is defined — one virtiofs
+    device per host dir in the libvirt domain XML, one entry in a Lima
+    instance's mount list, one 9p share on an HCS compute system.  A share
+    that first appears when a context switches backend therefore costs a stop,
+    a re-define and a cold boot, taking down whatever was running in the guest
+    with it.  Laying every backend's shares out up front makes the plan the
+    same whichever backend a context dispatches with, and stable across a
+    restart that happens to dispatch the other way round.
+
+    The price is per guest, not per switch: a context that never leaves one
+    backend still carries the other's shares — for libvirt, one ``virtiofsd``
+    process and a guest mount each, for the life of the VM.  Its CLI is not
+    installed until :meth:`Sandbox.add_runtime` takes the runtime into use.
+
+    ``model=None``: none of these is launched, and the one that is arrives
+    through ``create_sandbox(runtime=...)`` carrying the context's own model.
+    """
+    from open_shrimp.backend.factory import get_backend_by_name, known_backends
+
+    layout: list[AgentRuntime] = []
+    for name in known_backends():
+        try:
+            layout.append(get_backend_by_name(name).make_runtime(
+                state_dir, context_name=context_name, model=None,
+            ))
+        except Exception:
+            logger.warning(
+                "Backend '%s' could not describe its sandbox shares for "
+                "context '%s'; switching to it will re-define the guest",
+                name, context_name, exc_info=True,
+            )
+    return layout
+
+
 def _register_sandbox(
     mgr: Any, context_name: str, sandbox: Sandbox,
+    runtime: "AgentRuntime | None",
 ) -> Sandbox:
-    """Cache *sandbox* as *context_name*'s guest.
+    """Cache *sandbox* as *context_name*'s guest, running *runtime*.
 
-    What it hosts is the sandbox's own answer
-    (:attr:`Sandbox.runtime_names`), off the ``runtimes=`` its constructor
-    already took.
+    The guest is laid out for every backend, so taking the caller's runtime
+    into use here is what separates "installs its CLI" from "has a share
+    waiting for it".
     """
+    if runtime is not None:
+        sandbox.add_runtime(runtime)
     mgr._sandbox_cache[context_name] = sandbox
     return sandbox
 
@@ -430,9 +472,11 @@ class LimaSandboxManager:
             instance_prefix=self._instance_prefix,
             computer_use=context.sandbox.computer_use,
             guest_os=context.sandbox.guest_os,
-            runtimes=[runtime] if runtime is not None else [],
+            runtimes=_runtimes_for_layout(
+                self.context_state_dir(context_name), context_name,
+            ),
         )
-        return _register_sandbox(self, context_name, sandbox)
+        return _register_sandbox(self, context_name, sandbox, runtime)
 
     # -- Build logging --------------------------------------------------------
 
@@ -776,9 +820,11 @@ class LibvirtSandboxManager:
             computer_use=context.sandbox.computer_use,
             virgl=context.sandbox.virgl,
             phone_use=context.sandbox.phone_use,
-            runtimes=[runtime] if runtime is not None else [],
+            runtimes=_runtimes_for_layout(
+                self.context_state_dir(context_name), context_name,
+            ),
         )
-        return _register_sandbox(self, context_name, sandbox)
+        return _register_sandbox(self, context_name, sandbox, runtime)
 
     # -- Build logging --------------------------------------------------------
 
@@ -945,9 +991,11 @@ class HcsSandboxManager:
             state_dir=self._state_dir / context_name,
             additional_directories=context.additional_directories or None,
             instance_prefix=self._instance_prefix,
-            runtimes=[runtime] if runtime is not None else [],
+            runtimes=_runtimes_for_layout(
+                self.context_state_dir(context_name), context_name,
+            ),
         )
-        return _register_sandbox(self, context_name, sandbox)
+        return _register_sandbox(self, context_name, sandbox, runtime)
 
     # -- Build logging --------------------------------------------------------
 
