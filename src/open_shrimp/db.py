@@ -1,8 +1,10 @@
 """SQLite persistence for OpenShrimp.
 
-Maps (chat_id, message_thread_id, context_name) -> session_id so sessions
-can be resumed across bot restarts.  Forum topics (threads) get independent
-sessions within the same chat.
+Maps (chat_id, message_thread_id, context_name, backend) -> session_id so
+sessions can be resumed across bot restarts.  Forum topics (threads) get
+independent sessions within the same chat, and each backend keeps its own
+session per context: session ids are minted by the backend and mean nothing
+to the other one, so switching back and forth resumes where each left off.
 
 Also stores scheduled tasks for the events schedule runner.
 """
@@ -47,8 +49,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     chat_id INTEGER NOT NULL,
     message_thread_id INTEGER NOT NULL DEFAULT 0,
     context_name TEXT NOT NULL,
+    backend TEXT NOT NULL,
     session_id TEXT NOT NULL,
-    PRIMARY KEY (chat_id, message_thread_id, context_name)
+    PRIMARY KEY (chat_id, message_thread_id, context_name, backend)
 )
 """
 
@@ -330,6 +333,39 @@ async def _migrate_schema(db: aiosqlite.Connection) -> None:
     logger.info("Database schema migration complete.")
 
 
+async def _migrate_sessions_backend(
+    db: aiosqlite.Connection, default_backend: str | None
+) -> None:
+    """Widen the sessions key with the backend that minted the session id.
+
+    Rows written before the column existed name no backend, and the id
+    alone cannot say which one wrote it.  They are stamped with
+    *default_backend* — the top-level ``backend:``, which served every
+    context that did not override it.  A row that was in fact the other
+    backend's fails to resume once and starts fresh, exactly as it did
+    before this column existed.  With no default to stamp (callers that
+    have no config in hand, such as tests), the rows go.
+    """
+    cursor = await db.execute("PRAGMA table_info(sessions)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "backend" in columns:
+        return
+
+    logger.info("Migrating sessions to a per-backend key...")
+    await db.execute("ALTER TABLE sessions RENAME TO sessions_old")
+    await db.execute(_CREATE_SESSIONS_TABLE)
+    if default_backend is not None:
+        await db.execute(
+            "INSERT INTO sessions "
+            "(chat_id, message_thread_id, context_name, backend, session_id) "
+            "SELECT chat_id, message_thread_id, context_name, ?, session_id "
+            "FROM sessions_old",
+            (default_backend,),
+        )
+    await db.execute("DROP TABLE sessions_old")
+    await db.commit()
+
+
 async def _migrate_scheduled_tasks_events(db: aiosqlite.Connection) -> None:
     """Drop the chat binding (and ``disabled`` flag) from scheduled_tasks.
 
@@ -402,8 +438,14 @@ async def _migrate_inbound_events_columns(db: aiosqlite.Connection) -> None:
         await db.commit()
 
 
-async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
-    """Create the database and tables, return the connection."""
+async def init_db(
+    db_path: Path | None = None, *, default_backend: str | None = None
+) -> aiosqlite.Connection:
+    """Create the database and tables, return the connection.
+
+    *default_backend* is the top-level ``backend:`` name, used only to
+    stamp session rows predating the per-backend key.
+    """
     if db_path is None:
         db_path = _default_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -425,6 +467,9 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
     await db.execute(_CREATE_ONCE_CLAIMS_TABLE)
     await db.commit()
     await _migrate_schema(db)
+    # After _migrate_schema: that one rebuilds sessions from the pre-thread
+    # shape, so the backend column has to be added to whatever it leaves.
+    await _migrate_sessions_backend(db, default_backend)
     await _migrate_scheduled_tasks_events(db)
     await _migrate_security_key_android_columns(db)
     await _migrate_inbound_events_columns(db)
@@ -440,41 +485,77 @@ async def init_db(db_path: Path | None = None) -> aiosqlite.Connection:
 
 
 async def get_session_id(
-    db: aiosqlite.Connection, scope: ChatScope, context_name: str
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    context_name: str,
+    backend: str,
 ) -> str | None:
-    """Return the session_id for (scope, context_name), or None."""
+    """Return the session_id for (scope, context_name, backend), or None."""
     cursor = await db.execute(
         "SELECT session_id FROM sessions "
-        "WHERE chat_id = ? AND message_thread_id = ? AND context_name = ?",
-        (scope.chat_id, _thread_id_to_db(scope.thread_id), context_name),
+        "WHERE chat_id = ? AND message_thread_id = ? AND context_name = ? "
+        "AND backend = ?",
+        (
+            scope.chat_id,
+            _thread_id_to_db(scope.thread_id),
+            context_name,
+            backend,
+        ),
     )
     row = await cursor.fetchone()
     return row[0] if row else None
 
 
 async def set_session_id(
-    db: aiosqlite.Connection, scope: ChatScope, context_name: str, session_id: str
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    context_name: str,
+    backend: str,
+    session_id: str,
 ) -> None:
-    """Insert or update the session_id for (scope, context_name)."""
+    """Insert or update the session_id for (scope, context_name, backend)."""
     await db.execute(
-        "INSERT INTO sessions (chat_id, message_thread_id, context_name, session_id) "
-        "VALUES (?, ?, ?, ?) "
-        "ON CONFLICT (chat_id, message_thread_id, context_name) "
+        "INSERT INTO sessions "
+        "(chat_id, message_thread_id, context_name, backend, session_id) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT (chat_id, message_thread_id, context_name, backend) "
         "DO UPDATE SET session_id = excluded.session_id",
-        (scope.chat_id, _thread_id_to_db(scope.thread_id), context_name, session_id),
+        (
+            scope.chat_id,
+            _thread_id_to_db(scope.thread_id),
+            context_name,
+            backend,
+            session_id,
+        ),
     )
     await db.commit()
 
 
 async def delete_session(
-    db: aiosqlite.Connection, scope: ChatScope, context_name: str
+    db: aiosqlite.Connection,
+    scope: ChatScope,
+    context_name: str,
+    backend: str | None = None,
 ) -> None:
-    """Remove the session mapping for (scope, context_name)."""
-    await db.execute(
+    """Remove the session mapping for (scope, context_name).
+
+    A *backend* of ``None`` removes every backend's mapping for that
+    context, which is what ``/clear`` means: the scope keeps no history on
+    either binary, not just the one currently serving it.
+    """
+    sql = (
         "DELETE FROM sessions "
-        "WHERE chat_id = ? AND message_thread_id = ? AND context_name = ?",
-        (scope.chat_id, _thread_id_to_db(scope.thread_id), context_name),
+        "WHERE chat_id = ? AND message_thread_id = ? AND context_name = ?"
     )
+    params: tuple[object, ...] = (
+        scope.chat_id,
+        _thread_id_to_db(scope.thread_id),
+        context_name,
+    )
+    if backend is not None:
+        sql += " AND backend = ?"
+        params += (backend,)
+    await db.execute(sql, params)
     await db.commit()
 
 

@@ -537,7 +537,7 @@ async def run_bot_async(config_path: str, stop_event: asyncio.Event | None = Non
         )
         control = None
 
-    db = await init_db()
+    db = await init_db(default_backend=config.backend)
 
     # Start tunnel if configured (before the bot, so public_url is ready).
     tunnel_proc = None

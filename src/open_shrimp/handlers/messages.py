@@ -34,6 +34,7 @@ from open_shrimp.client_manager import (
 from open_shrimp.config import (
     Config,
     ContextConfig,
+    effective_backend,
     is_sandboxed,
     sandbox_backend,
 )
@@ -934,7 +935,10 @@ async def _start_agent_task(
         await send_no_context(context.bot, scope, config)
         return
     ctx_name, ctx_config = resolved
-    session_id = await get_session_id(db, scope, ctx_name)
+    # Keyed by backend: the resume id belongs to the binary that minted it,
+    # and the other one rejects it.
+    backend_name = effective_backend(ctx_config, config)
+    session_id = await get_session_id(db, scope, ctx_name, backend_name)
 
     # Ensure pinned status message exists (e.g. after a restart)
     if not await get_pinned_message_id(db, scope):
@@ -1296,7 +1300,9 @@ async def _start_agent_task(
                     )
 
                     if result.session_id:
-                        await set_session_id(db, scope, ctx_name, result.session_id)
+                        await set_session_id(
+                            db, scope, ctx_name, backend_name, result.session_id
+                        )
 
                     if result.model_usage or result.turn_usage:
                         await _update_pinned_status(
@@ -1469,7 +1475,9 @@ async def _start_agent_task(
             _scope_todos.pop(scope, None)
             if draft_state.session_id:
                 try:
-                    await set_session_id(db, scope, ctx_name, draft_state.session_id)
+                    await set_session_id(
+                        db, scope, ctx_name, backend_name, draft_state.session_id
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to save session on cleanup for scope %s", scope

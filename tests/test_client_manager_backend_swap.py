@@ -1,6 +1,7 @@
 """When the resolved backend for a scope changes, the live client must be
-torn down and rebuilt against the new backend.  Session IDs are
-backend-scoped, so the old session id is dropped on the rebuild.
+torn down and rebuilt against the new backend.  The persisted mapping is
+keyed by backend, so the resume id reaching ``get_or_create_session`` is
+already the incoming backend's and the rebuild carries it through.
 
 Covers both the same-context-but-backend-edited path and the
 ``/context`` cross-backend swap, which share the close+reopen body.
@@ -158,15 +159,14 @@ async def test_close_session_keeps_a_target_a_sibling_topic_still_uses(
     assert unregistered == []
 
 
-async def test_backend_swap_clears_persisted_session(
+async def test_backend_swap_resumes_the_incoming_backends_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A live backend swap must also drop the persisted session mapping.
+    """A live swap rebuilds on the resume id the caller looked up.
 
-    The stored id belongs to the old backend; leaving it would make a later
-    cold start try to resume a foreign session (failing over to fresh with a
-    spurious warning).  ``get_or_create_session`` clears it via
-    ``delete_session`` when it closes the old client.
+    That lookup is already keyed by the incoming backend, so the id here is
+    OpenCode's own — the swap must hand it to the new client rather than
+    discarding it, or switching back and forth would lose both histories.
     """
     sdk = _make_backend("claude_sdk")
     oc = _make_backend("opencode")
@@ -175,8 +175,6 @@ async def test_backend_swap_clears_persisted_session(
         "get_backend_by_name",
         lambda name: {"claude_sdk": sdk, "opencode": oc}[name],
     )
-    deleted = AsyncMock()
-    monkeypatch.setattr(cm, "delete_session", deleted)
 
     scope = ChatScope(chat_id=7, thread_id=None)
     old_client = MagicMock(spec=[])
@@ -184,37 +182,35 @@ async def test_backend_swap_clears_persisted_session(
     old_client.disconnect = AsyncMock()
     cm._active_sessions[scope] = cm.AgentSession(
         client=old_client,
-        session_id="old-session-id",
+        session_id="claude-session-id",
         context_name="ctx",
         backend=sdk,
     )
 
     ctx = _FakeCtx(backend="opencode")
     cb = MagicMock(spec=[])
-    db = MagicMock(name="db")
 
     session = await cm.get_or_create_session(
         scope=scope,
         context_name="ctx",
         context=ctx,
-        session_id="old-session-id",
+        session_id="opencode-session-id",
         callback_context=cb,
-        db=db,
+        db=MagicMock(name="db"),
     )
 
-    deleted.assert_awaited_once_with(db, scope, "ctx")
-    # The rebuilt session must not carry the old backend's resume id.
-    assert session.session_id is None
+    old_client.disconnect.assert_awaited_once()
+    assert session.session_id == "opencode-session-id"
     assert session.backend is oc
 
 
 async def test_backend_swap_notifies_user(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A live backend swap tells the user the conversation reset.
+    """A live backend swap tells the user the conversation moved.
 
-    Sessions are backend-scoped, so the swap silently drops history; the
-    notice explains why the bot appears to have forgotten the conversation.
+    The incoming backend answers from its own session, so the topic reads
+    as a different conversation; the notice explains why.
     """
     sdk = _make_backend("claude_sdk")
     oc = _make_backend("opencode")
@@ -223,7 +219,6 @@ async def test_backend_swap_notifies_user(
         "get_backend_by_name",
         lambda name: {"claude_sdk": sdk, "opencode": oc}[name],
     )
-    monkeypatch.setattr(cm, "delete_session", AsyncMock())
 
     scope = ChatScope(chat_id=9, thread_id=None)
     old_client = MagicMock(spec=[])

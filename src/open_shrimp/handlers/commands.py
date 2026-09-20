@@ -303,7 +303,9 @@ async def handle_context_callback(
         desc = escape_rich(ctx.description)
         target_escaped = target
 
-        existing_session = await get_session_id(db, scope, target)
+        existing_session = await get_session_id(
+            db, scope, target, scope_backend_name(scope, ctx, config)
+        )
         if existing_session:
             text = f"Switched to context `{target_escaped}` - {desc}\n_Resuming existing session._"
             markup = InlineKeyboardMarkup([[
@@ -415,7 +417,9 @@ async def context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     desc = escape_rich(ctx.description)
     target_escaped = target
 
-    existing_session = await get_session_id(db, scope, target)
+    existing_session = await get_session_id(
+        db, scope, target, scope_backend_name(scope, ctx, config)
+    )
     if existing_session:
         text = f"Switched to context `{target_escaped}` - {desc}\n_Resuming existing session._"
         markup = InlineKeyboardMarkup([[
@@ -500,7 +504,9 @@ async def _gather_status(
         context_name=ctx_name,
         ctx=ctx,
         config=config,
-        session_id=await get_session_id(db, scope, ctx_name),
+        session_id=await get_session_id(
+            db, scope, ctx_name, scope_backend_name(scope, ctx, config)
+        ),
         running=get_running_turn(scope) is not None,
         elapsed=get_run_elapsed(scope),
         injectable=is_injectable(scope),
@@ -878,8 +884,8 @@ def _build_backend_page(
 
     lines.append("")
     lines.append(
-        "_The two backends keep separate conversation histories, so "
-        "switching starts a fresh session in this topic._"
+        "_Each backend keeps its own session in this topic, so switching "
+        "picks up where that backend last left off._"
     )
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
@@ -894,6 +900,10 @@ async def _choose_backend(
     that is one.  A selection that lands where the scope already is returns
     False untouched: closing a live client to arrive where we are costs the
     user a respawn and their /model pin for nothing.
+
+    Only the live client goes.  The persisted session mapping is keyed by
+    backend, so the incoming one resumes its own session in this topic and
+    the outgoing one keeps its own for a switch back.
 
     A real change drops that pin, because aliases do not cross backends —
     the SDK takes `sonnet`, OpenCode wants a provider-qualified
@@ -1392,7 +1402,7 @@ async def _build_resume_page(
     has_next = len(sessions) > per_page
     sessions = sessions[:per_page]
 
-    current_session_id = await get_session_id(db, scope, ctx_name)
+    current_session_id = await get_session_id(db, scope, ctx_name, backend.name)
 
     buttons: list[list[InlineKeyboardButton]] = []
     for s in sessions:
@@ -1518,7 +1528,8 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Direct resume by session ID (or prefix).
         target = args[1]
-        sessions = await resolve_backend(backend, context=ctx).list_sessions(
+        active_backend = resolve_backend(backend, context=ctx)
+        sessions = await active_backend.list_sessions(
             ctx.directory,
             ctx=ctx,
             ctx_name=ctx_name,
@@ -1535,7 +1546,9 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         await close_session(scope)
-        await set_session_id(db, scope, ctx_name, match.session_id)
+        await set_session_id(
+            db, scope, ctx_name, active_backend.name, match.session_id
+        )
         summary = escape_rich(match.summary or "No summary")
         await reply_rich(message, f"Resumed session `{match.session_id[:12]}...`\n_{summary}_")
         await _update_pinned_status(context.bot, scope, ctx_name, ctx, db, config)
@@ -1611,13 +1624,16 @@ async def handle_resume_callback(
             await query.answer("Cannot determine chat.")
             return True
         scope = chat_scope_from_message(query.message)
-        # Only the name is needed, so this skips _get_context's runtime-dirs
-        # lookup and override merge.
+        # Only the name and the backend are needed, so this skips
+        # _get_context's runtime-dirs lookup.
         ctx_name = await _get_context_name(scope, config, db)
-        if ctx_name is None:
+        ctx = resolve_context(config, ctx_name) if ctx_name else None
+        if ctx_name is None or ctx is None:
             await answer_no_context(query, config)
             return True
-        current_session_id = await get_session_id(db, scope, ctx_name)
+        current_session_id = await get_session_id(
+            db, scope, ctx_name, scope_backend_name(scope, ctx, config)
+        )
         text, keyboard = _build_resume_detail(
             session_id, ctx_name, current_session_id,
         )
@@ -1646,7 +1662,9 @@ async def handle_resume_callback(
         return True
     ctx_name, ctx = resolved
     await close_session(scope)
-    await set_session_id(db, scope, ctx_name, session_id)
+    await set_session_id(
+        db, scope, ctx_name, effective_backend(ctx, config), session_id
+    )
     await query.answer(f"Resumed session {session_id[:8]}...")
 
     try:

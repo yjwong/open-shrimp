@@ -154,7 +154,7 @@ async def test_directory_gets_a_line_to_itself(db):
 @pytest.mark.asyncio
 async def test_session_id_is_whole_and_copyable(db):
     config = await _bound(db)
-    await set_session_id(db, SCOPE, "labs", SESSION_ID)
+    await set_session_id(db, SCOPE, "labs", config.backend, SESSION_ID)
     text, _ = await _send_status(db, config)
     # Monospace is tap-to-copy in Telegram, and a truncated id copies to
     # nothing usable.
@@ -343,7 +343,7 @@ async def test_refresh_edits_the_card_in_place(db):
 @pytest.mark.asyncio
 async def test_clear_asks_before_it_clears(db):
     config = await _bound(db)
-    await set_session_id(db, SCOPE, "labs", SESSION_ID)
+    await set_session_id(db, SCOPE, "labs", config.backend, SESSION_ID)
     bot = RichBot()
     query = _StubQuery(bot)
     await commands.handle_status_callback(
@@ -358,13 +358,13 @@ async def test_clear_asks_before_it_clears(db):
 
     from open_shrimp.db import get_session_id
 
-    assert await get_session_id(db, SCOPE, "labs") == SESSION_ID
+    assert await get_session_id(db, SCOPE, "labs", config.backend) == SESSION_ID
 
 
 @pytest.mark.asyncio
 async def test_confirmed_clear_drops_the_session(db):
     config = await _bound(db)
-    await set_session_id(db, SCOPE, "labs", SESSION_ID)
+    await set_session_id(db, SCOPE, "labs", config.backend, SESSION_ID)
     bot = RichBot()
     query = _StubQuery(bot)
     await commands.handle_status_callback(
@@ -376,7 +376,7 @@ async def test_confirmed_clear_drops_the_session(db):
 
     from open_shrimp.db import get_session_id
 
-    assert await get_session_id(db, SCOPE, "labs") is None
+    assert await get_session_id(db, SCOPE, "labs", config.backend) is None
     assert query.answers == ["Session cleared"]
 
 
