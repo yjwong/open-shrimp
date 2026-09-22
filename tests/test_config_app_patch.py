@@ -202,6 +202,48 @@ def test_new_context_is_added_alongside_existing():
     assert "mcp" not in raw["contexts"]["new"]
 
 
+def test_payload_order_becomes_file_order(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "telegram:\n"
+        "  token: t\n"
+        "allowed_users:\n"
+        "  - 1\n"
+        "contexts:\n"
+        "  a:\n"
+        "    directory: /a  # dir a\n"
+        "    description: a\n"
+        "    allowed_tools: []\n"
+        "  b:\n"
+        "    directory: /b\n"
+        "    description: b\n"
+        "    allowed_tools: []\n"
+        "  c:\n"
+        "    directory: /c\n"
+        "    description: c\n"
+        "    allowed_tools: []\n"
+        "default_context: a\n",
+        encoding="utf-8",
+    )
+
+    raw = load_raw_yaml(config_file)
+    patch_raw_yaml(raw, {"contexts": {"c": {}, "a": {}, "b": {}}})
+    write_raw_yaml(config_file, raw)
+
+    text = config_file.read_text(encoding="utf-8")
+    assert "directory: /a  # dir a" in text
+    assert list(load_config(config_file).contexts) == ["c", "a", "b"]
+
+
+def test_payload_order_applies_to_plain_dicts():
+    raw = _base_raw()
+    raw["contexts"]["second"] = _saved_context()
+    patch_raw_yaml(
+        raw, {"contexts": {"second": {}, "default": {}, "third": _saved_context()}},
+    )
+    assert list(raw["contexts"]) == ["second", "default", "third"]
+
+
 def test_merge_preserves_comments_round_trip(tmp_path):
     """The merge writes through ruamel's CommentedMap, keeping comments."""
     config_file = tmp_path / "config.yaml"

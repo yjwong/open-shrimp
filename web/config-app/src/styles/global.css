@@ -193,6 +193,35 @@ body {
   margin-top: 2px;
 }
 
+.context-card-order {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.order-btn {
+  width: 28px;
+  height: 22px;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 6px;
+  border: 1px solid var(--text-muted);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.order-btn:hover:not(:disabled) {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.order-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
 .context-card-chevron {
   color: var(--text-muted);
   font-size: 18px;

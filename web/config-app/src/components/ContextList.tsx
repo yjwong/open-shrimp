@@ -6,11 +6,12 @@ interface ContextListProps {
   config: AppConfig;
   onEdit: (name: string) => void;
   onAdd: () => void;
+  onMove: (name: string, delta: -1 | 1) => void;
 }
 
 type SandboxAction = "reboot" | "reset";
 
-export default function ContextList({ config, onEdit, onAdd }: ContextListProps) {
+export default function ContextList({ config, onEdit, onAdd, onMove }: ContextListProps) {
   const entries = Object.entries(config.contexts);
   const [busy, setBusy] = useState<Record<string, SandboxAction | undefined>>({});
   const [status, setStatus] = useState<{
@@ -60,7 +61,7 @@ export default function ContextList({ config, onEdit, onAdd }: ContextListProps)
 
   return (
     <div className="context-list">
-      {entries.map(([name, ctx]) => {
+      {entries.map(([name, ctx], index) => {
         const activeAction = busy[name];
         const isBusy = activeAction !== undefined;
         return (
@@ -109,6 +110,29 @@ export default function ContextList({ config, onEdit, onAdd }: ContextListProps)
                   {status.message}
                 </div>
               )}
+            </div>
+            <div
+              className="context-card-order"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="order-btn"
+                aria-label={`Move ${name} up`}
+                disabled={index === 0}
+                onClick={() => onMove(name, -1)}
+              >
+                &#9650;
+              </button>
+              <button
+                type="button"
+                className="order-btn"
+                aria-label={`Move ${name} down`}
+                disabled={index === entries.length - 1}
+                onClick={() => onMove(name, 1)}
+              >
+                &#9660;
+              </button>
             </div>
             <span className="context-card-chevron">&rsaquo;</span>
           </div>

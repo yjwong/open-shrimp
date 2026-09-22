@@ -1375,8 +1375,13 @@ def patch_contexts(raw: Any, incoming: dict[str, Any]) -> None:
       preserved from disk.  An empty mapping is how a context is named
       as surviving while being left entirely alone.
 
+    The payload's key order becomes the file's order, which is the order
+    ``/context`` lists them in.
+
     Merging into the existing ``CommentedMap`` rather than replacing it
-    also keeps comments on individual contexts.
+    also keeps comments on individual contexts.  An end-of-line comment
+    travels with its key on a reorder; a full-line comment above a context
+    belongs to whatever precedes it in ruamel's model and stays put.
     """
     existing = raw.get("contexts")
     if not hasattr(existing, "items"):
@@ -1393,6 +1398,14 @@ def patch_contexts(raw: Any, incoming: dict[str, Any]) -> None:
             continue
         for key, value in ctx.items():
             current[key] = value
+
+    # ``move_to_end`` keeps ruamel's per-key comments; popping and
+    # reinserting would drop them.  A plain dict has no comments to lose.
+    for name in incoming:
+        if hasattr(existing, "move_to_end"):
+            existing.move_to_end(name)
+        else:
+            existing[name] = existing.pop(name)
 
 
 def patch_raw_yaml(raw: Any, body: dict[str, Any]) -> None:

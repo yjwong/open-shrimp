@@ -109,6 +109,17 @@ export default function App() {
           config={config}
           onEdit={(name) => setView({ type: "edit", name })}
           onAdd={() => setView({ type: "edit", name: null })}
+          onMove={(name, delta) =>
+            setConfig((prev) => {
+              if (!prev) return prev;
+              const entries = Object.entries(prev.contexts);
+              const from = entries.findIndex(([n]) => n === name);
+              const to = from + delta;
+              if (from < 0 || to < 0 || to >= entries.length) return prev;
+              [entries[from], entries[to]] = [entries[to]!, entries[from]!];
+              return { ...prev, contexts: Object.fromEntries(entries) };
+            })
+          }
         />
       )}
 
@@ -185,9 +196,14 @@ function ContextEditorView({
         if (!prev) return prev;
         const next = { ...prev, contexts: { ...prev.contexts } };
 
-        // If renaming (editing existing, name changed), remove old key.
+        // A rename rebuilds the mapping so the context keeps its position
+        // in the list, which is the order /context offers them in.
         if (contextName && contextName !== name) {
-          delete next.contexts[contextName];
+          next.contexts = Object.fromEntries(
+            Object.entries(prev.contexts).map(([n, c]) =>
+              n === contextName ? [name, ctx] : [n, c],
+            ),
+          );
           if (prev.default_context === contextName) {
             next.default_context = name;
           }
