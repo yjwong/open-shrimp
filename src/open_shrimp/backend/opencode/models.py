@@ -20,7 +20,7 @@ Claude is usually either a subscription already paid for or a bill being cut.
 ``gpt-5.6-sol`` rather than the bare ``gpt-5.6``: models.dev carries both, and
 they differ in nothing but the id and the display name, so the bare id is today
 a pointer at the Sol tier alongside Terra and Luna.  The config records the tier
-for the same reason ``MODEL_CHOICES`` records ``claude-opus-5``: what a pointer
+for the same reason ``MODEL_CHOICES`` records ``claude-opus-5-5``: what a pointer
 resolves to is somebody else's to change.
 """
 

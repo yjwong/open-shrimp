@@ -20,7 +20,7 @@ MODEL_CHOICES: tuple[ModelChoice, ...] = (
         "claude-fable-5-1",
         "Most capable for your hardest and longest-running tasks",
     ),
-    ModelChoice("opus", "claude-opus-5", "Best for everyday, complex tasks"),
+    ModelChoice("opus", "claude-opus-5-5", "Best for everyday, complex tasks"),
     ModelChoice(
         "sonnet",
         "claude-sonnet-5",
@@ -37,6 +37,7 @@ _ALSO_KNOWN: frozenset[str] = frozenset(
         "claude-fable-5",
         "claude-mythos-5-1",
         "claude-mythos-5",
+        "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
