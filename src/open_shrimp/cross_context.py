@@ -14,6 +14,13 @@ inherited so anything the user already trusts there runs silently, and
 everything else routes a normal Approve/Deny prompt into the *originating*
 chat via the existing approval machinery.
 
+Files cross in both directions without either agent seeing the other's
+filesystem.  The caller's ``files`` are staged the way a Telegram upload
+is.  The sub-query's one writable place is a per-call outbox under
+``.openshrimp-exchange/`` in the target workspace, which every sandbox
+backend already shares with its guest; whatever it leaves there is copied
+to the caller once the sub-query ends, and the outbox is deleted.
+
 The *current* context is also a valid target, but only for the new-topic
 handoff path: the approval card offers no "Run inline" button for a
 self-target (an inline sub-query of yourself adds no capability), so the
@@ -26,6 +33,7 @@ import asyncio
 import logging
 import mimetypes
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -135,7 +143,8 @@ def _build_description(
         "— without you switching contexts. It has no memory of this "
         "conversation, so make the question self-contained. It cannot see "
         "this context's files: pass the ones it needs in `files` and they "
-        "are copied into its reach. Every call "
+        "are copied into its reach. Files it writes back are copied to this "
+        "context and listed in the result. Every call "
         "requires the user's approval. The CURRENT context is also a valid "
         "target, but only as a new-topic handoff: the user can spawn a "
         "parallel forum topic under this same context (useful to fork off a "
@@ -344,8 +353,12 @@ def build_ask_context_tool(
     sandbox_managers: dict[str, Any] | None = None,
     mcp_proxy: Any | None = None,
     db: Any | None = None,
+    caller_sandbox: Any | None = None,
 ) -> "OpenShrimpTool | None":
     """Build the ``ask_context`` tool descriptor, or ``None`` if no targets.
+
+    *caller_sandbox* is the calling context's own sandbox, if it has one:
+    files the answering context returns are copied into it.
 
     Returns ``None`` when the config has no contexts map or nothing is
     targetable.  The current context alone is enough: it is a valid
@@ -417,6 +430,7 @@ def build_ask_context_tool(
             ctx=ctx,
             question=question,
             attachments=attachments,
+            caller_sandbox=caller_sandbox,
             user_id=user_id,
             is_private_chat=is_private_chat,
             terminal_base_url=terminal_base_url,
@@ -787,10 +801,15 @@ def _build_sub_query_options(
     sandboxed: bool,
     chat_id: int,
     approval_cb: "CanUseTool",
+    outbox: Path | None,
     launch: _SandboxLaunch | None = None,
     mcp_servers: dict[str, Any] | None = None,
 ) -> "BackendOptions":
     """Assemble the fresh, read-only sub-query's runtime configuration.
+
+    The one writable place is *outbox*: passing it as a session-approved
+    directory makes ``make_can_use_tool`` allow mutating tools inside it
+    without a prompt, while writes anywhere else still route to the user.
 
     Capability layers 1 (base read) and 2 (inherit the target's trusted
     tools) plus the permission callback wiring live here; layer 3 is the
@@ -808,8 +827,28 @@ def _build_sub_query_options(
         additional_directories=ctx.additional_directories or None,
         chat_id=chat_id,
         is_containerized=sandboxed,
+        get_session_approved_dirs=(
+            (lambda: [str(outbox)]) if outbox is not None else None
+        ),
         policy=backend.policy,
     )
+
+    # A sandboxed agent sees the workspace at a guest path that need not
+    # match the host's (HCS mounts it elsewhere), so it is told the outbox
+    # relative to its working directory, which is the workspace everywhere.
+    outbox_note = ""
+    if outbox is not None:
+        outbox_ref = (
+            f"the `{outbox.relative_to(ctx.directory).as_posix()}/` "
+            "directory inside your working directory"
+            if sandboxed else f"`{outbox}`"
+        )
+        outbox_note = (
+            f" If the answer includes files (a patch, an extract, generated "
+            f"output), write them into {outbox_ref}; everything there is "
+            f"handed to the asking agent with your answer. Do not modify "
+            f"anything else."
+        )
 
     extra: dict[str, Any] = {}
     if launch is not None and launch.endpoint is not None:
@@ -832,6 +871,7 @@ def _build_sub_query_options(
             f"Another agent is asking you a question about this project "
             f"({target}). You have no memory of their conversation. "
             f"Answer concisely and factually from this project's files."
+            f"{outbox_note}"
         ),
     )
 
@@ -1005,22 +1045,30 @@ def _view_output_keyboard(
     return InlineKeyboardMarkup([[button]]) if button else None
 
 
-def _format_tool_result(target: str, result: _SubQueryResult) -> dict[str, Any]:
-    """Render the sub-query outcome as the MCP tool result for the agent."""
+def _format_tool_result(
+    target: str, result: _SubQueryResult, returned: str = "",
+) -> dict[str, Any]:
+    """Render the sub-query outcome as the MCP tool result for the agent.
+
+    *returned* is the note from ``_deliver_outbox`` naming the files the
+    sub-query handed back, appended whatever the outcome.
+    """
+    suffix = f"\n\n{returned}" if returned else ""
     if result.outcome == "timeout":
         return _text_result(
             f"Cross-context query to {target!r} timed out after "
             f"{int(_DEFAULT_TIMEOUT_SECONDS)}s. "
-            f"Partial answer (if any):\n{result.collected}".rstrip(),
+            f"Partial answer (if any):\n{result.collected}".rstrip() + suffix,
             is_error=True,
         )
     if result.outcome == "error":
         return _text_result(
-            f"Cross-context query to {target!r} failed: {result.error_detail}",
+            f"Cross-context query to {target!r} failed: {result.error_detail}"
+            + suffix,
             is_error=True,
         )
     collected = result.collected or "(the context produced no textual answer)"
-    return _text_result(f"[{target} answered]\n{collected}")
+    return _text_result(f"[{target} answered]\n{collected}{suffix}")
 
 
 async def _edit_outer_card(
@@ -1183,6 +1231,7 @@ async def _run_query(
     db: Any | None = None,
     handoff_only: bool = False,
     attachments: "list[FileAttachment] | None" = None,
+    caller_sandbox: Any | None = None,
 ) -> dict[str, Any]:
     """Orchestrate one cross-context query: approve, then dispatch."""
     attachments = attachments or []
@@ -1239,7 +1288,126 @@ async def _run_query(
             sandbox_managers=sandbox_managers,
             mcp_proxy=mcp_proxy,
             attachments=attachments,
+            caller_sandbox=caller_sandbox,
         )
+
+
+# The outbox parent inside the target's workspace.  The workspace is the one
+# directory every sandbox backend shares into its guest, so a file written
+# there is on the host without a copy-out step.
+_EXCHANGE_DIR = ".openshrimp-exchange"
+
+
+def _make_outbox(directory: str, call_id: str) -> Path:
+    """Create the per-call outbox under *directory*.
+
+    A ``.gitignore`` of ``*`` inside it keeps the outbox out of the target
+    repository's ``git status`` for the length of the call.
+    """
+    exchange = Path(directory) / _EXCHANGE_DIR
+    exchange.mkdir(exist_ok=True)
+    outbox = exchange / call_id
+    outbox.mkdir()
+    (outbox / ".gitignore").write_text("*\n", encoding="utf-8")
+    return outbox
+
+
+def _remove_outbox(outbox: Path) -> None:
+    """Delete *outbox*, and its parent once no other call is using it."""
+    shutil.rmtree(outbox, ignore_errors=True)
+    try:
+        outbox.parent.rmdir()
+    except OSError:
+        pass
+
+
+def _collect_outbox(
+    outbox: Path,
+) -> "tuple[list[tuple[str, FileAttachment]], list[str]]":
+    """Read the regular files the sub-query left in *outbox*.
+
+    Returns ``(collected, skipped)``: collected entries pair the path
+    relative to the outbox with its contents; skipped entries are relative
+    paths with the reason they were left behind.  Symlinks are never
+    followed: the sub-query controls the outbox, and a link to a host file
+    would otherwise carry that file out.  The same count and size caps as
+    the ``files`` argument apply.
+    """
+    from open_shrimp.agent import FileAttachment
+
+    collected: list[tuple[str, FileAttachment]] = []
+    skipped: list[str] = []
+    total = 0
+    for root, dirs, names in os.walk(outbox):
+        dirs.sort()
+        for name in sorted(names):
+            path = Path(root) / name
+            rel = path.relative_to(outbox).as_posix()
+            if rel == ".gitignore":
+                continue
+            if path.is_symlink() or not path.is_file():
+                skipped.append(f"{rel} (not a regular file)")
+                continue
+            size = path.stat().st_size
+            if len(collected) >= _MAX_FILES:
+                skipped.append(f"{rel} (over the {_MAX_FILES}-file limit)")
+                continue
+            if total + size > _MAX_FILES_BYTES:
+                skipped.append(
+                    f"{rel} (over the "
+                    f"{_MAX_FILES_BYTES // (1024 * 1024)} MB limit)"
+                )
+                continue
+            total += size
+            collected.append((rel, FileAttachment(
+                data=path.read_bytes(),
+                mime_type=(
+                    mimetypes.guess_type(name)[0] or "application/octet-stream"
+                ),
+                filename=name,
+            )))
+    return collected, skipped
+
+
+async def _deliver_outbox(
+    outbox: Path,
+    *,
+    chat_id: int,
+    thread_id: int | None,
+    caller_sandbox: Any,
+) -> str:
+    """Hand the outbox's files to the caller; return the tool-result note.
+
+    The files are saved to the chat's upload directory, which the caller's
+    ``can_use_tool`` reads without a prompt, and copied into the caller's
+    guest when it is sandboxed.  The host copies are registered with the
+    caller scope's attachment paths, so they are deleted when its turn ends.
+    """
+    from open_shrimp.agent import save_attachments
+    from open_shrimp.db import ChatScope
+    from open_shrimp.handlers.state import _injected_attachment_paths
+
+    collected, skipped = await asyncio.to_thread(_collect_outbox, outbox)
+    lines: list[str] = []
+    if collected:
+        saved = await asyncio.to_thread(
+            save_attachments, [att for _, att in collected], chat_id,
+        )
+        _injected_attachment_paths.setdefault(
+            ChatScope(chat_id=chat_id, thread_id=thread_id), [],
+        ).extend(saved)
+        paths = saved
+        if caller_sandbox is not None:
+            paths = await caller_sandbox.copy_files_in(saved)
+        lines.append("Files it returned:")
+        lines.extend(
+            f"- {rel} -> {path}"
+            for (rel, _), path in zip(collected, paths)
+        )
+    if skipped:
+        lines.append("Files it wrote but were not returned:")
+        lines.extend(f"- {entry}" for entry in skipped)
+    return "\n".join(lines)
 
 
 def _remove_launch_paths(launch: _SandboxLaunch | None) -> None:
@@ -1270,6 +1438,7 @@ async def _run_inline_query(
     sandbox_managers: dict[str, Any] | None,
     mcp_proxy: Any | None,
     attachments: "list[FileAttachment]",
+    caller_sandbox: Any | None,
 ) -> dict[str, Any]:
     """Run an approved inline sub-query: launch, execute, report.
 
@@ -1340,6 +1509,18 @@ async def _run_inline_query(
         terminal_base_url=terminal_base_url,
         policy=backend.policy,
     )
+    task_id = f"askctx{os.urandom(6).hex()}"
+    # A workspace the host cannot write to (a read-only checkout) still
+    # answers questions; it just cannot return files.
+    outbox: Path | None
+    try:
+        outbox = await asyncio.to_thread(_make_outbox, ctx.directory, task_id)
+    except OSError:
+        logger.warning(
+            "ask_context: no outbox for %r", target, exc_info=True,
+        )
+        outbox = None
+
     options = _build_sub_query_options(
         backend=backend,
         ctx=ctx,
@@ -1347,6 +1528,7 @@ async def _run_inline_query(
         sandboxed=sandboxed,
         chat_id=chat_id,
         approval_cb=approval_cb,
+        outbox=outbox,
         launch=launch,
         mcp_servers=mcp_servers,
     )
@@ -1368,6 +1550,8 @@ async def _run_inline_query(
             logger.exception("ask_context: staging files for %r failed", target)
             cleanup_attachments(staged)
             _remove_launch_paths(launch)
+            if outbox is not None:
+                _remove_outbox(outbox)
             return _text_result(
                 f"Could not stage the files for context {target!r}, so the "
                 f"question was not asked: {exc}",
@@ -1377,7 +1561,6 @@ async def _run_inline_query(
             question, prompt_paths, attached_by="The asking agent",
         )
 
-    task_id = f"askctx{os.urandom(6).hex()}"
     sink = _ProgressSink(task_id, chat_id, thread_id, target)
 
     status = _StatusMessage(bot, chat_id, thread_id, target)
@@ -1392,6 +1575,7 @@ async def _run_inline_query(
         ),
     )
 
+    returned = ""
     try:
         result = await _run_sub_query(
             client=backend.make_client(options),
@@ -1401,9 +1585,26 @@ async def _run_inline_query(
             policy=backend.policy,
             timeout=_DEFAULT_TIMEOUT_SECONDS,
         )
+        # Collected on timeout and error too: whatever the sub-query wrote
+        # before it stopped is still the caller's.
+        if outbox is not None:
+            try:
+                returned = await _deliver_outbox(
+                    outbox,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    caller_sandbox=caller_sandbox,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "ask_context: returning files from %r failed", target,
+                )
+                returned = f"Its files could not be returned: {exc}"
     finally:
         cleanup_attachments(staged)
         _remove_launch_paths(launch)
+        if outbox is not None:
+            await asyncio.to_thread(_remove_outbox, outbox)
 
     await status.finish(result)
-    return _format_tool_result(target, result)
+    return _format_tool_result(target, result, returned)

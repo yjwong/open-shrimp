@@ -2018,6 +2018,7 @@ def create_openshrimp_tools(
             sandbox_managers=sandbox_managers,
             mcp_proxy=mcp_proxy,
             db=db,
+            caller_sandbox=sandbox,
         )
         if ask_tool is not None:
             tools_list.append(ask_tool)

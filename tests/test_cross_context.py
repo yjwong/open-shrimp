@@ -1190,3 +1190,239 @@ async def test_handoff_forwards_files_to_dispatch(monkeypatch, tmp_path) -> None
     (att,) = dispatched["attachments"]
     assert (att.filename, att.data) == ("notes.md", b"# plan")
     assert "notes.md" in dispatched["placeholder"]
+
+
+# --- outbox -----------------------------------------------------------------
+
+
+def _outbox_backend(write) -> MagicMock:
+    """A backend whose sub-query runs *write(outbox)* before answering."""
+    captured: dict = {}
+
+    class _WritingClient(_FakeClient):
+        async def query(self, prompt: str) -> None:
+            (outbox,) = captured["workspace"].glob(".openshrimp-exchange/*")
+            captured["outbox"] = outbox
+            write(outbox)
+
+    def _make_client(options):
+        captured["system_prompt"] = options.system_prompt
+        return _WritingClient("done")
+
+    backend = MagicMock()
+    backend.make_client.side_effect = _make_client
+    backend.make_can_use_tool.return_value = AsyncMock()
+    backend.make_runtime.return_value = SimpleNamespace(name="rt")
+    backend.policy = MagicMock()
+    backend.captured = captured
+    return backend
+
+
+def _patch_inline(monkeypatch, backend) -> None:
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: backend,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
+    )
+
+
+@pytest.mark.asyncio
+async def test_outbox_files_returned_to_caller(monkeypatch, tmp_path) -> None:
+    import open_shrimp.hooks as hooks
+    from open_shrimp.db import ChatScope
+    from open_shrimp.handlers.state import _injected_attachment_paths
+
+    monkeypatch.setattr(hooks, "ATTACHMENT_TEMP_DIR", tmp_path / "uploads")
+    target = tmp_path / "target"
+    target.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("host secret")
+
+    def _write(outbox):
+        (outbox / "sub").mkdir()
+        (outbox / "sub" / "report.csv").write_text("a,b\n1,2\n")
+        (outbox / "leak.txt").symlink_to(secret)
+
+    backend = _outbox_backend(_write)
+    backend.captured["workspace"] = target
+    _patch_inline(monkeypatch, backend)
+    monkeypatch.setitem(_injected_attachment_paths, ChatScope(3, 4), [])
+
+    tool = build_ask_context_tool(
+        bot=_files_bot(), chat_id=3, thread_id=4,
+        config=_files_config(tmp_path / "caller", target),
+        context_name="default",
+    )
+    assert tool is not None
+    result = await tool.handler({"context": "glints-delta-etl", "question": "q"})
+
+    assert result.get("is_error") is None
+    text = result["content"][0]["text"]
+    (line,) = [l for l in text.splitlines() if l.startswith("- sub/report.csv")]
+    delivered = line.split(" -> ", 1)[1]
+    assert open(delivered).read() == "a,b\n1,2\n"
+    assert "leak.txt (not a regular file)" in text
+    assert "host secret" not in text
+    # Removed when the caller's turn ends, like a Telegram upload.
+    assert [str(p) for p in _injected_attachment_paths[ChatScope(3, 4)]] == [
+        delivered,
+    ]
+    # The outbox and its parent are gone; the target workspace is untouched.
+    assert list(target.iterdir()) == []
+    # A host target is told the absolute outbox path, and may write there.
+    outbox = backend.captured["outbox"]
+    assert f"`{outbox}`" in backend.captured["system_prompt"]
+    approved = backend.make_can_use_tool.call_args.kwargs[
+        "get_session_approved_dirs"
+    ]
+    assert approved() == [str(outbox)]
+
+
+@pytest.mark.asyncio
+async def test_outbox_copied_into_sandboxed_caller(monkeypatch, tmp_path) -> None:
+    import open_shrimp.hooks as hooks
+    from pathlib import Path
+
+    monkeypatch.setattr(hooks, "ATTACHMENT_TEMP_DIR", tmp_path / "uploads")
+    target = tmp_path / "target"
+    target.mkdir()
+    cfg = _files_config(tmp_path / "caller", target)
+    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="libvirt")
+
+    backend = _outbox_backend(
+        lambda outbox: (outbox / "fix.patch").write_text("diff"),
+    )
+    backend.captured["workspace"] = target
+    _patch_inline(monkeypatch, backend)
+
+    async def _copy_files_in(host_paths):
+        return [Path("/guest/uploads") / p.name for p in host_paths]
+
+    caller_sandbox = SimpleNamespace(copy_files_in=_copy_files_in)
+    tool = build_ask_context_tool(
+        bot=_files_bot(), chat_id=1, thread_id=None, config=cfg,
+        context_name="default",
+        sandbox_managers={"libvirt": _FakeSandboxManager()},
+        caller_sandbox=caller_sandbox,
+    )
+    assert tool is not None
+    result = await tool.handler({"context": "glints-delta-etl", "question": "q"})
+
+    text = result["content"][0]["text"]
+    assert "- fix.patch -> /guest/uploads/" in text
+    # A sandboxed target is told the outbox relative to its working
+    # directory, since its guest may mount the workspace elsewhere.
+    outbox = backend.captured["outbox"]
+    assert (
+        f"`.openshrimp-exchange/{outbox.name}/` directory inside your "
+        "working directory"
+    ) in backend.captured["system_prompt"]
+    assert str(target) not in backend.captured["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_outbox_caps_file_count(monkeypatch, tmp_path) -> None:
+    import open_shrimp.hooks as hooks
+    from open_shrimp import cross_context
+
+    monkeypatch.setattr(hooks, "ATTACHMENT_TEMP_DIR", tmp_path / "uploads")
+    target = tmp_path / "target"
+    target.mkdir()
+
+    def _write(outbox):
+        for i in range(cross_context._MAX_FILES + 1):
+            (outbox / f"f{i:02d}.txt").write_text(str(i))
+
+    backend = _outbox_backend(_write)
+    backend.captured["workspace"] = target
+    _patch_inline(monkeypatch, backend)
+
+    tool = build_ask_context_tool(
+        bot=_files_bot(), chat_id=1, thread_id=None,
+        config=_files_config(tmp_path / "caller", target),
+        context_name="default",
+    )
+    assert tool is not None
+    result = await tool.handler({"context": "glints-delta-etl", "question": "q"})
+
+    text = result["content"][0]["text"]
+    assert text.count(" -> ") == cross_context._MAX_FILES
+    last = f"f{cross_context._MAX_FILES:02d}.txt"
+    assert f"{last} (over the {cross_context._MAX_FILES}-file limit)" in text
+
+
+@pytest.mark.asyncio
+async def test_no_outbox_when_workspace_missing(monkeypatch, tmp_path) -> None:
+    captured: dict = {}
+
+    def _make_client(options):
+        captured["system_prompt"] = options.system_prompt
+        return _FakeClient("still answers")
+
+    backend = MagicMock()
+    backend.make_client.side_effect = _make_client
+    backend.make_can_use_tool.return_value = AsyncMock()
+    backend.policy = MagicMock()
+    _patch_inline(monkeypatch, backend)
+
+    tool = build_ask_context_tool(
+        bot=_files_bot(), chat_id=1, thread_id=None,
+        config=_files_config(tmp_path / "caller", tmp_path / "absent"),
+        context_name="default",
+    )
+    assert tool is not None
+    result = await tool.handler({"context": "glints-delta-etl", "question": "q"})
+
+    assert "still answers" in result["content"][0]["text"]
+    assert "outbox" not in captured["system_prompt"]
+    assert "write them into" not in captured["system_prompt"]
+    assert not (tmp_path / "absent").exists()
+    assert backend.make_can_use_tool.call_args.kwargs[
+        "get_session_approved_dirs"
+    ] is None
+
+
+@pytest.mark.asyncio
+async def test_outbox_write_allowed_other_writes_prompt(tmp_path) -> None:
+    from open_shrimp.backend.claude_sdk.policy import ClaudeSdkPolicy
+    from open_shrimp.backend.types import (
+        PermissionResultAllow,
+        ToolPermissionContext,
+    )
+    from open_shrimp.cross_context import _build_sub_query_options
+    from open_shrimp.hooks import make_can_use_tool
+
+    workspace = tmp_path / "target"
+    outbox = workspace / ".openshrimp-exchange" / "askctx1"
+    outbox.mkdir(parents=True)
+    backend = MagicMock()
+    backend.make_can_use_tool.side_effect = make_can_use_tool
+    backend.policy = ClaudeSdkPolicy()
+    approval = AsyncMock(return_value=False)
+
+    _build_sub_query_options(
+        backend=backend,
+        ctx=ContextConfig(
+            directory=str(workspace), description="t", allowed_tools=[],
+        ),
+        target="t", sandboxed=False, chat_id=1,
+        approval_cb=approval, outbox=outbox,
+    )
+    can_use_tool = backend.make_can_use_tool.call_args.kwargs
+    cb = make_can_use_tool(**can_use_tool)
+    context = ToolPermissionContext(tool_use_id="x", signal=None, suggestions=[])
+
+    inside = await cb(
+        "Write", {"file_path": str(outbox / "a.txt"), "content": ""}, context,
+    )
+    assert isinstance(inside, PermissionResultAllow)
+    approval.assert_not_awaited()
+
+    await cb(
+        "Write", {"file_path": str(workspace / "src.py"), "content": ""},
+        context,
+    )
+    approval.assert_awaited_once()
