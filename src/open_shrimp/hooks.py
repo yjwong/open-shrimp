@@ -161,11 +161,28 @@ def _is_path_within_directory(path: str, directory: str) -> bool:
     return real_path == real_dir or real_path.startswith(real_dir + os.sep)
 
 
-def _is_path_within_any_directory(
+def is_path_within_any_directory(
     path: str, directories: list[str]
 ) -> bool:
     """Check if a resolved path is within any of the given directories."""
     return any(_is_path_within_directory(path, d) for d in directories)
+
+
+def static_approved_dirs(
+    cwd: str,
+    additional_directories: list[str] | None,
+    chat_id: int | None,
+) -> list[str]:
+    """The directories ``make_can_use_tool`` reads in without a prompt.
+
+    The context directory, its additional directories, and the chat's
+    upload directory when *chat_id* is given.  Session-approved
+    directories come on top of these and are not included.
+    """
+    dirs = [cwd] + list(additional_directories or [])
+    if chat_id is not None:
+        dirs.append(str(ATTACHMENT_TEMP_DIR / str(chat_id)))
+    return dirs
 
 
 def tool_path_within_dir(
@@ -277,10 +294,9 @@ def make_can_use_tool(
     """
     p = _resolve_policy(policy)
 
-    static_approved_dirs = [cwd] + (additional_directories or [])
-    if chat_id is not None:
-        upload_dir = str(ATTACHMENT_TEMP_DIR / str(chat_id))
-        static_approved_dirs.append(upload_dir)
+    approved_static = static_approved_dirs(
+        cwd, additional_directories, chat_id,
+    )
 
     async def can_use_tool(
         tool_name: str,
@@ -384,7 +400,7 @@ def make_can_use_tool(
             if get_session_approved_dirs is not None
             else []
         )
-        approved_dirs = static_approved_dirs + session_dirs
+        approved_dirs = approved_static + session_dirs
 
         # Containerized contexts: auto-approve all path-scoped tools
         # regardless of path, since the sandbox provides the safety
@@ -406,7 +422,7 @@ def make_can_use_tool(
         tool_path = p.extract_path(tool_name, tool_input, cwd)
         path_scoped_out_of_scope = False
         if tool_path is not None:
-            if _is_path_within_any_directory(tool_path, session_dirs):
+            if is_path_within_any_directory(tool_path, session_dirs):
                 if p.is_mutating(tool_name) and notify_auto_approved_edit:
                     try:
                         await notify_auto_approved_edit(tool_name, tool_input)
@@ -420,7 +436,7 @@ def make_can_use_tool(
                     tool_path,
                 )
                 return PermissionResultAllow()
-            if _is_path_within_any_directory(tool_path, static_approved_dirs):
+            if is_path_within_any_directory(tool_path, approved_static):
                 if p.is_mutating(tool_name):
                     if is_edit_auto_approved and is_edit_auto_approved():
                         logger.info(
@@ -494,7 +510,7 @@ def make_can_use_tool(
         # own envelope and don't fit ``_PATH_SCOPED_TOOLS``.  Same
         # boundary rules as Edit/Write: containerized auto-approve,
         # accept-all-edits auto-approve when every targeted path
-        # resolves inside ``static_approved_dirs``.
+        # resolves inside ``approved_static``.
         if p.multi_file_mutating(tool_name):
             if is_containerized:
                 if notify_auto_approved_edit:
@@ -512,7 +528,7 @@ def make_can_use_tool(
                 is_edit_auto_approved
                 and is_edit_auto_approved()
                 and p.multi_file_paths_within(
-                    tool_name, tool_input, cwd, static_approved_dirs,
+                    tool_name, tool_input, cwd, approved_static,
                 )
             ):
                 if notify_auto_approved_edit:

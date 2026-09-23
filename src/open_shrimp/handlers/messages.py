@@ -69,6 +69,7 @@ from open_shrimp.handlers.state import (
     _edit_approved_sessions,
     _injectable_sessions,
     _injected_attachment_paths,
+    track_turn_attachments,
     _media_group_messages,
     _media_group_tasks,
     _MEDIA_GROUP_WAIT,
@@ -857,7 +858,9 @@ async def _inject_message(
     """
     attachment_paths: list[Path] = []
     if attachments:
-        attachment_paths = save_attachments(attachments, scope.chat_id)
+        attachment_paths = await asyncio.to_thread(
+            save_attachments, attachments, scope.chat_id,
+        )
 
         # For containerized contexts, copy into the container and use
         # container-side paths in the prompt.
@@ -873,7 +876,7 @@ async def _inject_message(
 
     # Track attachment paths for cleanup in _run()'s finally block.
     if attachment_paths:
-        _injected_attachment_paths.setdefault(scope, []).extend(attachment_paths)
+        track_turn_attachments(scope, attachment_paths)
 
     _reinject_runtime_credentials(session)
 
@@ -956,7 +959,9 @@ async def _start_agent_task(
 
         attachment_paths: list[Path] = []
         if attachments:
-            attachment_paths = save_attachments(attachments, scope.chat_id)
+            attachment_paths = await asyncio.to_thread(
+                save_attachments, attachments, scope.chat_id,
+            )
 
         # Collect all attachment paths (original + injected) for cleanup.
         all_attachment_paths: list[Path] = list(attachment_paths)
@@ -1243,8 +1248,8 @@ async def _start_agent_task(
             for queued_prompt, queued_attachments in setup_queue:
                 queued_paths: list[Path] = []
                 if queued_attachments:
-                    queued_paths = save_attachments(
-                        queued_attachments, scope.chat_id,
+                    queued_paths = await asyncio.to_thread(
+                        save_attachments, queued_attachments, scope.chat_id,
                     )
                     prompt_paths = queued_paths
                     if session.sandbox is not None:

@@ -85,7 +85,8 @@ _DEFAULT_TIMEOUT_SECONDS = 600.0
 # Caps on the ``files`` argument.  Every file is read into memory and copied
 # once more per sandbox hop, so the total is bounded rather than per-file.
 _MAX_FILES = 10
-_MAX_FILES_BYTES = 20 * 1024 * 1024
+_MAX_FILES_MB = 20
+_MAX_FILES_BYTES = _MAX_FILES_MB * 1024 * 1024
 
 # The user's choice on the three-way outer approval card.
 HandoffOutcome = Literal["inline", "new_topic", "deny"]
@@ -188,8 +189,8 @@ _ASK_CONTEXT_SCHEMA: dict[str, Any] = {
                 "Each must lie inside this context's directory or its "
                 "additional directories (relative paths resolve against the "
                 "context directory), or be a file the user uploaded in this "
-                f"chat. At most {_MAX_FILES} files, "
-                f"{_MAX_FILES_BYTES // (1024 * 1024)} MB in total. The "
+                f"chat. At most {_MAX_FILES} files, {_MAX_FILES_MB} MB in "
+                "total. The "
                 "answering context receives copies at paths named in its "
                 "prompt; nothing it does reaches the originals."
             ),
@@ -284,60 +285,64 @@ def _summary_line(text: str, limit: int = 160) -> str:
     return ""
 
 
-def _read_files(
+def _check_files(
     paths: list[str], ctx: "ContextConfig", chat_id: int,
-) -> "list[FileAttachment] | str":
-    """Read the caller's ``files`` into attachments, or return an error.
+) -> "list[Path] | str":
+    """Resolve the caller's ``files`` to host paths, or return an error.
 
-    A path must resolve (symlinks included) inside the calling context's
-    directory, one of its additional directories, or this chat's upload
-    directory: the same set ``hooks.make_can_use_tool`` auto-approves reads
-    in, so ``ask_context`` never hands the target a file the caller could
-    not read itself without a prompt.  Paths are host paths; a sandboxed
-    caller's workspace is mounted at its host path, but a guest-only file
-    such as ``/tmp/x`` does not exist here and is reported as missing.
+    A path must resolve (symlinks included) inside the directories
+    ``hooks.make_can_use_tool`` reads in without a prompt for the calling
+    context, so ``ask_context`` never hands the target a file the caller
+    could not read itself.  Paths are host paths; a sandboxed caller's
+    workspace is mounted at its host path, but a guest-only file such as
+    ``/tmp/x`` does not exist here and is reported as missing.  Nothing is
+    read yet: the contents are loaded only once the user approves.
     """
-    from open_shrimp.agent import FileAttachment
     from open_shrimp.hooks import (
-        ATTACHMENT_TEMP_DIR,
-        _is_path_within_any_directory,
+        is_path_within_any_directory,
+        static_approved_dirs,
     )
 
     if len(paths) > _MAX_FILES:
         return f"Error: at most {_MAX_FILES} files per call, got {len(paths)}."
 
-    allowed_dirs = (
-        [ctx.directory]
-        + list(ctx.additional_directories or [])
-        + [str(ATTACHMENT_TEMP_DIR / str(chat_id))]
+    allowed_dirs = static_approved_dirs(
+        ctx.directory, ctx.additional_directories, chat_id,
     )
-    attachments: list[FileAttachment] = []
+    resolved: list[Path] = []
     total = 0
     for raw in paths:
-        path = os.path.realpath(
+        path = Path(os.path.realpath(
             os.path.join(ctx.directory, os.path.expanduser(raw)),
-        )
-        if not _is_path_within_any_directory(path, allowed_dirs):
+        ))
+        if not is_path_within_any_directory(str(path), allowed_dirs):
             return (
                 f"Error: {raw} is outside this context's directories. Only "
                 "files under " + ", ".join(allowed_dirs) + " can be passed."
             )
-        if not os.path.isfile(path):
+        if not path.is_file():
             return f"Error: file not found: {raw}"
-        total += os.path.getsize(path)
+        total += path.stat().st_size
         if total > _MAX_FILES_BYTES:
-            return (
-                "Error: files exceed "
-                f"{_MAX_FILES_BYTES // (1024 * 1024)} MB in total."
-            )
-        with open(path, "rb") as fh:
-            data = fh.read()
-        attachments.append(FileAttachment(
-            data=data,
-            mime_type=mimetypes.guess_type(path)[0] or "application/octet-stream",
-            filename=os.path.basename(path),
-        ))
-    return attachments
+            return f"Error: files exceed {_MAX_FILES_MB} MB in total."
+        resolved.append(path)
+    return resolved
+
+
+def _file_attachment(path: Path) -> "FileAttachment":
+    """Read *path* into an attachment named after it."""
+    from open_shrimp.agent import FileAttachment
+
+    return FileAttachment(
+        data=path.read_bytes(),
+        mime_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        filename=path.name,
+    )
+
+
+def _files_line(names: list[str]) -> str:
+    """The ``📎 a.txt, b.csv`` line shown on cards that carry files."""
+    return "📎 " + ", ".join(f"`{escape_rich_inline(n)}`" for n in names)
 
 
 def build_ask_context_tool(
@@ -405,7 +410,7 @@ def build_ask_context_tool(
             return _text_result(
                 "Error: files must be a list of paths.", is_error=True,
             )
-        attachments: list[FileAttachment] = []
+        file_paths: list[Path] = []
         if files:
             caller_ctx = _current_ctx()
             if caller_ctx is None:
@@ -414,12 +419,12 @@ def build_ask_context_tool(
                     "longer configured, so its files cannot be resolved.",
                     is_error=True,
                 )
-            read = await asyncio.to_thread(
-                _read_files, files, caller_ctx, chat_id,
+            checked = await asyncio.to_thread(
+                _check_files, files, caller_ctx, chat_id,
             )
-            if isinstance(read, str):
-                return _text_result(read, is_error=True)
-            attachments = read
+            if isinstance(checked, str):
+                return _text_result(checked, is_error=True)
+            file_paths = checked
 
         return await _run_query(
             bot=bot,
@@ -429,7 +434,7 @@ def build_ask_context_tool(
             target=target,
             ctx=ctx,
             question=question,
-            attachments=attachments,
+            files=file_paths,
             caller_sandbox=caller_sandbox,
             user_id=user_id,
             is_private_chat=is_private_chat,
@@ -473,7 +478,6 @@ class _SandboxLaunch:
     cli_path: str | None = None
     endpoint: Any = None
     cleanup_paths: list[str] = field(default_factory=list)
-    host_address: str | None = None
     sandbox: Any = None
 
 
@@ -521,7 +525,6 @@ async def _launch_target_sandbox(
             cli_path=handle.cli_path,
             endpoint=handle.endpoint,
             cleanup_paths=list(handle.cleanup_paths),
-            host_address=sandbox.host_address,
             sandbox=sandbox,
         )
 
@@ -641,9 +644,7 @@ async def _request_outer_approval(
         f"> {escape_rich_inline(_summary_line(question, limit=300))}"
     )
     if filenames:
-        text += "\n📎 " + ", ".join(
-            f"`{escape_rich_inline(name)}`" for name in filenames
-        )
+        text += "\n" + _files_line(filenames)
     buttons = []
     if include_inline:
         buttons.append(
@@ -1045,30 +1046,22 @@ def _view_output_keyboard(
     return InlineKeyboardMarkup([[button]]) if button else None
 
 
-def _format_tool_result(
-    target: str, result: _SubQueryResult, returned: str = "",
-) -> dict[str, Any]:
-    """Render the sub-query outcome as the MCP tool result for the agent.
-
-    *returned* is the note from ``_deliver_outbox`` naming the files the
-    sub-query handed back, appended whatever the outcome.
-    """
-    suffix = f"\n\n{returned}" if returned else ""
+def _format_tool_result(target: str, result: _SubQueryResult) -> dict[str, Any]:
+    """Render the sub-query outcome as the MCP tool result for the agent."""
     if result.outcome == "timeout":
         return _text_result(
             f"Cross-context query to {target!r} timed out after "
             f"{int(_DEFAULT_TIMEOUT_SECONDS)}s. "
-            f"Partial answer (if any):\n{result.collected}".rstrip() + suffix,
+            f"Partial answer (if any):\n{result.collected}".rstrip(),
             is_error=True,
         )
     if result.outcome == "error":
         return _text_result(
-            f"Cross-context query to {target!r} failed: {result.error_detail}"
-            + suffix,
+            f"Cross-context query to {target!r} failed: {result.error_detail}",
             is_error=True,
         )
     collected = result.collected or "(the context produced no textual answer)"
-    return _text_result(f"[{target} answered]\n{collected}{suffix}")
+    return _text_result(f"[{target} answered]\n{collected}")
 
 
 async def _edit_outer_card(
@@ -1184,8 +1177,8 @@ async def _run_handoff(
         f"{escape_rich(brief)}"
     )
     if attachments:
-        placeholder += "\n\n📎 " + ", ".join(
-            f"`{escape_rich_inline(a.filename or 'file')}`" for a in attachments
+        placeholder += "\n\n" + _files_line(
+            [a.filename or "" for a in attachments],
         )
     try:
         # The attachments take the same path as a Telegram upload to the new
@@ -1228,25 +1221,34 @@ async def _run_query(
     terminal_base_url: str | None,
     sandbox_managers: dict[str, Any] | None,
     mcp_proxy: Any | None,
+    files: list[Path],
     db: Any | None = None,
     handoff_only: bool = False,
-    attachments: "list[FileAttachment] | None" = None,
     caller_sandbox: Any | None = None,
 ) -> dict[str, Any]:
     """Orchestrate one cross-context query: approve, then dispatch."""
-    attachments = attachments or []
     approval = await _request_outer_approval(
         bot=bot,
         chat_id=chat_id,
         thread_id=thread_id,
         target=target,
         question=question,
-        filenames=[a.filename or "file" for a in attachments],
+        filenames=[p.name for p in files],
         include_inline=not handoff_only,
     )
     if approval.outcome == "deny":
         return _text_result(
             f"Cross-context query to {target!r} was denied by the user.",
+            is_error=True,
+        )
+    try:
+        attachments = await asyncio.to_thread(
+            lambda: [_file_attachment(p) for p in files],
+        )
+    except OSError as exc:
+        return _text_result(
+            f"Could not read the files for context {target!r}, so the "
+            f"question was not asked: {exc}",
             is_error=True,
         )
     if approval.outcome == "new_topic":
@@ -1333,8 +1335,6 @@ def _collect_outbox(
     would otherwise carry that file out.  The same count and size caps as
     the ``files`` argument apply.
     """
-    from open_shrimp.agent import FileAttachment
-
     collected: list[tuple[str, FileAttachment]] = []
     skipped: list[str] = []
     total = 0
@@ -1353,19 +1353,10 @@ def _collect_outbox(
                 skipped.append(f"{rel} (over the {_MAX_FILES}-file limit)")
                 continue
             if total + size > _MAX_FILES_BYTES:
-                skipped.append(
-                    f"{rel} (over the "
-                    f"{_MAX_FILES_BYTES // (1024 * 1024)} MB limit)"
-                )
+                skipped.append(f"{rel} (over the {_MAX_FILES_MB} MB limit)")
                 continue
             total += size
-            collected.append((rel, FileAttachment(
-                data=path.read_bytes(),
-                mime_type=(
-                    mimetypes.guess_type(name)[0] or "application/octet-stream"
-                ),
-                filename=name,
-            )))
+            collected.append((rel, _file_attachment(path)))
     return collected, skipped
 
 
@@ -1385,7 +1376,7 @@ async def _deliver_outbox(
     """
     from open_shrimp.agent import save_attachments
     from open_shrimp.db import ChatScope
-    from open_shrimp.handlers.state import _injected_attachment_paths
+    from open_shrimp.handlers.state import track_turn_attachments
 
     collected, skipped = await asyncio.to_thread(_collect_outbox, outbox)
     lines: list[str] = []
@@ -1393,9 +1384,9 @@ async def _deliver_outbox(
         saved = await asyncio.to_thread(
             save_attachments, [att for _, att in collected], chat_id,
         )
-        _injected_attachment_paths.setdefault(
-            ChatScope(chat_id=chat_id, thread_id=thread_id), [],
-        ).extend(saved)
+        track_turn_attachments(
+            ChatScope(chat_id=chat_id, thread_id=thread_id), saved,
+        )
         paths = saved
         if caller_sandbox is not None:
             paths = await caller_sandbox.copy_files_in(saved)
@@ -1408,6 +1399,18 @@ async def _deliver_outbox(
         lines.append("Files it wrote but were not returned:")
         lines.extend(f"- {entry}" for entry in skipped)
     return "\n".join(lines)
+
+
+def _cleanup_inline(
+    staged: list[Path], launch: _SandboxLaunch | None, outbox: Path | None,
+) -> None:
+    """Remove everything one inline sub-query left on the host."""
+    from open_shrimp.agent import cleanup_attachments
+
+    cleanup_attachments(staged)
+    _remove_launch_paths(launch)
+    if outbox is not None:
+        _remove_outbox(outbox)
 
 
 def _remove_launch_paths(launch: _SandboxLaunch | None) -> None:
@@ -1446,7 +1449,6 @@ async def _run_inline_query(
     """
     from open_shrimp.agent import (
         build_prompt_with_attachments,
-        cleanup_attachments,
         save_attachments,
     )
     from open_shrimp.client_manager import resolve_backend
@@ -1489,7 +1491,7 @@ async def _run_inline_query(
                 ctx=ctx,
                 target=target,
                 mcp_proxy=mcp_proxy,
-                host_ip=launch.host_address or "127.0.0.1",
+                host_ip=launch.sandbox.host_address or "127.0.0.1",
             )
         except Exception:
             logger.exception(
@@ -1537,46 +1539,41 @@ async def _run_inline_query(
     # can_use_tool already auto-approves reads in (it is built with the
     # parent's chat_id); a sandboxed target gets guest-side copies.
     staged: list[Path] = []
-    prompt = question
-    if attachments:
-        try:
-            staged = await asyncio.to_thread(
-                save_attachments, attachments, chat_id,
-            )
-            prompt_paths = staged
-            if launch is not None and launch.sandbox is not None:
-                prompt_paths = await launch.sandbox.copy_files_in(staged)
-        except Exception as exc:
-            logger.exception("ask_context: staging files for %r failed", target)
-            cleanup_attachments(staged)
-            _remove_launch_paths(launch)
-            if outbox is not None:
-                _remove_outbox(outbox)
-            return _text_result(
-                f"Could not stage the files for context {target!r}, so the "
-                f"question was not asked: {exc}",
-                is_error=True,
-            )
-        prompt = build_prompt_with_attachments(
-            question, prompt_paths, attached_by="The asking agent",
-        )
-
-    sink = _ProgressSink(task_id, chat_id, thread_id, target)
-
-    status = _StatusMessage(bot, chat_id, thread_id, target)
-    await status.start(
-        _view_output_keyboard(
-            task_id=task_id,
-            terminal_base_url=terminal_base_url,
-            config=config,
-            chat_id=chat_id,
-            user_id=user_id,
-            is_private_chat=is_private_chat,
-        ),
-    )
-
-    returned = ""
     try:
+        prompt = question
+        if attachments:
+            try:
+                staged = await asyncio.to_thread(
+                    save_attachments, attachments, chat_id,
+                )
+                prompt_paths = staged
+                if launch is not None:
+                    prompt_paths = await launch.sandbox.copy_files_in(staged)
+            except Exception as exc:
+                logger.exception(
+                    "ask_context: staging files for %r failed", target,
+                )
+                return _text_result(
+                    f"Could not stage the files for context {target!r}, so "
+                    f"the question was not asked: {exc}",
+                    is_error=True,
+                )
+            prompt = build_prompt_with_attachments(
+                question, prompt_paths, attached_by="The asking agent",
+            )
+
+        sink = _ProgressSink(task_id, chat_id, thread_id, target)
+        status = _StatusMessage(bot, chat_id, thread_id, target)
+        await status.start(
+            _view_output_keyboard(
+                task_id=task_id,
+                terminal_base_url=terminal_base_url,
+                config=config,
+                chat_id=chat_id,
+                user_id=user_id,
+                is_private_chat=is_private_chat,
+            ),
+        )
         result = await _run_sub_query(
             client=backend.make_client(options),
             sink=sink,
@@ -1587,6 +1584,7 @@ async def _run_inline_query(
         )
         # Collected on timeout and error too: whatever the sub-query wrote
         # before it stopped is still the caller's.
+        returned = ""
         if outbox is not None:
             try:
                 returned = await _deliver_outbox(
@@ -1601,10 +1599,10 @@ async def _run_inline_query(
                 )
                 returned = f"Its files could not be returned: {exc}"
     finally:
-        cleanup_attachments(staged)
-        _remove_launch_paths(launch)
-        if outbox is not None:
-            await asyncio.to_thread(_remove_outbox, outbox)
+        await asyncio.to_thread(_cleanup_inline, staged, launch, outbox)
 
     await status.finish(result)
-    return _format_tool_result(target, result, returned)
+    tool_result = _format_tool_result(target, result)
+    if returned:
+        tool_result["content"][0]["text"] += f"\n\n{returned}"
+    return tool_result

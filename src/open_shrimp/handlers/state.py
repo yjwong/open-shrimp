@@ -142,6 +142,11 @@ def queued_count(scope: ChatScope) -> int:
 # ---------------------------------------------------------------------------
 _injected_attachment_paths: dict[ChatScope, list[Path]] = {}
 
+
+def track_turn_attachments(scope: ChatScope, paths: list[Path]) -> None:
+    """Delete *paths* when *scope*'s running agent task ends."""
+    _injected_attachment_paths.setdefault(scope, []).extend(paths)
+
 # ---------------------------------------------------------------------------
 # Per-scope latest task checklist.  Mirrors the agent's task list so
 # agent-status pushes can attach x-of-y progress counts even from emission
