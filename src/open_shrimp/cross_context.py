@@ -138,10 +138,13 @@ def _build_description(
     """Enumerate the queryable contexts and their descriptions for the agent."""
     lines = [
         "Ask a focused question of ANOTHER context and get a synchronous "
-        "answer back. The answering context runs a fresh, read-only session "
-        "against its own project tree (its directory, CLAUDE.md, and project "
-        "MCP servers), so it can answer authoritatively about its own domain "
-        "— without you switching contexts. It has no memory of this "
+        "answer back. The answering context runs a fresh session against its "
+        "own project tree (its directory, CLAUDE.md, and project MCP "
+        "servers), so it can answer authoritatively about its own domain "
+        "— without you switching contexts. Its base tools are read-only; "
+        "it can still act on a request to change something (edit a "
+        "document, run a command), and each action outside its trusted "
+        "tools sends the user an Approve/Deny prompt. It has no memory of this "
         "conversation, so make the question self-contained. It cannot see "
         "this context's files: pass the ones it needs in `files` and they "
         "are copied into its reach. Files it writes back are copied to this "
@@ -847,8 +850,8 @@ def _build_sub_query_options(
         outbox_note = (
             f" If the answer includes files (a patch, an extract, generated "
             f"output), write them into {outbox_ref}; everything there is "
-            f"handed to the asking agent with your answer. Do not modify "
-            f"anything else."
+            f"handed to the asking agent with your answer. Files written "
+            f"anywhere else are not returned."
         )
 
     extra: dict[str, Any] = {}
@@ -871,7 +874,12 @@ def _build_sub_query_options(
         system_prompt=(
             f"Another agent is asking you a question about this project "
             f"({target}). You have no memory of their conversation. "
-            f"Answer concisely and factually from this project's files."
+            f"Answer concisely and factually from this project's files. "
+            f"Your base tools are read-only, but that is a permission "
+            f"default, not an instruction: if the asking agent asks you to "
+            f"change something or run a command, attempt it with the right "
+            f"tool. Any action outside your trusted tools sends the user an "
+            f"Approve/Deny prompt, so the user decides whether it runs."
             f"{outbox_note}"
         ),
     )
