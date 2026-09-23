@@ -97,7 +97,7 @@ def dispatch_calls(monkeypatch):
 
     calls: list[tuple[str, object, str | None]] = []
 
-    async def _fake_dispatch(prompt, scope, placeholder=None):
+    async def _fake_dispatch(prompt, scope, placeholder=None, attachments=None):
         calls.append((prompt, scope, placeholder))
         signal_turn_done(scope)
 
@@ -197,7 +197,7 @@ async def test_timeout_cancels_turn_and_notes(db, bot, runner, monkeypatch):
     task = await _make_task(db, timeout_seconds=0)
     turns: list[asyncio.Task] = []
 
-    async def _fake_dispatch(prompt, scope, placeholder=None):
+    async def _fake_dispatch(prompt, scope, placeholder=None, attachments=None):
         turn = asyncio.create_task(asyncio.sleep(30))
         state._running_tasks[scope] = turn
         turns.append(turn)

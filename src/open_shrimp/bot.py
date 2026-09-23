@@ -527,16 +527,22 @@ async def run_bot(
     # Register the agent dispatch callback so the review API (and other
     # components) can send prompts to the agent without needing a direct
     # reference to the bot Application.
+    from open_shrimp.agent import FileAttachment
     from open_shrimp.db import ChatScope
     from open_shrimp.handlers.messages import dispatch_from_registry
 
-    async def _dispatch(prompt: str, scope: ChatScope, placeholder: str | None = None) -> None:
+    async def _dispatch(
+        prompt: str,
+        scope: ChatScope,
+        placeholder: str | None,
+        attachments: list[FileAttachment],
+    ) -> None:
         # ``app`` stands in for a ContextTypes object: the dispatch path only
         # uses context.bot, context.bot_data, and asyncio.create_task.
         # Read config from bot_data so hot-reloaded config is used.
         await dispatch_from_registry(
             prompt, scope, app.bot_data["config"], db, app,
-            placeholder=placeholder,
+            placeholder=placeholder, attachments=attachments,
         )
 
     register_dispatch(_dispatch)

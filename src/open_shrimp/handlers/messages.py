@@ -685,6 +685,7 @@ async def dispatch_from_registry(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     placeholder: str | None = None,
+    attachments: list[FileAttachment] | None = None,
 ) -> None:
     """Start a turn that no user message asked for.
 
@@ -705,7 +706,8 @@ async def dispatch_from_registry(
             "cannot start a turn there."
         )
     await _dispatch_to_agent(
-        prompt, [], scope, config, db, context, placeholder=placeholder,
+        prompt, attachments or [], scope, config, db, context,
+        placeholder=placeholder,
     )
 
 

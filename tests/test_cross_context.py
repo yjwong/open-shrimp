@@ -612,7 +612,9 @@ async def test_handoff_creates_topic_binds_and_dispatches(monkeypatch) -> None:
 
     dispatched: list[tuple] = []
 
-    async def _fake_dispatch(prompt, chat_id, thread_id=None, *, placeholder=None):
+    async def _fake_dispatch(
+        prompt, chat_id, thread_id=None, *, placeholder=None, attachments=None,
+    ):
         # Ordering guarantee: the context must be bound before injection.
         assert set_calls, "context must be bound before dispatch"
         dispatched.append((prompt, chat_id, thread_id, placeholder))
@@ -745,7 +747,9 @@ async def test_handoff_allowed_in_private_chat_without_is_forum(monkeypatch) -> 
     async def _noop_set_active_context(db, scope, name):
         pass
 
-    async def _noop_dispatch(prompt, chat_id, thread_id=None, *, placeholder=None):
+    async def _noop_dispatch(
+        prompt, chat_id, thread_id=None, *, placeholder=None, attachments=None,
+    ):
         pass
 
     monkeypatch.setattr(
@@ -798,7 +802,9 @@ async def test_self_target_handoff_binds_same_context(monkeypatch) -> None:
 
     dispatched: list[tuple] = []
 
-    async def _fake_dispatch(prompt, chat_id, thread_id=None, *, placeholder=None):
+    async def _fake_dispatch(
+        prompt, chat_id, thread_id=None, *, placeholder=None, attachments=None,
+    ):
         dispatched.append((prompt, chat_id, thread_id))
 
     monkeypatch.setattr(
@@ -953,3 +959,234 @@ async def test_outer_approval_registers_pending_card_for_scope() -> None:
     await task
 
     assert has_pending_approval(scope) is False
+
+
+# --- files ------------------------------------------------------------------
+
+
+def _files_config(caller_dir, target_dir) -> Config:
+    cfg = _config()
+    cfg.contexts["default"].directory = str(caller_dir)
+    cfg.contexts["glints-delta-etl"].directory = str(target_dir)
+    return cfg
+
+
+def _files_bot() -> MagicMock:
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    wire_rich(bot)
+    bot.edit_message_text = AsyncMock()
+    return bot
+
+
+@pytest.mark.asyncio
+async def test_files_outside_context_rejected_before_approval(
+    monkeypatch, tmp_path,
+) -> None:
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("nope")
+    # A symlink inside the caller's tree must not launder an outside file.
+    (caller / "link.txt").symlink_to(secret)
+    approval = AsyncMock()
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval", approval,
+    )
+
+    tool = build_ask_context_tool(
+        bot=_files_bot(), chat_id=1, thread_id=None,
+        config=_files_config(caller, tmp_path / "target"),
+        context_name="default",
+    )
+    assert tool is not None
+    for path in (str(secret), "../secret.txt", "link.txt", "missing.txt"):
+        result = await tool.handler({
+            "context": "glints-delta-etl", "question": "q", "files": [path],
+        })
+        assert result.get("is_error") is True, path
+    approval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_files_over_count_cap_rejected(monkeypatch, tmp_path) -> None:
+    from open_shrimp import cross_context
+
+    approval = AsyncMock()
+    monkeypatch.setattr(cross_context, "_request_outer_approval", approval)
+    tool = build_ask_context_tool(
+        bot=_files_bot(), chat_id=1, thread_id=None,
+        config=_files_config(tmp_path, tmp_path / "target"),
+        context_name="default",
+    )
+    assert tool is not None
+    result = await tool.handler({
+        "context": "glints-delta-etl",
+        "question": "q",
+        "files": ["a"] * (cross_context._MAX_FILES + 1),
+    })
+    assert result.get("is_error") is True
+    assert "at most" in result["content"][0]["text"]
+    approval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inline_files_staged_named_and_cleaned(
+    monkeypatch, tmp_path,
+) -> None:
+    import open_shrimp.hooks as hooks
+
+    uploads = tmp_path / "uploads"
+    monkeypatch.setattr(hooks, "ATTACHMENT_TEMP_DIR", uploads)
+    caller = tmp_path / "caller"
+    (caller / "logs").mkdir(parents=True)
+    (caller / "logs" / "run.log").write_text("boom at line 3")
+
+    seen: dict = {}
+
+    class _PromptClient(_FakeClient):
+        async def query(self, prompt: str) -> None:
+            seen["prompt"] = prompt
+            staged = [
+                line.split(": ", 1)[1] for line in prompt.splitlines()
+                if line.startswith("The asking agent attached a file.")
+            ]
+            seen["content"] = open(staged[0]).read()
+
+    fake_backend = MagicMock()
+    fake_backend.make_client.return_value = _PromptClient("ok")
+    fake_backend.make_can_use_tool.return_value = AsyncMock()
+    fake_backend.policy = MagicMock()
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: fake_backend,
+    )
+    approval = AsyncMock(return_value=_OuterApproval(outcome="inline"))
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval", approval,
+    )
+
+    tool = build_ask_context_tool(
+        bot=_files_bot(), chat_id=5, thread_id=None,
+        config=_files_config(caller, tmp_path / "target"),
+        context_name="default",
+    )
+    assert tool is not None
+    result = await tool.handler({
+        "context": "glints-delta-etl",
+        "question": "why did it fail?",
+        "files": ["logs/run.log"],
+    })
+
+    assert result.get("is_error") is None
+    assert approval.await_args.kwargs["filenames"] == ["run.log"]
+    assert seen["prompt"].endswith("why did it fail?")
+    assert seen["content"] == "boom at line 3"
+    # The staged copy lives in the chat's upload dir and is gone afterwards.
+    assert list((uploads / "5").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_inline_files_copied_into_guest(
+    monkeypatch, tmp_path,
+) -> None:
+    import open_shrimp.hooks as hooks
+
+    monkeypatch.setattr(hooks, "ATTACHMENT_TEMP_DIR", tmp_path / "uploads")
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (caller / "schema.sql").write_text("create table t ();")
+    cfg = _files_config(caller, tmp_path / "target")
+    cfg.contexts["glints-delta-etl"].sandbox = SandboxConfig(backend="libvirt")
+
+    captured: dict = {}
+
+    class _PromptClient(_FakeClient):
+        async def query(self, prompt: str) -> None:
+            captured["prompt"] = prompt
+
+    fake_backend = MagicMock()
+    fake_backend.make_client.return_value = _PromptClient("ok")
+    fake_backend.make_can_use_tool.return_value = AsyncMock()
+    fake_backend.make_runtime.return_value = SimpleNamespace(name="rt")
+    fake_backend.policy = MagicMock()
+    monkeypatch.setattr(
+        "open_shrimp.client_manager.resolve_backend",
+        lambda **kwargs: fake_backend,
+    )
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=_OuterApproval(outcome="inline")),
+    )
+
+    from pathlib import Path
+
+    manager = _FakeSandboxManager()
+
+    async def _copy_files_in(host_paths):
+        captured["host_paths"] = list(host_paths)
+        return [Path("/tmp/openshrimp-uploads") / p.name for p in host_paths]
+
+    manager.sandbox.copy_files_in = _copy_files_in
+
+    tool = build_ask_context_tool(
+        bot=_files_bot(), chat_id=1, thread_id=None, config=cfg,
+        context_name="default", sandbox_managers={"libvirt": manager},
+    )
+    assert tool is not None
+    result = await tool.handler({
+        "context": "glints-delta-etl", "question": "q",
+        "files": [str(caller / "schema.sql")],
+    })
+
+    assert result.get("is_error") is None
+    (host_path,) = captured["host_paths"]
+    assert host_path.suffix == ".sql"
+    assert f"/tmp/openshrimp-uploads/{host_path.name}" in captured["prompt"]
+    assert str(host_path) not in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_handoff_forwards_files_to_dispatch(monkeypatch, tmp_path) -> None:
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (caller / "notes.md").write_text("# plan")
+    monkeypatch.setattr(
+        "open_shrimp.cross_context._request_outer_approval",
+        AsyncMock(return_value=_OuterApproval(outcome="new_topic")),
+    )
+
+    async def _noop_set_active_context(db, scope, name):
+        pass
+
+    dispatched: dict = {}
+
+    async def _fake_dispatch(
+        prompt, chat_id, thread_id=None, *, placeholder=None, attachments=None,
+    ):
+        dispatched["attachments"] = attachments
+        dispatched["placeholder"] = placeholder
+
+    monkeypatch.setattr(
+        "open_shrimp.db.set_active_context", _noop_set_active_context,
+    )
+    monkeypatch.setattr("open_shrimp.dispatch_registry.dispatch", _fake_dispatch)
+
+    bot = _files_bot()
+    bot.create_forum_topic = AsyncMock(
+        return_value=SimpleNamespace(message_thread_id=9),
+    )
+    tool = build_ask_context_tool(
+        bot=bot, chat_id=1, thread_id=None,
+        config=_files_config(caller, tmp_path / "target"),
+        context_name="default", db=MagicMock(),
+    )
+    assert tool is not None
+    result = await tool.handler({
+        "context": "glints-delta-etl", "question": "q", "files": ["notes.md"],
+    })
+
+    assert result.get("is_error") is None
+    (att,) = dispatched["attachments"]
+    assert (att.filename, att.data) == ("notes.md", b"# plan")
+    assert "notes.md" in dispatched["placeholder"]

@@ -99,7 +99,11 @@ def save_attachments(
 
     paths: list[Path] = []
     for att in attachments:
-        ext = _MIME_TO_EXT.get(att.mime_type, ".bin")
+        ext = (
+            _MIME_TO_EXT.get(att.mime_type)
+            or (Path(att.filename).suffix if att.filename else "")
+            or ".bin"
+        )
         # Use sanitized original filename as part of the temp name if available.
         safe_name = _sanitize_filename(att.filename) if att.filename else ""
         prefix = f"openshrimp_{safe_name}_" if safe_name else "openshrimp_"
@@ -114,15 +118,20 @@ def save_attachments(
     return paths
 
 
-def build_prompt_with_attachments(prompt: str, attachment_paths: list[Path]) -> str:
+def build_prompt_with_attachments(
+    prompt: str,
+    attachment_paths: list[Path],
+    *,
+    attached_by: str = "The user",
+) -> str:
     """Prepend file references to the user prompt."""
     parts: list[str] = []
     if len(attachment_paths) == 1:
         parts.append(
-            f"The user attached a file. Read it from: {attachment_paths[0]}"
+            f"{attached_by} attached a file. Read it from: {attachment_paths[0]}"
         )
     else:
-        parts.append("The user attached files. Read them from:")
+        parts.append(f"{attached_by} attached files. Read them from:")
         for p in attachment_paths:
             parts.append(f"  - {p}")
     parts.append("")
