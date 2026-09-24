@@ -24,6 +24,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from open_shrimp.backend.claude_sdk.binary import find_claude_binary
 from open_shrimp.backend.claude_sdk.login import login_workspace
 from open_shrimp.config import Config
+from open_shrimp.handlers.state import is_task_active
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
 from open_shrimp.terminal.log_source import LogSource, resolve
@@ -45,19 +46,68 @@ async def _authenticate(request: Request) -> int:
     )
 
 
+def _missing_params() -> JSONResponse:
+    return JSONResponse({"error": "type and id are required"}, status_code=400)
+
+
+def _not_found() -> JSONResponse:
+    return JSONResponse({"error": "Log source not found"}, status_code=404)
+
+
+# How often a tail re-scans for the output file of a task that has not
+# written any yet.
+_PENDING_POLL_INTERVAL = 2.0
+
+
 def _resolve_source(request: Request) -> LogSource | None:
-    """Extract ``type``, ``id``, and optional ``task_type`` from query
-    params and resolve to a ``LogSource``."""
-    source_type = request.query_params.get("type", "")
-    source_id = request.query_params.get("id", "")
-    task_type = request.query_params.get("task_type")
-    if not source_type or not source_id:
-        return None
+    """Resolve the ``type``, ``id`` and optional ``task_type`` query params
+    to a ``LogSource``, or ``None`` if nothing is on disk for them."""
     sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
     return resolve(
-        source_type, source_id, task_type=task_type,
+        request.query_params["type"],
+        request.query_params["id"],
+        task_type=request.query_params.get("task_type"),
         sandbox_managers=sandbox_managers,
     )
+
+
+def _has_source_params(request: Request) -> bool:
+    return bool(request.query_params.get("type")) and bool(
+        request.query_params.get("id")
+    )
+
+
+def _is_pending_task(request: Request) -> bool:
+    """True for a running task whose output file does not exist yet.
+
+    The Claude CLI opens a task's ``.output`` file on the first write, so
+    a Monitor whose script has printed nothing has no file to resolve.
+    """
+    return request.query_params["type"] == "task" and is_task_active(
+        request.query_params["id"]
+    )
+
+
+async def _wait_for_task_output(
+    request: Request, stop_event: asyncio.Event,
+) -> LogSource | None:
+    """Re-resolve a pending task until its output file appears.
+
+    Returns ``None`` once the task ends without writing, or when
+    *stop_event* is set.  The file's session directory is unknown until
+    it exists, so this rescans rather than watching one directory.
+    """
+    task_id = request.query_params["id"]
+    while not stop_event.is_set():
+        source = await asyncio.to_thread(_resolve_source, request)
+        if source is not None:
+            return source
+        if not is_task_active(task_id):
+            return None
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(_PENDING_POLL_INTERVAL):
+                await stop_event.wait()
+    return None
 
 
 async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
@@ -68,23 +118,24 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
         id: Source identifier (task ID or context name).
         task_type: Optional task type hint (only for ``type=task``).
         offset: Byte offset to start reading from (default 0).
+
+    A running task with no output file yet streams nothing until the
+    file appears, then tails it like any other.
     """
     try:
         await _authenticate(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
-    source = _resolve_source(request)
-    if source is None:
-        return JSONResponse(
-            {"error": "type and id are required"}, status_code=400
-        )
+    if not _has_source_params(request):
+        return _missing_params()
+    initial_source = _resolve_source(request)
+    if initial_source is None and not _is_pending_task(request):
+        return _not_found()
 
     offset = int(request.query_params.get("offset", "0"))
     if offset < 0:
         offset = 0
-
-    is_agent = source.render == "jsonl"
 
     async def event_stream() -> AsyncGenerator[str, None]:
         """Generate SSE events as the file grows.
@@ -95,6 +146,8 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
         """
         from watchfiles import awatch
 
+        source = initial_source
+        is_agent = source is not None and source.render == "jsonl"
         pos = offset
         line_buffer = ""  # carries incomplete JSONL lines (agent only)
         DRAIN_TIMEOUT = 3.0  # seconds to drain after source becomes inactive
@@ -173,10 +226,22 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                 await asyncio.sleep(2)
 
         disconnect_task = asyncio.create_task(watch_disconnect())
-        completion_task = asyncio.create_task(check_completion())
+        completion_task: asyncio.Task[None] | None = None
 
         try:
             async with asyncio.timeout(GLOBAL_TIMEOUT):
+                if source is None:
+                    source = await _wait_for_task_output(request, stop_event)
+                    if source is None:
+                        yield _flush_and_done(
+                            completed=not is_task_active(
+                                request.query_params["id"]
+                            )
+                        )
+                        return
+                    is_agent = source.render == "jsonl"
+
+                completion_task = asyncio.create_task(check_completion())
                 parent = source.path.parent
 
                 # Wait for the parent directory to appear (rare race).
@@ -259,12 +324,12 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
 
         finally:
             stop_event.set()
-            disconnect_task.cancel()
-            completion_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await disconnect_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await completion_task
+            for task in (disconnect_task, completion_task):
+                if task is None:
+                    continue
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     return StreamingResponse(
         event_stream(),
@@ -291,17 +356,23 @@ async def read_endpoint(request: Request) -> JSONResponse:
         type: Log source type (``"task"`` or ``"container_build"``).
         id: Source identifier (task ID or context name).
         task_type: Optional task type hint (only for ``type=task``).
+
+    A running task with no output file yet reads as empty.
     """
     try:
         await _authenticate(request)
     except AuthError as e:
         return JSONResponse({"error": e.message}, status_code=e.status_code)
 
+    if not _has_source_params(request):
+        return _missing_params()
     source = _resolve_source(request)
     if source is None:
-        return JSONResponse(
-            {"error": "type and id are required"}, status_code=400
-        )
+        if _is_pending_task(request):
+            return JSONResponse({
+                "id": request.query_params["id"], "content": "", "size": 0,
+            })
+        return _not_found()
 
     is_agent = source.render == "jsonl"
 
@@ -309,9 +380,7 @@ async def read_endpoint(request: Request) -> JSONResponse:
         content = await asyncio.to_thread(source.path.read_text, "utf-8", "replace")
         size = source.path.stat().st_size
     except FileNotFoundError:
-        return JSONResponse(
-            {"error": "Log source not found"}, status_code=404
-        )
+        return _not_found()
 
     if is_agent:
         content = render_jsonl_content(content)
