@@ -1639,6 +1639,9 @@ def ssh_check_alive(
             "-o", "ConnectTimeout=2",
             f"{user}@localhost", "true",
         ],
+        # ssh forwards its stdin to the remote command, so an inherited one
+        # loses whatever it buffers — the first keystrokes of `sandbox shell`.
+        stdin=subprocess.DEVNULL,
         capture_output=True,
     )
     return result.returncode == 0

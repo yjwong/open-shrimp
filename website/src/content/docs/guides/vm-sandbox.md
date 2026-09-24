@@ -121,6 +121,16 @@ The VM sandbox uses QEMU's QMP (QEMU Machine Protocol) for mouse, keyboard, and 
 
 See the [Computer Use](/guides/computer-use/) guide for details.
 
+## Shell access
+
+Open an interactive shell in a context's VM from the host:
+
+```bash
+openshrimp sandbox shell myproject
+```
+
+This SSHes in as the `openshrimp` user with a PTY and agent forwarding, and starts `bash -l` in the project directory. A stopped VM is booted first, and the bot picks it up on its next message. A VM that has never been built is refused: send a message in a topic bound to the context to build it.
+
 ## Troubleshooting
 
 ### VM won't start

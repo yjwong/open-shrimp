@@ -258,6 +258,15 @@ class Sandbox(Protocol):
         """
         ...
 
+    def shell_argv(self) -> list[str]:
+        """Host argv for an interactive login shell in the guest workspace.
+
+        The caller execs it on a terminal, so it must allocate a guest PTY.
+        Requires :meth:`running`.  Raises :class:`NotImplementedError` on a
+        backend whose guest channel carries no PTY.
+        """
+        ...
+
     def reach(self, guest_port: int) -> str:
         """Expose a guest TCP port to the host; return ``"127.0.0.1:<host_port>"``.
 

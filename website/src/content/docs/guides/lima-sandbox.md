@@ -86,6 +86,16 @@ Both directories are available at their original paths inside the VM.
 
 When you send files to the bot (photos, documents), they're copied into the VM via `limactl copy` and placed in `/tmp/openshrimp-uploads`. Claude can then read and work with them.
 
+## Shell access
+
+Open an interactive shell in a context's VM from the host:
+
+```bash
+openshrimp sandbox shell myproject
+```
+
+This runs `limactl shell` against OpenShrimp's own `LIMA_HOME`, starting in the project directory. A stopped VM is booted first. A VM that has never been built is refused: send a message in a topic bound to the context to build it.
+
 ## Performance
 
 - **Cold boot**: ~30 seconds. VMs are kept running between sessions for speed.

@@ -1570,6 +1570,12 @@ class HcsSandbox:
             )
         return exe
 
+    def shell_argv(self) -> list[str]:
+        raise NotImplementedError(
+            "the HCS exec agent pipes stdin/stdout frames with no guest PTY, "
+            "so it cannot host an interactive shell"
+        )
+
     def reach(self, guest_port: int) -> str:
         """Expose guest ``127.0.0.1:guest_port`` on host loopback.
 

@@ -338,6 +338,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Emit one NDJSON progress object per line (for a setup UI)",
     )
+    sub_shell = sandbox_subs.add_parser(
+        "shell",
+        parents=[common],
+        help="Open an interactive shell in a sandboxed context's guest",
+    )
+    sub_shell.add_argument("context", help="Name of a sandboxed context")
 
     sub_config = subparsers.add_parser(
         "config",
@@ -1159,6 +1165,75 @@ def _run_sandbox_prefetch(
     return 0
 
 
+def _run_sandbox_shell(*, context_name: str, config_path: str) -> int:
+    """Exec an interactive shell in *context_name*'s guest.
+
+    Boots a stopped guest but refuses one never built: a first build
+    downloads a base image and takes minutes, which belongs to the bot's first
+    turn where its progress is shown.  A guest booted here is one the bot
+    adopts on its next turn, the same as one left running by a previous bot
+    process.
+    """
+    from open_shrimp.config import is_sandboxed, sandbox_backend
+    from open_shrimp.sandbox.manager import create_sandbox_manager
+
+    try:
+        config = load_config(config_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Cannot read config {config_path}: {exc}", file=sys.stderr)
+        return 1
+    init_paths(config.instance_name)
+
+    ctx = config.contexts.get(context_name)
+    if ctx is None:
+        print(
+            f"No context named {context_name!r}. Contexts: "
+            f"{', '.join(config.contexts)}",
+            file=sys.stderr,
+        )
+        return 1
+    if not is_sandboxed(ctx):
+        print(
+            f"Context {context_name!r} is not sandboxed; it runs in "
+            f"{ctx.directory} on this host.",
+            file=sys.stderr,
+        )
+        return 1
+
+    mgr = create_sandbox_manager(sandbox_backend(ctx))
+    mgr.set_instance_prefix(config.instance_name)
+    mgr.start_backend()
+    try:
+        sandbox = mgr.create_sandbox(context_name, ctx)
+        if not sandbox.environment_ready():
+            print(
+                f"The sandbox for {context_name!r} has not been built yet. "
+                "Send a message in a topic bound to this context to build it.",
+                file=sys.stderr,
+            )
+            return 1
+        if not sandbox.running():
+            print(f"Starting the sandbox for {context_name!r}...", file=sys.stderr)
+            sandbox.ensure_running()
+        argv = sandbox.shell_argv()
+    except NotImplementedError as exc:
+        print(f"No shell for {context_name!r}: {exc}", file=sys.stderr)
+        return 1
+    except RuntimeError as exc:
+        # An undefined guest, most often: its environment files can outlive
+        # the domain, and only ensure_environment defines one.
+        print(
+            f"Could not start the sandbox for {context_name!r}: {exc}\n"
+            "Send a message in a topic bound to this context to bring it up.",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        mgr.stop_backend()
+
+    os.execvp(argv[0], argv)
+
+
 def _context_from_entry(entry: object, position: int) -> tuple[str, dict[str, Any]]:
     """Turn one entry of a JSON description into a named context.
 
@@ -1415,8 +1490,15 @@ def main() -> None:
                     config_path=args.config,
                 )
             )
+        if args.sandbox_command == "shell":
+            sys.exit(
+                _run_sandbox_shell(
+                    context_name=args.context, config_path=args.config,
+                )
+            )
         print(
-            "usage: openshrimp sandbox prefetch [--backend NAME] [--json]",
+            "usage: openshrimp sandbox prefetch [--backend NAME] [--json]\n"
+            "       openshrimp sandbox shell CONTEXT",
             file=sys.stderr,
         )
         sys.exit(2)

@@ -728,6 +728,15 @@ class LimaSandbox:
         )
         return path, [path]
 
+    def shell_argv(self) -> list[str]:
+        # limactl finds the instance through LIMA_HOME, which this process
+        # carries only in the env dicts it hands its own subprocesses.
+        return [
+            "env", f"LIMA_HOME={_lima_env()['LIMA_HOME']}",
+            self._limactl, "shell", "--workdir", self._project_dir,
+            self._inst_name,
+        ]
+
     def reach(self, guest_port: int) -> str:
         forward = self.add_port_forward(
             guest_port=guest_port,

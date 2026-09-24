@@ -944,6 +944,17 @@ class LibvirtSandbox:
         )
         return path, [path]
 
+    def shell_argv(self) -> list[str]:
+        from open_shrimp.sandbox.libvirt_helpers import _ssh_common_opts
+
+        assert self._ssh_port is not None
+        return [
+            "ssh", *_ssh_common_opts(self._sdir / "ssh_key", self._ssh_port),
+            "-t", "-o", "ForwardAgent=yes",
+            f"{SANDBOX_USER}@localhost",
+            "--", f"cd {shlex.quote(self._project_dir)} && exec bash -l",
+        ]
+
     def reach(self, guest_port: int) -> str:
         forward = self.add_port_forward(
             guest_port=guest_port,
