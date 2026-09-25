@@ -22,7 +22,11 @@ from open_shrimp.agent import (
 from open_shrimp.agent_status import notify_agent_status
 from open_shrimp.android_push import get_push_sender
 from open_shrimp.stt import transcribe as stt_transcribe
-from open_shrimp.backend.errors import CLIConnectionError, ProcessError
+from open_shrimp.backend.errors import (
+    AgentTurnError,
+    CLIConnectionError,
+    ProcessError,
+)
 from open_shrimp.client_manager import (
     CallbackContext,
     close_session,
@@ -1409,6 +1413,23 @@ async def _start_agent_task(
 
         except asyncio.CancelledError:
             logger.info("Agent task cancelled for scope %s", scope)
+        except AgentTurnError as exc:
+            logger.warning("Agent aborted turn for scope %s: %s", scope, exc)
+            # The aborted turn's trailing events are still queued on the live
+            # client, where they would end the next turn early; the next
+            # message resumes the session on a fresh one.
+            try:
+                await close_session(scope)
+            except Exception:
+                logger.debug("Failed to close aborted session for scope %s", scope)
+            try:
+                await send_rich(
+                    context.bot, scope.chat_id,
+                    escape_rich(f"The agent stopped with an error: {exc}"),
+                    thread_id=scope.thread_id,
+                )
+            except Exception:
+                logger.exception("Failed to send error message")
         except (CLIConnectionError, ProcessError) as exc:
             logger.exception("Agent task failed for scope %s", scope)
             # Close the dead session so the next message starts fresh

@@ -10,7 +10,7 @@ Event → message map (load-bearing):
 ================================  ==========================================
 OpenCode SSE event                ``backend.types`` emitted
 ================================  ==========================================
-``session.error``                 raise ``ProcessError``
+``session.error``                 raise ``AgentTurnError``
 ``message.updated`` (finish/err)  ``AssistantMessage`` (usage/error on final)
 ``message.part.delta`` text       ``TextDeltaEvent`` + buffer text
 ``message.part.updated`` tool     ``AssistantMessage([ToolUseBlock])`` (pending/
@@ -37,7 +37,11 @@ from typing import Any
 
 import httpx
 
-from open_shrimp.backend.errors import CLIConnectionError, ProcessError
+from open_shrimp.backend.errors import (
+    AgentTurnError,
+    CLIConnectionError,
+    ProcessError,
+)
 from open_shrimp.backend.opencode.permission import PermissionBridge
 from open_shrimp.backend.opencode.sse import EventQueue, EventQueueClosed
 from open_shrimp.backend.types import (
@@ -189,7 +193,7 @@ async def _iter_response(
 
 
         if etype == EVT_SESSION_ERROR:
-            raise ProcessError(_extract_error_message(props))
+            raise AgentTurnError(_extract_error_message(props))
 
         if etype == EVT_MESSAGE_UPDATED:
             info = props.get("info")

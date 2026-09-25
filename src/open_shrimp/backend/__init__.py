@@ -11,7 +11,11 @@ selected once at startup from the top-level ``backend`` config key.
 
 from __future__ import annotations
 
-from open_shrimp.backend.errors import CLIConnectionError, ProcessError
+from open_shrimp.backend.errors import (
+    AgentTurnError,
+    CLIConnectionError,
+    ProcessError,
+)
 from open_shrimp.backend.factory import (
     DEFAULT_BACKEND,
     default_model_label,
@@ -54,6 +58,7 @@ from open_shrimp.backend.types import (
 )
 
 __all__ = [
+    "AgentTurnError",
     "AssistantMessage",
     "Backend",
     "BackendClient",

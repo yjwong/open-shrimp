@@ -11,7 +11,11 @@ from urllib.parse import quote
 
 import httpx
 
-from open_shrimp.backend.errors import CLIConnectionError, ProcessError
+from open_shrimp.backend.errors import (
+    AgentTurnError,
+    CLIConnectionError,
+    ProcessError,
+)
 from open_shrimp.backend.opencode.errors import OpenCodeAuthError
 from open_shrimp.backend.opencode.options import OpenCodeOptions, to_opencode
 from open_shrimp.backend.opencode.permission import PermissionBridge
@@ -1111,7 +1115,7 @@ class OpenCodeClient:
                         sink.write_message(msg)
                         await merge.put(("msg", msg))
                     break
-                except ProcessError as exc:
+                except AgentTurnError as exc:
                     # session.error precedes session.idle. Consume the idle
                     # before handing the retained queue to another invocation.
                     logger.warning(
