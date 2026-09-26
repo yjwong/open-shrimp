@@ -298,21 +298,63 @@ class _DraftState:
         self.live_edit_last_text = ""
 
 
-def _build_full_text(
-    state: _DraftState, *, include_thinking: bool = False,
-) -> str:
+def _build_full_text(state: _DraftState) -> str:
     """Render the buffer into one rich-message body.
 
-    Reasoning blocks are draft-only, so they are dropped unless the caller
-    is building a draft; an empty block (a blanked card, whitespace-only
-    reasoning) contributes nothing either way.
+    Reasoning blocks are draft-only (``_build_draft_text``), so they are
+    dropped here, as is an empty block such as a blanked card.
     """
     parts = [
         block.render().strip()
         for block in state.buffer
-        if block.text.strip() and (include_thinking or not block.thinking)
+        if block.text.strip() and not block.thinking
     ]
     return "\n\n".join(parts)
+
+
+def _build_draft_text(state: _DraftState) -> str:
+    """Render the buffer for a draft, cutting reasoning to fit one message.
+
+    A draft is a single message, so an overflowing one would show only its
+    first chunk and freeze on the oldest text.  The answer is capped by the
+    overflow-finalize in the stream loop, but reasoning is not, so reasoning
+    gives way: older blocks are dropped whole, then the newest keeps only its
+    tail behind a "…".  Each block's ``<tg-thinking>`` stays closed, which a
+    split through the middle of one would not guarantee.
+    """
+    blocks = [block for block in state.buffer if block.text.strip()]
+    parts = [block.render().strip() for block in blocks]
+
+    def joined() -> str:
+        return "\n\n".join(part for part in parts if part)
+
+    full = joined()
+    if len(full) <= RICH_MAX_LENGTH:
+        return full
+
+    thinking = [i for i, block in enumerate(blocks) if block.thinking]
+    if not thinking:
+        return full
+    for i in thinking[:-1]:
+        parts[i] = ""
+        full = joined()
+        if len(full) <= RICH_MAX_LENGTH:
+            return full
+
+    newest = thinking[-1]
+    parts[newest] = ""
+    wrapper = len("\n\n<tg-thinking></tg-thinking>")
+    budget = RICH_MAX_LENGTH - len(joined()) - wrapper
+    text = blocks[newest].text.strip()
+    keep = budget - 1  # the "…"
+    # Escaping only grows text, so shrinking by the overshoot converges.
+    while keep > 0:
+        body = escape_rich("…" + text[-keep:].lstrip())
+        if len(body) <= budget:
+            parts[newest] = f"<tg-thinking>{body}</tg-thinking>"
+            break
+        keep -= len(body) - budget
+    return joined()
 
 
 def _draft_is_stale(state: _DraftState) -> bool:
@@ -344,7 +386,7 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
         # The state stays dirty, so the next tick spends it on newer text.
         return
 
-    full_text = _build_full_text(state, include_thinking=True)
+    full_text = _build_draft_text(state)
     if not full_text.strip():
         return
 
@@ -352,8 +394,9 @@ async def _send_draft(bot: Bot, state: _DraftState) -> None:
     if not chunks:
         return
 
-    # Use only the first chunk for the current draft
-    # (overflow is handled at finalization)
+    # Only the answer can still overflow here, briefly: escaping pushed it
+    # past the ceiling its raw length is checked against, and the final
+    # split sends the rest.
     text = chunks[0]
 
     try:

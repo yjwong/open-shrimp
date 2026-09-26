@@ -16,6 +16,7 @@ import pytest
 from telegram.error import RetryAfter
 
 from open_shrimp import rich_message
+from open_shrimp.markdown import RICH_MAX_LENGTH
 from open_shrimp.rich_message import (
     DRAFT_TTL_SECONDS,
     _DRAFT_MIN_INTERVAL,
@@ -208,3 +209,55 @@ async def test_a_sent_draft_clears_dirty_and_stamps_the_time() -> None:
     assert bot.do_api_request.await_count == 1
     assert state.dirty is False
     assert state.last_draft_sent > 0.0
+
+
+# --- Overflowing reasoning --------------------------------------------------
+
+async def _sent_draft(state: _DraftState) -> str:
+    bot = AsyncMock()
+    await _send_draft(bot, state)
+    kwargs = bot.do_api_request.await_args.kwargs["api_kwargs"]
+    return kwargs["rich_message"]["markdown"]
+
+
+@pytest.mark.asyncio
+async def test_long_reasoning_keeps_its_newest_words_in_the_draft() -> None:
+    """Sending the first chunk of an overflowing draft froze it mid-thought."""
+    state = _DraftState(chat_id=1)
+    state.append_gfm("The answer so far.")
+    for i in range(4000):
+        state.append_thinking(f"step {i} weighs a thing. ")
+
+    text = await _sent_draft(state)
+
+    assert len(text) <= RICH_MAX_LENGTH
+    assert text.startswith("The answer so far.")
+    assert "step 3999 weighs a thing." in text
+    assert "step 0 " not in text
+    assert text.count("<tg-thinking>") == text.count("</tg-thinking>") == 1
+
+
+@pytest.mark.asyncio
+async def test_older_reasoning_blocks_go_before_the_newest_is_cut() -> None:
+    state = _DraftState(chat_id=1)
+    state.append_thinking("old " * 5000)
+    state.thinking_open = False
+    state.append_gfm("Between the two.")
+    state.append_thinking("new " * 5000)
+
+    text = await _sent_draft(state)
+
+    assert "old" not in text
+    assert text.startswith("Between the two.")
+    assert text.count("new") == 5000
+
+
+@pytest.mark.asyncio
+async def test_reasoning_that_fits_is_sent_whole() -> None:
+    state = _DraftState(chat_id=1)
+    state.append_thinking("weighing two approaches")
+    state.append_gfm("Done.")
+
+    text = await _sent_draft(state)
+
+    assert text == "<tg-thinking>weighing two approaches</tg-thinking>\n\nDone."
