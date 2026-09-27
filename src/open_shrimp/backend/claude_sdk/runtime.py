@@ -71,7 +71,8 @@ def claude_runtime(
         image_bundle=claude_image_bundle(),
         # Claude refreshes OAuth tokens independently of dispatches; a
         # sandboxed process holding a stale file silently 401s.  The watcher
-        # fans host-side refreshes out to every registered sandbox home.
+        # drives host-side refreshes and fans them out to every registered
+        # sandbox home, minus the refresh token.
         watch_host_credentials=watch_host_credentials,
         host_credentials_available=host_credentials_available,
         write_cred_target=write_target,

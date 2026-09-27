@@ -6,7 +6,8 @@ dispatches** — the host CLI rewrites ``~/.claude/.credentials.json``
 expired token, including between OpenShrimp turns.  A sandboxed ``claude``
 process holding a stale file silently 401s on its next call, so the watcher's
 job is to fan host-side refreshes out to every registered sandbox claude-home
-in near real time.
+in near real time.  What it writes carries no refresh token: only the host
+refreshes (see :mod:`open_shrimp.backend.claude_sdk.host_refresh`).
 
 The runtime-agnostic registration plumbing lives in
 :mod:`open_shrimp.sandbox.agent_runtime_watcher`; this module supplies the
@@ -93,10 +94,52 @@ def host_signed_in() -> bool:
     return found or HOST_CREDENTIALS.exists()
 
 
+def guest_payload(payload: str) -> str:
+    """Strip the refresh token from a host credentials payload.
+
+    A guest CLI without a refresh token never refreshes (it reports
+    ``no_refresh_token`` and keeps using the access token), so it cannot
+    rotate the token out from under the host.  It re-reads the file when its
+    mtime changes, which is how host refreshes reach it.
+    """
+    try:
+        creds = json.loads(payload)
+    except json.JSONDecodeError:
+        return payload
+    oauth = creds.get("claudeAiOauth")
+    if isinstance(oauth, dict):
+        oauth.pop("refreshToken", None)
+    return json.dumps(creds)
+
+
+def write_guest_credentials(dest: Path, payload: str) -> None:
+    """Write the guest-safe form of *payload* to *dest*, mode 0600."""
+    dest.write_text(guest_payload(payload), encoding="utf-8")
+    dest.chmod(0o600)
+
+
 def write_target(home_dir: Path, payload: str) -> None:
     """Write *payload* into the sandbox's claude-home as ``.credentials.json``."""
-    dest = home_dir / ".credentials.json"
-    dest.write_text(payload, encoding="utf-8")
+    write_guest_credentials(home_dir / ".credentials.json", payload)
+
+
+def read_host_expires_at() -> int | None:
+    """The host access token's expiry in epoch ms, if it can be refreshed."""
+    if sys.platform == "darwin":
+        from open_shrimp.sandbox.lima_helpers import _read_credentials_json
+
+        payload = _read_credentials_json()
+    else:
+        try:
+            payload = HOST_CREDENTIALS.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    if not payload:
+        return None
+    oauth = json.loads(payload).get("claudeAiOauth") or {}
+    if not oauth.get("refreshToken") or not oauth.get("expiresAt"):
+        return None
+    return int(oauth["expiresAt"])
 
 
 def _watch_credentials_linux(stop: threading.Event) -> None:
@@ -192,11 +235,47 @@ def watch_host_credentials(stop: threading.Event) -> None:
     Keeps long-lived sandboxed claude clients in sync with host-side token
     refreshes.  Uses native OS change-notification (FSEvents on macOS, inotify
     on Linux) so we wake immediately on refresh rather than polling.
+
+    Guests hold no refresh token, so a sibling thread makes the host CLI
+    refresh before each expiry (:mod:`host_refresh`); the watcher then carries
+    the result into every sandbox.
     """
-    if sys.platform == "darwin":
-        _watch_credentials_macos(stop)
+    from open_shrimp.backend.claude_sdk.binary import find_claude_binary
+    from open_shrimp.backend.claude_sdk.host_refresh import (
+        keep_host_token_fresh,
+        run_refresh_cli,
+    )
+
+    # The refresher lives exactly as long as this watcher body.  The
+    # registration plumbing restarts a watcher that exited on its own with a
+    # fresh stop event, so sharing *stop* would strand the old refresher.
+    refresher_stop = threading.Event()
+    try:
+        binary = find_claude_binary()
+    except RuntimeError:
+        logger.warning(
+            "No host Claude CLI to refresh tokens with; sandboxed sessions "
+            "will need /login once the current token expires",
+        )
     else:
-        _watch_credentials_linux(stop)
+        threading.Thread(
+            target=keep_host_token_fresh,
+            args=(
+                refresher_stop,
+                read_host_expires_at,
+                lambda: run_refresh_cli(binary),
+            ),
+            daemon=True,
+            name="claude-token-refresher",
+        ).start()
+
+    try:
+        if sys.platform == "darwin":
+            _watch_credentials_macos(stop)
+        else:
+            _watch_credentials_linux(stop)
+    finally:
+        refresher_stop.set()
 
 
 __all__ = [
@@ -205,8 +284,11 @@ __all__ = [
     "MACOS_KEYCHAIN_DB_NAME",
     "MACOS_KEYCHAIN_DIR",
     "RUNTIME_NAME",
+    "guest_payload",
     "host_credentials_available",
     "host_signed_in",
+    "read_host_expires_at",
     "watch_host_credentials",
+    "write_guest_credentials",
     "write_target",
 ]

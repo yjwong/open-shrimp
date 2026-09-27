@@ -9,11 +9,11 @@ agent home (called by the VM sandbox after the binary install).
 from __future__ import annotations
 
 import logging
-import shutil
 import sys
 from pathlib import Path
 
 from open_shrimp.backend.claude_sdk.binary import find_claude_binary
+from open_shrimp.backend.claude_sdk.cred_watcher import write_guest_credentials
 from open_shrimp.sandbox.libvirt_helpers import install_cli_via_ssh
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,8 @@ def provision_claude_credentials(home_dir: Path) -> None:
     inside the VM (``<sandbox-user>`` is ``openshrimp`` for libvirt and
     Lima), so the CLI picks the credentials up automatically.  On macOS
     the credentials live in the Keychain (read via ``security``);
-    elsewhere they sit in ``~/.claude/.credentials.json``.
+    elsewhere they sit in ``~/.claude/.credentials.json``.  The guest copy
+    carries no refresh token (see ``cred_watcher.guest_payload``).
     """
     home_dir.mkdir(parents=True, exist_ok=True)
     dest = home_dir / ".credentials.json"
@@ -68,11 +69,13 @@ def provision_claude_credentials(home_dir: Path) -> None:
 
         payload = _read_credentials_json()
         if payload:
-            dest.write_text(payload, encoding="utf-8")
+            write_guest_credentials(dest, payload)
             logger.info("Wrote Claude credentials (Keychain) to %s", dest)
             return
 
     host_credentials = Path.home() / ".claude" / ".credentials.json"
     if host_credentials.exists():
-        shutil.copy2(str(host_credentials), str(dest))
+        write_guest_credentials(
+            dest, host_credentials.read_text(encoding="utf-8"),
+        )
         logger.info("Copied Claude credentials to %s", dest)
