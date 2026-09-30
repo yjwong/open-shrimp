@@ -433,6 +433,15 @@ class TrackedTask:
     tool_use_id: str | None = None
     session_id: str | None = None
     last_tool_name: str | None = None  # updated by TaskProgressMessage
+    #: The ⏳ card announcing the task, and the keyboard it was sent with
+    #: (an edit that omits the keyboard removes it).
+    card_message_id: int | None = None
+    card_markup: Any = None
+    #: Latest progress body the policy rendered, and the one the card shows.
+    #: They differ while an edit is being held back by the rate limit.
+    progress_body: str | None = None
+    shown_progress_body: str | None = None
+    card_edited_at: float = 0.0
 
 
 _active_bg_tasks: dict[ChatScope, dict[str, TrackedTask]] = {}

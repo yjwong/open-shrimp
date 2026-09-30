@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from open_shrimp.backend.policy import BackendPolicy
     from open_shrimp.backend.protocol import BackendCopy, ChecklistReader
+    from open_shrimp.handlers.state import TrackedTask
 
 from open_shrimp.backend.types import (
     AssistantMessage,
@@ -59,6 +60,7 @@ from open_shrimp.rich_message import (
     DRAFT_TTL_SECONDS,
     draft_budget_spent,
     edit_rich,
+    edit_rich_unchanged_ok,
     send_rich,
     send_rich_draft,
 )
@@ -87,6 +89,11 @@ def _is_thread_not_found(exc: BaseException) -> bool:
     )
 
 DRAFT_INTERVAL_SECONDS = 0.5
+
+#: Least time between two rewrites of one task's ⏳ card.  A workflow reports
+#: every agent's state change, and a wide phase starts dozens at once;
+#: Telegram throttles edits to one message well before that.
+TASK_CARD_EDIT_INTERVAL_SECONDS = 3.0
 
 #: Re-send an unchanged draft once it has gone this long without an update.
 #: A client deletes a live draft ``DRAFT_TTL_SECONDS`` after the last one it
@@ -681,6 +688,40 @@ def _close_bash_card(
     ))
 
 
+def _task_card_text(description: str | None, progress: str | None) -> str:
+    """The ⏳ card: the task's description, then its progress when it has any."""
+    text = f"⏳ {escape_rich(description or 'Background task')}"
+    return f"{text}\n\n{progress}" if progress else text
+
+
+async def _refresh_task_card(
+    bot: Bot, chat_id: int, tracked: TrackedTask, *, force: bool = False,
+) -> None:
+    """Rewrite a task's ⏳ card with its latest progress body.
+
+    An update inside ``TASK_CARD_EDIT_INTERVAL_SECONDS`` of the last edit is
+    held rather than dropped; the next progress event, or *force* when the
+    task finishes, puts it on the card.
+    """
+    body = tracked.progress_body
+    if tracked.card_message_id is None or body == tracked.shown_progress_body:
+        return
+    now = time.monotonic()
+    if not force and now - tracked.card_edited_at < TASK_CARD_EDIT_INTERVAL_SECONDS:
+        return
+    tracked.card_edited_at = now
+    if await edit_rich_unchanged_ok(
+        bot, chat_id, tracked.card_message_id,
+        _task_card_text(tracked.description, body),
+        reply_markup=tracked.card_markup,
+    ):
+        tracked.shown_progress_body = body
+    else:
+        logger.warning(
+            "Failed to update the card of task %s", tracked.task_id,
+        )
+
+
 def _drop_open_bash_cards(state: _DraftState) -> None:
     """Blank rows for commands still running as the draft is finalized.
 
@@ -1122,7 +1163,7 @@ async def stream_response(
                         )
 
                         scope_tasks = _active_bg_tasks.setdefault(scope, {})
-                        scope_tasks[event.task_id] = TrackedTask(
+                        tracked_task = scope_tasks[event.task_id] = TrackedTask(
                             task_id=event.task_id,
                             description=event.description,
                             task_type=event.task_type,
@@ -1156,13 +1197,16 @@ async def stream_response(
                             if view_output
                             else None
                         )
-                        await send_rich(
+                        card = await send_rich(
                             bot, state.chat_id,
-                            f"⏳ {escape_rich(desc)}",
+                            _task_card_text(desc, None),
                             thread_id=state.thread_id,
                             reply_markup=keyboard,
                             disable_notification=True,
                         )
+                        if scope is not None and card is not None:
+                            tracked_task.card_message_id = card.message_id
+                            tracked_task.card_markup = keyboard
                     except Exception as e:
                         if _is_thread_not_found(e):
                             raise
@@ -1183,9 +1227,16 @@ async def stream_response(
 
                         scope_tasks = _active_bg_tasks.get(scope)
                         if scope_tasks and event.task_id in scope_tasks:
-                            scope_tasks[event.task_id].last_tool_name = (
-                                event.last_tool_name
+                            tracked = scope_tasks[event.task_id]
+                            tracked.last_tool_name = event.last_tool_name
+                            body = p.render_task_progress(
+                                tracked.task_type, event.data,
                             )
+                            if body is not None:
+                                tracked.progress_body = body
+                                await _refresh_task_card(
+                                    bot, state.chat_id, tracked,
+                                )
 
                 elif isinstance(event, TaskNotificationMessage):
                     # The summary is the subagent's whole report, so the line
@@ -1210,6 +1261,10 @@ async def stream_response(
                         )
 
                         tracked = take_finished_task(scope, event.task_id)
+                    if tracked is not None:
+                        await _refresh_task_card(
+                            bot, state.chat_id, tracked, force=True,
+                        )
                     description = tracked.description if tracked else None
                     elapsed = (
                         time.monotonic() - tracked.started_at if tracked else None
@@ -1250,7 +1305,11 @@ async def stream_response(
                     ):
                         from open_shrimp.handlers.state import finish_task
 
-                        if finish_task(scope, event.task_id) is not None:
+                        finished = finish_task(scope, event.task_id)
+                        if finished is not None:
+                            await _refresh_task_card(
+                                bot, state.chat_id, finished, force=True,
+                            )
                             logger.info(
                                 "Cleared task %s from tracking on terminal "
                                 "task_updated (%s) for chat %d",

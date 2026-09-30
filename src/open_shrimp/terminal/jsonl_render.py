@@ -96,6 +96,7 @@ def _render_user(obj: dict[str, Any]) -> str:
 
     # String content = the initial user prompt.
     if isinstance(content, str):
+        content = _unframe_workflow_task(content)
         truncated = content[:200] + ("..." if len(content) > 200 else "")
         return f"{_BOLD_CYAN}> {truncated}{_RESET}\n\n"
 
@@ -106,6 +107,22 @@ def _render_user(obj: dict[str, Any]) -> str:
                 return ""
 
     return ""
+
+
+#: Ends the paragraph the CLI prepends to a workflow agent's task; the task
+#: follows with every line indented by two spaces.
+_WORKFLOW_FRAME_END = "The computed task text follows:\n"
+
+
+def _unframe_workflow_task(prompt: str) -> str:
+    """The task a workflow script gave its agent, without the CLI's
+    "[Workflow harness — computed task]" preamble around it."""
+    if not prompt.startswith("[Workflow harness"):
+        return prompt
+    _, found, task = prompt.partition(_WORKFLOW_FRAME_END)
+    if not found:
+        return prompt
+    return "\n".join(line.removeprefix("  ") for line in task.splitlines())
 
 
 def _render_assistant(obj: dict[str, Any]) -> str:

@@ -603,6 +603,11 @@ class OpenCodePolicy:
     def is_subagent_task(self, task_type: str | None) -> bool:
         return task_type in ("local_agent", "remote_agent")
 
+    def render_task_progress(
+        self, task_type: str | None, data: dict[str, Any],
+    ) -> str | None:
+        return None
+
     def host_bash_render(self) -> tuple[str, str]:
         return ("\U0001f513", "host_bash")
 

@@ -34,6 +34,7 @@ from claude_agent_sdk.types import (
 )
 
 from open_shrimp.backend import types as bt
+from open_shrimp.backend.claude_sdk import workflow
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,9 @@ class SdkTranslator:
                 data=msg.data,
                 task_id=msg.task_id,
                 tool_use_id=msg.tool_use_id,
-                description=msg.description,
+                description=workflow.task_description(
+                    msg.description, msg.data.get("workflow_name"),
+                ),
                 task_type=msg.task_type,
                 output_file=getattr(msg, "output_file", None),
                 session_id=msg.session_id,
@@ -190,6 +193,7 @@ class SdkTranslator:
                 parent_tool_use_id=getattr(msg, "parent_tool_use_id", None),
             )
         if isinstance(msg, _SdkUser):
+            workflow.record_launch(getattr(msg, "tool_use_result", None))
             return bt.UserMessage(
                 content=_user_content(msg.content),
                 parent_tool_use_id=getattr(msg, "parent_tool_use_id", None),

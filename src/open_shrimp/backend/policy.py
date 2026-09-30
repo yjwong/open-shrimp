@@ -230,6 +230,17 @@ class BackendPolicy(Protocol):
         suppressed from the Telegram chat."""
         ...
 
+    def render_task_progress(
+        self, task_type: str | None, data: dict[str, Any],
+    ) -> str | None:
+        """Rich-text body for a running task's ⏳ card, from the raw
+        payload of one of its progress events.
+
+        ``stream.py`` rewrites the card with each new body; None leaves the
+        card as it was sent, which is every task type a backend has no
+        structured progress for."""
+        ...
+
     def host_bash_render(self) -> tuple[str, str]:
         """The (icon, label) pair used to render host_bash tool-result
         messages in ``stream.py``."""

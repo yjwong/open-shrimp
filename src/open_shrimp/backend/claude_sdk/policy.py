@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from telegram import InlineKeyboardButton
 
+from open_shrimp.backend.claude_sdk import workflow
 from open_shrimp.backend.policy import ApprovalKeyboardExtras
 from open_shrimp.backend.approval_cards import (
     format_agent_approval,
@@ -266,6 +267,8 @@ def _summarize(
         subagent = tool_input.get("subagent_type", "")
         label = f"({subagent}) " if subagent else ""
         return f"{label}{desc}" if desc else subagent
+    if tool_name == workflow.WORKFLOW_TOOL_NAME:
+        return workflow.summarize_call(tool_input)
     if tool_name == "AskUserQuestion":
         questions = tool_input.get("questions", [])
         if questions:
@@ -581,6 +584,13 @@ class ClaudeSdkPolicy:
     def is_subagent_task(self, task_type: str | None) -> bool:
         return task_type in ("local_agent", "remote_agent")
 
+    def render_task_progress(
+        self, task_type: str | None, data: dict[str, Any],
+    ) -> str | None:
+        if task_type != workflow.WORKFLOW_TASK_TYPE:
+            return None
+        return workflow.render_progress(data)
+
     def host_bash_render(self) -> tuple[str, str]:
         return ("\U0001f513", "host_bash")
 
@@ -605,6 +615,8 @@ class ClaudeSdkPolicy:
             )
         if tool_name == "Agent":
             return format_agent_approval(tool_input, expanded=False)
+        if tool_name == workflow.WORKFLOW_TOOL_NAME:
+            return workflow.format_approval(tool_input, expanded=False)
         if tool_name == "ExitPlanMode":
             return _format_plan_approval(tool_input)
         return format_generic_approval(tool_name, tool_input)
@@ -630,6 +642,8 @@ class ClaudeSdkPolicy:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> str:
+        if tool_name == workflow.WORKFLOW_TOOL_NAME:
+            return workflow.format_approval(tool_input, expanded=True)
         return format_agent_approval(tool_input, expanded=True)
 
     def approval_keyboard_extras(
@@ -659,6 +673,46 @@ class ClaudeSdkPolicy:
                     "Show prompt", callback_data=show_prompt_data,
                 ),
             )
+
+        # Workflow: the whole script in the preview Mini App, or clipped into
+        # the card through "Show script" when there is no Mini App to open.
+        if tool_name == workflow.WORKFLOW_TOOL_NAME:
+            document = workflow.script_document(tool_input)
+            view_script = None
+            if document and base_url:
+                from open_shrimp.preview.api import store_ephemeral_content
+
+                content_id = store_ephemeral_content(
+                    "Workflow script", document,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    tool_use_id=tool_use_id,
+                )
+                thread_param = (
+                    f"&thread_id={thread_id}"
+                    if thread_id is not None
+                    else ""
+                )
+                view_script = make_web_app_button(
+                    "\U0001f4dc View script",
+                    base_url,
+                    f"/preview/?content_id={content_id}"
+                    f"&chat_id={chat_id}{thread_param}",
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    bot_token=bot_token,
+                    is_private_chat=is_private_chat,
+                )
+            if view_script:
+                extras.pre_primary_rows.append([view_script])
+            elif document:
+                _pending_agent_inputs[tool_use_id] = tool_input
+                extras.primary_row_extras.append(
+                    InlineKeyboardButton(
+                        "Show script",
+                        callback_data=f"show_prompt:{tool_use_id}",
+                    ),
+                )
 
         # Edit / Write / NotebookEdit: "Accept all edits" session button.
         if tool_name in ("Edit", "Write", "NotebookEdit"):

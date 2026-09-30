@@ -7,6 +7,7 @@ output files, container build logs, etc.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -129,22 +130,39 @@ def _resolve_guest_symlink(
     ``/.claude/`` marker is what the translation keys off rather than a
     hardcoded prefix.
     """
-    from open_shrimp.backend.claude_sdk.runtime import claude_home_dir
-
     try:
         target = os.readlink(symlink)
     except OSError:
         return None
 
-    marker = "/.claude/"
-    idx = target.find(marker)
-    if idx != -1:
-        relative = target[idx + len(marker):]
-        host_path = claude_home_dir(context_dir) / relative
-        if host_path.is_file():
-            return host_path
-
+    host_path = _guest_to_host(target, context_dir)
+    if host_path is not None and host_path.is_file():
+        return host_path
     return None
+
+
+def _guest_to_host(guest_path: str, context_dir: Path) -> Path | None:
+    """Map a path under a guest's ``~/.claude`` to the host directory shared
+    as it, keyed off the ``/.claude/`` marker (see
+    :func:`_resolve_guest_symlink`)."""
+    from open_shrimp.backend.claude_sdk.runtime import claude_home_dir
+
+    marker = "/.claude/"
+    idx = guest_path.find(marker)
+    if idx == -1:
+        return None
+    return claude_home_dir(context_dir) / guest_path[idx + len(marker):]
+
+
+def _sandbox_context_dirs(
+    sandbox_managers: dict[str, SandboxManager] | None,
+) -> list[Path]:
+    """Every sandboxed context's state directory across all managers."""
+    dirs: list[Path] = []
+    for mgr in (sandbox_managers or {}).values():
+        if mgr.state_dir.is_dir():
+            dirs.extend(p for p in mgr.state_dir.iterdir() if p.is_dir())
+    return dirs
 
 
 def _find_task_output_file(
@@ -172,23 +190,18 @@ def _find_task_output_file(
         return result
 
     # Search all sandbox managers' state directories.
-    if sandbox_managers:
-        for mgr in sandbox_managers.values():
-            state_dir = mgr.state_dir
-            if not state_dir.is_dir():
-                continue
-            for context_dir in state_dir.iterdir():
-                tmp_dir = context_dir / "tmp"
-                result = _search_tmp_base(tmp_dir, filename)
-                if result:
-                    # Broken symlink — resolve guest path to host path.
-                    if result.is_symlink() and not result.exists():
-                        resolved = _resolve_guest_symlink(
-                            result, context_dir,
-                        )
-                        if resolved:
-                            return resolved
-                    return result
+    for context_dir in _sandbox_context_dirs(sandbox_managers):
+        tmp_dir = context_dir / "tmp"
+        result = _search_tmp_base(tmp_dir, filename)
+        if result:
+            # Broken symlink — resolve guest path to host path.
+            if result.is_symlink() and not result.exists():
+                resolved = _resolve_guest_symlink(
+                    result, context_dir,
+                )
+                if resolved:
+                    return resolved
+            return result
 
     return None
 
@@ -202,6 +215,167 @@ def _is_agent_output(path: Path, task_type: str | None) -> bool:
         return path.is_symlink() and os.readlink(path).endswith(".jsonl")
     except OSError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Workflow runs
+# ---------------------------------------------------------------------------
+
+# Agent ID pattern: the CLI's hex agent ids (e.g. "a29aed8856e110805").
+_AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9]+$")
+
+
+@dataclass
+class WorkflowAgent:
+    """One agent a workflow script spawned, as its run journal records it."""
+
+    agent_id: str
+    label: str
+    phase: str
+    #: ``running``; ``done`` once it returned a result; ``stopped`` when the
+    #: run ended without one (the agent failed or the run was cancelled).
+    state: str
+
+
+def _claude_homes(
+    sandbox_managers: dict[str, SandboxManager] | None,
+) -> list[Path]:
+    """The host's Claude config home, then every sandboxed context's."""
+    from claude_agent_sdk._internal.sessions import _get_claude_config_home_dir
+
+    from open_shrimp.backend.claude_sdk.runtime import claude_home_dir
+
+    homes = [_get_claude_config_home_dir()]
+    homes.extend(
+        claude_home_dir(d) for d in _sandbox_context_dirs(sandbox_managers)
+    )
+    return homes
+
+
+def _workflow_run_dir(
+    task_id: str,
+    sandbox_managers: dict[str, SandboxManager] | None,
+) -> Path | None:
+    """The host directory holding a workflow task's agent transcripts.
+
+    The CLI reports the directory when it launches the run; that report is
+    lost on a restart, so a finished run is also found from its ``.output``
+    file, which sits at ``<tmp>/<project>/<session>/tasks/`` and lists its
+    agents' ids, under ``projects/<project>/<session>/`` of a Claude home.
+    """
+    from open_shrimp.backend.claude_sdk import workflow
+
+    reported = workflow.transcript_dir(task_id)
+    if reported is not None:
+        path = Path(reported)
+        if path.is_dir():
+            return path
+        for context_dir in _sandbox_context_dirs(sandbox_managers):
+            host_path = _guest_to_host(reported, context_dir)
+            if host_path is not None and host_path.is_dir():
+                return host_path
+
+    output = _find_task_output_file(task_id, sandbox_managers=sandbox_managers)
+    if output is None:
+        return None
+    try:
+        snapshot = json.loads(output.read_text()).get("workflowProgress")
+    except (OSError, ValueError, AttributeError):
+        return None
+    agent_ids = [
+        entry["agentId"]
+        for entry in snapshot or []
+        if isinstance(entry, dict)
+        and isinstance(entry.get("agentId"), str)
+        and _AGENT_ID_RE.match(entry["agentId"])
+    ]
+    if not agent_ids:
+        return None
+    session_dir = output.parent.parent
+    project, session = session_dir.parent.name, session_dir.name
+    for home in _claude_homes(sandbox_managers):
+        runs = home / "projects" / project / session / "subagents" / "workflows"
+        for transcript in runs.glob(f"*/agent-{agent_ids[0]}.jsonl"):
+            return transcript.parent
+    return None
+
+
+def _read_journal(run_dir: Path) -> list[dict]:
+    try:
+        lines = (run_dir / "journal.jsonl").read_text().splitlines()
+    except OSError:
+        return []
+    entries = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            # The CLI may be mid-way through appending the last line.
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def list_workflow_agents(
+    task_id: str,
+    sandbox_managers: dict[str, SandboxManager] | None = None,
+) -> list[WorkflowAgent] | None:
+    """The agents a workflow task has started so far, in start order.
+
+    None when the run's transcripts cannot be found.  The journal records
+    ``started`` when an agent begins and ``result`` when it returns, and
+    nothing for an agent that fails, so an agent without a result is
+    running until the task ends.
+    """
+    if not _TASK_ID_RE.match(task_id):
+        return None
+    run_dir = _workflow_run_dir(task_id, sandbox_managers)
+    if run_dir is None:
+        return None
+
+    task_active = is_task_active(task_id)
+    agents: dict[str, WorkflowAgent] = {}
+    for entry in _read_journal(run_dir):
+        agent_id = entry.get("agentId")
+        if not isinstance(agent_id, str):
+            continue
+        if entry.get("type") == "started" and agent_id not in agents:
+            agents[agent_id] = WorkflowAgent(
+                agent_id=agent_id,
+                label=str(entry.get("label") or agent_id),
+                phase=str(entry.get("phase") or ""),
+                state="running" if task_active else "stopped",
+            )
+        elif entry.get("type") == "result" and agent_id in agents:
+            agents[agent_id].state = "done"
+    return list(agents.values())
+
+
+def resolve_workflow_agent(
+    task_id: str,
+    agent_id: str,
+    sandbox_managers: dict[str, SandboxManager] | None = None,
+) -> LogSource | None:
+    """Resolve one agent of a workflow task to its live transcript."""
+    if not _TASK_ID_RE.match(task_id) or not _AGENT_ID_RE.match(agent_id):
+        return None
+    run_dir = _workflow_run_dir(task_id, sandbox_managers)
+    if run_dir is None:
+        return None
+    path = run_dir / f"agent-{agent_id}.jsonl"
+    if not path.is_file():
+        return None
+
+    def is_active() -> bool:
+        if not is_task_active(task_id):
+            return False
+        return not any(
+            entry.get("type") == "result" and entry.get("agentId") == agent_id
+            for entry in _read_journal(run_dir)
+        )
+
+    return LogSource(path=path, is_active=is_active, render="jsonl")
 
 
 # ---------------------------------------------------------------------------
@@ -280,15 +454,18 @@ def resolve(
     source_id: str,
     task_type: str | None = None,
     sandbox_managers: dict[str, SandboxManager] | None = None,
+    agent_id: str | None = None,
 ) -> LogSource | None:
     """Resolve a ``(type, id)`` pair to a ``LogSource``.
 
     Args:
-        source_type: The type of log source (``"task"`` or
-            ``"container_build"``).
+        source_type: The type of log source (``"task"``,
+            ``"workflow_agent"`` or ``"container_build"``).
         source_id: The identifier (task ID or context name).
         task_type: Optional task type hint (only for ``type=task``).
         sandbox_managers: Managers dict for build log and state dirs.
+        agent_id: The agent within the workflow task *source_id* (only
+            for ``type=workflow_agent``).
 
     Returns:
         A ``LogSource`` or ``None`` if the source cannot be found.
@@ -296,6 +473,12 @@ def resolve(
     if source_type == "task":
         return resolve_task(
             source_id, task_type=task_type, sandbox_managers=sandbox_managers,
+        )
+    elif source_type == "workflow_agent":
+        if not agent_id:
+            return None
+        return resolve_workflow_agent(
+            source_id, agent_id, sandbox_managers=sandbox_managers,
         )
     elif source_type == "container_build":
         return resolve_container_build(

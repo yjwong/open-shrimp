@@ -88,13 +88,15 @@ async function tailMain(): Promise<void> {
     return;
   }
 
+  // A workflow's own output file is its final summary, written once the run
+  // ends; each of its agents keeps a live transcript of its own instead.
+  const isWorkflow = sourceType === "task" && taskType === "local_workflow";
+
   // Build query string for API calls.
   let apiQuery = `type=${encodeURIComponent(sourceType)}&id=${encodeURIComponent(sourceId)}`;
   if (taskType) {
     apiQuery += `&task_type=${encodeURIComponent(taskType)}`;
   }
-
-  const labels = getLabels(sourceType);
 
   showStatus(`Loading xterm.js...`);
 
@@ -108,6 +110,9 @@ async function tailMain(): Promise<void> {
 
   // Inject styles.
   injectBaseStyles();
+  if (isWorkflow) {
+    injectAgentBarStyles();
+  }
 
   const term = new Terminal({
     convertEol: true,
@@ -141,25 +146,48 @@ async function tailMain(): Promise<void> {
     // ignore
   }
 
-  // ── Start tailing ──
+  if (isWorkflow) {
+    await followWorkflow(term, sourceId);
+    return;
+  }
 
+  const labels = getLabels(sourceType);
   term.writeln(
     `\x1b[1;34m● Tailing ${labels.tailPrefix} \x1b[1;37m${sourceId}\x1b[0m`
   );
   term.writeln("");
+  await tailSource(term, apiQuery, labels);
+}
 
+// ── Tailing one source ──
+
+interface TerminalLike {
+  write(data: string): void;
+  writeln(data: string): void;
+  reset(): void;
+}
+
+/** Read a source's existing content, then stream what it appends until the
+ * server reports it done.  Returns quietly once *signal* aborts. */
+async function tailSource(
+  term: TerminalLike,
+  apiQuery: string,
+  labels: SourceLabels,
+  signal?: AbortSignal
+): Promise<void> {
   // Read existing content.
   let offset = 0;
   try {
     const readResp = await fetch(
       `/api/terminal/read?${apiQuery}`,
-      { headers: getAuthHeader() }
+      { headers: getAuthHeader(), signal }
     );
     if (readResp.ok) {
       const data = (await readResp.json()) as {
         content: string;
         size: number;
       };
+      if (signal?.aborted) return;
       if (data.content) {
         term.write(data.content);
         offset = data.size;
@@ -169,6 +197,7 @@ async function tailMain(): Promise<void> {
       term.writeln(`\x1b[31mRead error (${readResp.status}): ${err}\x1b[0m`);
     }
   } catch (e) {
+    if (signal?.aborted) return;
     term.writeln(`\x1b[31mRead failed: ${e}\x1b[0m`);
   }
 
@@ -181,6 +210,7 @@ async function tailMain(): Promise<void> {
         ...getAuthHeader(),
         Accept: "text/event-stream",
       },
+      signal,
     });
 
     if (!resp.ok) {
@@ -200,7 +230,7 @@ async function tailMain(): Promise<void> {
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done || signal?.aborted) break;
 
       buffer += decoder.decode(value, { stream: true });
 
@@ -249,10 +279,123 @@ async function tailMain(): Promise<void> {
       }
     }
 
+    if (signal?.aborted) return;
     term.writeln("");
     term.writeln("\x1b[1;33m● Connection closed.\x1b[0m");
   } catch (e) {
+    if (signal?.aborted) return;
     term.writeln(`\x1b[31mStream error: ${e}\x1b[0m`);
+  }
+}
+
+// ── Workflow mode ──
+
+interface WorkflowAgent {
+  agent_id: string;
+  label: string;
+  phase: string;
+  state: "running" | "done" | "stopped";
+}
+
+// How often the agent list is re-read while the workflow runs.
+const AGENT_POLL_MS = 3000;
+
+const AGENT_ICONS: Record<WorkflowAgent["state"], string> = {
+  running: "⏳",
+  done: "✅",
+  stopped: "⚠️",
+};
+
+const AGENT_LABELS: SourceLabels = {
+  tailPrefix: "agent",
+  completedMsg: "Agent finished.",
+  endedMsg: "Agent output stream ended.",
+};
+
+/** Show a bar of the workflow's agents and tail whichever one is picked,
+ * starting with the first.  The bar grows as the script starts agents. */
+async function followWorkflow(
+  term: TerminalLike,
+  taskId: string
+): Promise<void> {
+  const bar = document.getElementById("agent-bar")!;
+  bar.style.display = "flex";
+
+  let agents: WorkflowAgent[] = [];
+  let selected: string | null = null;
+  let tail: AbortController | null = null;
+
+  function select(agent: WorkflowAgent): void {
+    if (agent.agent_id === selected) return;
+    selected = agent.agent_id;
+    tail?.abort();
+    tail = new AbortController();
+    term.reset();
+    const phase = agent.phase ? `\x1b[0;90m (${agent.phase})` : "";
+    term.writeln(
+      `\x1b[1;34m● Tailing agent \x1b[1;37m${agent.label}${phase}\x1b[0m`
+    );
+    term.writeln("");
+    const query =
+      `type=workflow_agent&id=${encodeURIComponent(taskId)}` +
+      `&agent=${encodeURIComponent(agent.agent_id)}`;
+    void tailSource(term, query, AGENT_LABELS, tail.signal);
+    renderBar();
+    bar.querySelector(".selected")?.scrollIntoView({ inline: "nearest" });
+  }
+
+  function renderBar(): void {
+    bar.replaceChildren(
+      ...agents.map((agent) => {
+        const chip = document.createElement("button");
+        chip.className =
+          "agent-chip" + (agent.agent_id === selected ? " selected" : "");
+        chip.textContent = `${AGENT_ICONS[agent.state]} ${agent.label}`;
+        chip.title = agent.phase;
+        chip.onclick = () => select(agent);
+        return chip;
+      })
+    );
+  }
+
+  term.writeln("\x1b[1;34m● Waiting for the workflow to start an agent...\x1b[0m");
+
+  while (true) {
+    let active = false;
+    try {
+      const resp = await fetch(
+        `/api/terminal/workflow?id=${encodeURIComponent(taskId)}`,
+        { headers: getAuthHeader() }
+      );
+      if (!resp.ok) {
+        if (!selected) {
+          const err = await resp.text();
+          term.writeln(`\x1b[31mWorkflow error (${resp.status}): ${err}\x1b[0m`);
+        }
+        return;
+      }
+      const data = (await resp.json()) as {
+        active: boolean;
+        agents: WorkflowAgent[];
+      };
+      active = data.active;
+      agents = data.agents;
+      const first = agents[0];
+      if (!selected && first) {
+        select(first);
+      } else {
+        renderBar();
+      }
+      if (!active && !agents.length) {
+        term.writeln("");
+        term.writeln("\x1b[1;33m● The workflow ended without starting an agent.\x1b[0m");
+      }
+    } catch (e) {
+      term.writeln(`\x1b[31mWorkflow poll failed: ${e}\x1b[0m`);
+      return;
+    }
+    if (!active) return;
+    await new Promise((r) => setTimeout(r, AGENT_POLL_MS));
   }
 }
 
@@ -474,6 +617,47 @@ function injectBaseStyles(): void {
       font-family: monospace;
       font-size: 13px;
       z-index: 9999;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function injectAgentBarStyles(): void {
+  const style = document.createElement("style");
+  style.textContent = `
+    #terminal-container {
+      top: 44px !important;
+    }
+    #agent-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 44px;
+      display: none;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      overflow-x: auto;
+      background: #24283b;
+      border-bottom: 1px solid #414868;
+      z-index: 100;
+      scrollbar-width: none;
+    }
+    .agent-chip {
+      flex: none;
+      padding: 5px 10px;
+      border: 1px solid #414868;
+      border-radius: 14px;
+      background: #1a1b26;
+      color: #a9b1d6;
+      font-family: monospace;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .agent-chip.selected {
+      background: #7aa2f7;
+      border-color: #7aa2f7;
+      color: #1a1b26;
+      font-weight: bold;
     }
   `;
   document.head.appendChild(style);

@@ -147,6 +147,26 @@ def test_task_started_is_systemmessage_subclass_and_preserves_fields():
     assert out.output_file is None
 
 
+def test_a_workflow_task_is_named_after_its_script():
+    def started(description: str) -> bt.TaskStartedMessage:
+        return SdkTranslator()(sdk.TaskStartedMessage(
+            subtype="task_started",
+            data={"workflow_name": "review-changes"},
+            task_id="w1",
+            description=description,
+            uuid="u",
+            session_id="s",
+            task_type="local_workflow",
+        ))
+
+    # The CLI's fallback when the script has no summary names nothing.
+    assert started("Dynamic workflow").description == "review-changes"
+    assert (
+        started("Review the diff").description
+        == "review-changes: Review the diff"
+    )
+
+
 def test_task_progress_translates():
     usage = {}  # TaskUsage is a TypedDict; an empty dict satisfies it
     msg = sdk.TaskProgressMessage(

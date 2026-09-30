@@ -27,7 +27,11 @@ from open_shrimp.config import Config
 from open_shrimp.handlers.state import is_task_active
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
 from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
-from open_shrimp.terminal.log_source import LogSource, resolve
+from open_shrimp.terminal.log_source import (
+    LogSource,
+    list_workflow_agents,
+    resolve,
+)
 from open_shrimp.terminal.pty_transport import (
     PtyProcess,
     PtyUnavailable,
@@ -60,14 +64,16 @@ _PENDING_POLL_INTERVAL = 2.0
 
 
 def _resolve_source(request: Request) -> LogSource | None:
-    """Resolve the ``type``, ``id`` and optional ``task_type`` query params
-    to a ``LogSource``, or ``None`` if nothing is on disk for them."""
+    """Resolve the ``type``, ``id`` and optional ``task_type`` and ``agent``
+    query params to a ``LogSource``, or ``None`` if nothing is on disk for
+    them."""
     sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
     return resolve(
         request.query_params["type"],
         request.query_params["id"],
         task_type=request.query_params.get("task_type"),
         sandbox_managers=sandbox_managers,
+        agent_id=request.query_params.get("agent"),
     )
 
 
@@ -81,11 +87,13 @@ def _is_pending_task(request: Request) -> bool:
     """True for a running task whose output file does not exist yet.
 
     The Claude CLI opens a task's ``.output`` file on the first write, so
-    a Monitor whose script has printed nothing has no file to resolve.
+    a Monitor whose script has printed nothing has no file to resolve.  A
+    workflow agent's transcript likewise appears only once the agent's
+    first message is written.
     """
-    return request.query_params["type"] == "task" and is_task_active(
-        request.query_params["id"]
-    )
+    return request.query_params["type"] in (
+        "task", "workflow_agent",
+    ) and is_task_active(request.query_params["id"])
 
 
 async def _wait_for_task_output(
@@ -114,9 +122,12 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
     """GET /api/terminal/tail — SSE stream tailing a log source.
 
     Query params:
-        type: Log source type (``"task"`` or ``"container_build"``).
+        type: Log source type (``"task"``, ``"workflow_agent"`` or
+            ``"container_build"``).
         id: Source identifier (task ID or context name).
         task_type: Optional task type hint (only for ``type=task``).
+        agent: Agent ID within the workflow task *id* (only for
+            ``type=workflow_agent``).
         offset: Byte offset to start reading from (default 0).
 
     A running task with no output file yet streams nothing until the
@@ -353,9 +364,12 @@ async def read_endpoint(request: Request) -> JSONResponse:
     """GET /api/terminal/read — read the full content of a log source.
 
     Query params:
-        type: Log source type (``"task"`` or ``"container_build"``).
+        type: Log source type (``"task"``, ``"workflow_agent"`` or
+            ``"container_build"``).
         id: Source identifier (task ID or context name).
         task_type: Optional task type hint (only for ``type=task``).
+        agent: Agent ID within the workflow task *id* (only for
+            ``type=workflow_agent``).
 
     A running task with no output file yet reads as empty.
     """
@@ -389,6 +403,48 @@ async def read_endpoint(request: Request) -> JSONResponse:
         "id": request.query_params.get("id", ""),
         "content": content,
         "size": size,
+    })
+
+
+async def workflow_agents_endpoint(request: Request) -> JSONResponse:
+    """GET /api/terminal/workflow — the agents a workflow task has started.
+
+    Query params:
+        id: The workflow's task ID.
+
+    Each agent's transcript tails as ``type=workflow_agent&id=<task
+    id>&agent=<agent_id>``.  A running workflow whose transcripts are not
+    found yet lists no agents rather than 404ing, since it may not have
+    started any.
+    """
+    try:
+        await _authenticate(request)
+    except AuthError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status_code)
+
+    task_id = request.query_params.get("id")
+    if not task_id:
+        return JSONResponse({"error": "id is required"}, status_code=400)
+    sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
+    agents = await asyncio.to_thread(
+        list_workflow_agents, task_id, sandbox_managers,
+    )
+    active = is_task_active(task_id)
+    if agents is None:
+        if not active:
+            return _not_found()
+        agents = []
+    return JSONResponse({
+        "active": active,
+        "agents": [
+            {
+                "agent_id": a.agent_id,
+                "label": a.label,
+                "phase": a.phase,
+                "state": a.state,
+            }
+            for a in agents
+        ],
     })
 
 
@@ -734,6 +790,9 @@ def create_terminal_routes() -> list[Route | Mount]:
     routes: list[Route | Mount] = [
         Route("/api/terminal/tail", tail_endpoint, methods=["GET"]),
         Route("/api/terminal/read", read_endpoint, methods=["GET"]),
+        Route(
+            "/api/terminal/workflow", workflow_agents_endpoint, methods=["GET"],
+        ),
         WebSocketRoute("/ws/terminal/login", login_ws_endpoint),
     ]
 
