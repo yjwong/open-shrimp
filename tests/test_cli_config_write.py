@@ -144,7 +144,7 @@ def test_written_config_loads(tmp_path, monkeypatch, capsys):
     config = load_config(out["config_path"])
     assert config.allowed_users == [42]
     assert config.contexts["default"].directory == str(tmp_path)
-    assert config.contexts["default"].model == "claude-sonnet-5"
+    assert config.contexts["default"].model == "claude-sonnet-5-5"
 
 
 def test_no_default_context_is_named(tmp_path, monkeypatch, capsys):

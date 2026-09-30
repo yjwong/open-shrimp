@@ -187,7 +187,7 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.2.156"
+version = "0.2.162"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -195,13 +195,12 @@ dependencies = [
     { name = "mcp" },
     { name = "sniffio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/21/a4/f33a3878c5c67b7f7a72db581b2122334b5156ec0853120d86f43f5a7dbf/claude_agent_sdk-0.2.156.tar.gz", hash = "sha256:4caddd158af0c30572586a3e7837dd5d0e5257a9f45ef31a0b3bf5a1064197ce", size = 346573, upload-time = "2026-09-18T02:27:03.106Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/a3/d31886d0723593228797c96eb54d07a19e561931a2771ed40b4a105bedc9/claude_agent_sdk-0.2.162.tar.gz", hash = "sha256:e4cf92f04f934d3b87d42be9ecbeb75c1a3d487a8dc8a299f7fed1ad9d0b476f", size = 365167, upload-time = "2026-09-29T20:06:54.593Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/72/d1519f4e06c21092d029ea6c5d997b779f97c1a91fb8e1e2015392fa557b/claude_agent_sdk-0.2.156-py3-none-macosx_11_0_arm64.whl", hash = "sha256:37dc1a5b4f7aace0b4622a6707517840dbbd60fb175443d385a1f2ec49f25668", size = 91890544, upload-time = "2026-09-18T02:27:06.938Z" },
-    { url = "https://files.pythonhosted.org/packages/ac/b6/af22b631b052bc57caa5038eaed4e9aca40ccc18f5676758957dd1289144/claude_agent_sdk-0.2.156-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:1b09c623d1f7559648d799b939f1c417ce5c84cfe3020c523919adb5f88415b9", size = 96485189, upload-time = "2026-09-18T02:27:11.144Z" },
-    { url = "https://files.pythonhosted.org/packages/f9/a9/c0cf5a139e43b55527fbc3e1eb7b0bd9fdfa71c6b8defb01a7fe26a16dfc/claude_agent_sdk-0.2.156-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:2da24c3cffbe52997ee1693e598f92c339a87ffcad1f278feec3b52878e2003f", size = 101840056, upload-time = "2026-09-18T02:27:15.72Z" },
-    { url = "https://files.pythonhosted.org/packages/d0/cd/5e979631de4b8112d0e319ca0af2a059c774b92168c51fc1851bfc1552b1/claude_agent_sdk-0.2.156-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:256fafa0fa893bde52caceb21f7b1ac65e5c58ddfa07eb72cc54d1f90cf84960", size = 101975247, upload-time = "2026-09-18T02:27:20.44Z" },
-    { url = "https://files.pythonhosted.org/packages/69/50/9fca087f43f7f6382d0fe9a5b8a4e634a5e9fd17bf387221c3402b65a9ea/claude_agent_sdk-0.2.156-py3-none-win_amd64.whl", hash = "sha256:db01f5fa0b916a58b10791c8cb037a312429d0d943f6471a36159726535771ee", size = 104675694, upload-time = "2026-09-18T02:27:25.186Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/b6/ec37e32cb0782977e80cd00338f5073f150d6ecfa568e9fa1a1dd5c9eed3/claude_agent_sdk-0.2.162-py3-none-macosx_11_0_arm64.whl", hash = "sha256:a0d5ad6185a8bcaaff05f5648036e2484cab28bd1c2ccc474fc8969555b386f7", size = 92700771, upload-time = "2026-09-29T20:06:59.661Z" },
+    { url = "https://files.pythonhosted.org/packages/92/c4/1165688243cbf90d3532f509ea65bc337c3ba7f8229e26d7297e00a6ec2b/claude_agent_sdk-0.2.162-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:faab97b03f04f9c3deb58ad85a0410404d40b6efb5547c9defc4fa986642fced", size = 97130408, upload-time = "2026-09-29T20:07:06.243Z" },
+    { url = "https://files.pythonhosted.org/packages/05/41/f0addb831c3aefbc02c811ef7415e89e889d1bc2ae976eb935c508c91c0d/claude_agent_sdk-0.2.162-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:332cfb5eb9190fc8de1ad427753417d7c345264e9d2bd2ffa312afcc2f5cf766", size = 102183342, upload-time = "2026-09-29T20:07:14.279Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/33/8a7acd75405d0cfde96c26219dbbac050aa23416ceefd5f62cf7aecfc22d/claude_agent_sdk-0.2.162-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:673598c9916f5f4d03ff49ab3128f856f0c6508135e8e258838fc3b6f7aafa49", size = 102525631, upload-time = "2026-09-29T20:07:23.411Z" },
 ]
 
 [[package]]
@@ -507,7 +506,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite" },
-    { name = "claude-agent-sdk", specifier = "==0.2.156" },
+    { name = "claude-agent-sdk", specifier = "==0.2.162" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "json5", specifier = ">=0.9" },
     { name = "lark-oapi", marker = "extra == 'lark'" },
