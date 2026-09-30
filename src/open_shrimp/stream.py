@@ -210,6 +210,11 @@ class _DraftState:
     # parent_tool_use_id are suppressed from the Telegram chat (the user
     # can watch progress via the terminal viewer instead).
     bg_task_tool_use_ids: set[str] = field(default_factory=set)
+    # Held while the buffer is being sent as a message.  Permission callbacks
+    # finalize from their own task, and a background agent's tool call can
+    # land while the stream is sending the turn's last message; unguarded,
+    # both read the buffer before either clears it and post it twice.
+    finalize_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # tool_use_id -> (icon, label, started_at) for a Bash call still awaiting
     # its result.  The render arguments ride along so the row can be rewritten
     # without re-deriving whether it came from Bash or host_bash, and the
@@ -725,11 +730,12 @@ async def finalize_and_reset(
     Args:
         silent: If True, send the finalized message silently (no notification).
     """
-    _drop_open_bash_cards(state)
-    if state.has_content:
-        msg_ids = await _finalize_message(bot, state, silent=silent)
-        state.sent_message_ids.extend(msg_ids)
-    state.begin_new_message()
+    async with state.finalize_lock:
+        _drop_open_bash_cards(state)
+        if state.has_content:
+            msg_ids = await _finalize_message(bot, state, silent=silent)
+            state.sent_message_ids.extend(msg_ids)
+        state.begin_new_message()
 
 
 #: Neutral fallback messages for the vendor-agnostic error codes a backend
@@ -1296,25 +1302,29 @@ async def stream_response(
             except asyncio.CancelledError:
                 pass
 
-        # Commands with no result get their mark before the send, not after:
-        # the row is in the buffer about to go out.
-        if state.pending_bash_cards:
-            _clear_pending_bash_cards(state)
+        async with state.finalize_lock:
+            # Commands with no result get their mark before the send, not
+            # after: the row is in the buffer about to go out.
+            if state.pending_bash_cards:
+                _clear_pending_bash_cards(state)
 
-        # Final send of any remaining text — notify since the task is done.
-        if state.has_content:
-            msg_ids = await _finalize_message(bot, state, silent=False)
-            state.sent_message_ids.extend(msg_ids)
+            # Final send of any remaining text — notify since the task is
+            # done.
+            if state.has_content:
+                msg_ids = await _finalize_message(bot, state, silent=False)
+                state.sent_message_ids.extend(msg_ids)
 
-        # Snapshot the message ids this turn produced for the per-turn
-        # backend hook (Backend.on_turn_end).  The handler reads the
-        # last id to attach the prompt-suggestion button; the slice
-        # bound is recorded at turn start so we ignore ids from prior
-        # turns sharing the same draft state.
-        result.sent_message_ids = state.sent_message_ids[sent_message_start:]
+            # Snapshot the message ids this turn produced for the per-turn
+            # backend hook (Backend.on_turn_end).  The handler reads the
+            # last id to attach the prompt-suggestion button; the slice
+            # bound is recorded at turn start so we ignore ids from prior
+            # turns sharing the same draft state.
+            result.sent_message_ids = state.sent_message_ids[
+                sent_message_start:
+            ]
 
-        # Reset for the next stream_response() iteration.
-        state.begin_new_message()
+            # Reset for the next stream_response() iteration.
+            state.begin_new_message()
 
     return result
 
@@ -1326,38 +1336,39 @@ async def _finalize_current(bot: Bot, state: _DraftState) -> None:
     than GFM: ``split_message`` already chose a boundary the markup survives,
     and re-parsing it would escape the tags it just balanced.
     """
-    chunks = split_message(_build_full_text(state), RICH_MAX_LENGTH)
-    if len(chunks) <= 1:
-        return
+    async with state.finalize_lock:
+        chunks = split_message(_build_full_text(state), RICH_MAX_LENGTH)
+        if len(chunks) <= 1:
+            return
 
-    for chunk in chunks[:-1]:
-        try:
-            msg = await send_rich(
-                bot, state.chat_id, chunk,
-                thread_id=state.thread_id,
-                disable_notification=True,
-            )
-            state.sent_message_ids.append(msg.message_id)
-        except Exception as e:
-            if _is_thread_not_found(e):
-                raise
-            logger.exception("Failed to finalize message")
+        for chunk in chunks[:-1]:
             try:
-                msg = await bot.send_message(
-                    chat_id=state.chat_id,
-                    text=chunk,
+                msg = await send_rich(
+                    bot, state.chat_id, chunk,
+                    thread_id=state.thread_id,
                     disable_notification=True,
-                    **state._thread_kwargs,
                 )
                 state.sent_message_ids.append(msg.message_id)
-            except Exception as e2:
-                if _is_thread_not_found(e2):
+            except Exception as e:
+                if _is_thread_not_found(e):
                     raise
-                logger.exception("Failed to send plaintext fallback")
+                logger.exception("Failed to finalize message")
+                try:
+                    msg = await bot.send_message(
+                        chat_id=state.chat_id,
+                        text=chunk,
+                        disable_notification=True,
+                        **state._thread_kwargs,
+                    )
+                    state.sent_message_ids.append(msg.message_id)
+                except Exception as e2:
+                    if _is_thread_not_found(e2):
+                        raise
+                    logger.exception("Failed to send plaintext fallback")
 
-    state.begin_new_message()
-    state.buffer.append(_Block(rich=True, text=chunks[-1]))
-    state.dirty = True
+        state.begin_new_message()
+        state.buffer.append(_Block(rich=True, text=chunks[-1]))
+        state.dirty = True
 
 
 def add_tool_notification(
