@@ -263,6 +263,55 @@ def test_task_updated_dropped_for_suppressed_fg_bash():
     assert tr(updated) is None
 
 
+def _bash_task_started(task_id: str, tool_use_id: str) -> sdk.TaskStartedMessage:
+    return sdk.TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id=task_id,
+        description="Wait for host build to finish",
+        uuid="u",
+        session_id="s",
+        tool_use_id=tool_use_id,
+        task_type="local_bash",
+    )
+
+
+def test_bash_task_from_a_workflow_agent_is_dropped():
+    # A workflow agent's tool_use never reaches the main stream, so its
+    # tool_use_id is unknown; a card for it would point at an .output file
+    # the CLI never writes for an auto-promoted foreground command.
+    tr = SdkTranslator()
+    assert tr(_bash_task_started("wf-1", "tu-unseen")) is None
+    notification = sdk.TaskNotificationMessage(
+        subtype="task_notification",
+        data={},
+        task_id="wf-1",
+        status="completed",
+        output_file="",
+        summary="Wait for host build to finish",
+        uuid="u",
+        session_id="s",
+        tool_use_id="tu-unseen",
+    )
+    assert tr(notification) is None
+
+
+def test_background_bash_on_the_main_stream_keeps_its_task():
+    tr = SdkTranslator()
+    tr(
+        sdk.AssistantMessage(
+            content=[sdk.ToolUseBlock(
+                id="tu-bg", name="Bash",
+                input={"command": "make", "run_in_background": True},
+            )],
+            model="claude",
+        )
+    )
+    out = tr(_bash_task_started("bg-1", "tu-bg"))
+    assert isinstance(out, bt.TaskStartedMessage)
+    assert out.task_id == "bg-1"
+
+
 def test_user_message_str_content_passes_through():
     msg = sdk.UserMessage(content="plain string prompt")
     out = SdkTranslator()(msg)

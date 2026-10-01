@@ -255,11 +255,20 @@ class SdkTranslator:
         Without this filter we'd post ⏳ + 📋 noise and a "View output"
         button that 404s.  Reported upstream as anthropics/claude-code#31518
         (closed without fix).
+
+        A ``tool_use_id`` absent from ``_tool_use_map`` belongs to a workflow
+        agent: Agent-tool subagents stream their assistant messages with
+        ``parent_tool_use_id``, but workflow agents never reach this stream,
+        so whether the call set ``run_in_background`` is unknowable here.
+        Those are dropped too; the workflow's own card and its per-agent
+        terminal tabs already cover what the agent runs.
         """
         if msg.task_type != "local_bash" or not msg.tool_use_id:
             return False
         info = self._tool_use_map.get(msg.tool_use_id)
-        if info is None or info[0] != "Bash":
+        if info is None:
+            return True
+        if info[0] != "Bash":
             return False
         return not info[1].get("run_in_background")
 
