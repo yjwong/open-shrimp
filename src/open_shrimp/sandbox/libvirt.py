@@ -74,6 +74,7 @@ from open_shrimp.sandbox.libvirt_helpers import (
     find_virtiofsd,
     generate_cloud_init_iso,
     generate_domain_xml,
+    grow_guest_root_fs,
     cloud_init_fingerprint,
     load_cloud_init_fingerprint,
     load_ssh_port,
@@ -81,6 +82,8 @@ from open_shrimp.sandbox.libvirt_helpers import (
     qmp_send_mouse_event,
     qmp_send_scroll_event,
     qmp_type_text,
+    qcow2_virtual_size,
+    resize_qcow2,
     save_cloud_init_fingerprint,
     save_ssh_port,
     ssh_check_alive,
@@ -219,6 +222,11 @@ class LibvirtSandbox:
         self._dom_name = _domain_name(context_name, instance_prefix)
         self._ssh_port: int | None = load_ssh_port(self._sdir)
 
+        # Present from the moment the overlay grows until the guest's root
+        # filesystem has been extended onto it, so a process that dies in
+        # between leaves the next one the in-guest half to finish.
+        self._root_fs_grow_marker = self._sdir / "root-fs-grow-pending"
+
         # Screenshots directory for computer-use (host-side).
         self._screenshots_dir = (
             self._sdir / "screenshots" if self._computer_use else None
@@ -342,8 +350,9 @@ class LibvirtSandbox:
         private_key, public_key_path = ensure_ssh_key(sdir)
         public_key = public_key_path.read_text(encoding="utf-8").strip()
 
-        # 3. qcow2 overlay.
+        # 3. qcow2 overlay, grown if disk_size went up since it was made.
         overlay = create_overlay(sdir, base_image, self._config.disk_size)
+        self._grow_overlay(overlay, log_file=log_file)
 
         # 3a. Persistent volume qcow2 files (survive rebuilds).
         persistent_volumes: list[tuple[str, Path]] = []
@@ -466,6 +475,49 @@ class LibvirtSandbox:
 
         save_cloud_init_fingerprint(sdir, desired_fp)
         _log(log_file, "VM environment ready.")
+
+    def _grow_overlay(self, overlay: Path, *, log_file: Path | None) -> None:
+        """Grow *overlay* to ``disk_size`` if it is smaller.
+
+        A running domain holds the image open, so its disk is grown through
+        libvirt's ``blockResize`` and the guest sees the new capacity at once;
+        a stopped one is resized with ``qemu-img``.  Either way the root
+        filesystem is extended in the guest by :meth:`ensure_running`, which
+        leaves the VM up across the change.  A smaller ``disk_size`` is
+        skipped with a warning: qcow2 can shrink, the filesystem on it cannot.
+        """
+        import libvirt
+
+        want = self._config.disk_size * 1024**3
+        have = qcow2_virtual_size(overlay)
+        if want == have:
+            return
+        if want < have:
+            msg = (
+                f"sandbox.disk_size is {self._config.disk_size} GiB but the "
+                f"VM disk is already {have / 1024**3:g} GiB, and a disk "
+                "cannot shrink — keeping the larger disk."
+            )
+            _log(log_file, msg)
+            logger.warning("%s: %s", self._dom_name, msg)
+            return
+
+        _log(
+            log_file,
+            f"Growing the VM disk from {have / 1024**3:g} GiB to "
+            f"{self._config.disk_size} GiB...",
+        )
+        self._root_fs_grow_marker.touch()
+        if self._is_domain_active():
+            domain = self._conn.lookupByName(self._dom_name)
+            domain.blockResize(
+                "vda", want, libvirt.VIR_DOMAIN_BLOCK_RESIZE_BYTES,
+            )
+        else:
+            resize_qcow2(overlay, want)
+        logger.info(
+            "Grew overlay of %s from %d to %d bytes", self._dom_name, have, want,
+        )
 
     def running(self) -> bool:
         """Check if the VM is active and SSH-reachable."""
@@ -633,6 +685,21 @@ class LibvirtSandbox:
                 ssh_key=self._sdir / "ssh_key",
                 persistent_paths=self._config.persistent_paths,
             )
+
+        if self._root_fs_grow_marker.exists():
+            _log(log_file, "Extending the root filesystem onto the grown disk...")
+            try:
+                grow_guest_root_fs(self._ssh_port, self._sdir / "ssh_key")
+            except (RuntimeError, subprocess.SubprocessError) as exc:
+                # The guest still works at its old size, and the marker stays
+                # for the next start to try again.
+                logger.warning(
+                    "Could not extend the root filesystem of %s: %s",
+                    self._dom_name, exc,
+                )
+                _log(log_file, f"Root filesystem not extended: {exc}")
+            else:
+                self._root_fs_grow_marker.unlink(missing_ok=True)
 
     def provision_workspace(self, *, log_file: Path | None = None) -> None:
         """Install computer-use helpers, runtime CLI binary, and credentials."""
@@ -1663,6 +1730,8 @@ class LibvirtSandbox:
         overlay.unlink(missing_ok=True)
         # Also delete cloud-init ISO so it gets regenerated.
         (self._sdir / "cloud-init.iso").unlink(missing_ok=True)
+        # The fresh overlay is made at disk_size and cloud-init grows into it.
+        self._root_fs_grow_marker.unlink(missing_ok=True)
         logger.info("Deleted overlay and cloud-init for rebuild")
 
         # 3. Re-run ensure_environment to regenerate overlay + cloud-init.

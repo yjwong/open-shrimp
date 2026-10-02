@@ -158,7 +158,7 @@ Run the Claude CLI inside an isolated environment. When a sandbox is enabled, al
 | `computer_use` | bool | No | `false` | Enable GUI interaction with a headless desktop |
 | `memory` | int | No | `2048` | Memory ceiling in MB (Libvirt, Lima, and HCS backends) |
 | `cpus` | int | No | `2` | Number of vCPUs (Libvirt, Lima, and HCS backends). HCS rejects a count above the host's logical processor count |
-| `disk_size` | int | No | `20` | Disk size in GB for the qcow2 overlay (Libvirt, Lima) or each dynamic VHDX volume (HCS) |
+| `disk_size` | int | No | `20` | Disk size in GB for the qcow2 overlay (Libvirt, Lima) or each dynamic VHDX volume (HCS). Raising it grows an existing disk in place; a disk never shrinks |
 | `base_image` | string | No | `null` | Path to a base image you supply — qcow2 for Libvirt, VHDX for HCS. Both backends download one when unset |
 | `provision` | string | No | `null` | Shell script to run on first boot (Libvirt, Lima, and HCS backends) |
 

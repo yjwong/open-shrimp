@@ -50,6 +50,8 @@ contexts:
 
 Memory uses free-page-reporting, so the VM only consumes what it actually needs — the configured value is a ceiling.
 
+Raising `disk_size` grows the existing disk the next time a conversation starts in the context, without restarting the VM: libvirt resizes the overlay under the running guest and OpenShrimp extends the root filesystem over SSH. Lowering it changes nothing, since a disk never shrinks.
+
 ## Custom base image
 
 Use your own qcow2 or cloud image:

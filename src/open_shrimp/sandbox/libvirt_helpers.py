@@ -11,6 +11,7 @@ after initial system package installation.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -1276,6 +1277,58 @@ def create_overlay(sdir: Path, base_image: Path, disk_size_gb: int) -> Path:
     )
     logger.info("Created qcow2 overlay at %s (backed by %s)", overlay, base_image)
     return overlay
+
+
+def qcow2_virtual_size(path: Path) -> int:
+    """The virtual size of the qcow2 at *path*, in bytes.
+
+    ``-U`` skips QEMU's image lock, so this answers for an overlay a running
+    domain holds open.
+    """
+    result = subprocess.run(
+        ["qemu-img", "info", "-U", "--output=json", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return int(json.loads(result.stdout)["virtual-size"])
+
+
+def resize_qcow2(path: Path, size_bytes: int) -> None:
+    """Grow the qcow2 at *path* to *size_bytes*.  The image must not be open
+    in a running domain; :meth:`virDomain.blockResize` covers that case."""
+    subprocess.run(
+        ["qemu-img", "resize", str(path), str(size_bytes)],
+        check=True,
+        capture_output=True,
+    )
+
+
+def grow_guest_root_fs(ssh_port: int, ssh_key: Path) -> None:
+    """Extend the guest's root partition and filesystem onto a grown disk.
+
+    Runs cloud-init's own ``growpart`` and ``resizefs`` modules, the ones it
+    already runs on every boot, so whatever partition layout and filesystem
+    the base image uses is handled the way first boot handled it.
+
+    Raises :class:`RuntimeError` naming the module that failed.
+    """
+    ssh_opts = _ssh_common_opts(ssh_key, ssh_port)
+    for module in ("growpart", "resizefs"):
+        result = subprocess.run(
+            [
+                "ssh", *ssh_opts, f"{SANDBOX_USER}@localhost", "--",
+                f"sudo cloud-init single --name {module} --frequency always",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"cloud-init {module} failed: "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
 
 
 # ---------------------------------------------------------------------------

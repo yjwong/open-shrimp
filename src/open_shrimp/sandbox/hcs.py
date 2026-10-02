@@ -672,7 +672,7 @@ class HcsSandbox:
         self._ensure_rootfs(log_file=log_file, progress=progress)
 
         # Create any missing persistent-volume VHDX (never re-create existing;
-        # data survives rebuilds).
+        # data survives rebuilds), and grow existing ones to disk_size.
         for guest_path in self._persistent_paths():
             vol = self._sdir / H.persistent_vol_filename(guest_path)
             if not vol.exists():
@@ -680,6 +680,7 @@ class HcsSandbox:
                     log_file, f"Creating persistent volume for {guest_path}...",
                 )
                 W.create_dynamic_vhdx(str(vol), self._config.disk_size)
+        self._grow_persistent_volumes(log_file=log_file)
 
         # Stage the guest-side exec agent + provision script into the cfg
         # share so the guest can pick them up over 9p (no rootfs rebuild).
@@ -687,6 +688,58 @@ class HcsSandbox:
 
         self._save_fingerprint(desired_fp)
         self._log(log_file, "HCS sandbox environment ready.")
+
+    def _grow_persistent_volumes(self, *, log_file: Path | None) -> None:
+        """Grow every persistent-volume VHDX smaller than ``disk_size``.
+
+        A running compute system holds its VHDXs attached, so the guest is
+        stopped (flushing the ext4 journals) before any resize and
+        :meth:`ensure_running` boots it again; :meth:`_provision_guest` runs
+        ``resize2fs`` on each volume as it mounts it.  A volume larger than
+        ``disk_size`` is left alone with a warning, since ext4 cannot shrink
+        while mounted and the space may hold data.
+        """
+        from open_shrimp.sandbox import hcs_win as W
+
+        want = self._config.disk_size * 1024**3
+        to_grow: list[tuple[str, Path, int]] = []
+        for guest_path in self._persistent_paths():
+            vol = self._sdir / H.persistent_vol_filename(guest_path)
+            try:
+                have = W.vhdx_virtual_size(str(vol))
+            except W.HcsError as exc:
+                logger.warning(
+                    "Could not read the size of %s, leaving it as is: %s",
+                    vol, exc,
+                )
+                continue
+            if have < want:
+                to_grow.append((guest_path, vol, have))
+            elif have > want:
+                self._log(
+                    log_file,
+                    f"sandbox.disk_size is {self._config.disk_size} GiB but "
+                    f"the persistent volume for {guest_path} is already "
+                    f"{have / 1024**3:g} GiB, and a volume cannot shrink — "
+                    "keeping the larger volume.",
+                )
+        if not to_grow:
+            return
+
+        if self._live_runtime_id() is not None:
+            self._log(
+                log_file,
+                "Persistent volume size changed — stopping the HCS sandbox "
+                "to grow it...",
+            )
+            self.stop()
+        for guest_path, vol, have in to_grow:
+            self._log(
+                log_file,
+                f"Growing the persistent volume for {guest_path} from "
+                f"{have / 1024**3:g} GiB to {self._config.disk_size} GiB...",
+            )
+            W.grow_vhdx(str(vol), self._config.disk_size)
 
     def _rootfs_template(
         self,
@@ -1020,6 +1073,8 @@ class HcsSandbox:
         #    mkfs.ext4/blkid), so this runs inside the chroot.  A blank disk
         #    is formatted at its deterministic LUN device; a formatted one is
         #    resolved by label, so attach-order drift cannot corrupt data.
+        #    resize2fs then grows the mounted filesystem onto a VHDX that
+        #    _grow_persistent_volumes enlarged, and is a no-op otherwise.
         for idx, guest_path in enumerate(self._persistent_paths()):
             dev = f"/dev/{H.persistent_dev_name(idx)}"
             label = H.persistent_vol_label(guest_path)
@@ -1031,13 +1086,20 @@ class HcsSandbox:
             inner = (
                 f"d=$(blkid -L {label} 2>/dev/null || true); "
                 f"if [ -z \"$d\" ]; then mkfs.ext4 -q -L {label} {dev}; d={dev}; fi; "
-                'mkdir -p "$1" && mount -t ext4 "$d" "$1" && echo PV-OK'
+                'mkdir -p "$1" && mount -t ext4 "$d" "$1" && echo PV-OK && '
+                '{ resize2fs "$d" >/dev/null 2>&1 || echo PV-GROW-FAILED; }'
             )
-            ctl(
+            out = ctl(
                 f"chroot {H.MNT_ROOT} /usr/bin/env PATH={H.CHROOT_PATH} "
                 f"sh -c {shlex.quote(inner)} _ {shlex.quote(guest_path)}",
                 expect="PV-OK", read_timeout=120.0,
             )
+            if "PV-GROW-FAILED" in out:
+                # The volume is mounted and usable at its old size.
+                logger.warning(
+                    "resize2fs failed on the persistent volume for %s in %s",
+                    guest_path, self._context_name,
+                )
 
         # 5. Run the provision script inside the chroot when configured.
         if self._config.provision:

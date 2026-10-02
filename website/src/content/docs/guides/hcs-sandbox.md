@@ -106,7 +106,9 @@ contexts:
 
 `cpus` **may not exceed the host's logical processor count** — HCS rejects a larger processor topology with a bare error code, so OpenShrimp checks it against the host before creating the guest. Any count from 1 up to that limit is accepted. Note that client editions of Windows use at most two CPU sockets, so a Windows host that is itself a VM may see far fewer logical processors than its hypervisor was configured to give it.
 
-Each entry in `persistent_paths` gets its own ext4 VHDX, mounted by label and untouched by rebuilds — that is where package caches and anything else worth keeping belong. Changing any sandbox field rebuilds the guest; the persistent volumes survive.
+Each entry in `persistent_paths` gets its own ext4 VHDX, mounted by label and untouched by rebuilds — that is where package caches and anything else worth keeping belong. Changing any other sandbox field rebuilds the guest; the persistent volumes survive.
+
+Raising `disk_size` grows every existing persistent volume: OpenShrimp stops the guest, resizes each VHDX, and the guest runs `resize2fs` as it mounts the volume again. A smaller `disk_size` leaves existing volumes at their size.
 
 `additional_directories` are shared in alongside the project directory, and files you send the bot are copied into the workspace share. Shares are 9p, mounted with `cache=mmap` so memory-mapped files — including SQLite in WAL mode — work correctly.
 

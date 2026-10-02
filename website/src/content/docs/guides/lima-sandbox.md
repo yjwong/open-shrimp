@@ -49,6 +49,8 @@ contexts:
 
 Memory uses free-page-reporting, so the VM only consumes what it actually needs.
 
+Changing `cpus` or `memory`, or raising `disk_size`, keeps the VM and everything installed in it: OpenShrimp stops it, applies the new sizing with `limactl edit`, and starts it again, and the guest grows its root filesystem on that boot. A smaller `disk_size` is ignored with a warning, because Lima cannot shrink a disk. A macOS guest is rebuilt on a `disk_size` change instead, since nothing in it grows APFS onto the new space.
+
 ## Provisioning
 
 Run a shell script on first boot to install tools and dependencies:
@@ -64,7 +66,7 @@ contexts:
         npm install -g typescript
 ```
 
-The provision script runs via cloud-init on the first boot. If you change the provision script or any sandbox config field, OpenShrimp detects the change and automatically rebuilds the VM.
+The provision script runs via cloud-init on the first boot. If you change the provision script or any other sandbox field apart from the sizing ones above, OpenShrimp detects the change and automatically rebuilds the VM.
 
 ## Additional directories
 

@@ -533,6 +533,104 @@ def hcn_delete_network(network_guid: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _vhdx_storage_type() -> Any:
+    from win32more.Windows.Win32.Storage.Vhd import VIRTUAL_STORAGE_TYPE
+
+    storage_type = VIRTUAL_STORAGE_TYPE()
+    storage_type.DeviceId = 3  # VIRTUAL_STORAGE_TYPE_DEVICE_VHDX
+    storage_type.VendorId = Guid("EC984AEC-A0F9-47E9-901F-71415A66345B")
+    return storage_type
+
+
+def _open_vhdx(path: str, *, info_only: bool) -> ctypes.c_void_p:
+    """Open the VHDX at *path*, returning a handle the caller closes.
+
+    *info_only* opens it for ``GetVirtualDiskInformation`` alone, which a
+    compute system holding the disk attached does not block.
+    """
+    from win32more.Windows.Win32.Storage.Vhd import (
+        OPEN_VIRTUAL_DISK_PARAMETERS,
+        OpenVirtualDisk,
+    )
+
+    storage_type = _vhdx_storage_type()
+    params = OPEN_VIRTUAL_DISK_PARAMETERS()
+    params.Version = 2  # OPEN_VIRTUAL_DISK_VERSION_2
+    params.Anonymous.Version2.GetInfoOnly = 1 if info_only else 0
+    handle = ctypes.c_void_p()
+    # Version-2 parameters require VIRTUAL_DISK_ACCESS_NONE (0).
+    rc = OpenVirtualDisk(
+        ctypes.byref(storage_type),
+        path,
+        0,
+        0,  # OPEN_VIRTUAL_DISK_FLAG_NONE
+        ctypes.byref(params),
+        ctypes.byref(handle),
+    )
+    if rc != 0:
+        raise HcsError(
+            f"OpenVirtualDisk({path}) failed win32={rc} ({hr_message(rc)})"
+        )
+    return handle
+
+
+def vhdx_virtual_size(path: str) -> int:
+    """The virtual size of the VHDX at *path*, in bytes."""
+    from win32more.Windows.Win32.Storage.Vhd import (
+        GET_VIRTUAL_DISK_INFO,
+        GetVirtualDiskInformation,
+    )
+
+    handle = _open_vhdx(path, info_only=True)
+    try:
+        info = GET_VIRTUAL_DISK_INFO()
+        info.Version = 1  # GET_VIRTUAL_DISK_INFO_SIZE
+        info_size = ctypes.c_uint32(ctypes.sizeof(info))
+        rc = GetVirtualDiskInformation(
+            handle, ctypes.byref(info_size), ctypes.byref(info), None,
+        )
+        if rc != 0:
+            raise HcsError(
+                f"GetVirtualDiskInformation({path}) failed win32={rc} "
+                f"({hr_message(rc)})"
+            )
+        return int(info.Anonymous.Size.VirtualSize)
+    finally:
+        _k32.CloseHandle(handle)
+
+
+def grow_vhdx(path: str, size_gb: int) -> None:
+    """Grow the VHDX at *path* to *size_gb* GiB.
+
+    The disk must not be attached to a running compute system.  Only the
+    virtual disk grows; the guest extends the filesystem on it at its next
+    mount.
+    """
+    from win32more.Windows.Win32.Storage.Vhd import (
+        RESIZE_VIRTUAL_DISK_PARAMETERS,
+        ResizeVirtualDisk,
+    )
+
+    handle = _open_vhdx(path, info_only=False)
+    try:
+        params = RESIZE_VIRTUAL_DISK_PARAMETERS()
+        params.Version = 1  # RESIZE_VIRTUAL_DISK_VERSION_1
+        params.Anonymous.Version1.NewSize = size_gb * 1024 * 1024 * 1024
+        rc = ResizeVirtualDisk(
+            handle,
+            0,  # RESIZE_VIRTUAL_DISK_FLAG_NONE
+            ctypes.byref(params),
+            None,
+        )
+        if rc != 0:
+            raise HcsError(
+                f"ResizeVirtualDisk({path}) failed win32={rc} "
+                f"({hr_message(rc)})"
+            )
+    finally:
+        _k32.CloseHandle(handle)
+
+
 def create_dynamic_vhdx(path: str, size_gb: int) -> None:
     """Create an empty dynamic (sparse) VHDX at *path* via ``virtdisk.dll``.
 
@@ -543,12 +641,9 @@ def create_dynamic_vhdx(path: str, size_gb: int) -> None:
     from win32more.Windows.Win32.Storage.Vhd import (
         CREATE_VIRTUAL_DISK_PARAMETERS,
         CreateVirtualDisk,
-        VIRTUAL_STORAGE_TYPE,
     )
 
-    storage_type = VIRTUAL_STORAGE_TYPE()
-    storage_type.DeviceId = 3  # VIRTUAL_STORAGE_TYPE_DEVICE_VHDX
-    storage_type.VendorId = Guid("EC984AEC-A0F9-47E9-901F-71415A66345B")
+    storage_type = _vhdx_storage_type()
 
     params = CREATE_VIRTUAL_DISK_PARAMETERS()
     params.Version = 2  # CREATE_VIRTUAL_DISK_VERSION_2

@@ -70,6 +70,8 @@ from open_shrimp.sandbox.lima_helpers import (
     lima_template,
     limactl_create,
     limactl_delete,
+    limactl_edit,
+    limactl_instance,
     limactl_instance_status,
     limactl_shell_check,
     limactl_start,
@@ -246,14 +248,18 @@ class LimaSandbox:
         A drift in the mount set — what registering a second agent runtime
         produces — is absorbed by rewriting the instance's mount list and
         letting :meth:`ensure_running` restart it, so the guest disk and the
-        CLIs installed on it survive.  Anything else still rebuilds.
+        CLIs installed on it survive.  So is a change to ``cpus``, ``memory``
+        or a grown ``disk`` (:meth:`_reconcile_sizing`).  Anything else still
+        rebuilds.
         """
         sdir = self._sdir
         sdir.mkdir(parents=True, mode=0o700, exist_ok=True)
 
-        # Detect config drift outside the mount set.
+        # Detect config drift outside the mount set and the sizing fields.
         template = self._template()
-        desired = config_fingerprint(template)
+        desired = config_fingerprint(
+            template, applied_in_place=self._sizing_fields(),
+        )
         saved = load_config_fingerprint(sdir)
         if saved is not None and saved != desired:
             # Drop the fingerprint first: a crash partway through the rebuild
@@ -278,6 +284,7 @@ class LimaSandbox:
                 self._inst_name, status,
             )
             self._reconcile_mounts(template, log_file=log_file)
+            self._reconcile_sizing(template, log_file=log_file)
             save_config_fingerprint(sdir, desired)
             _log(log_file, "Lima VM environment ready.")
             return
@@ -438,6 +445,71 @@ class LimaSandbox:
         # rebuild starts from what is actually mounted.
         write_lima_yaml(self._sdir, template)
         return True
+
+    def _sizing_fields(self) -> tuple[str, ...]:
+        """Template fields :meth:`_reconcile_sizing` applies to an existing
+        instance, which the rebuild fingerprint therefore leaves out.
+
+        A macOS guest keeps ``disk`` in the fingerprint: Lima grows its image,
+        but nothing in the guest grows the APFS container onto the new space.
+        """
+        if self._guest_os == "linux":
+            return ("cpus", "memory", "disk")
+        return ("cpus", "memory")
+
+    def _reconcile_sizing(
+        self, template: dict, *, log_file: Path | None = None,
+    ) -> None:
+        """Give the existing instance the template's sizing fields.
+
+        Compared against ``limactl list``, which reports what the instance
+        config holds whoever wrote it.  A changed field costs a stop and a
+        ``limactl edit``; :meth:`ensure_running` starts the VM again.  A
+        smaller ``disk`` is skipped with a warning, because Lima cannot shrink
+        a disk and would refuse to start an instance configured for it.
+        """
+        inst = limactl_instance(self._limactl, self._inst_name)
+        if inst is None:
+            return
+        wanted = {
+            "cpus": self._config.cpus,
+            "memory": self._config.memory * 1024 * 1024,
+            "disk": self._config.disk_size * 1024 * 1024 * 1024,
+        }
+        changed: dict[str, int | str] = {}
+        for field in self._sizing_fields():
+            have = inst.get(field)
+            if not isinstance(have, int) or have == wanted[field]:
+                continue
+            if field == "disk" and wanted[field] < have:
+                msg = (
+                    f"sandbox.disk_size is {self._config.disk_size} GiB but "
+                    f"the Lima VM's disk is already {have / 1024**3:g} GiB, "
+                    "and a disk cannot shrink — keeping the larger disk."
+                )
+                _log(log_file, msg)
+                logger.warning("%s: %s", self._inst_name, msg)
+                continue
+            changed[field] = template[field]
+        if not changed:
+            return
+
+        if inst.get("status") == "Running":
+            _log(
+                log_file,
+                f"VM sizing changed ({', '.join(changed)}) — "
+                "restarting the Lima VM...",
+            )
+            limactl_stop(self._limactl, self._inst_name)
+        try:
+            limactl_edit(self._limactl, self._inst_name, changed)
+        except subprocess.CalledProcessError as exc:
+            logger.warning(
+                "limactl edit of %s failed (%s) — falling back to a rebuild",
+                self._inst_name, (exc.stderr or "").strip(),
+            )
+            _log(log_file, "Lima VM sizing could not be changed — rebuilding VM...")
+            self._rebuild_vm(log_file=log_file)
 
     def running(self) -> bool:
         """Check if the Lima instance is running and responsive."""

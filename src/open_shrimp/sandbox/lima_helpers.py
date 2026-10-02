@@ -21,6 +21,7 @@ import stat
 import subprocess
 import tempfile
 import textwrap
+from collections.abc import Collection
 from pathlib import Path
 from typing import Callable
 
@@ -715,19 +716,25 @@ def _build_computer_use_provisions() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def config_fingerprint(template: dict) -> str:
-    """Hash *template* without its ``mounts:`` block.
+def config_fingerprint(
+    template: dict, *, applied_in_place: Collection[str] = (),
+) -> str:
+    """Hash *template* without its ``mounts:`` block or *applied_in_place*.
 
     The mount set is left out because nothing persisted here could say which
     runtimes the *running* instance was booted with: a process that starts
     against a guest built for both agents and dispatches one of them would
     read a hash of its own half-sized plan as drift.  The instance's own
     ``lima.yaml`` already records the shares it carries, so mounts are
-    reconciled against that file (:func:`instance_mounts`) and every other
-    field — cpus, memory, disk, provision scripts, port forwards — is hashed
-    here, where a change means the VM is deleted and built again.
+    reconciled against that file (:func:`instance_mounts`).
+
+    *applied_in_place* names the sizing fields the caller settles against
+    ``limactl list`` and ``limactl edit`` instead.  Every other field —
+    provision scripts, images, port forwards — is hashed here, where a change
+    means the VM is deleted and built again.
     """
-    body = {key: value for key, value in template.items() if key != "mounts"}
+    skipped = {"mounts", *applied_in_place}
+    body = {key: value for key, value in template.items() if key not in skipped}
     content = yaml.dump(body, default_flow_style=False, sort_keys=False)
     return hashlib.sha256(content.encode()).hexdigest()
 
@@ -960,12 +967,39 @@ def limactl_list_json(limactl: str) -> list[dict]:
     return instances
 
 
-def limactl_instance_status(limactl: str, name: str) -> str | None:
-    """Return instance status (``Running``, ``Stopped``, etc.) or ``None``."""
+def limactl_instance(limactl: str, name: str) -> dict | None:
+    """The ``limactl list --json`` entry for *name*, or ``None``.
+
+    Lima reports ``cpus`` as a count and ``memory``/``disk`` in bytes, already
+    resolved from whatever spelling the instance config uses.
+    """
     for inst in limactl_list_json(limactl):
         if inst.get("name") == name:
-            return inst.get("status")
+            return inst
     return None
+
+
+def limactl_instance_status(limactl: str, name: str) -> str | None:
+    """Return instance status (``Running``, ``Stopped``, etc.) or ``None``."""
+    inst = limactl_instance(limactl, name)
+    return inst.get("status") if inst is not None else None
+
+
+def limactl_edit(limactl: str, name: str, fields: dict[str, int | str]) -> None:
+    """Set top-level *fields* in a stopped instance's config.
+
+    ``limactl edit`` refuses a running instance and validates the result,
+    rejecting a smaller ``disk`` among other things.  A grown ``disk`` is
+    applied to the instance's diff disk by the next ``limactl start``, and the
+    guest's cloud-init ``growpart`` extends the root filesystem on that boot.
+    """
+    expr = " | ".join(
+        f".{key} = {json.dumps(value)}" for key, value in fields.items()
+    )
+    _run_limactl(
+        limactl, ["edit", "--tty=false", "--set", expr, name], timeout=60,
+    )
+    logger.info("Edited Lima instance %s: %s", name, expr)
 
 
 def limactl_shell_check(limactl: str, name: str) -> bool:

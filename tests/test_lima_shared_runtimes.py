@@ -300,7 +300,9 @@ def test_the_wrapper_execs_the_runtimes_own_cli(tmp_path):
 
 
 def _fingerprint(sb: LimaSandbox) -> str:
-    return lima_helpers.config_fingerprint(sb._template())
+    return lima_helpers.config_fingerprint(
+        sb._template(), applied_in_place=sb._sizing_fields(),
+    )
 
 
 def test_gaining_a_runtime_leaves_the_rebuild_trigger_alone(tmp_path):
@@ -314,13 +316,42 @@ def test_gaining_a_runtime_leaves_the_rebuild_trigger_alone(tmp_path):
     assert set(_mounts(after)) > set(_mounts(before))
 
 
-def test_more_memory_moves_the_fingerprint(tmp_path):
-    """A config change outside the mount set still rebuilds the VM."""
+def test_a_new_provision_script_moves_the_fingerprint(tmp_path):
+    """Lima runs provision scripts only when it creates the instance, so a
+    changed one still rebuilds the VM."""
     before = _sandbox(tmp_path, _claude(tmp_path))
     after = _sandbox(tmp_path, _claude(tmp_path))
-    after._config = SandboxConfig(backend="lima", memory=before._config.memory * 2)
+    after._config = SandboxConfig(backend="lima", provision="apt-get install -y jq")
 
     assert _fingerprint(after) != _fingerprint(before)
+
+
+def test_sizing_leaves_the_fingerprint_alone(tmp_path):
+    """cpus, memory and disk are applied to the existing instance with
+    ``limactl edit``; hashing them would delete the guest instead."""
+    before = _sandbox(tmp_path, _claude(tmp_path))
+    after = _sandbox(tmp_path, _claude(tmp_path))
+    after._config = SandboxConfig(
+        backend="lima", cpus=8, memory=8192, disk_size=80,
+    )
+
+    assert _fingerprint(after) == _fingerprint(before)
+
+
+def test_a_macos_guests_disk_still_moves_the_fingerprint(tmp_path):
+    """Nothing in a macOS guest grows APFS onto a grown image."""
+    before = _sandbox(tmp_path, _claude(tmp_path))
+    before._guest_os = "macos"
+    after = _sandbox(tmp_path, _claude(tmp_path))
+    after._guest_os = "macos"
+    after._config = SandboxConfig(backend="lima", disk_size=80)
+
+    assert "disk" not in after._sizing_fields()
+    assert lima_helpers.config_fingerprint(
+        after._template(), applied_in_place=after._sizing_fields(),
+    ) != lima_helpers.config_fingerprint(
+        before._template(), applied_in_place=before._sizing_fields(),
+    )
 
 
 def test_a_guest_booted_for_both_agents_survives_a_process_restart(
@@ -472,3 +503,91 @@ def test_a_remount_without_an_instance_falls_back_to_a_rebuild(
     sb = _sandbox(tmp_path, _claude(tmp_path), _opencode())
 
     assert sb._remount(sb._template()) is False
+
+
+# -- sizing ---------------------------------------------------------------
+
+
+_GIB = 1024**3
+
+
+def _reconcile_sizing(
+    sb: LimaSandbox, monkeypatch, instance: dict[str, Any], *, edit: Any = None,
+) -> tuple[list[str], list[dict], list[str]]:
+    """Run ``_reconcile_sizing`` against *instance* as ``limactl list`` reports
+    it, returning the stops, edits and rebuilds it asked for."""
+    stopped: list[str] = []
+    edits: list[dict] = []
+    rebuilt: list[str] = []
+    monkeypatch.setattr(
+        "open_shrimp.sandbox.lima.limactl_instance",
+        lambda limactl, name: {"name": name, **instance},
+    )
+    monkeypatch.setattr(
+        "open_shrimp.sandbox.lima.limactl_stop",
+        lambda limactl, name: stopped.append(name),
+    )
+    monkeypatch.setattr(
+        "open_shrimp.sandbox.lima.limactl_edit",
+        edit or (lambda limactl, name, fields: edits.append(fields)),
+    )
+    monkeypatch.setattr(sb, "_rebuild_vm", lambda **kw: rebuilt.append("x"))
+    sb._reconcile_sizing(sb._template())
+    return stopped, edits, rebuilt
+
+
+def test_a_grown_disk_is_edited_into_the_stopped_instance(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path, _claude(tmp_path))
+    sb._config = SandboxConfig(backend="lima", disk_size=40)
+
+    stopped, edits, rebuilt = _reconcile_sizing(sb, monkeypatch, {
+        "status": "Running", "cpus": 2, "memory": 2048 * 1024**2,
+        "disk": 20 * _GIB,
+    })
+
+    assert stopped == ["openshrimp-dev"]
+    assert edits == [{"disk": "40GiB"}]
+    assert rebuilt == []
+
+
+def test_matching_sizing_leaves_the_vm_running(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path, _claude(tmp_path))
+
+    stopped, edits, _ = _reconcile_sizing(sb, monkeypatch, {
+        "status": "Running", "cpus": 2, "memory": 2048 * 1024**2,
+        "disk": 20 * _GIB,
+    })
+
+    assert (stopped, edits) == ([], [])
+
+
+def test_a_smaller_disk_is_never_written(tmp_path, monkeypatch):
+    """Lima refuses to start an instance configured below its disk's size, so
+    writing one would leave the context unbootable."""
+    sb = _sandbox(tmp_path, _claude(tmp_path))
+    sb._config = SandboxConfig(backend="lima", disk_size=10, cpus=4)
+
+    stopped, edits, _ = _reconcile_sizing(sb, monkeypatch, {
+        "status": "Stopped", "cpus": 2, "memory": 2048 * 1024**2,
+        "disk": 20 * _GIB,
+    })
+
+    assert stopped == []
+    assert edits == [{"cpus": 4}]
+
+
+def test_a_failed_edit_falls_back_to_a_rebuild(tmp_path, monkeypatch):
+    import subprocess
+
+    sb = _sandbox(tmp_path, _claude(tmp_path))
+    sb._config = SandboxConfig(backend="lima", memory=4096)
+
+    def refuse(limactl, name, fields):
+        raise subprocess.CalledProcessError(1, "limactl", stderr="nope")
+
+    _, _, rebuilt = _reconcile_sizing(sb, monkeypatch, {
+        "status": "Stopped", "cpus": 2, "memory": 2048 * 1024**2,
+        "disk": 20 * _GIB,
+    }, edit=refuse)
+
+    assert rebuilt == ["x"]
