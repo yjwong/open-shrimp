@@ -67,6 +67,7 @@ from open_shrimp.sandbox.libvirt_helpers import (
     ensure_mounts,
     ensure_persistent_mounts,
     ensure_ssh_key,
+    extract_cpu_topology_from_xml,
     extract_fs_tags_from_xml,
     extract_persistent_disks_from_xml,
     extract_sizing_from_xml,
@@ -417,15 +418,16 @@ class LibvirtSandbox:
 
         # Define domain (idempotent — overwrites if exists).
         # If the domain is active but its filesystem devices, persistent
-        # disks, memory or vCPU count differ from the config, we must
-        # gracefully stop the VM, re-define, and let ensure_running()
-        # restart it.
+        # disks, memory, vCPU count or CPU topology differ from the config,
+        # we must gracefully stop the VM, re-define, and let
+        # ensure_running() restart it.
         desired_tags = {_fs_tag_for_dir(d) for d in all_dirs}
         desired_pvs = {
             _persistent_dev_name(i)
             for i in range(len(persistent_volumes))
         }
         desired_sizing = (self._config.memory, self._config.cpus)
+        desired_topology = (1, 1, self._config.cpus, 1)
         try:
             domain = self._conn.lookupByName(self._dom_name)
             if not domain.isActive():
@@ -437,10 +439,12 @@ class LibvirtSandbox:
                 current_tags = extract_fs_tags_from_xml(live_xml)
                 current_pvs = extract_persistent_disks_from_xml(live_xml)
                 current_sizing = extract_sizing_from_xml(live_xml)
+                current_topology = extract_cpu_topology_from_xml(live_xml)
                 config_drifted = (
                     current_tags != desired_tags
                     or current_pvs != desired_pvs
                     or current_sizing != desired_sizing
+                    or current_topology != desired_topology
                 )
                 if config_drifted:
                     _log(
@@ -452,12 +456,14 @@ class LibvirtSandbox:
                         "Config drifted for %s: "
                         "fs_tags current=%s desired=%s, "
                         "pvs current=%s desired=%s, "
-                        "(memory MiB, vcpus) current=%s desired=%s "
+                        "(memory MiB, vcpus) current=%s desired=%s, "
+                        "cpu topology current=%s desired=%s "
                         "— stopping for re-define",
                         self._dom_name,
                         current_tags, desired_tags,
                         current_pvs, desired_pvs,
                         current_sizing, desired_sizing,
+                        current_topology, desired_topology,
                     )
                     self.stop()
                     # After stop, domain is inactive — undefine and re-define.

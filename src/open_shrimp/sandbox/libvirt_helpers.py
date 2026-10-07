@@ -1141,6 +1141,26 @@ def extract_sizing_from_xml(domain_xml: str) -> tuple[int, int]:
     return memory_mib, vcpus
 
 
+def extract_cpu_topology_from_xml(
+    domain_xml: str,
+) -> tuple[int, int, int, int] | None:
+    """Return ``(sockets, dies, cores, threads)`` from ``<cpu><topology>``.
+
+    ``None`` when the domain declares no topology, which QEMU turns into one
+    single-core socket per vCPU.
+    """
+    root = ET.fromstring(domain_xml)
+    topology = root.find("cpu/topology")
+    if topology is None:
+        return None
+    return (
+        int(topology.get("sockets", "0")),
+        int(topology.get("dies", "1")),
+        int(topology.get("cores", "0")),
+        int(topology.get("threads", "0")),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Base image management
 # ---------------------------------------------------------------------------
@@ -1435,6 +1455,13 @@ def generate_domain_xml(
     # modern extensions, causing V8/Bun to use inefficient memory paths
     # and OOM on small VMs.
     cpu = ET.SubElement(domain, "cpu", mode="host-passthrough")
+    # One socket of N cores: without <topology> QEMU presents N single-core
+    # sockets, so the guest scheduler gives each vCPU a private LLC and its
+    # wakeup idle-CPU search spans one CPU.  threads=1 because the vCPUs are
+    # unpinned and do not sit on real SMT siblings.
+    ET.SubElement(
+        cpu, "topology", sockets="1", dies="1", cores=str(vcpus), threads="1",
+    )
 
     # OS boot config.
     os_elem = ET.SubElement(domain, "os")
