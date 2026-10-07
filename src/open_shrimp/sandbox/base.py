@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 from open_shrimp.sandbox.prefetch import ProgressFn
 
 if TYPE_CHECKING:
+    from open_shrimp.config import SandboxConfig
     from open_shrimp.sandbox.agent_runtime import AgentHandle, AgentRuntime
 
 
@@ -118,6 +119,17 @@ class Sandbox(Protocol):
         it carries the live model and provider, which the layout set's
         same-named runtime does not.  The guest is already laid out for it, so
         the caller's provision pass has only its CLI left to install.
+        """
+        ...
+
+    def reconfigure(self, config: "SandboxConfig") -> None:
+        """Adopt *config*, the context's ``sandbox`` block as last loaded.
+
+        A cached sandbox outlives config reloads, so the manager hands it the
+        current block on every lookup.  The next :meth:`ensure_environment`
+        compares it against the guest and applies what changed (resizing,
+        or a stop and re-define).  Nothing is applied to the guest here, so a
+        turn running in it carries on.
         """
         ...
 

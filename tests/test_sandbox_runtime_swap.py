@@ -54,10 +54,14 @@ class _FakeSandbox:
     """Minimal stand-in for a concrete sandbox: records the runtimes it is
     laid out for, the ones taken into use, and stop()."""
 
-    def __init__(self, *, runtimes: Any, **_kw: Any) -> None:
+    def __init__(self, *, runtimes: Any, config: Any, **_kw: Any) -> None:
         self.runtimes = list(runtimes)
         self.in_use: list[str] = []
         self.stopped = False
+        self.config = config
+
+    def reconfigure(self, config: Any) -> None:
+        self.config = config
 
     def add_runtime(self, runtime: Any) -> None:
         if all(r.name != runtime.name for r in self.runtimes):
@@ -107,6 +111,23 @@ def test_same_runtime_reuses_cached_sandbox(monkeypatch):
 
     assert first is second
     assert first.stopped is False
+
+
+@pytest.mark.parametrize(
+    "build_manager", [_manager, _lima_manager, _hcs_manager],
+)
+def test_a_cached_sandbox_takes_the_reloaded_config(monkeypatch, build_manager):
+    """A reload that changes ``memory`` reaches the cached sandbox, which
+    applies it on its next ensure_environment, without stopping the guest."""
+    mgr = build_manager(monkeypatch)
+    sb = mgr.create_sandbox("dev", _FakeCtx(), runtime=_runtime("claude"))
+
+    reloaded = _FakeCtx(sandbox=SandboxConfig(backend="libvirt", memory=16384))
+    again = mgr.create_sandbox("dev", reloaded, runtime=_runtime("claude"))
+
+    assert again is sb
+    assert sb.config.memory == 16384
+    assert sb.stopped is False
 
 
 @pytest.mark.parametrize(

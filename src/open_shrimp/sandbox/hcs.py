@@ -419,6 +419,9 @@ class HcsSandbox:
         self._runtimes[runtime.name] = runtime
         self._in_use[runtime.name] = runtime
 
+    def reconfigure(self, config: SandboxConfig) -> None:
+        self._config = config
+
     @property
     def runtimes_in_use(self) -> set[str]:
         return set(self._in_use)

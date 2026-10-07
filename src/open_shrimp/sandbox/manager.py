@@ -93,19 +93,26 @@ def destroy_contexts_background(
 
 
 def _cached_sandbox_for(
-    mgr: Any, context_name: str, runtime: "AgentRuntime | None",
+    mgr: Any, context_name: str, context: ContextConfig,
+    runtime: "AgentRuntime | None",
 ) -> Sandbox | None:
     """The cached sandbox for *context_name*, running *runtime* as well.
 
+    The sandbox is handed *context*'s ``sandbox`` block first: it was built
+    from the config loaded at the time, and a reload since (a new ``memory``,
+    say) would otherwise never reach the guest until the process restarts.
+
     A sandbox already running *runtime* (or asked for no runtime at all) comes
-    back untouched.  One running only a different runtime takes this one on
-    too: the guest was laid out for every backend
+    back otherwise untouched.  One running only a different runtime takes this
+    one on too: the guest was laid out for every backend
     (:func:`_runtimes_for_layout`), so the caller's provision pass has only
     the newcomer's CLI left to install in the guest that is already there.
     """
     cached = mgr._sandbox_cache.get(context_name)
     if cached is None:
         return None
+    assert context.sandbox is not None
+    cached.reconfigure(context.sandbox)
     if runtime is None or runtime.name in cached.runtimes_in_use:
         return cached
     cached.add_runtime(runtime)
@@ -446,7 +453,7 @@ class LimaSandboxManager:
         self, context_name: str, context: ContextConfig,
         *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
-        cached = _cached_sandbox_for(self, context_name, runtime)
+        cached = _cached_sandbox_for(self, context_name, context, runtime)
         if cached is not None:
             return cached
 
@@ -793,7 +800,7 @@ class LibvirtSandboxManager:
         self, context_name: str, context: ContextConfig,
         *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
-        cached = _cached_sandbox_for(self, context_name, runtime)
+        cached = _cached_sandbox_for(self, context_name, context, runtime)
         if cached is not None:
             return cached
 
@@ -976,7 +983,7 @@ class HcsSandboxManager:
         self, context_name: str, context: ContextConfig,
         *, runtime: "AgentRuntime | None" = None,
     ) -> Sandbox:
-        cached = _cached_sandbox_for(self, context_name, runtime)
+        cached = _cached_sandbox_for(self, context_name, context, runtime)
         if cached is not None:
             return cached
 

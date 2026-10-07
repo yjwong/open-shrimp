@@ -69,6 +69,7 @@ from open_shrimp.sandbox.libvirt_helpers import (
     ensure_ssh_key,
     extract_fs_tags_from_xml,
     extract_persistent_disks_from_xml,
+    extract_sizing_from_xml,
     extract_vnc_port_from_xml,
     find_free_port,
     find_virtiofsd,
@@ -261,6 +262,9 @@ class LibvirtSandbox:
         self._runtimes[runtime.name] = runtime
         self._in_use[runtime.name] = runtime
 
+    def reconfigure(self, config: SandboxConfig) -> None:
+        self._config = config
+
     @property
     def runtimes_in_use(self) -> set[str]:
         return set(self._in_use)
@@ -412,14 +416,16 @@ class LibvirtSandbox:
         )
 
         # Define domain (idempotent — overwrites if exists).
-        # If the domain is active but the desired filesystem devices or
-        # persistent disks have changed, we must gracefully stop the VM,
-        # re-define, and let ensure_running() restart it.
+        # If the domain is active but its filesystem devices, persistent
+        # disks, memory or vCPU count differ from the config, we must
+        # gracefully stop the VM, re-define, and let ensure_running()
+        # restart it.
         desired_tags = {_fs_tag_for_dir(d) for d in all_dirs}
         desired_pvs = {
             _persistent_dev_name(i)
             for i in range(len(persistent_volumes))
         }
+        desired_sizing = (self._config.memory, self._config.cpus)
         try:
             domain = self._conn.lookupByName(self._dom_name)
             if not domain.isActive():
@@ -427,13 +433,14 @@ class LibvirtSandbox:
                 self._conn.defineXML(xml)
                 logger.info("Re-defined domain %s", self._dom_name)
             else:
-                # Check if filesystem devices or persistent disks drifted.
                 live_xml = domain.XMLDesc(0)
                 current_tags = extract_fs_tags_from_xml(live_xml)
                 current_pvs = extract_persistent_disks_from_xml(live_xml)
+                current_sizing = extract_sizing_from_xml(live_xml)
                 config_drifted = (
                     current_tags != desired_tags
                     or current_pvs != desired_pvs
+                    or current_sizing != desired_sizing
                 )
                 if config_drifted:
                     _log(
@@ -444,10 +451,13 @@ class LibvirtSandbox:
                     logger.info(
                         "Config drifted for %s: "
                         "fs_tags current=%s desired=%s, "
-                        "pvs current=%s desired=%s — stopping for re-define",
+                        "pvs current=%s desired=%s, "
+                        "(memory MiB, vcpus) current=%s desired=%s "
+                        "— stopping for re-define",
                         self._dom_name,
                         current_tags, desired_tags,
                         current_pvs, desired_pvs,
+                        current_sizing, desired_sizing,
                     )
                     self.stop()
                     # After stop, domain is inactive — undefine and re-define.

@@ -1116,6 +1116,31 @@ def extract_persistent_disks_from_xml(domain_xml: str) -> set[str]:
     return devs
 
 
+_MEMORY_UNIT_MIB = {
+    "b": 1 / 1024**2, "bytes": 1 / 1024**2,
+    "k": 1 / 1024, "kib": 1 / 1024,
+    "m": 1, "mib": 1,
+    "g": 1024, "gib": 1024,
+}
+
+
+def extract_sizing_from_xml(domain_xml: str) -> tuple[int, int]:
+    """Return ``(memory_mib, vcpus)`` from domain XML.
+
+    libvirt reports ``<memory>`` in KiB whatever unit the domain was defined
+    with, so the unit attribute is honoured rather than assumed.
+    """
+    root = ET.fromstring(domain_xml)
+    memory = root.find("memory")
+    vcpu = root.find("vcpu")
+    memory_mib = 0
+    if memory is not None and memory.text:
+        unit = memory.get("unit", "KiB").lower()
+        memory_mib = int(int(memory.text) * _MEMORY_UNIT_MIB.get(unit, 1 / 1024))
+    vcpus = int(vcpu.text) if vcpu is not None and vcpu.text else 0
+    return memory_mib, vcpus
+
+
 # ---------------------------------------------------------------------------
 # Base image management
 # ---------------------------------------------------------------------------
