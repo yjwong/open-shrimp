@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 from telegram import Bot, Update
-from telegram.error import TelegramError
+from telegram.error import TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
 from open_shrimp.agent import (
@@ -299,6 +299,13 @@ async def _download_telegram_audio(
     return attachments, skipped
 
 
+# A voice note has no text fallback, so a lost download loses the message.
+# python-telegram-bot's 5 s default read timeout is short enough for one slow
+# getFile reply to hit it, so each attempt gets 15 s and a timeout gets one retry.
+_VOICE_READ_TIMEOUT = 15.0
+_VOICE_DOWNLOAD_ATTEMPTS = 2
+
+
 async def _download_telegram_voice(
     message: Any, bot: Bot
 ) -> bytes | None:
@@ -309,8 +316,22 @@ async def _download_telegram_voice(
     voice = message.voice or message.video_note
     if not voice:
         return None
-    file = await bot.get_file(voice.file_id)
-    return bytes(await file.download_as_bytearray())
+    for attempt in range(1, _VOICE_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            file = await bot.get_file(
+                voice.file_id, read_timeout=_VOICE_READ_TIMEOUT
+            )
+            return bytes(
+                await file.download_as_bytearray(read_timeout=_VOICE_READ_TIMEOUT)
+            )
+        except TimedOut:
+            if attempt == _VOICE_DOWNLOAD_ATTEMPTS:
+                raise
+            logger.warning(
+                "Voice note download timed out (attempt %d/%d), retrying",
+                attempt, _VOICE_DOWNLOAD_ATTEMPTS,
+            )
+    raise AssertionError("unreachable")
 
 
 async def _download_all_attachments(
@@ -442,37 +463,52 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if has_voice:
         try:
             voice_data = await _download_telegram_voice(message, context.bot)
-            if voice_data:
-                transcription = await stt_transcribe(voice_data)
-                if transcription:
-                    logger.info(
-                        "Voice transcription for scope %s: %s",
-                        scope, transcription[:100],
-                    )
-                    prompt = f"[Transcribed from voice note] {transcription}"
-                    prompt = await _prepend_reply_context(
-                        prompt, message, context.bot.id, db
-                    )
-                    await _dispatch_to_agent(
-                        prompt, [], scope, config, db, context,
-                        user_id=update.effective_user.id,
-                        is_private_chat=update.effective_chat.type == "private" if update.effective_chat else True,
-                    )
-                    return
-                else:
-                    logger.warning("Empty transcription for voice note in scope %s", scope)
+        except TelegramError as exc:
+            logger.exception("Voice note download failed for scope %s", scope)
+            try:
+                await send_rich(
+                    context.bot,
+                    scope.chat_id,
+                    f"Couldn't download the voice note from Telegram ({exc}). "
+                    "Send it again.",
+                    thread_id=scope.thread_id,
+                )
+            except Exception:
+                pass
+            return
+        if not voice_data:
+            return
+        try:
+            transcription = await stt_transcribe(voice_data)
         except Exception:
             logger.exception("Voice transcription failed for scope %s", scope)
             try:
                 await send_rich(
                     context.bot,
                     scope.chat_id,
-                    "Failed to transcribe voice note. "
-                    "Is moonshine-stt installed?",
+                    "moonshine-stt failed to transcribe the voice note. "
+                    "The bot log has the error.",
                     thread_id=scope.thread_id,
                 )
             except Exception:
                 pass
+            return
+        if not transcription:
+            logger.warning("Empty transcription for voice note in scope %s", scope)
+            return
+        logger.info(
+            "Voice transcription for scope %s: %s",
+            scope, transcription[:100],
+        )
+        prompt = f"[Transcribed from voice note] {transcription}"
+        prompt = await _prepend_reply_context(
+            prompt, message, context.bot.id, db
+        )
+        await _dispatch_to_agent(
+            prompt, [], scope, config, db, context,
+            user_id=update.effective_user.id,
+            is_private_chat=update.effective_chat.type == "private" if update.effective_chat else True,
+        )
         return
 
     # Extract text from either message.text or message.caption (for photos)
