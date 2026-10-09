@@ -667,8 +667,12 @@ async def get_or_create_session(
             # Check if the environment needs building or the sandbox
             # needs starting — send user feedback before potentially
             # slow operations.
-            needs_build = not sandbox.environment_ready()
-            needs_start = not needs_build and not sandbox.running()
+            needs_build = not await asyncio.to_thread(
+                sandbox.environment_ready,
+            )
+            needs_start = not needs_build and not await asyncio.to_thread(
+                sandbox.running,
+            )
             boot_progress: ProgressFn | None = None
             if (needs_build or needs_start) and bot is not None:
                 log_file = sandbox_manager.register_build(context_name)

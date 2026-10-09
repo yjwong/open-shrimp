@@ -888,9 +888,15 @@ def limactl_start(
     logger.info("Started Lima instance %s", name)
 
 
-def limactl_stop(limactl: str, name: str) -> None:
-    """Stop a Lima instance."""
-    _run_limactl(limactl, ["stop", name], check=False, timeout=120)
+def limactl_stop(limactl: str, name: str, *, force: bool = False) -> None:
+    """Stop a Lima instance.
+
+    A graceful stop asks the guest to shut down over SSH; *force* kills the
+    VM and host agent instead, the only stop that works on a guest whose SSH
+    no longer answers.
+    """
+    args = ["stop", "--force", name] if force else ["stop", name]
+    _run_limactl(limactl, args, check=False, timeout=120)
     logger.info("Stopped Lima instance %s", name)
 
 
@@ -1003,10 +1009,19 @@ def limactl_edit(limactl: str, name: str, fields: dict[str, int | str]) -> None:
 
 
 def limactl_shell_check(limactl: str, name: str) -> bool:
-    """Quick liveness check: ``limactl shell <name> -- true``."""
-    result = _run_limactl(
-        limactl, ["shell", name, "--", "true"], check=False, timeout=10,
-    )
+    """Quick liveness check: ``limactl shell <name> -- true``.
+
+    A probe that outlives its 10s timeout counts as unresponsive: a stale SSH
+    ControlMaster socket (left behind when the host sleeps) makes
+    ``limactl shell`` hang rather than fail.
+    """
+    try:
+        result = _run_limactl(
+            limactl, ["shell", name, "--", "true"], check=False, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("limactl shell %s timed out after 10s", name)
+        return False
     return result.returncode == 0
 
 

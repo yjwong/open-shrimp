@@ -18,6 +18,7 @@ import logging
 import os
 import shlex
 import subprocess
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -88,6 +89,13 @@ from open_shrimp.sandbox.lima_helpers import (
 from open_shrimp.vnc.rfb_snapshot import RfbSnapshotError, capture_to_png
 
 logger = logging.getLogger(__name__)
+
+# Seconds a freshly started guest gets to answer ``limactl shell``.
+_SHELL_BOOT_TIMEOUT = 120
+# Seconds an already-Running guest gets before it is force-restarted.  Long
+# enough to ride out a guest that is slow under load, or one another dispatch
+# is still booting (Lima reports Running before SSH is up).
+_SHELL_STALL_TIMEOUT = 30
 
 # Named key → character mapping for wlrctl keyboard input (Linux guests).
 _NAMED_KEY_CHARS: dict[str, str] = {
@@ -521,6 +529,48 @@ class LimaSandbox:
             return False
         return limactl_shell_check(self._limactl, self._inst_name)
 
+    def _start_instance(self, *, log_file: Path | None = None) -> None:
+        """``limactl start`` the instance, tolerating a DEGRADED macOS guest."""
+        if self._guest_os != "macos":
+            limactl_start(self._limactl, self._inst_name, log_file=log_file)
+            return
+        # macOS guests often start in DEGRADED state because SSH agent
+        # forwarding requires sudo which isn't available until our askpass
+        # provision runs.  limactl start exits non-zero for DEGRADED, but the
+        # VM is still usable — don't treat it as fatal.
+        try:
+            limactl_start(self._limactl, self._inst_name, log_file=log_file)
+        except subprocess.CalledProcessError:
+            # Check if the VM came up despite the error.
+            recheck = limactl_instance_status(self._limactl, self._inst_name)
+            if recheck != "Running":
+                raise
+            logger.warning(
+                "limactl start returned non-zero for %s but VM is "
+                "running (likely DEGRADED state — expected for "
+                "macOS guests before askpass is provisioned)",
+                self._inst_name,
+            )
+
+    def _wait_for_shell(
+        self, timeout: int, *, log_file: Path | None = None,
+    ) -> bool:
+        """Probe the guest shell until it answers or *timeout* seconds pass.
+
+        The deadline is wall-clock: each probe can itself take its full 10s
+        when SSH hangs.
+        """
+        if limactl_shell_check(self._limactl, self._inst_name):
+            return True
+        _log(log_file, "Waiting for VM to be ready...")
+        logger.info("Waiting for shell on %s...", self._inst_name)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            if limactl_shell_check(self._limactl, self._inst_name):
+                return True
+        return False
+
     def ensure_running(self, *, log_file: Path | None = None) -> None:
         """Start the Lima instance if not running, wait for shell access."""
         status = limactl_instance_status(self._limactl, self._inst_name)
@@ -531,49 +581,35 @@ class LimaSandbox:
             )
 
         if status != "Running":
-            if self._guest_os == "macos":
-                # macOS guests often start in DEGRADED state because
-                # SSH agent forwarding requires sudo which isn't
-                # available until our askpass provision runs.
-                # limactl start exits non-zero for DEGRADED, but the
-                # VM is still usable — don't treat it as fatal.
-                try:
-                    limactl_start(
-                        self._limactl, self._inst_name, log_file=log_file,
-                    )
-                except subprocess.CalledProcessError:
-                    # Check if the VM came up despite the error.
-                    recheck = limactl_instance_status(
-                        self._limactl, self._inst_name,
-                    )
-                    if recheck != "Running":
-                        raise
-                    logger.warning(
-                        "limactl start returned non-zero for %s but VM is "
-                        "running (likely DEGRADED state — expected for "
-                        "macOS guests before askpass is provisioned)",
-                        self._inst_name,
-                    )
-            else:
-                limactl_start(
-                    self._limactl, self._inst_name, log_file=log_file,
-                )
+            self._start_instance(log_file=log_file)
+            responsive = self._wait_for_shell(
+                _SHELL_BOOT_TIMEOUT, log_file=log_file,
+            )
+        elif self._wait_for_shell(_SHELL_STALL_TIMEOUT, log_file=log_file):
+            responsive = True
+        else:
+            # Lima reports Running while its host agent lives, so a guest
+            # whose SSH stopped answering (a stale ControlMaster after the
+            # host slept, a wedged guest kernel) stays Running until it is
+            # killed.
+            _log(log_file, "Lima VM is not responding — restarting it...")
+            logger.warning(
+                "Lima instance %s is Running but its shell has not answered "
+                "for %ds — force-restarting it",
+                self._inst_name, _SHELL_STALL_TIMEOUT,
+            )
+            limactl_stop(self._limactl, self._inst_name, force=True)
+            self._start_instance(log_file=log_file)
+            responsive = self._wait_for_shell(
+                _SHELL_BOOT_TIMEOUT, log_file=log_file,
+            )
 
-        # Wait for shell to be responsive.
-        if not limactl_shell_check(self._limactl, self._inst_name):
-            _log(log_file, "Waiting for VM to be ready...")
-            logger.info("Waiting for shell on %s...", self._inst_name)
-            import time
-
-            for _ in range(120):
-                if limactl_shell_check(self._limactl, self._inst_name):
-                    break
-                time.sleep(1)
-            else:
-                raise RuntimeError(
-                    f"Lima instance {self._inst_name} shell not responsive "
-                    f"after 120s — instance left running for debugging"
-                )
+        if not responsive:
+            raise RuntimeError(
+                f"Lima instance {self._inst_name} shell not responsive "
+                f"after {_SHELL_BOOT_TIMEOUT}s — instance left running for "
+                f"debugging"
+            )
 
         _log(log_file, "Lima VM ready.")
         logger.info("Lima instance %s is ready", self._inst_name)

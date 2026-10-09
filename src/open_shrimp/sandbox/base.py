@@ -192,8 +192,10 @@ class Sandbox(Protocol):
         """Return ``True`` if the runtime is already up.
 
         Used by the caller to decide whether to show a "starting..." progress
-        message before calling :meth:`ensure_running`.  Must be cheap (no
-        side effects, no waiting).
+        message before calling :meth:`ensure_running`.  Must have no side
+        effects.  It may block on a liveness probe (Lima's ``limactl shell``
+        takes up to 10s against a hung guest), so async callers run it in a
+        worker thread.
         """
         ...
 
