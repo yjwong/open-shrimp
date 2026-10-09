@@ -14,13 +14,14 @@ App accept anything, so the drift costs a menu row rather than a capability.
 Ids resolved against ``models.dev/api.json``, the catalog opencode itself
 resolves ids against, so an id here is an id opencode accepts.  Each carries
 ``tool_call`` and ``reasoning``: a model that cannot call tools cannot serve a
-turn.  One model per lab, across a 10× price range, because the reason to leave
+turn.  One model per lab, across a 5× price range, because the reason to leave
 Claude is usually either a subscription already paid for or a bill being cut.
 
-``gpt-5.6-sol`` rather than the bare ``gpt-5.6``: models.dev carries both, and
-they differ in nothing but the id and the display name, so the bare id is today
-a pointer at the Sol tier alongside Terra and Luna.  The config records the tier
-for the same reason ``MODEL_CHOICES`` records ``claude-opus-5-5``: what a pointer
+``gpt-6.1-sol`` rather than ``gpt-6-astra``: Astra costs 5× Sol per token
+($10/$50 against $2/$10 per million), and Sol is the tier this row has always
+named.  The id carries its tier because OpenAI has shipped bare ids such as
+``gpt-5.6`` as pointers at one tier, and the config records the tier for the
+same reason ``MODEL_CHOICES`` records ``claude-opus-5-5``: what a pointer
 resolves to is somebody else's to change.
 """
 
@@ -37,10 +38,10 @@ def _choice(model: str, description: str) -> ModelChoice:
 
 
 SETUP_MODEL_CHOICES: tuple[ModelChoice, ...] = (
-    _choice("openai/gpt-5.6-sol", "Frontier GPT for coding and agentic work"),
-    _choice("google/gemini-3.7-flash", "Fast, 1M context, cheap"),
-    _choice("xai/grok-4.6", "Long-running agents and coding"),
-    _choice("deepseek/deepseek-v4-pro", "A tenth the price, 1M context"),
+    _choice("openai/gpt-6.1-sol", "Frontier GPT for coding and agentic work"),
+    _choice("google/gemini-3.8-flash", "Fast, 1M context, cheap"),
+    _choice("xai/grok-4.7", "Long-running agents and coding"),
+    _choice("deepseek/deepseek-v4-pro", "A fifth the price, 1M context"),
 )
 
 # Provider id → the lab as a menu names it.  Written out rather than derived

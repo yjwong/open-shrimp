@@ -930,7 +930,7 @@ class TestModelMenu:
     def test_every_row_names_a_lab_and_none_names_a_backend(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """"gpt-5.6-sol" without "OpenAI" does not tell somebody which account
+        """"gpt-6.1-sol" without "OpenAI" does not tell somebody which account
         they are about to be asked to log into.  "opencode" would tell them
         about a decision that is not theirs to make."""
         _Wizard(_fake_with_operator(), "y").run(tmp_path / "config.yaml")
@@ -957,14 +957,14 @@ class TestModelMenu:
             projects=(
                 "a", "/tmp", "",
                 "a", str(tmp_path / "second"), "",
-                "", _model_choice("openai/gpt-5.6-sol"),
+                "", _model_choice("openai/gpt-6.1-sol"),
             ),
         ).run(config_path)
 
         contexts = yaml.safe_load(config_path.read_text())["contexts"]
         assert len(contexts) == 2
         for context in contexts.values():
-            assert context["model"] == "openai/gpt-5.6-sol"
+            assert context["model"] == "openai/gpt-6.1-sol"
             assert context["backend"] == "opencode"
 
     def test_a_claude_model_writes_no_backend_key_at_all(
@@ -1051,7 +1051,7 @@ class TestProviderConnect:
             _fake_with_operator(),
             "y",
             signed_in=False,
-            projects=self._picked("openai/gpt-5.6-sol"),
+            projects=self._picked("openai/gpt-6.1-sol"),
         )
         wizard.run(tmp_path / "config.yaml")
 
@@ -1081,7 +1081,7 @@ class TestProviderConnect:
             _fake_with_operator(),
             "y",
             connected=("openai",),
-            projects=self._picked("openai/gpt-5.6-sol"),
+            projects=self._picked("openai/gpt-6.1-sol"),
         )
         wizard.run(tmp_path / "config.yaml")
 
@@ -1096,7 +1096,7 @@ class TestProviderConnect:
             _fake_with_operator(),
             "y",
             connect="y",
-            projects=self._picked("google/gemini-3.7-flash"),
+            projects=self._picked("google/gemini-3.8-flash"),
         )
         wizard.run(tmp_path / "config.yaml")
 
@@ -1113,7 +1113,7 @@ class TestProviderConnect:
             _fake_with_operator(),
             "y",
             connect="n",
-            projects=self._picked("xai/grok-4.6"),
+            projects=self._picked("xai/grok-4.7"),
         )
         wizard.run(config_path)
 
@@ -1151,7 +1151,7 @@ class TestProviderConnect:
             _fake_with_operator(),
             "y",
             connect="y",
-            projects=self._picked("openai/gpt-5.6-sol"),
+            projects=self._picked("openai/gpt-6.1-sol"),
         )
         wizard._provider_login = _no_build  # type: ignore[method-assign]
         wizard.run(config_path)

@@ -281,7 +281,7 @@ The top-level `backend:` key picks the agent runtime that drives OpenShrimp. Two
 
 Two preconditions on the host:
 
-- **Provider-qualified models.** Every OpenCode context's `model:` must be `provider/model` (e.g. `openai/gpt-5.5`, `anthropic/claude-opus-4-7`, `google/gemini-2.5-pro`). An unqualified model fails fast at startup.
+- **Provider-qualified models.** Every OpenCode context's `model:` must be `provider/model` (e.g. `openai/gpt-6.1-sol`, `anthropic/claude-opus-4-7`, `google/gemini-2.5-pro`). An unqualified model fails fast at startup.
 - **Pre-authenticate.** Run `opencode auth login` on the host; OpenShrimp reuses the credentials.
 
 The CLI is not something you install: the first turn on an OpenCode context downloads a pinned build (about 60 MB) and reports the transfer in the chat. Only that copy is run — an `opencode` on your `PATH` or at `~/.opencode/bin/opencode` is ignored, since the pin is what keeps host and guest on one build. Set `$OPENCODE_BIN` to run your own instead.
@@ -291,7 +291,7 @@ backend: opencode
 contexts:
   my-project:
     directory: /home/you/projects/my-project
-    model: openai/gpt-5.5   # provider/model REQUIRED
+    model: openai/gpt-6.1-sol   # provider/model REQUIRED
 ```
 
 ## Deployment

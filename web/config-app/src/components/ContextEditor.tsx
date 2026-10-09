@@ -267,7 +267,7 @@ export default function ContextEditor({
                 list="model-options"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder="provider/model, e.g. openai/gpt-5.5"
+                placeholder="provider/model, e.g. openai/gpt-6.1-sol"
               />
               <datalist id="model-options">
                 {modelOptions.models.map((m) => (

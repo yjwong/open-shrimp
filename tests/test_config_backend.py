@@ -245,13 +245,13 @@ def test_a_wizard_pinning_an_opencode_model_writes_a_context_that_resolves_to_it
     _opencode_build_published,
 ):
     """The whole point of deriving the backend in ``build_context_dict``: a
-    first config naming ``openai/gpt-5.6-sol`` has to reach the turn through
+    first config naming ``openai/gpt-6.1-sol`` has to reach the turn through
     OpenCode, and the only thing between the wizard and that turn is this."""
     from open_shrimp.config import build_context_dict
 
     raw = _base_raw()
     raw["contexts"] = {
-        "gpt": build_context_dict("/tmp", "gpt", "openai/gpt-5.6-sol"),
+        "gpt": build_context_dict("/tmp", "gpt", "openai/gpt-6.1-sol"),
         "default": build_context_dict("/tmp", "claude", "sonnet"),
     }
 

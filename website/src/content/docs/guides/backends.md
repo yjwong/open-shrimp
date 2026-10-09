@@ -43,7 +43,7 @@ The pin lasts until `/clear`, a context switch, or `/backend reset`, and it does
 Two preconditions on the host:
 
 1. **Provider-qualified models.** Every OpenCode context's `model:` must be written as `provider/model`. OpenCode has no implicit default provider, so an unqualified model fails fast at startup. Examples:
-   - `openai/gpt-5.5`
+   - `openai/gpt-6.1-sol`
    - `anthropic/claude-opus-4-7`
    - `google/gemini-2.5-pro`
 2. **Pre-authenticate out-of-band.** Run `opencode auth login` on the host. This writes credentials to `~/.local/share/opencode/auth.json`, which OpenShrimp reuses.
@@ -69,7 +69,7 @@ backend: opencode
 contexts:
   my-project:
     directory: /home/you/projects/my-project
-    model: openai/gpt-5.5   # provider/model REQUIRED
+    model: openai/gpt-6.1-sol   # provider/model REQUIRED
 ```
 
 ## Interaction with sandboxes

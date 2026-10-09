@@ -907,7 +907,7 @@ async def _choose_backend(
 
     A real change drops that pin, because aliases do not cross backends —
     the SDK takes `sonnet`, OpenCode wants a provider-qualified
-    `openai/gpt-5.5`, so carrying one over hands the incoming binary a model
+    `openai/gpt-6.1-sol`, so carrying one over hands the incoming binary a model
     it has never heard of.  `/effort` survives; its levels are neutral.
     """
     pinned = None if target == effective_backend(ctx, config) else target

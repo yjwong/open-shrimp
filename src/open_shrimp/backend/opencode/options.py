@@ -54,7 +54,7 @@ def split_provider_model(model: str | None) -> tuple[str, str]:
     if "/" not in model:
         raise ValueError(
             f"context.model {model!r} must be 'provider/model' "
-            f"(e.g. 'openai/gpt-5.5', 'google/gemini-2.5-pro')"
+            f"(e.g. 'openai/gpt-6.1-sol', 'google/gemini-2.5-pro')"
         )
     provider, _, rest = model.partition("/")
     return provider, rest

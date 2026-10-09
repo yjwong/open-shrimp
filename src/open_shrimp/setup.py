@@ -716,7 +716,7 @@ def _offer_sign_in() -> None:
 def _prompt_model() -> str | None:
     """Ask which model the imported projects run on, once for all of them.
 
-    Every row names its lab, because "gpt-5.6-sol" without "OpenAI" does not
+    Every row names its lab, because "gpt-6.1-sol" without "OpenAI" does not
     tell somebody which account they are about to be asked to log into.  No row
     names a backend: which one serves the turn follows from the model, and
     nobody choosing a model is choosing it.

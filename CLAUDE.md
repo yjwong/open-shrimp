@@ -40,7 +40,7 @@ Telegram <-> bot.py / handlers/ <-> client_manager.py <-> backend/ (claude_sdk |
 
 ### Backend layer (`backend/`)
 
-Everything downstream of `client_manager` speaks the backend-neutral contract in `backend/protocol.py` + `backend/types.py`. `backend/claude_sdk/` wraps the Claude Agent SDK; `backend/opencode/` drives `opencode serve` over HTTP (models must be provider-qualified like `openai/gpt-5.5`). Per-agent sandbox integration (image bundles, runtime factory, in-guest installers) lives under `backend/<agent>/` — the `sandbox/` package is generic plumbing and must never name an agent.
+Everything downstream of `client_manager` speaks the backend-neutral contract in `backend/protocol.py` + `backend/types.py`. `backend/claude_sdk/` wraps the Claude Agent SDK; `backend/opencode/` drives `opencode serve` over HTTP (models must be provider-qualified like `openai/gpt-6.1-sol`). Per-agent sandbox integration (image bundles, runtime factory, in-guest installers) lives under `backend/<agent>/` — the `sandbox/` package is generic plumbing and must never name an agent.
 
 ### Tool approval (`hooks.py`, `handlers/approval.py`, `bash_parse.py`)
 

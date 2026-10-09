@@ -3,7 +3,7 @@ import Foundation
 
 /// One model a context may be pinned to.
 ///
-/// `provider` is the lab the row names, because "gpt-5.6-sol" without "OpenAI"
+/// `provider` is the lab the row names, because "gpt-6.1-sol" without "OpenAI"
 /// does not tell somebody which account they are about to be asked to log
 /// into.  `providerID` is the same lab on a wire — what `auth status` and
 /// `auth login` take — and is nil for a model whose credential is the Claude

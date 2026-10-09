@@ -8,7 +8,7 @@ namespace OpenShrimp.Tray.Core;
 /// <summary>
 /// One model a context may be pinned to.
 ///
-/// <c>Provider</c> is the lab the row names, because "gpt-5.6-sol" without
+/// <c>Provider</c> is the lab the row names, because "gpt-6.1-sol" without
 /// "OpenAI" does not tell somebody which account they are about to be asked to
 /// log into. <c>ProviderId</c> is the same lab on a wire — what
 /// <c>auth status</c> and <c>auth login</c> take — and is null for a model

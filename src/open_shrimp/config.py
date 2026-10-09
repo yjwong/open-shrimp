@@ -530,7 +530,7 @@ def _validate_raw(raw: dict) -> None:
             except ValueError as exc:
                 raise ValueError(
                     f"Context '{name}': backend 'opencode' requires a "
-                    f"provider-qualified model (e.g. 'openai/gpt-5.5'): {exc}"
+                    f"provider-qualified model (e.g. 'openai/gpt-6.1-sol'): {exc}"
                 ) from exc
 
         # An absent binary is not a config error: it is fetched on first use.
@@ -1254,7 +1254,7 @@ def build_context_dict(
     *model* decides the backend, per context rather than at the top level.  A
     config mixing one project on Claude with one on GPT then comes out right
     without the wizard asking twice, and ``openshrimp config write`` is fixed
-    at the same seam: a GUI handing over ``"model": "openai/gpt-5.6-sol"``
+    at the same seam: a GUI handing over ``"model": "openai/gpt-6.1-sol"``
     otherwise gets a config that runs that string through ``claude_sdk`` on
     every turn.  A Claude-only config comes out with no ``backend:`` key at
     all.

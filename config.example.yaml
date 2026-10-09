@@ -164,7 +164,7 @@ default_context: default
 # OpenCode preconditions:
 #   * Every context's `model:` MUST be provider-qualified as `provider/model`
 #     (OpenCode has no implicit default provider), e.g.:
-#         model: openai/gpt-5.5
+#         model: openai/gpt-6.1-sol
 #         model: anthropic/claude-opus-4-7
 #         model: google/gemini-2.5-pro
 #     An unqualified model fails fast at startup.
