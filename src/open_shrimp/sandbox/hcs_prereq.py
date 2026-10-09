@@ -244,7 +244,7 @@ def _check_hcs_rdp_helper(config: Any) -> tuple[bool, str]:
         if missing:
             problems.append(
                 f"{name}: {mingw} is missing {', '.join(missing)} \u2014 install "
-                "mingw-w64-x86_64-gcc, -pkgconf and -freerdp in MSYS2"
+                "mingw-w64-ucrt-x86_64-gcc, -pkgconf and -freerdp in MSYS2"
             )
             continue
         buildable.append(f"{name}: buildable from {mingw}")

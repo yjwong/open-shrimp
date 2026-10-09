@@ -1174,7 +1174,7 @@ class HcsSandbox:
         )
 
     def _mingw_bin(self) -> Path | None:
-        """The MSYS2 mingw64 bin directory from the sandbox config, or ``None``.
+        """The MSYS2 UCRT64 bin directory from the sandbox config, or ``None``.
 
         Optional: it is only the fallback source of the RDP helper — the
         gcc/pkgconf toolchain that builds it and the FreeRDP DLLs it then

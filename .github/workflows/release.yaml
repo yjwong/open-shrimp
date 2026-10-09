@@ -572,12 +572,12 @@ jobs:
 
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-freerdp
-            mingw-w64-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-freerdp
+            mingw-w64-ucrt-x86_64-pkgconf
             zip
 
       - name: Build helper
@@ -592,11 +592,11 @@ jobs:
 
       - name: Bundle the FreeRDP DLLs
         # ldd resolves the PE's imports transitively, so one pass collects the
-        # whole closure.  Only the /mingw64 ones travel; the rest are Windows'
+        # whole closure.  Only the /ucrt64 ones travel; the rest are Windows'
         # own and are already on the target machine.
         run: |
           cd bundle
-          ldd hcs_rdp_helper.exe | awk '/mingw64/ {print $3}' | sort -u | \
+          ldd hcs_rdp_helper.exe | awk '/ucrt64/ {print $3}' | sort -u | \
             while read -r dll; do cp -n "$dll" .; done
           ls -l
 

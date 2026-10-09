@@ -50,7 +50,7 @@ LONG_REMEDY = (
     "rdp and no sandbox.mingw_bin to build one — unpack the "
     "openshrimp-hcs-rdp-helper-windows-x64.zip release asset there (or point "
     "OPENSHRIMP_HCS_RDP_HELPER at it), or set sandbox.mingw_bin to an MSYS2 "
-    "mingw64 bin directory (e.g. C:\\msys64\\mingw64\\bin)"
+    "UCRT64 bin directory (e.g. C:\\msys64\\ucrt64\\bin)"
 )
 
 
@@ -341,7 +341,7 @@ class TestFailureReply:
 
         assert all(len(part) <= RICH_MAX_LENGTH for part in parts)
         assert LONG_REMEDY in "".join(parts)
-        assert "C:\\msys64\\mingw64\\bin" in text
+        assert "C:\\msys64\\ucrt64\\bin" in text
 
 
 # -- The real error path -------------------------------------------------------
@@ -473,7 +473,7 @@ class TestTheWholeChain:
 
         context = await _drive(db)
 
-        remedy = [text for text in _sent(context) if "mingw64" in text]
+        remedy = [text for text in _sent(context) if "ucrt64" in text]
         assert remedy
         assert LONG_REMEDY in "".join(remedy)
 
@@ -488,7 +488,7 @@ class TestTheWholeChain:
 
         context = await _drive(db)
 
-        parts = [text for text in _sent(context) if "mingw64" in text]
+        parts = [text for text in _sent(context) if "ucrt64" in text]
         assert len(parts) > 1, "a reply over the limit must arrive in pieces"
         assert all(len(part) <= RICH_MAX_LENGTH for part in parts)
         assert "".join(parts).count(LONG_REMEDY) == 160

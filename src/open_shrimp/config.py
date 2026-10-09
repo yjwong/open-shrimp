@@ -95,7 +95,7 @@ class SandboxConfig:
     provision: str | None = None  # shell script to run on first boot
     persistent_paths: list[str] = field(default_factory=list)  # guest paths with dedicated qcow2 volumes
 
-    # HCS-specific: the MSYS2 mingw64 bin directory that supplies the FreeRDP
+    # HCS-specific: the MSYS2 UCRT64 bin directory that supplies the FreeRDP
     # DLLs and the gcc/pkgconf toolchain the computer-use RDP helper is built
     # with.  Optional even with computer_use — the helper ships prebuilt, and
     # a toolchain is only the source-install fallback, which is what the

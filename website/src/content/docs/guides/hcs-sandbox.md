@@ -143,8 +143,8 @@ The host talks to the guest desktop over RDP through a small helper, which is do
 
 ```yaml
     sandbox:
-      mingw_bin: C:\msys64\mingw64\bin   # optional; MSYS2 with
-                                         # mingw-w64-x86_64-{freerdp,gcc,pkgconf}
+      mingw_bin: C:\msys64\ucrt64\bin   # optional; MSYS2 with
+                                        # mingw-w64-ucrt-x86_64-{freerdp,gcc,pkgconf}
 ```
 
 `/vnc` renders the live desktop in the VNC Mini App. Window focus by name is not available — a single-surface RDP desktop has nothing to switch between, the same as on the Libvirt backend — so use key combos like `alt+Tab` instead. See [Computer Use](/guides/computer-use/) for the tools themselves.

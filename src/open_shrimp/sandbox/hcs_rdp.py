@@ -8,7 +8,7 @@ member.
 Split of responsibilities:
 
 - ``hcs_rdp_helper.c`` (shipped prebuilt with its FreeRDP DLLs, or compiled
-  once with MSYS2 mingw64 gcc against libfreerdp3 — see
+  once with MSYS2 UCRT64 gcc against libfreerdp3 — see
   :func:`ensure_rdp_helper`) owns the RDP wire session:
   it dials ``AF_HYPERV`` to the guest's vsock RDP relay through an
   in-process TCP shim, decodes frames into a memory framebuffer, injects
@@ -939,8 +939,8 @@ def ensure_rdp_helper(
         f"download {HELPER_ASSET} from an OpenShrimp release and unpack it "
         f"into {shipped_helper_dir()}, or point OPENSHRIMP_HCS_RDP_HELPER at "
         "a directory holding it; or (2) a toolchain to build it from source "
-        r"— set sandbox.mingw_bin to an MSYS2 mingw64 bin directory (e.g. "
-        r"C:\msys64\mingw64\bin) with the mingw-w64-x86_64-freerdp, -gcc and "
+        r"— set sandbox.mingw_bin to an MSYS2 UCRT64 bin directory (e.g. "
+        r"C:\msys64\ucrt64\bin) with the mingw-w64-ucrt-x86_64-freerdp, -gcc and "
         f"-pkgconf packages installed. Fetching the bundle was tried first "
         f"and failed: {download_error}"
     )
@@ -949,8 +949,8 @@ def ensure_rdp_helper(
 def build_helper_exe(out_dir: Path, mingw_bin: Path) -> Path:
     """Compile the native RDP helper if missing or stale; return its path.
 
-    Requires an MSYS2 mingw64 toolchain (``gcc``, ``pkgconf``) with the
-    ``mingw-w64-x86_64-freerdp`` package installed.  The build is skipped
+    Requires an MSYS2 UCRT64 toolchain (``gcc``, ``pkgconf``) with the
+    ``mingw-w64-ucrt-x86_64-freerdp`` package installed.  The build is skipped
     while the staged source copy matches the packaged one, mirroring the
     launcher-exe build strategy.
     """
