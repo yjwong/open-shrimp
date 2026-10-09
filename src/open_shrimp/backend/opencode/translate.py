@@ -85,7 +85,7 @@ _PART_TYPE_REASONING = "reasoning"
 _TASK_TOOL = "task"
 #: ``task_type`` stamped on subagent ``TaskStartedMessage``s — both foreground
 #: and background subagents, matching the Claude side (``local_agent`` is in
-#: ``terminal/log_source.py``'s ``_AGENT_TASK_TYPES``).
+#: ``terminal/log_source.py``'s ``AGENT_TASK_TYPES``).
 _SUBAGENT_TASK_TYPE = "local_agent"
 
 

@@ -70,7 +70,42 @@ def test_read_pending_task_is_empty(
     _set_state(monkeypatch, active={"quiet"}, sources={})
     resp = client.get("/api/terminal/read?type=task&id=quiet")
     assert resp.status_code == 200
-    assert resp.json() == {"id": "quiet", "content": "", "size": 0}
+    assert resp.json() == {
+        "id": "quiet", "render": "raw", "content": "", "size": 0,
+        "active": True,
+    }
+
+
+def test_read_pending_agent_is_an_empty_transcript(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_state(monkeypatch, active={"quiet"}, sources={})
+    resp = client.get("/api/terminal/read?type=task&id=quiet&task_type=local_agent")
+    assert resp.json() == {
+        "id": "quiet", "render": "jsonl", "events": [], "size": 0,
+        "active": True,
+    }
+
+
+def test_read_transcript_stops_at_the_last_complete_line(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    done = json.dumps({"type": "user", "message": {"content": "Do it."}}) + "\n"
+    output = tmp_path / "agent.jsonl"
+    output.write_text(done + '{"type": "assist')
+    _set_state(monkeypatch, active=set(), sources={
+        "agent": LogSource(path=output, is_active=lambda: False, render="jsonl"),
+    })
+
+    resp = client.get("/api/terminal/read?type=task&id=agent")
+
+    assert resp.json() == {
+        "id": "agent",
+        "render": "jsonl",
+        "events": [{"kind": "prompt", "text": "Do it."}],
+        "size": len(done),
+        "active": False,
+    }
 
 
 def test_pending_container_build_is_404(

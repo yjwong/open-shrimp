@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Your personal Claude, on Telegram.</strong>
+  <strong>Your personal coding agent, on Telegram.</strong>
 </p>
 
 ---
@@ -51,7 +51,7 @@ Both are self-hosted and open source. They solve different problems.
 | **Tool approval** | Interactive — inline keyboard approve/deny per tool call | Autonomous by default |
 | **Project awareness** | Full — CLAUDE.md, working directories, path-scoped permissions | Limited — general shell access |
 
-**TL;DR:** OpenClaw is a Swiss Army knife for daily life. OpenShrimp is your personal Claude at work on your own computer, asking before every change.
+**TL;DR:** OpenClaw is a Swiss Army knife for daily life. OpenShrimp is your personal coding agent at work on your own computer, asking before every change.
 
 ## OpenShrimp vs Claude Code Remote Control
 

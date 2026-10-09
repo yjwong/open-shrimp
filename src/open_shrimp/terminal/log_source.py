@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _TASK_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 # task_type values that indicate an agent transcript (JSONL format).
-_AGENT_TASK_TYPES = {"local_agent", "remote_agent"}
+AGENT_TASK_TYPES = {"local_agent", "remote_agent"}
 
 def _claude_tmp_base() -> Path:
     """Base directory for Claude CLI tmp files.
@@ -209,7 +209,7 @@ def _find_task_output_file(
 def _is_agent_output(path: Path, task_type: str | None) -> bool:
     """Determine if a task output file is an agent JSONL transcript."""
     if task_type:
-        return task_type in _AGENT_TASK_TYPES
+        return task_type in AGENT_TASK_TYPES
     # Fallback: agent output files are symlinks to .jsonl files.
     try:
         return path.is_symlink() and os.readlink(path).endswith(".jsonl")

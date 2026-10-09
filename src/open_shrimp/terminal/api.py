@@ -26,8 +26,9 @@ from open_shrimp.backend.claude_sdk.login import login_workspace
 from open_shrimp.config import Config
 from open_shrimp.handlers.state import is_task_active
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
-from open_shrimp.terminal.jsonl_render import render_jsonl_content, render_jsonl_lines
+from open_shrimp.terminal.transcript import parse_transcript, parse_transcript_lines
 from open_shrimp.terminal.log_source import (
+    AGENT_TASK_TYPES,
     LogSource,
     list_workflow_agents,
     resolve,
@@ -94,6 +95,14 @@ def _is_pending_task(request: Request) -> bool:
     return request.query_params["type"] in (
         "task", "workflow_agent",
     ) and is_task_active(request.query_params["id"])
+
+
+def _is_pending_agent(request: Request) -> bool:
+    """Whether a pending source will be an agent transcript once it appears."""
+    return (
+        request.query_params["type"] == "workflow_agent"
+        or request.query_params.get("task_type") in AGENT_TASK_TYPES
+    )
 
 
 async def _wait_for_task_output(
@@ -168,12 +177,9 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
             """Flush remaining agent buffer and return done SSE events."""
             parts = ""
             if is_agent and line_buffer.strip():
-                rendered, _ = render_jsonl_lines(line_buffer + "\n")
-                if rendered:
-                    payload = json.dumps({
-                        "text": rendered,
-                        "offset": pos,
-                    })
+                events, _ = parse_transcript_lines(line_buffer + "\n")
+                if events:
+                    payload = json.dumps({"events": events, "offset": pos})
                     parts += f"data: {payload}\n\n"
             done_data = json.dumps({"completed": completed})
             parts += f"event: done\ndata: {done_data}\n\n"
@@ -196,16 +202,12 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
             if not chunk:
                 return None
             if is_agent:
-                text_to_render = line_buffer + chunk
-                rendered, line_buffer = render_jsonl_lines(text_to_render)
-                if rendered:
-                    pos = file_size
-                    payload = json.dumps({
-                        "text": rendered, "offset": file_size,
-                    })
-                    return f"data: {payload}\n\n"
+                events, line_buffer = parse_transcript_lines(line_buffer + chunk)
                 pos = file_size
-                return None
+                if not events:
+                    return None
+                payload = json.dumps({"events": events, "offset": file_size})
+                return f"data: {payload}\n\n"
             else:
                 pos = file_size
                 payload = json.dumps({
@@ -371,6 +373,11 @@ async def read_endpoint(request: Request) -> JSONResponse:
         agent: Agent ID within the workflow task *id* (only for
             ``type=workflow_agent``).
 
+    The response's ``render`` says how to show it: ``raw`` sources return
+    their text as ``content``; agent transcripts (``jsonl``) return
+    ``events`` parsed from every complete line, and ``size`` stops at the
+    last newline so a tail from there picks up a line still being written.
+    ``active`` is whether the source is still being written to.
     A running task with no output file yet reads as empty.
     """
     try:
@@ -380,29 +387,41 @@ async def read_endpoint(request: Request) -> JSONResponse:
 
     if not _has_source_params(request):
         return _missing_params()
+    source_id = request.query_params["id"]
     source = _resolve_source(request)
     if source is None:
-        if _is_pending_task(request):
+        if not _is_pending_task(request):
+            return _not_found()
+        if _is_pending_agent(request):
             return JSONResponse({
-                "id": request.query_params["id"], "content": "", "size": 0,
+                "id": source_id, "render": "jsonl", "events": [], "size": 0,
+                "active": True,
             })
-        return _not_found()
-
-    is_agent = source.render == "jsonl"
+        return JSONResponse({
+            "id": source_id, "render": "raw", "content": "", "size": 0,
+            "active": True,
+        })
 
     try:
-        content = await asyncio.to_thread(source.path.read_text, "utf-8", "replace")
-        size = source.path.stat().st_size
+        data = await asyncio.to_thread(source.path.read_bytes)
     except FileNotFoundError:
         return _not_found()
 
-    if is_agent:
-        content = render_jsonl_content(content)
-
+    if source.render == "jsonl":
+        complete = data[: data.rfind(b"\n") + 1]
+        return JSONResponse({
+            "id": source_id,
+            "render": "jsonl",
+            "events": parse_transcript(complete.decode("utf-8", "replace")),
+            "size": len(complete),
+            "active": source.is_active(),
+        })
     return JSONResponse({
-        "id": request.query_params.get("id", ""),
-        "content": content,
-        "size": size,
+        "id": source_id,
+        "render": "raw",
+        "content": data.decode("utf-8", "replace"),
+        "size": len(data),
+        "active": source.is_active(),
     })
 
 

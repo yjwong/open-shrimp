@@ -1,4 +1,10 @@
 import "@xterm/xterm/css/xterm.css";
+import {
+  injectTranscriptStyles,
+  TranscriptView,
+  type NoticeLevel,
+  type TranscriptEvent,
+} from "./transcript";
 
 // ── Globals ──
 
@@ -8,6 +14,7 @@ declare global {
       WebApp: {
         initData: string;
         close: () => void;
+        openLink?: (url: string) => void;
         ready: () => void;
         expand: () => void;
         viewportHeight: number;
@@ -66,7 +73,7 @@ if (mode === "login") {
   tailMain().catch((e) => showError(`Fatal: ${e}`));
 }
 
-// ── Tail mode (existing logic) ──
+// ── Tail mode ──
 
 async function tailMain(): Promise<void> {
   showStatus("Initializing...");
@@ -90,29 +97,190 @@ async function tailMain(): Promise<void> {
 
   // A workflow's own output file is its final summary, written once the run
   // ends; each of its agents keeps a live transcript of its own instead.
-  const isWorkflow = sourceType === "task" && taskType === "local_workflow";
+  if (sourceType === "task" && taskType === "local_workflow") {
+    injectTranscriptStyles();
+    loadingEl.remove();
+    const view = new TranscriptView(
+      document.getElementById("transcript-root")!,
+      document.getElementById("status-bar")!
+    );
+    await followWorkflow(view, sourceId);
+    return;
+  }
 
-  // Build query string for API calls.
   let apiQuery = `type=${encodeURIComponent(sourceType)}&id=${encodeURIComponent(sourceId)}`;
   if (taskType) {
     apiQuery += `&task_type=${encodeURIComponent(taskType)}`;
   }
 
-  showStatus(`Loading xterm.js...`);
+  showStatus("Loading...");
+  let initial: ReadResult;
+  try {
+    initial = await readSource(apiQuery);
+  } catch (e) {
+    showError(`${e}`);
+    return;
+  }
+
+  const labels = getLabels(sourceType);
+  let sink: Sink;
+  if (initial.render === "jsonl") {
+    injectTranscriptStyles();
+    loadingEl.remove();
+    const view = new TranscriptView(
+      document.getElementById("transcript-root")!,
+      document.getElementById("status-bar")!
+    );
+    view.reset("Subagent");
+    sink = transcriptSink(view, AGENT_LABELS);
+  } else {
+    sink = await openTerminal(labels, sourceId);
+  }
+  sink.apply(initial);
+  await streamSource(sink, apiQuery, initial.size);
+}
+
+// ── Reading and tailing one source ──
+
+type ReadResult =
+  | { render: "raw"; content: string; size: number; active: boolean }
+  | { render: "jsonl"; events: TranscriptEvent[]; size: number; active: boolean };
+
+/** Where a source's content goes: a terminal for raw output, a transcript
+ * page for an agent. */
+interface Sink {
+  apply(data: ReadResult | { text?: string; events?: TranscriptEvent[] }): void;
+  finish(completed: boolean): void;
+  notice(level: NoticeLevel, msg: string): void;
+}
+
+async function readSource(
+  apiQuery: string,
+  signal?: AbortSignal
+): Promise<ReadResult> {
+  const resp = await fetch(`/api/terminal/read?${apiQuery}`, {
+    headers: getAuthHeader(),
+    signal,
+  });
+  if (!resp.ok) {
+    throw new Error(`Read error (${resp.status}): ${await resp.text()}`);
+  }
+  return (await resp.json()) as ReadResult;
+}
+
+/** Stream what a source appends past *offset* until the server reports it
+ * done.  Returns quietly once *signal* aborts. */
+async function streamSource(
+  sink: Sink,
+  apiQuery: string,
+  offset: number,
+  signal?: AbortSignal
+): Promise<void> {
+  const url = `/api/terminal/tail?${apiQuery}&offset=${offset}`;
+
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        ...getAuthHeader(),
+        Accept: "text/event-stream",
+      },
+      signal,
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      sink.notice("error", `Stream error (${resp.status}): ${text}`);
+      return;
+    }
+
+    const reader = resp.body?.getReader();
+    if (!reader) {
+      sink.notice("error", "Streaming not supported.");
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let doneNext = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done || signal?.aborted) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (line.startsWith("event: done")) {
+          // The next "data:" line carries the done payload.
+          doneNext = true;
+        } else if (line.startsWith("data: ")) {
+          let payload: {
+            text?: string;
+            events?: TranscriptEvent[];
+            completed?: boolean;
+          };
+          try {
+            payload = JSON.parse(line.slice(6));
+          } catch {
+            continue;
+          }
+          if (doneNext) {
+            sink.finish(!!payload.completed);
+            return;
+          }
+          sink.apply(payload);
+        }
+      }
+    }
+
+    if (signal?.aborted) return;
+    sink.notice("warn", "Connection closed.");
+  } catch (e) {
+    if (signal?.aborted) return;
+    sink.notice("error", `Stream error: ${e}`);
+  }
+}
+
+function transcriptSink(view: TranscriptView, labels: SourceLabels): Sink {
+  return {
+    apply(data) {
+      if ("events" in data && data.events) view.addEvents(data.events);
+      if ("active" in data) view.setState(data.active ? "running" : "done");
+    },
+    finish(completed) {
+      view.setState(completed ? "done" : "ended");
+      view.notice(
+        completed ? "ok" : "warn",
+        completed ? labels.completedMsg : labels.endedMsg
+      );
+    },
+    notice(level, msg) {
+      view.notice(level, msg);
+    },
+  };
+}
+
+const NOTICE_COLOURS: Record<NoticeLevel, string> = {
+  info: "1;34",
+  ok: "1;32",
+  warn: "1;33",
+  error: "31",
+};
+
+/** Raw output keeps the terminal: it carries real ANSI colour, progress bars
+ * and carriage returns. */
+async function openTerminal(labels: SourceLabels, sourceId: string): Promise<Sink> {
+  showStatus("Loading xterm.js...");
 
   // Dynamic import so we can catch load errors.
   const { Terminal } = await import("@xterm/xterm");
   const { FitAddon } = await import("@xterm/addon-fit");
 
   showStatus("Creating terminal...");
-
-  const container = document.getElementById("terminal-container")!;
-
-  // Inject styles.
   injectBaseStyles();
-  if (isWorkflow) {
-    injectAgentBarStyles();
-  }
 
   const term = new Terminal({
     convertEol: true,
@@ -128,164 +296,39 @@ async function tailMain(): Promise<void> {
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-
-  showStatus("Opening terminal...");
-  term.open(container);
-
-  // Remove loading indicator now that the terminal is open.
+  term.open(document.getElementById("terminal-container")!);
   loadingEl.remove();
 
   requestAnimationFrame(() => fitAddon.fit());
   window.addEventListener("resize", () => fitAddon.fit());
-
   try {
-    window.Telegram?.WebApp?.onEvent("viewportChanged", () => {
-      fitAddon.fit();
-    });
+    window.Telegram?.WebApp?.onEvent("viewportChanged", () => fitAddon.fit());
   } catch {
     // ignore
   }
 
-  if (isWorkflow) {
-    await followWorkflow(term, sourceId);
-    return;
-  }
-
-  const labels = getLabels(sourceType);
   term.writeln(
     `\x1b[1;34m● Tailing ${labels.tailPrefix} \x1b[1;37m${sourceId}\x1b[0m`
   );
   term.writeln("");
-  await tailSource(term, apiQuery, labels);
-}
 
-// ── Tailing one source ──
-
-interface TerminalLike {
-  write(data: string): void;
-  writeln(data: string): void;
-  reset(): void;
-}
-
-/** Read a source's existing content, then stream what it appends until the
- * server reports it done.  Returns quietly once *signal* aborts. */
-async function tailSource(
-  term: TerminalLike,
-  apiQuery: string,
-  labels: SourceLabels,
-  signal?: AbortSignal
-): Promise<void> {
-  // Read existing content.
-  let offset = 0;
-  try {
-    const readResp = await fetch(
-      `/api/terminal/read?${apiQuery}`,
-      { headers: getAuthHeader(), signal }
-    );
-    if (readResp.ok) {
-      const data = (await readResp.json()) as {
-        content: string;
-        size: number;
-      };
-      if (signal?.aborted) return;
-      if (data.content) {
-        term.write(data.content);
-        offset = data.size;
-      }
-    } else {
-      const err = await readResp.text();
-      term.writeln(`\x1b[31mRead error (${readResp.status}): ${err}\x1b[0m`);
-    }
-  } catch (e) {
-    if (signal?.aborted) return;
-    term.writeln(`\x1b[31mRead failed: ${e}\x1b[0m`);
-  }
-
-  // Stream new output via fetch-based SSE.
-  const url = `/api/terminal/tail?${apiQuery}&offset=${offset}`;
-
-  try {
-    const resp = await fetch(url, {
-      headers: {
-        ...getAuthHeader(),
-        Accept: "text/event-stream",
-      },
-      signal,
-    });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      term.writeln(`\x1b[31mStream error (${resp.status}): ${text}\x1b[0m`);
-      return;
-    }
-
-    const reader = resp.body?.getReader();
-    if (!reader) {
-      term.writeln("\x1b[31mStreaming not supported.\x1b[0m");
-      return;
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done || signal?.aborted) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          try {
-            const event = JSON.parse(line.slice(6)) as {
-              text?: string;
-              offset?: number;
-            };
-            if (event.text) {
-              term.write(event.text);
-            }
-          } catch {
-            // Ignore malformed JSON.
-          }
-        } else if (line.startsWith("event: done")) {
-          // Next "data:" line carries the done payload.
-          const dataLine = lines.find(
-            (l, j) => j > lines.indexOf(line) && l.startsWith("data: ")
-          );
-          let completed = false;
-          if (dataLine) {
-            try {
-              const d = JSON.parse(dataLine.slice(6)) as {
-                completed?: boolean;
-              };
-              completed = !!d.completed;
-            } catch {
-              // ignore
-            }
-          }
-          term.writeln("");
-          if (completed) {
-            term.writeln(`\x1b[1;32m● ${labels.completedMsg}\x1b[0m`);
-          } else {
-            term.writeln(
-              `\x1b[1;33m● ${labels.endedMsg}\x1b[0m`
-            );
-          }
-          return;
-        }
-      }
-    }
-
-    if (signal?.aborted) return;
-    term.writeln("");
-    term.writeln("\x1b[1;33m● Connection closed.\x1b[0m");
-  } catch (e) {
-    if (signal?.aborted) return;
-    term.writeln(`\x1b[31mStream error: ${e}\x1b[0m`);
-  }
+  const notice = (level: NoticeLevel, msg: string) => {
+    term.writeln(`\x1b[${NOTICE_COLOURS[level]}m${msg}\x1b[0m`);
+  };
+  return {
+    apply(data) {
+      const text = "content" in data ? data.content : "text" in data ? data.text : "";
+      if (text) term.write(text);
+    },
+    finish(completed) {
+      term.writeln("");
+      notice(
+        completed ? "ok" : "warn",
+        `● ${completed ? labels.completedMsg : labels.endedMsg}`
+      );
+    },
+    notice,
+  };
 }
 
 // ── Workflow mode ──
@@ -312,34 +355,43 @@ const AGENT_LABELS: SourceLabels = {
   endedMsg: "Agent output stream ended.",
 };
 
-/** Show a bar of the workflow's agents and tail whichever one is picked,
+/** Show a bar of the workflow's agents and follow whichever one is picked,
  * starting with the first.  The bar grows as the script starts agents. */
 async function followWorkflow(
-  term: TerminalLike,
+  view: TranscriptView,
   taskId: string
 ): Promise<void> {
   const bar = document.getElementById("agent-bar")!;
   bar.style.display = "flex";
+  const sink = transcriptSink(view, AGENT_LABELS);
 
   let agents: WorkflowAgent[] = [];
   let selected: string | null = null;
   let tail: AbortController | null = null;
+
+  async function follow(query: string, signal: AbortSignal): Promise<void> {
+    let initial: ReadResult;
+    try {
+      initial = await readSource(query, signal);
+    } catch (e) {
+      if (!signal.aborted) view.notice("error", `${e}`);
+      return;
+    }
+    if (signal.aborted) return;
+    sink.apply(initial);
+    await streamSource(sink, query, initial.size, signal);
+  }
 
   function select(agent: WorkflowAgent): void {
     if (agent.agent_id === selected) return;
     selected = agent.agent_id;
     tail?.abort();
     tail = new AbortController();
-    term.reset();
-    const phase = agent.phase ? `\x1b[0;90m (${agent.phase})` : "";
-    term.writeln(
-      `\x1b[1;34m● Tailing agent \x1b[1;37m${agent.label}${phase}\x1b[0m`
-    );
-    term.writeln("");
+    view.reset(agent.phase ? `${agent.label} · ${agent.phase}` : agent.label);
     const query =
       `type=workflow_agent&id=${encodeURIComponent(taskId)}` +
       `&agent=${encodeURIComponent(agent.agent_id)}`;
-    void tailSource(term, query, AGENT_LABELS, tail.signal);
+    void follow(query, tail.signal);
     renderBar();
     bar.querySelector(".selected")?.scrollIntoView({ inline: "nearest" });
   }
@@ -348,6 +400,7 @@ async function followWorkflow(
     bar.replaceChildren(
       ...agents.map((agent) => {
         const chip = document.createElement("button");
+        chip.type = "button";
         chip.className =
           "agent-chip" + (agent.agent_id === selected ? " selected" : "");
         chip.textContent = `${AGENT_ICONS[agent.state]} ${agent.label}`;
@@ -358,7 +411,8 @@ async function followWorkflow(
     );
   }
 
-  term.writeln("\x1b[1;34m● Waiting for the workflow to start an agent...\x1b[0m");
+  view.reset("Workflow");
+  view.notice("info", "Waiting for the workflow to start an agent...");
 
   while (true) {
     let active = false;
@@ -370,7 +424,7 @@ async function followWorkflow(
       if (!resp.ok) {
         if (!selected) {
           const err = await resp.text();
-          term.writeln(`\x1b[31mWorkflow error (${resp.status}): ${err}\x1b[0m`);
+          view.notice("error", `Workflow error (${resp.status}): ${err}`);
         }
         return;
       }
@@ -387,11 +441,11 @@ async function followWorkflow(
         renderBar();
       }
       if (!active && !agents.length) {
-        term.writeln("");
-        term.writeln("\x1b[1;33m● The workflow ended without starting an agent.\x1b[0m");
+        view.setState("ended");
+        view.notice("warn", "The workflow ended without starting an agent.");
       }
     } catch (e) {
-      term.writeln(`\x1b[31mWorkflow poll failed: ${e}\x1b[0m`);
+      view.notice("error", `Workflow poll failed: ${e}`);
       return;
     }
     if (!active) return;
@@ -617,47 +671,6 @@ function injectBaseStyles(): void {
       font-family: monospace;
       font-size: 13px;
       z-index: 9999;
-    }
-  `;
-  document.head.appendChild(style);
-}
-
-function injectAgentBarStyles(): void {
-  const style = document.createElement("style");
-  style.textContent = `
-    #terminal-container {
-      top: 44px !important;
-    }
-    #agent-bar {
-      position: fixed;
-      top: 0; left: 0; right: 0;
-      height: 44px;
-      display: none;
-      align-items: center;
-      gap: 6px;
-      padding: 0 8px;
-      overflow-x: auto;
-      background: #24283b;
-      border-bottom: 1px solid #414868;
-      z-index: 100;
-      scrollbar-width: none;
-    }
-    .agent-chip {
-      flex: none;
-      padding: 5px 10px;
-      border: 1px solid #414868;
-      border-radius: 14px;
-      background: #1a1b26;
-      color: #a9b1d6;
-      font-family: monospace;
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    .agent-chip.selected {
-      background: #7aa2f7;
-      border-color: #7aa2f7;
-      color: #1a1b26;
-      font-weight: bold;
     }
   `;
   document.head.appendChild(style);

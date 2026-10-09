@@ -1144,7 +1144,7 @@ class _ChildTranscriptSink:
     Writes to the sanctioned :func:`transient_task_output_path` location so the
     Terminal Mini App's "📺 View output" button discovers and tails it the same
     way it does Claude-side agent tasks. Emits the JSONL shape
-    ``terminal/jsonl_render.py`` expects (``{"type": "user"|"assistant",
+    ``terminal/transcript.py`` parses (``{"type": "user"|"assistant",
     "message": {"content": …}}``). Any I/O failure is swallowed — the
     transcript is an observability nicety, never load-bearing.
     """

@@ -182,7 +182,7 @@ def test_agent_id_is_validated(tmp_path: Path) -> None:
 
 
 def test_transcript_shows_the_task_without_the_harness_frame() -> None:
-    from open_shrimp.terminal.jsonl_render import render_jsonl_content
+    from open_shrimp.terminal.transcript import parse_transcript
 
     prompt = (
         "[Workflow harness — computed task] The task text below was computed "
@@ -191,10 +191,9 @@ def test_transcript_shows_the_task_without_the_harness_frame() -> None:
     )
     line = json.dumps({"type": "user", "message": {"content": prompt}})
 
-    rendered = render_jsonl_content(line)
-
-    assert "harness" not in rendered
-    assert "> Run `echo one`.\nThen return ok." in rendered
+    assert parse_transcript(line) == [
+        {"kind": "prompt", "text": "Run `echo one`.\nThen return ok."},
+    ]
 
 
 @pytest.fixture
