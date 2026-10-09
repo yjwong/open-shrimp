@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 # How long the child gets to exit on a polite signal before it is killed.
 _TERMINATE_GRACE = 3.0
 _KILL_GRACE = 2.0
+# How long end of stream waits for the exited child to be reaped.
+_REAP_GRACE = 1.0
 
 _READ_SIZE = 4096
 
@@ -70,11 +72,27 @@ class PosixPtyProcess(PtyProcess):
                 loop.remove_reader(self._master_fd)
 
         try:
-            return os.read(self._master_fd, _READ_SIZE)
+            data = os.read(self._master_fd, _READ_SIZE)
         except OSError:
             # EIO on the master once the last slave fd closes — this
             # pty's end of stream, not a fault.
-            return b""
+            data = b""
+        if not data:
+            await self._await_reap()
+        return data
+
+    async def _await_reap(self) -> None:
+        """Hold end of stream until the child's exit status is collected.
+
+        The slave fd closes as the child exits, but asyncio sets
+        ``returncode`` only when its child watcher reaps the process, a
+        loop iteration or two later; without this, ``alive`` reads True
+        right after the stream ends.  Bounded, because a child can close
+        its terminal and keep running.
+        """
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(_REAP_GRACE):
+                await self._proc.wait()
 
     def _write(self, data: bytes) -> None:
         try:
