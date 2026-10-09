@@ -28,6 +28,8 @@ declare global {
 const loadingEl = document.getElementById("loading")!;
 
 function showError(msg: string): void {
+  // A view may already have taken the page; put the banner back over it.
+  if (!loadingEl.isConnected) document.body.appendChild(loadingEl);
   loadingEl.style.color = "#f7768e";
   loadingEl.textContent = msg;
 }
@@ -62,16 +64,7 @@ function getLabels(sourceType: string): SourceLabels {
   }
 }
 
-// ── Mode dispatch ──
-
 const params = new URLSearchParams(window.location.search);
-const mode = params.get("mode");
-
-if (mode === "login") {
-  loginMain().catch((e) => showError(`Fatal: ${e}`));
-} else {
-  tailMain().catch((e) => showError(`Fatal: ${e}`));
-}
 
 // ── Tail mode ──
 
@@ -724,4 +717,15 @@ function getAuthHeader(): Record<string, string> {
     return { Authorization: `tg-token ${token}` };
   }
   return {};
+}
+
+// ── Mode dispatch ──
+//
+// Last in the module: a mode may run synchronously up to its first await,
+// and every module-level const it touches must be initialised by then.
+
+if (params.get("mode") === "login") {
+  loginMain().catch((e) => showError(`Fatal: ${e}`));
+} else {
+  tailMain().catch((e) => showError(`Fatal: ${e}`));
 }
