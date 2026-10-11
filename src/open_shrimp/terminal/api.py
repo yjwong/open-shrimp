@@ -26,7 +26,7 @@ from open_shrimp.backend.claude_sdk.login import login_workspace
 from open_shrimp.config import Config
 from open_shrimp.handlers.state import is_task_active
 from open_shrimp.review.auth import AuthError, authenticate, validate_token_param
-from open_shrimp.terminal.transcript import parse_transcript, parse_transcript_lines
+from open_shrimp.terminal.transcript import parse_transcript
 from open_shrimp.terminal.log_source import (
     AGENT_TASK_TYPES,
     LogSource,
@@ -62,6 +62,11 @@ def _not_found() -> JSONResponse:
 # How often a tail re-scans for the output file of a task that has not
 # written any yet.
 _PENDING_POLL_INTERVAL = 2.0
+
+# Seconds one tail connection may stay open, capping orphaned connections.
+# Hitting it ends the stream without a done event, so a client that is still
+# watching reconnects from its last offset.
+_TAIL_TIMEOUT = 300.0
 
 
 def _resolve_source(request: Request) -> LogSource | None:
@@ -169,51 +174,44 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
         source = initial_source
         is_agent = source is not None and source.render == "jsonl"
         pos = offset
-        line_buffer = ""  # carries incomplete JSONL lines (agent only)
         DRAIN_TIMEOUT = 3.0  # seconds to drain after source becomes inactive
-        GLOBAL_TIMEOUT = 300.0  # hard cap for orphaned connections
 
-        def _flush_and_done(completed: bool) -> str:
-            """Flush remaining agent buffer and return done SSE events."""
-            parts = ""
-            if is_agent and line_buffer.strip():
-                events, _ = parse_transcript_lines(line_buffer + "\n")
-                if events:
-                    payload = json.dumps({"events": events, "offset": pos})
-                    parts += f"data: {payload}\n\n"
+        def _done(completed: bool) -> str:
             done_data = json.dumps({"completed": completed})
-            parts += f"event: done\ndata: {done_data}\n\n"
-            return parts
+            return f"event: done\ndata: {done_data}\n\n"
 
         def _read_new_data() -> tuple[str | None, int]:
-            """Read any new bytes past *pos*. Returns (chunk, new_size)."""
+            """Read any new bytes past *pos*. Returns (chunk, end).
+
+            An agent transcript is read only up to its last newline, so
+            *end* -- the offset a reconnecting client resumes from -- never
+            splits a line.
+            """
             try:
                 size = source.path.stat().st_size
             except FileNotFoundError:
                 return None, -1
             if size <= pos:
-                return "", size
-            chunk = _read_chunk(source.path, pos, size)
-            return chunk, size
+                return "", pos
+            data = _read_chunk(source.path, pos, size)
+            if is_agent:
+                data = data[: data.rfind(b"\n") + 1]
+            return data.decode("utf-8", errors="replace"), pos + len(data)
 
-        def _yield_chunk(chunk: str, file_size: int) -> str | None:
+        def _yield_chunk(chunk: str, end: int) -> str | None:
             """Render a chunk and return an SSE payload string (or None)."""
-            nonlocal line_buffer, pos
+            nonlocal pos
             if not chunk:
                 return None
+            pos = end
             if is_agent:
-                events, line_buffer = parse_transcript_lines(line_buffer + chunk)
-                pos = file_size
+                events = parse_transcript(chunk)
                 if not events:
                     return None
-                payload = json.dumps({"events": events, "offset": file_size})
-                return f"data: {payload}\n\n"
+                payload = json.dumps({"events": events, "offset": end})
             else:
-                pos = file_size
-                payload = json.dumps({
-                    "text": chunk, "offset": file_size,
-                })
-                return f"data: {payload}\n\n"
+                payload = json.dumps({"text": chunk, "offset": end})
+            return f"data: {payload}\n\n"
 
         # -- Coordinating event: signals all watchers to stop --
         stop_event = asyncio.Event()
@@ -242,11 +240,11 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
         completion_task: asyncio.Task[None] | None = None
 
         try:
-            async with asyncio.timeout(GLOBAL_TIMEOUT):
+            async with asyncio.timeout(_TAIL_TIMEOUT):
                 if source is None:
                     source = await _wait_for_task_output(request, stop_event)
                     if source is None:
-                        yield _flush_and_done(
+                        yield _done(
                             completed=not is_task_active(
                                 request.query_params["id"]
                             )
@@ -264,7 +262,7 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                             break
                         await asyncio.sleep(0.5)
                     if not parent.exists():
-                        yield _flush_and_done(completed=False)
+                        yield _done(completed=False)
                         return
 
                 # Wait for the file itself to appear.
@@ -275,7 +273,7 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                         if source.path.exists():
                             break
                     if stop_event.is_set() and not source.path.exists():
-                        yield _flush_and_done(
+                        yield _done(
                             completed=not source.is_active()
                         )
                         return
@@ -289,7 +287,7 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                 # Catch-up: read any data already present.
                 chunk, file_size = await asyncio.to_thread(_read_new_data)
                 if file_size == -1:
-                    yield _flush_and_done(completed=True)
+                    yield _done(completed=True)
                     return
                 if chunk:
                     sse = _yield_chunk(chunk, file_size)
@@ -323,17 +321,17 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
                 # Final read: pick up any bytes written after the last
                 # change event but before the stop_event fired.
                 chunk, file_size = await asyncio.to_thread(_read_new_data)
-                if chunk and file_size > 0:
+                if chunk:
                     sse = _yield_chunk(chunk, file_size)
                     if sse:
                         yield sse
 
-                yield _flush_and_done(
+                yield _done(
                     completed=not source.is_active()
                 )
 
         except TimeoutError:
-            yield _flush_and_done(completed=False)
+            pass
 
         finally:
             stop_event.set()
@@ -354,12 +352,11 @@ async def tail_endpoint(request: Request) -> StreamingResponse | JSONResponse:
     )
 
 
-def _read_chunk(path: Path, start: int, end: int) -> str:
+def _read_chunk(path: Path, start: int, end: int) -> bytes:
     """Read a file chunk from start to end byte positions."""
     with open(path, "rb") as f:
         f.seek(start)
-        data = f.read(end - start)
-    return data.decode("utf-8", errors="replace")
+        return f.read(end - start)
 
 
 async def read_endpoint(request: Request) -> JSONResponse:

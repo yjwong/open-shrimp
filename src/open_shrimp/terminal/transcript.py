@@ -39,22 +39,6 @@ def parse_transcript(raw_text: str) -> list[dict[str, Any]]:
     return events
 
 
-def parse_transcript_lines(raw_text: str) -> tuple[list[dict[str, Any]], str]:
-    """Parse the complete lines of *raw_text*, returning events and remainder.
-
-    The remainder is any trailing text without a newline: a line the CLI is
-    still writing, to be prepended to the next chunk.
-    """
-    if not raw_text:
-        return [], ""
-    segments = raw_text.split("\n")
-    remainder = segments.pop()
-    events: list[dict[str, Any]] = []
-    for seg in segments:
-        events.extend(_parse_line(seg))
-    return events, remainder
-
-
 def _parse_line(line: str) -> list[dict[str, Any]]:
     line = line.strip()
     if not line:

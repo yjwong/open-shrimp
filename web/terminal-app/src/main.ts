@@ -109,9 +109,9 @@ async function tailMain(): Promise<void> {
   showStatus("Loading...");
   let initial: ReadResult;
   try {
-    initial = await readSource(apiQuery);
+    initial = await withRetry(() => readSource(apiQuery));
   } catch (e) {
-    showError(`${e}`);
+    showError((e as Error).message);
     return;
   }
 
@@ -156,84 +156,192 @@ async function readSource(
     signal,
   });
   if (!resp.ok) {
-    throw new Error(`Read error (${resp.status}): ${await resp.text()}`);
+    throw new HttpError(resp.status, `Read error (${resp.status}): ${await resp.text()}`);
   }
   return (await resp.json()) as ReadResult;
 }
 
+/** Retry *fn* across transient failures until it succeeds, a permanent
+ * error is thrown, or *signal* aborts (which rethrows). */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  let retryMs = RETRY_MIN_MS;
+  while (true) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (signal?.aborted || !isTransient(e)) throw e;
+    }
+    await pause(retryMs, signal);
+    retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
+  }
+}
+
+// ── Surviving a backgrounded Mini App ──
+//
+// Switching away from Telegram suspends the WebView, and the OS drops its
+// sockets: an open stream either errors ("network error") or hangs without
+// ever erroring.  Every network loop here waits for the page to be visible
+// again, then reconnects; the tail resumes from the byte offset of the last
+// payload it applied, so nothing repeats or goes missing.
+
+// Backoff between reconnect attempts while the page is visible.
+const RETRY_MIN_MS = 1000;
+const RETRY_MAX_MS = 15000;
+
+/** Resolve after *ms*, or as soon as the page becomes visible again,
+ * whichever comes first.  While hidden, waits for visibility alone. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: number | undefined;
+    const done = () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") done();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    signal?.addEventListener("abort", done);
+    if (document.visibilityState === "visible") {
+      timer = window.setTimeout(done, ms);
+    }
+  });
+}
+
+/** An abort signal that fires when the page returns to the foreground, so a
+ * stream that went silent while suspended is replaced rather than trusted. */
+function abortOnResume(outer?: AbortSignal): {
+  signal: AbortSignal;
+  release: () => void;
+} {
+  const ctrl = new AbortController();
+  const onVisibility = () => {
+    if (document.visibilityState === "visible") ctrl.abort();
+  };
+  const onOuterAbort = () => ctrl.abort();
+  document.addEventListener("visibilitychange", onVisibility);
+  outer?.addEventListener("abort", onOuterAbort);
+  return {
+    signal: ctrl.signal,
+    release: () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      outer?.removeEventListener("abort", onOuterAbort);
+    },
+  };
+}
+
+class HttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+/** 5xx comes from the tunnel or a restarting bot and clears on its own;
+ * any other HTTP error will not. */
+function isTransient(e: unknown): boolean {
+  return !(e instanceof HttpError) || e.status >= 500;
+}
+
 /** Stream what a source appends past *offset* until the server reports it
- * done.  Returns quietly once *signal* aborts. */
+ * done, reconnecting from the last applied offset whenever the connection
+ * drops.  Returns quietly once *signal* aborts. */
 async function streamSource(
   sink: Sink,
   apiQuery: string,
   offset: number,
   signal?: AbortSignal
 ): Promise<void> {
-  const url = `/api/terminal/tail?${apiQuery}&offset=${offset}`;
-
-  try {
-    const resp = await fetch(url, {
-      headers: {
-        ...getAuthHeader(),
-        Accept: "text/event-stream",
-      },
-      signal,
-    });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      sink.notice("error", `Stream error (${resp.status}): ${text}`);
-      return;
+  let retryMs = RETRY_MIN_MS;
+  while (!signal?.aborted) {
+    const attempt = abortOnResume(signal);
+    try {
+      const finished = await streamOnce(sink, apiQuery, offset, attempt.signal, (o) => {
+        offset = o;
+        retryMs = RETRY_MIN_MS;
+      });
+      // A close without a done event is the server's time cap: reconnect.
+      if (finished) return;
+    } catch (e) {
+      if (signal?.aborted) return;
+      if (attempt.signal.aborted) continue; // back in the foreground
+      if (!isTransient(e)) {
+        sink.notice("error", (e as Error).message);
+        return;
+      }
+    } finally {
+      attempt.release();
     }
+    await pause(retryMs, signal);
+    retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
+  }
+}
 
-    const reader = resp.body?.getReader();
-    if (!reader) {
-      sink.notice("error", "Streaming not supported.");
-      return;
-    }
+/** One tail connection.  Resolves true once the server sends its done event,
+ * false if the stream closes without one; throws on a network or HTTP
+ * error. */
+async function streamOnce(
+  sink: Sink,
+  apiQuery: string,
+  offset: number,
+  signal: AbortSignal,
+  onOffset: (offset: number) => void
+): Promise<boolean> {
+  const resp = await fetch(`/api/terminal/tail?${apiQuery}&offset=${offset}`, {
+    headers: {
+      ...getAuthHeader(),
+      Accept: "text/event-stream",
+    },
+    signal,
+  });
+  if (!resp.ok) {
+    throw new HttpError(resp.status, `Stream error (${resp.status}): ${await resp.text()}`);
+  }
 
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let doneNext = false;
+  const reader = resp.body?.getReader();
+  if (!reader) throw new HttpError(0, "Streaming not supported.");
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done || signal?.aborted) break;
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let doneNext = false;
 
-      buffer += decoder.decode(value, { stream: true });
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) return false;
 
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
+    buffer += decoder.decode(value, { stream: true });
 
-      for (const line of lines) {
-        if (line.startsWith("event: done")) {
-          // The next "data:" line carries the done payload.
-          doneNext = true;
-        } else if (line.startsWith("data: ")) {
-          let payload: {
-            text?: string;
-            events?: TranscriptEvent[];
-            completed?: boolean;
-          };
-          try {
-            payload = JSON.parse(line.slice(6));
-          } catch {
-            continue;
-          }
-          if (doneNext) {
-            sink.finish(!!payload.completed);
-            return;
-          }
-          sink.apply(payload);
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (line.startsWith("event: done")) {
+        // The next "data:" line carries the done payload.
+        doneNext = true;
+      } else if (line.startsWith("data: ")) {
+        let payload: {
+          text?: string;
+          events?: TranscriptEvent[];
+          offset?: number;
+          completed?: boolean;
+        };
+        try {
+          payload = JSON.parse(line.slice(6));
+        } catch {
+          continue;
         }
+        if (doneNext) {
+          sink.finish(!!payload.completed);
+          return true;
+        }
+        sink.apply(payload);
+        if (payload.offset !== undefined) onOffset(payload.offset);
       }
     }
-
-    if (signal?.aborted) return;
-    sink.notice("warn", "Connection closed.");
-  } catch (e) {
-    if (signal?.aborted) return;
-    sink.notice("error", `Stream error: ${e}`);
   }
 }
 
@@ -366,9 +474,9 @@ async function followWorkflow(
   async function follow(query: string, signal: AbortSignal): Promise<void> {
     let initial: ReadResult;
     try {
-      initial = await readSource(query, signal);
+      initial = await withRetry(() => readSource(query, signal), signal);
     } catch (e) {
-      if (!signal.aborted) view.notice("error", `${e}`);
+      if (!signal.aborted) view.notice("error", (e as Error).message);
       return;
     }
     if (signal.aborted) return;
@@ -408,43 +516,43 @@ async function followWorkflow(
   view.reset("Workflow");
   view.notice("info", "Waiting for the workflow to start an agent...");
 
-  while (true) {
-    let active = false;
-    try {
-      const resp = await fetch(
-        `/api/terminal/workflow?id=${encodeURIComponent(taskId)}`,
-        { headers: getAuthHeader() }
+  async function poll(): Promise<{ active: boolean; agents: WorkflowAgent[] }> {
+    const resp = await fetch(
+      `/api/terminal/workflow?id=${encodeURIComponent(taskId)}`,
+      { headers: getAuthHeader() }
+    );
+    if (!resp.ok) {
+      throw new HttpError(
+        resp.status,
+        `Workflow error (${resp.status}): ${await resp.text()}`
       );
-      if (!resp.ok) {
-        if (!selected) {
-          const err = await resp.text();
-          view.notice("error", `Workflow error (${resp.status}): ${err}`);
-        }
-        return;
-      }
-      const data = (await resp.json()) as {
-        active: boolean;
-        agents: WorkflowAgent[];
-      };
-      active = data.active;
-      agents = data.agents;
-      const initial =
-        agents.find((a) => a.state === "running") ?? agents[0];
-      if (!selected && initial) {
-        select(initial);
-      } else {
-        renderBar();
-      }
-      if (!active && !agents.length) {
-        view.setState("ended");
-        view.notice("warn", "The workflow ended without starting an agent.");
-      }
+    }
+    return await resp.json();
+  }
+
+  while (true) {
+    let data: { active: boolean; agents: WorkflowAgent[] };
+    try {
+      data = await withRetry(poll);
     } catch (e) {
-      view.notice("error", `Workflow poll failed: ${e}`);
+      // Once an agent is showing, its own tail reports how it ended.
+      if (!selected) view.notice("error", (e as Error).message);
       return;
     }
-    if (!active) return;
-    await new Promise((r) => setTimeout(r, AGENT_POLL_MS));
+    agents = data.agents;
+    const initial =
+      agents.find((a) => a.state === "running") ?? agents[0];
+    if (!selected && initial) {
+      select(initial);
+    } else {
+      renderBar();
+    }
+    if (!data.active && !agents.length) {
+      view.setState("ended");
+      view.notice("warn", "The workflow ended without starting an agent.");
+    }
+    if (!data.active) return;
+    await pause(AGENT_POLL_MS);
   }
 }
 

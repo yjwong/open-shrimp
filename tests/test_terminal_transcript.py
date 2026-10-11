@@ -7,7 +7,6 @@ import json
 from open_shrimp.terminal.transcript import (
     TOOL_RESULT_MAX_CHARS,
     parse_transcript,
-    parse_transcript_lines,
 )
 
 
@@ -76,13 +75,3 @@ def test_records_without_content_are_skipped() -> None:
     )
 
     assert parse_transcript(transcript) == []
-
-
-def test_unfinished_line_is_held_back() -> None:
-    whole = _user("Go.")
-    partial = '{"type": "assistant", "mess'
-
-    events, remainder = parse_transcript_lines(whole + partial)
-
-    assert events == [{"kind": "prompt", "text": "Go."}]
-    assert remainder == partial

@@ -216,3 +216,44 @@ async def test_wait_stops_on_stop_event(monkeypatch: pytest.MonkeyPatch) -> None
     await asyncio.sleep(0.05)
     stop.set()
     assert await asyncio.wait_for(waiter, timeout=1) is None
+
+
+def test_tail_resumes_an_agent_transcript_at_a_line_boundary(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    done = json.dumps({"type": "user", "message": {"content": "Do it."}}) + "\n"
+    output = tmp_path / "agent.jsonl"
+    output.write_text(done + '{"type": "assist')
+    _set_state(monkeypatch, active=set(), sources={
+        "agent": LogSource(path=output, is_active=lambda: False, render="jsonl"),
+    })
+
+    resp = client.get("/api/terminal/tail?type=task&id=agent")
+
+    data = [
+        json.loads(line.removeprefix("data: "))
+        for line in resp.text.splitlines()
+        if line.startswith("data: ") and '"events"' in line
+    ]
+    assert data == [{
+        "events": [{"kind": "prompt", "text": "Do it."}],
+        "offset": len(done),
+    }]
+
+
+def test_tail_hitting_its_time_cap_ends_without_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_state(monkeypatch, active={"quiet"}, sources={})
+    monkeypatch.setattr(api, "_PENDING_POLL_INTERVAL", 0.05)
+
+    async def _forever(request: Request, stop_event: asyncio.Event) -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(api, "_wait_for_task_output", _forever)
+    monkeypatch.setattr(api, "_TAIL_TIMEOUT", 0.1)
+
+    resp = client.get("/api/terminal/tail?type=task&id=quiet")
+
+    assert resp.status_code == 200
+    assert "event: done" not in resp.text
