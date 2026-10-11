@@ -349,7 +349,8 @@ const AGENT_LABELS: SourceLabels = {
 };
 
 /** Show a bar of the workflow's agents and follow whichever one is picked,
- * starting with the first.  The bar grows as the script starts agents. */
+ * starting with the earliest-started running agent, or the first agent if
+ * none is running.  The bar grows as the script starts agents. */
 async function followWorkflow(
   view: TranscriptView,
   taskId: string
@@ -427,9 +428,10 @@ async function followWorkflow(
       };
       active = data.active;
       agents = data.agents;
-      const first = agents[0];
-      if (!selected && first) {
-        select(first);
+      const initial =
+        agents.find((a) => a.state === "running") ?? agents[0];
+      if (!selected && initial) {
+        select(initial);
       } else {
         renderBar();
       }
