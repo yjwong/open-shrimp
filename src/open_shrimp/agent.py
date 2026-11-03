@@ -26,6 +26,10 @@ class FileAttachment:
     data: bytes  # raw file bytes
     mime_type: str  # e.g. "image/jpeg", "application/pdf"
     filename: str | None = None  # original filename, if available
+    # A file already written into the chat's upload directory, too large to
+    # hold in ``data``.  save_attachments hands it on as-is, so the turn's
+    # cleanup deletes it like any other attachment.
+    staged: Path | None = None
 
 
 
@@ -92,30 +96,42 @@ def save_attachments(
     Files are created with delete=False so they persist for the agent to
     read.  The caller is responsible for cleanup.
     """
+    paths: list[Path] = []
+    for att in attachments:
+        if att.staged is not None:
+            paths.append(att.staged)
+            continue
+        path = create_attachment_file(chat_id, att.filename, att.mime_type)
+        path.write_bytes(att.data)
+        paths.append(path)
+        logger.info("Saved attachment to %s (%d bytes, %s)", path, len(att.data), att.mime_type)
+    return paths
+
+
+def create_attachment_file(
+    chat_id: int, filename: str | None, mime_type: str,
+) -> Path:
+    """Create an empty, uniquely named file in the chat's upload directory.
+
+    The name keeps the sanitized original filename and its extension, so
+    the agent sees what the file was called.
+    """
     from open_shrimp.hooks import ATTACHMENT_TEMP_DIR
 
     chat_dir = ATTACHMENT_TEMP_DIR / str(chat_id)
     chat_dir.mkdir(parents=True, exist_ok=True)
-
-    paths: list[Path] = []
-    for att in attachments:
-        ext = (
-            _MIME_TO_EXT.get(att.mime_type)
-            or (Path(att.filename).suffix if att.filename else "")
-            or ".bin"
-        )
-        # Use sanitized original filename as part of the temp name if available.
-        safe_name = _sanitize_filename(att.filename) if att.filename else ""
-        prefix = f"openshrimp_{safe_name}_" if safe_name else "openshrimp_"
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=ext, prefix=prefix, delete=False,
-            dir=chat_dir,
-        )
-        tmp.write(att.data)
-        tmp.close()
-        paths.append(Path(tmp.name))
-        logger.info("Saved attachment to %s (%d bytes, %s)", tmp.name, len(att.data), att.mime_type)
-    return paths
+    ext = (
+        _MIME_TO_EXT.get(mime_type)
+        or (Path(filename).suffix if filename else "")
+        or ".bin"
+    )
+    safe_name = _sanitize_filename(filename) if filename else ""
+    prefix = f"openshrimp_{safe_name}_" if safe_name else "openshrimp_"
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=ext, prefix=prefix, delete=False, dir=chat_dir,
+    )
+    tmp.close()
+    return Path(tmp.name)
 
 
 def build_prompt_with_attachments(

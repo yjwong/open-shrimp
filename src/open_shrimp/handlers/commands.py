@@ -1820,6 +1820,38 @@ async def phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _open_vnc_viewer(update, context, phone=True)
 
 
+async def upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /upload -- open the upload page for files over 20 MB."""
+    if not update.effective_user or not update.message:
+        return
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    if not _is_authorized(update.effective_user.id, config):
+        return
+
+    scope = chat_scope_from_message(update.message)
+    if await require_context(update.message, scope, config, db) is None:
+        return
+
+    from open_shrimp.file_upload.api import open_session
+
+    session_id = open_session(scope.chat_id, scope.thread_id)
+    await reply_mini_app(
+        update.message,
+        text=escape_rich("Upload files over Telegram's 20 MB limit."),
+        buttons=[("📤 Upload file", f"/upload/?id={session_id}")],
+        config=config,
+        user_id=update.effective_user.id,
+        is_private_chat=_is_private_chat(update),
+        opens="the upload page",
+        still_works=(
+            "Files up to 20 MB still work as normal attachments — just send "
+            "them here."
+        ),
+    )
+
+
 # ── /security_key ──
 
 

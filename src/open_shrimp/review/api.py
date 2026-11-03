@@ -932,6 +932,10 @@ def create_review_app(
 
     routes.extend(create_secret_routes())
 
+    from open_shrimp.file_upload.api import create_upload_routes
+
+    routes.extend(create_upload_routes())
+
     from open_shrimp.security_key.api import create_security_key_routes
 
     routes.extend(create_security_key_routes())

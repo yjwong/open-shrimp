@@ -189,6 +189,10 @@ async def _prepend_reply_context(
 # server, so pointing the bot at a self-hosted one lifts it.
 _MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 
+# Ends every skip reason for an attachment over that cap, so the warning can
+# offer the upload page for exactly those.
+_OVER_LIMIT = "over the 20 MB limit"
+
 
 def _describe_size(size: int | None) -> str:
     """Render an attachment size for a user-facing message."""
@@ -211,7 +215,7 @@ async def _fetch_file(
             "Attachment %r (%s) exceeds the Bot API download limit",
             label, _describe_size(size),
         )
-        skipped.append(f"{label} — {_describe_size(size)}, over the 20 MB limit")
+        skipped.append(f"{label} — {_describe_size(size)}, {_OVER_LIMIT}")
         return None
     try:
         file = await bot.get_file(file_id)
@@ -221,7 +225,7 @@ async def _fetch_file(
         # Telegram omits file_size on some attachments, so the limit can still
         # be hit here despite the check above.
         if "too big" in str(exc).lower():
-            skipped.append(f"{label} — over the 20 MB limit")
+            skipped.append(f"{label} — {_OVER_LIMIT}")
         else:
             skipped.append(f"{label} — download failed: {exc}")
         return None
@@ -362,26 +366,53 @@ async def _download_all_attachments(
 
 
 async def _warn_skipped_attachments(
-    bot: Bot, scope: ChatScope, skipped: list[str]
-) -> None:
+    bot: Bot,
+    scope: ChatScope,
+    skipped: list[str],
+    config: Config,
+    *,
+    user_id: int,
+    is_private_chat: bool,
+    caption: str,
+) -> bool:
     """Tell the user which attachments never reached the agent, and why.
 
     Attachment failures are reported rather than swallowed: a silently dropped
-    file is indistinguishable from the bot ignoring the message.
+    file is indistinguishable from the bot ignoring the message.  When one
+    was over the Bot API's download cap, the warning carries an upload
+    button and *caption* prefills the page's message.
+
+    Returns whether the upload button was delivered.
     """
     if not skipped:
-        return
+        return False
     lines = "\n".join(f"• {escape_rich(item)}" for item in skipped)
     header = escape_rich(
         "Couldn't read this file:" if len(skipped) == 1 else "Couldn't read these files:"
     )
+    text = f"{header}\n{lines}"
+    reply_markup = None
+    if any(item.endswith(_OVER_LIMIT) for item in skipped):
+        from open_shrimp.file_upload.api import upload_keyboard
+
+        reply_markup = upload_keyboard(
+            config, scope.chat_id, scope.thread_id,
+            user_id=user_id, is_private_chat=is_private_chat, caption=caption,
+        )
+        if reply_markup is not None:
+            text += "\n\n" + escape_rich(
+                "Send files over 20 MB through the upload page instead."
+            )
     try:
         await send_rich(
-            bot, scope.chat_id, f"{header}\n{lines}",
+            bot, scope.chat_id, text,
             thread_id=scope.thread_id,
+            reply_markup=reply_markup,
         )
     except Exception:
         logger.warning("Failed to report skipped attachments for scope %s", scope, exc_info=True)
+        return False
+    return reply_markup is not None
 
 
 # ---------------------------------------------------------------------------
@@ -550,10 +581,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Downloaded %d attachment(s) for scope %s (%d bytes), %d skipped",
             len(attachments), scope, sum(len(att.data) for att in attachments), len(skipped),
         )
-        await _warn_skipped_attachments(context.bot, scope, skipped)
+        offered_upload = await _warn_skipped_attachments(
+            context.bot, scope, skipped, config,
+            user_id=update.effective_user.id if update.effective_user else 0,
+            is_private_chat=update.effective_chat.type == "private" if update.effective_chat else True,
+            caption="" if attachments else _strip_mention(raw_text, bot_username),
+        )
         # Nothing arrived and the prompt was only ever a stand-in for the
-        # files — there is nothing for the agent to answer.
-        if skipped and not attachments and not raw_text and not has_location:
+        # files — there is nothing for the agent to answer.  With the upload
+        # page offered, the text waits there with the files instead.
+        if (
+            skipped and not attachments and not has_location
+            and (offered_upload or not raw_text)
+        ):
             return
 
     await _dispatch_to_agent(
@@ -675,10 +715,16 @@ async def _handle_media_group_message(
             group_id, len(attachments), scope,
             sum(len(att.data) for att in attachments), len(skipped),
         )
-        await _warn_skipped_attachments(context.bot, scope, skipped)
+        offered_upload = await _warn_skipped_attachments(
+            context.bot, scope, skipped, config,
+            user_id=update.effective_user.id if update.effective_user else 0,
+            is_private_chat=update.effective_chat.type == "private" if update.effective_chat else True,
+            caption="" if attachments else _strip_mention(raw_text, bot_username),
+        )
         # Nothing arrived and the prompt was only ever a stand-in for the
-        # files — there is nothing for the agent to answer.
-        if skipped and not attachments and not raw_text:
+        # files — there is nothing for the agent to answer.  With the upload
+        # page offered, the text waits there with the files instead.
+        if skipped and not attachments and (offered_upload or not raw_text):
             return
 
         await _dispatch_to_agent(

@@ -64,6 +64,7 @@ from open_shrimp.handlers.commands import (
     schedule_handler,
     security_key_handler,
     phone_handler,
+    upload_handler,
     start_handler,
     status_handler,
     tasks_handler,
@@ -392,6 +393,7 @@ def build_application(
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CommandHandler("vnc", vnc_handler))
     app.add_handler(CommandHandler("phone", phone_handler))
+    app.add_handler(CommandHandler("upload", upload_handler))
     app.add_handler(CommandHandler("security_key", security_key_handler))
     app.add_handler(CommandHandler("pair", pair_handler))
     app.add_handler(CommandHandler("config", config_handler))
@@ -557,6 +559,7 @@ async def run_bot(
         BotCommand("review", "Review and stage git changes"),
         BotCommand("schedule", "List scheduled tasks"),
         BotCommand("tasks", "List or stop background tasks"),
+        BotCommand("upload", "Upload a file over 20 MB"),
         BotCommand("vnc", "View computer-use desktop"),
         BotCommand("security_key", "Start security-key forwarding"),
         BotCommand("pair", "Pair Android companion app"),

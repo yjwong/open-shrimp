@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="referrer" content="no-referrer">
+<title>Upload file</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --field: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --button: var(--tg-theme-button-color, #2481cc);
+    --button-text: var(--tg-theme-button-text-color, #ffffff);
+    --danger: var(--tg-theme-destructive-text-color, #d93a3a);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .note { color: var(--hint); font-size: 13px; margin-top: 6px; }
+  #pick {
+    display: block; width: 100%; padding: 14px; margin-top: 12px;
+    border: 1px dashed var(--hint); border-radius: 8px;
+    background: transparent; color: var(--button); font-size: 15px; font-weight: 600;
+  }
+  #files { list-style: none; margin: 12px 0 0; padding: 0; }
+  #files li { padding: 10px; margin-top: 8px; border-radius: 8px; background: var(--field); }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .name { flex: 1; word-break: break-all; }
+  .size { color: var(--hint); font-size: 13px; white-space: nowrap; }
+  .remove { border: 0; background: transparent; color: var(--hint); font-size: 18px; padding: 0 4px; cursor: pointer; }
+  .bar { height: 4px; margin-top: 8px; border-radius: 2px; background: var(--bg); overflow: hidden; }
+  .bar div { height: 100%; width: 0; background: var(--button); }
+  textarea {
+    width: 100%; height: 90px; margin-top: 12px; padding: 10px;
+    border: 0; border-radius: 8px; resize: vertical;
+    background: var(--field); color: var(--text); font: inherit;
+  }
+  .buttons { display: flex; gap: 8px; margin-top: 16px; }
+  .buttons button {
+    flex: 1; padding: 12px; border: 0; border-radius: 8px;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  #send { background: var(--button); color: var(--button-text); }
+  #cancel { background: var(--field); color: var(--text); }
+  button:disabled { opacity: 0.5; }
+  #status { margin-top: 12px; color: var(--hint); }
+  #status.error { color: var(--danger); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="form" hidden>
+  <h1>Upload file</h1>
+  <div class="note">For files over Telegram's 20 MB limit. They go straight to OpenShrimp, and the agent gets them like any attachment.</div>
+  <input type="file" id="input" multiple hidden>
+  <button id="pick" type="button">Choose files</button>
+  <ul id="files"></ul>
+  <textarea id="message" placeholder="Message (optional)"></textarea>
+  <div id="status" hidden></div>
+  <div class="buttons">
+    <button id="cancel" type="button">Cancel</button>
+    <button id="send" type="button" disabled>Send</button>
+  </div>
+</div>
+<div id="done" hidden></div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  try { tg && tg.ready(); tg && tg.expand(); } catch (e) {}
+
+  const params = new URLSearchParams(location.search);
+  const api = "/api/upload/" + encodeURIComponent(params.get("id") || "");
+  const $ = (sel) => document.getElementById(sel);
+  const entries = [];  // {file, fileId, sent, li, bar}
+  let key = "";
+  let chunkBytes = 8 * 1024 * 1024;
+  let busy = false;
+
+  function authHeader() {
+    if (tg && tg.initData) return { Authorization: "tg-init-data " + tg.initData };
+    const token = params.get("token");
+    return token ? { Authorization: "tg-token " + token } : {};
+  }
+
+  function formatSize(n) {
+    if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(2) + " GB";
+    if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + " MB";
+    return Math.max(1, Math.round(n / 1024)) + " KB";
+  }
+
+  function status(text, isError) {
+    $("status").textContent = text;
+    $("status").className = isError ? "error" : "";
+    $("status").hidden = !text;
+  }
+
+  function finish(text) {
+    setClosingConfirmation(false);
+    $("form").hidden = true;
+    $("done").textContent = text;
+    $("done").hidden = false;
+    if (tg && tg.initData) setTimeout(() => tg.close(), 800);
+  }
+
+  function setClosingConfirmation(on) {
+    try {
+      if (!tg || !tg.initData) return;
+      on ? tg.enableClosingConfirmation() : tg.disableClosingConfirmation();
+    } catch (e) {}
+  }
+
+  function setBusy(on) {
+    busy = on;
+    $("pick").disabled = on;
+    $("message").disabled = on;
+    $("send").disabled = on || entries.length === 0;
+    for (const entry of entries) entry.li.querySelector(".remove").hidden = on;
+    setClosingConfirmation(on);
+  }
+
+  class Fatal extends Error {}
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // One request, retried through dropped connections and 5xx; any other
+  // error response is final.  Returns [status, json].
+  async function call(path, opts, accept) {
+    let delay = 1000;
+    for (;;) {
+      let resp;
+      try {
+        resp = await fetch(api + path, {
+          ...opts,
+          headers: { "X-Upload-Key": key, ...(opts.headers || {}) },
+        });
+      } catch (e) {
+        resp = null;
+      }
+      if (resp && (resp.ok || (accept || []).includes(resp.status))) {
+        return [resp.status, await resp.json().catch(() => ({}))];
+      }
+      if (resp && (resp.status < 500 || resp.status === 507)) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Fatal(data.error || "Request failed (HTTP " + resp.status + ").");
+      }
+      status("Connection lost. Retrying…", false);
+      await sleep(delay);
+      delay = Math.min(delay * 2, 15000);
+    }
+  }
+
+  async function upload(entry) {
+    if (!entry.fileId) {
+      const [, data] = await call("/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: entry.file.name, size: entry.file.size }),
+      });
+      entry.fileId = data.file_id;
+    }
+    const path = "/files/" + encodeURIComponent(entry.fileId);
+    while (entry.sent < entry.file.size) {
+      const chunk = entry.file.slice(entry.sent, entry.sent + chunkBytes);
+      const [, data] = await call(path + "?offset=" + entry.sent, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: chunk,
+      }, [409]);
+      entry.sent = data.received;
+      entry.bar.style.width = (100 * entry.sent / entry.file.size) + "%";
+      status("Uploading " + entry.file.name + ": " + formatSize(entry.sent)
+        + " of " + formatSize(entry.file.size), false);
+    }
+  }
+
+  function addFile(file) {
+    const li = document.createElement("li");
+    li.innerHTML = '<div class="row"><span class="name"></span><span class="size"></span>'
+      + '<button class="remove" type="button" aria-label="Remove">×</button></div>'
+      + '<div class="bar"><div></div></div>';
+    li.querySelector(".name").textContent = file.name;
+    li.querySelector(".size").textContent = formatSize(file.size);
+    const entry = { file, fileId: null, sent: 0, li, bar: li.querySelector(".bar div") };
+    li.querySelector(".remove").addEventListener("click", () => {
+      entries.splice(entries.indexOf(entry), 1);
+      li.remove();
+      if (entry.fileId) {
+        fetch(api + "/files/" + encodeURIComponent(entry.fileId),
+          { method: "DELETE", headers: { "X-Upload-Key": key } }).catch(() => {});
+      }
+      setBusy(false);
+    });
+    entries.push(entry);
+    $("files").appendChild(li);
+  }
+
+  $("pick").addEventListener("click", () => $("input").click());
+  $("input").addEventListener("change", () => {
+    for (const file of $("input").files) {
+      if (file.size > 0) addFile(file);
+    }
+    $("input").value = "";
+    status("", false);
+    setBusy(false);
+  });
+
+  $("send").addEventListener("click", async () => {
+    setBusy(true);
+    try {
+      for (const entry of entries) await upload(entry);
+      status("Sending to the agent…", false);
+      await call("/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: $("message").value }),
+      });
+      finish("Sent. You can close this window.");
+    } catch (e) {
+      status(e instanceof Fatal ? e.message : String(e), true);
+      setBusy(false);
+    }
+  });
+
+  $("cancel").addEventListener("click", async () => {
+    if (key) {
+      try {
+        await fetch(api + "/cancel", { method: "POST", headers: { "X-Upload-Key": key } });
+      } catch (e) {}
+    }
+    finish("Cancelled. Nothing was sent.");
+  });
+
+  (async () => {
+    let resp;
+    try {
+      resp = await fetch(api + "/start", { method: "POST", headers: authHeader() });
+    } catch (e) {
+      finish("Couldn't reach OpenShrimp. Check your connection and tap the button again.");
+      return;
+    }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      finish(data.error || "Request failed (HTTP " + resp.status + ").");
+      return;
+    }
+    key = data.key;
+    chunkBytes = data.chunk_bytes || chunkBytes;
+    $("message").value = data.caption || "";
+    $("form").hidden = false;
+  })();
+</script>
+</body>
+</html>

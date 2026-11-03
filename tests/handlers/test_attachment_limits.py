@@ -8,7 +8,7 @@ attachments sent alongside it.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -123,11 +123,21 @@ async def test_healthy_download_reports_nothing_skipped() -> None:
     assert attachments[0].data == b"pdf-bytes"
 
 
+async def _warn(bot, scope: ChatScope, skipped: list[str], caption: str = "") -> bool:
+    return await _warn_skipped_attachments(
+        bot, scope, skipped, MagicMock(),
+        user_id=1, is_private_chat=True, caption=caption,
+    )
+
+
 async def test_warning_names_each_skipped_file() -> None:
     bot = wire_rich(SimpleNamespace(send_message=AsyncMock()))
     scope = ChatScope(chat_id=7, thread_id=3)
 
-    await _warn_skipped_attachments(bot, scope, ["huge.zip — 41.0 MB, over the 20 MB limit"])
+    with patch("open_shrimp.file_upload.api.upload_keyboard", return_value=None):
+        offered = await _warn(bot, scope, ["huge.zip — 41.0 MB, over the 20 MB limit"])
+
+    assert offered is False
 
     bot.send_message.assert_awaited_once()
     kwargs = bot.send_message.await_args.kwargs
@@ -143,7 +153,7 @@ async def test_warning_names_each_skipped_file() -> None:
 async def test_nothing_skipped_sends_no_message() -> None:
     bot = SimpleNamespace(send_message=AsyncMock())
 
-    await _warn_skipped_attachments(bot, ChatScope(chat_id=7, thread_id=None), [])
+    assert await _warn(bot, ChatScope(chat_id=7, thread_id=None), []) is False
 
     bot.send_message.assert_not_called()
 
@@ -152,4 +162,36 @@ async def test_a_failing_report_never_escapes() -> None:
     bot = SimpleNamespace(send_message=AsyncMock(side_effect=NetworkError("down")))
 
     # The user already lost the attachment; losing the turn as well is worse.
-    await _warn_skipped_attachments(bot, ChatScope(chat_id=7, thread_id=None), ["x — nope"])
+    assert await _warn(bot, ChatScope(chat_id=7, thread_id=None), ["x — nope"]) is False
+
+
+async def test_oversized_file_offers_the_upload_page() -> None:
+    bot = wire_rich(SimpleNamespace(send_message=AsyncMock()))
+    scope = ChatScope(chat_id=7, thread_id=3)
+    markup = MagicMock()
+
+    with patch(
+        "open_shrimp.file_upload.api.upload_keyboard", return_value=markup,
+    ) as keyboard:
+        offered = await _warn(
+            bot, scope, ["huge.zip — 41.0 MB, over the 20 MB limit"],
+            caption="summarise this",
+        )
+
+    assert offered is True
+    assert keyboard.call_args.kwargs["caption"] == "summarise this"
+    assert bot.send_message.await_args.kwargs["reply_markup"] is markup
+    assert "upload page" in bot.send_message.await_args.kwargs["text"]
+
+
+async def test_other_failures_offer_no_upload_page() -> None:
+    bot = wire_rich(SimpleNamespace(send_message=AsyncMock()))
+
+    with patch("open_shrimp.file_upload.api.upload_keyboard") as keyboard:
+        offered = await _warn(
+            bot, ChatScope(chat_id=7, thread_id=None),
+            ["notes.pdf — download failed: connection reset"],
+        )
+
+    assert offered is False
+    keyboard.assert_not_called()
