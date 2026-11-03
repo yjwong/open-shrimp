@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="referrer" content="no-referrer">
+<title>Enter secret</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --field: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --button: var(--tg-theme-button-color, #2481cc);
+    --button-text: var(--tg-theme-button-text-color, #ffffff);
+    --danger: var(--tg-theme-destructive-text-color, #d93a3a);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .label { color: var(--hint); font-size: 13px; margin-top: 12px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all; }
+  .description { margin: 12px 0 0; white-space: pre-wrap; }
+  .note { color: var(--hint); font-size: 13px; margin-top: 6px; }
+  textarea, input[type=password], input[type=text] {
+    width: 100%; margin-top: 16px; padding: 10px;
+    border: 0; border-radius: 8px;
+    background: var(--field); color: var(--text);
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px;
+  }
+  textarea { height: 140px; resize: vertical; }
+  textarea.masked { -webkit-text-security: disc; text-security: disc; }
+  .show { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--hint); font-size: 13px; }
+  .buttons { display: flex; gap: 8px; margin-top: 16px; }
+  button {
+    flex: 1; padding: 12px; border: 0; border-radius: 8px;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  #save { background: var(--button); color: var(--button-text); }
+  #cancel { background: var(--field); color: var(--text); }
+  button:disabled { opacity: 0.5; }
+  .error { color: var(--danger); margin-top: 12px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="form" hidden>
+  <h1>Enter secret</h1>
+  <div class="label">Written to</div>
+  <code id="path"></code>
+  <div id="key-row" hidden>
+    <div class="label">As</div>
+    <code id="key"></code>
+  </div>
+  <p class="description" id="description"></p>
+  <div class="note" id="replaces" hidden></div>
+  <div class="note">Goes straight to this file. It doesn't pass through Telegram, and the agent only learns that the file was written.</div>
+  <input type="password" id="single" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
+  <textarea id="multi" class="masked" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" hidden></textarea>
+  <label class="show"><input type="checkbox" id="show"> Show</label>
+  <div class="error" id="error" hidden></div>
+  <div class="buttons">
+    <button id="cancel" type="button">Cancel</button>
+    <button id="save" type="button">Save</button>
+  </div>
+</div>
+<div id="message" hidden></div>
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  try { tg && tg.ready(); tg && tg.expand(); } catch (e) {}
+
+  const params = new URLSearchParams(location.search);
+  const id = params.get("id") || "";
+  const api = "/api/secret/" + encodeURIComponent(id);
+  const $ = (sel) => document.getElementById(sel);
+  let field = null;
+
+  function authHeader() {
+    if (tg && tg.initData) return { Authorization: "tg-init-data " + tg.initData };
+    const token = params.get("token");
+    return token ? { Authorization: "tg-token " + token } : {};
+  }
+
+  function finish(text) {
+    $("form").hidden = true;
+    $("message").textContent = text;
+    $("message").hidden = false;
+    if (field) field.value = "";
+    if (tg && tg.initData) setTimeout(() => tg.close(), 800);
+  }
+
+  function showError(text) {
+    $("error").textContent = text;
+    $("error").hidden = false;
+  }
+
+  async function load() {
+    let resp;
+    try {
+      resp = await fetch(api, { headers: authHeader() });
+    } catch (e) {
+      finish("Couldn't reach OpenShrimp. Check your connection and tap the button again.");
+      return;
+    }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      finish(data.error || "Request failed (HTTP " + resp.status + ").");
+      return;
+    }
+    $("path").textContent = data.path;
+    $("description").textContent = data.description;
+    if (data.env_key) {
+      $("key").textContent = data.env_key;
+      $("key-row").hidden = false;
+      field = $("single");
+    } else {
+      field = $("multi");
+    }
+    if (data.exists) {
+      $("replaces").textContent = data.env_key
+        ? "Replaces " + data.env_key + " if the file already sets it."
+        : "Replaces the existing file.";
+      $("replaces").hidden = false;
+    }
+    field.hidden = false;
+    $("form").hidden = false;
+    field.focus();
+  }
+
+  $("show").addEventListener("change", (e) => {
+    if (field === $("single")) field.type = e.target.checked ? "text" : "password";
+    else field.classList.toggle("masked", !e.target.checked);
+  });
+
+  $("save").addEventListener("click", async () => {
+    $("error").hidden = true;
+    if (!field.value) { showError("Enter a value."); return; }
+    $("save").disabled = true;
+    try {
+      const resp = await fetch(api, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeader() },
+        body: JSON.stringify({ value: field.value }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) { finish("Saved. You can close this window."); return; }
+      showError(data.error || "Request failed (HTTP " + resp.status + ").");
+    } catch (e) {
+      showError("Couldn't reach OpenShrimp. Nothing was saved. Try again.");
+    }
+    $("save").disabled = false;
+  });
+
+  $("cancel").addEventListener("click", async () => {
+    try {
+      await fetch(api + "/cancel", { method: "POST", headers: authHeader() });
+    } catch (e) {}
+    finish("Cancelled. Nothing was written.");
+  });
+
+  load();
+</script>
+</body>
+</html>

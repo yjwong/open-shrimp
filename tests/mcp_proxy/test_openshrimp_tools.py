@@ -141,6 +141,7 @@ async def test_tools_list_private_chat_excludes_edit_topic() -> None:
         db=object(),
         config=SimpleNamespace(
             default_context="default",
+            contexts={},
             events=SimpleNamespace(chat_id=-100, timezone=None),
         ),
     )
@@ -300,6 +301,7 @@ async def test_tools_list_names_match_factory() -> None:
         bot=bot, chat_id=1, thread_id=9, db=object(),
         config=SimpleNamespace(
             default_context="default",
+            contexts={},
             events=SimpleNamespace(chat_id=-100, timezone=None),
         ),
         user_id=10, is_private_chat=False, host_bash_workdir=None,
@@ -340,6 +342,7 @@ async def test_read_only_hint_parity() -> None:
         bot=bot, chat_id=1, thread_id=9, db=object(),
         config=SimpleNamespace(
             default_context="default",
+            contexts={},
             events=SimpleNamespace(chat_id=-100, timezone=None),
         ),
         user_id=10, is_private_chat=False, host_bash_workdir="/tmp",

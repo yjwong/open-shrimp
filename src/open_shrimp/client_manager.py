@@ -555,6 +555,9 @@ async def get_or_create_session(
                 )
             else:
                 allowed_tools.append("mcp__openshrimp__ask_context")
+                # The form it opens is the approval: the user sees the path
+                # and either saves a value they typed or cancels.
+                allowed_tools.append("mcp__openshrimp__request_secret")
         # Auto-approve host_monitor_stop when host escape is enabled: it only
         # kills a process OpenShrimp owns, so it needs no fresh approval (the
         # host_monitor arm already got one).  host_monitor and host_bash are

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import mimetypes
 import os
@@ -59,6 +60,9 @@ _MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # MIME types that Telegram can display as inline photos.
 _PHOTO_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+# How long request_secret waits for the user to save or cancel the form.
+_SECRET_WAIT = 15 * 60
 
 
 def _text_result(text: str, is_error: bool = False) -> dict[str, Any]:
@@ -556,6 +560,183 @@ def create_openshrimp_tools(
             input_schema=_edit_topic_schema,
             read_only=True,
             handler=edit_topic,
+        ))
+
+    # --- request_secret (the user types it into a Mini App form) ---
+    _secret_ctx = (
+        config.contexts.get(context_name)
+        if config is not None and context_name is not None
+        and not is_supervisor_context(context_name)
+        else None
+    )
+    if _secret_ctx is not None:
+        from open_shrimp.hooks import is_path_within_any_directory
+        from open_shrimp.secret_entry.api import (
+            ENV_KEY_RE,
+            close_request,
+            open_request,
+        )
+
+        _secret_dirs = [
+            _secret_ctx.directory, *_secret_ctx.additional_directories,
+        ]
+
+        _request_secret_schema = {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path of the file to write, inside the "
+                        "context directory. Missing parent directories are "
+                        "created."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "What the secret is and where the user finds it, "
+                        "shown on the form (e.g. 'Stripe test secret key, "
+                        "from Dashboard > Developers > API keys')."
+                    ),
+                },
+                "env_key": {
+                    "type": "string",
+                    "description": (
+                        "Set this variable in a dotenv file instead of "
+                        "replacing the whole file: writes KEY=value, "
+                        "replacing an existing KEY line and keeping the "
+                        "rest of the file. Omit to write the value as the "
+                        "entire file contents."
+                    ),
+                },
+            },
+            "required": ["path", "description"],
+        }
+
+        async def request_secret(args: dict[str, Any]) -> dict[str, Any]:
+            path = args.get("path", "")
+            description = args.get("description", "").strip()
+            env_key = args.get("env_key") or None
+
+            if not path or not os.path.isabs(path):
+                return _text_result(
+                    "Error: path must be an absolute path.", is_error=True,
+                )
+            if not description:
+                return _text_result(
+                    "Error: description is required.", is_error=True,
+                )
+            if env_key is not None and not ENV_KEY_RE.fullmatch(env_key):
+                return _text_result(
+                    f"Error: {env_key!r} is not a valid variable name.",
+                    is_error=True,
+                )
+            path = os.path.realpath(path)
+            if not is_path_within_any_directory(path, _secret_dirs):
+                return _text_result(
+                    f"Error: {path} is outside the context directories "
+                    f"({', '.join(_secret_dirs)}).",
+                    is_error=True,
+                )
+            if os.path.isdir(path):
+                return _text_result(
+                    f"Error: {path} is a directory.", is_error=True,
+                )
+
+            request_id, req = open_request(
+                path, env_key, description, _secret_dirs,
+            )
+            try:
+                keyboard = mini_app_keyboard(
+                    [("🔑 Enter secret", f"/secret/?id={request_id}")],
+                    config=config,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    is_private_chat=is_private_chat,
+                )
+                if keyboard is None:
+                    return _text_result(
+                        "Error: the Mini App tunnel is down, so the form "
+                        "can't open. Ask the user to restart OpenShrimp or "
+                        "set review.public_url.",
+                        is_error=True,
+                    )
+
+                target = escape_rich(path)
+                if env_key is not None:
+                    target = f"{escape_rich(env_key)} in {target}"
+                header = f"🔑 **Secret requested:** {target}"
+                try:
+                    msg = await send_rich(
+                        bot,
+                        chat_id,
+                        f"{header}\n\n{escape_rich(description)}",
+                        thread_id=thread_id,
+                        reply_markup=keyboard,
+                    )
+                except Exception as exc:
+                    logger.exception("request_secret: sending the form failed")
+                    return _text_result(
+                        f"Error sending the form button: {exc}", is_error=True,
+                    )
+
+                status = "⏱️ expired"
+                try:
+                    written = await asyncio.wait_for(
+                        asyncio.shield(req.outcome), timeout=_SECRET_WAIT,
+                    )
+                    status = "✅ saved" if written else "✖️ cancelled"
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    status = "✖️ cancelled"
+                    raise
+                finally:
+                    with contextlib.suppress(Exception):
+                        await edit_rich(
+                            bot, chat_id, msg.message_id,
+                            f"{header} — {status}",
+                        )
+
+                if status == "✅ saved":
+                    what = (
+                        f"{env_key} set in {path}" if env_key is not None
+                        else f"written to {path}"
+                    )
+                    return _text_result(
+                        f"The user entered the secret; it is {what}. "
+                        "The value is not shown to you."
+                    )
+                if status == "✖️ cancelled":
+                    return _text_result(
+                        "The user cancelled; nothing was written.",
+                        is_error=True,
+                    )
+                return _text_result(
+                    f"No secret was entered within {_SECRET_WAIT // 60} "
+                    "minutes; the request has expired and nothing was "
+                    "written.",
+                    is_error=True,
+                )
+            finally:
+                close_request(request_id)
+
+        tools_list.append(OpenShrimpTool(
+            name="request_secret",
+            description=(
+                "Ask the user for a secret (API key, token, password, "
+                "private key) and have it written to a file, without the "
+                "value passing through Telegram or this conversation. The "
+                "user gets a button opening a form; this call waits until "
+                "they save or cancel (up to 15 minutes). Use this instead "
+                "of asking the user to paste a secret into the chat. "
+                "Afterwards, reference the file (source it, point a config "
+                "at it) rather than reading or printing its contents."
+            ),
+            input_schema=_request_secret_schema,
+            read_only=False,
+            handler=request_secret,
         ))
 
     # --- Scheduling tools (when db and an events-configured config exist) ---
