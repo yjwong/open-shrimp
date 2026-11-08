@@ -400,6 +400,26 @@ def clear_scope_overrides(scope: ChatScope) -> None:
     _model_overrides.pop(scope, None)
     _effort_overrides.pop(scope, None)
 
+def copy_scope_state(src: ChatScope, dst: ChatScope, context_name: str) -> None:
+    """Give *dst* the overrides and session approvals *src* holds.
+
+    The in-memory half of ``/fork``.  Lives beside
+    :func:`clear_scope_overrides` and :func:`clear_session_approvals` so an
+    override or approval container added later is copied wherever it is
+    cleared.  Containers are copied by value: approving a tool in the fork
+    must not approve it in the source.
+    """
+    for overrides in (_backend_overrides, _model_overrides, _effort_overrides):
+        if src in overrides:
+            overrides[dst] = overrides[src]
+    src_key, dst_key = (src, context_name), (dst, context_name)
+    if src_key in _edit_approved_sessions:
+        _edit_approved_sessions.add(dst_key)
+    if src_key in _tool_approved_sessions:
+        _tool_approved_sessions[dst_key] = list(_tool_approved_sessions[src_key])
+    if src_key in _session_approved_dirs:
+        _session_approved_dirs[dst_key] = set(_session_approved_dirs[src_key])
+
 # ---------------------------------------------------------------------------
 # Per-scope additional directory overrides: (scope, context_name) -> dirs.
 # Set via /add_dir command.  Persisted in DB, cached here for fast lookup.

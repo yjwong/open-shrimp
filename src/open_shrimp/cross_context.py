@@ -1106,21 +1106,11 @@ async def _run_handoff(
     """
     from open_shrimp.db import ChatScope, set_active_context
     from open_shrimp.dispatch_registry import dispatch
+    from open_shrimp.telegram_topics import can_create_topics
 
-    # Topic gate: createForumTopic works in a private chat (bots may always
-    # create topics there) OR a forum supergroup. Telegram only sets
-    # ``Chat.is_forum`` on supergroups — a private chat reports it falsy even
-    # though topic creation is allowed — so private chats must be gated on
-    # ``is_private_chat``, not ``is_forum``.
-    topic_capable = is_private_chat
-    if not topic_capable:
-        try:
-            chat = await bot.get_chat(chat_id)
-            topic_capable = bool(getattr(chat, "is_forum", False))
-        except Exception:
-            logger.debug("get_chat failed during handoff", exc_info=True)
-            # Fall back to the topic signal: being in a topic implies a forum.
-            topic_capable = thread_id is not None
+    topic_capable = await can_create_topics(
+        bot, chat_id, is_private_chat=is_private_chat, thread_id=thread_id,
+    )
 
     if not topic_capable:
         await _edit_outer_card(

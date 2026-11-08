@@ -164,6 +164,12 @@ class OpenCodeClient:
     def session_id(self) -> str | None:
         return self._session_id
 
+    def server_address(self) -> tuple[str, str] | None:
+        """``(base_url, auth_header)`` of the connected server, or None."""
+        if self._server is None:
+            return None
+        return self._server.base_url, self._server.auth_header
+
     def is_alive(self) -> bool:
         """True while this connection's event bus and server remain alive."""
         return self._bus is not None and self._bus.is_alive()

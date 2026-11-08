@@ -801,6 +801,30 @@ async def get_additional_directories(
     return [row[0] for row in rows]
 
 
+async def copy_additional_directories(
+    db: aiosqlite.Connection,
+    src: ChatScope,
+    dst: ChatScope,
+    context_name: str,
+) -> list[str]:
+    """Give *dst* every runtime additional directory *src* has.
+
+    Returns *dst*'s full list afterwards, for the caller's cache.
+    """
+    await db.execute(
+        "INSERT OR IGNORE INTO additional_directories "
+        "(chat_id, message_thread_id, context_name, directory) "
+        "SELECT ?, ?, context_name, directory FROM additional_directories "
+        "WHERE chat_id = ? AND message_thread_id = ? AND context_name = ?",
+        (
+            dst.chat_id, _thread_id_to_db(dst.thread_id),
+            src.chat_id, _thread_id_to_db(src.thread_id), context_name,
+        ),
+    )
+    await db.commit()
+    return await get_additional_directories(db, dst, context_name)
+
+
 async def get_all_additional_directories_for_context(
     db: aiosqlite.Connection,
     context_name: str,

@@ -1,5 +1,5 @@
 """Telegram command handlers (/start, /context, /clear, /status, /cancel, /model,
-/backend, /effort, /resume, /review, /mcp, /tasks, /usage, /login).
+/backend, /effort, /resume, /fork, /review, /mcp, /tasks, /usage, /login).
 """
 
 from __future__ import annotations
@@ -1685,6 +1685,189 @@ async def handle_resume_callback(
     for k in expired:
         _resume_selections.pop(k, None)
     return True
+
+
+# ── /fork ──
+
+
+def _source_topic_link(message: Message, scope: ChatScope) -> str:
+    """Rich Markdown naming the topic */fork* was sent from, linked if it can be.
+
+    Supergroup topics have a ``t.me/c`` link.  Private-chat topics have none,
+    so they get the topic's name, which Telegram reports on the topic-created
+    service message that a message in a topic replies to.
+    """
+    created = getattr(
+        getattr(message, "reply_to_message", None), "forum_topic_created", None,
+    )
+    name = getattr(created, "name", None)
+    label = escape_rich_inline(name) if name else "the source topic"
+    chat_id = str(scope.chat_id)
+    if scope.thread_id is None or not chat_id.startswith("-100"):
+        return label
+    return f"[{label}](https://t.me/c/{chat_id[4:]}/{scope.thread_id})"
+
+
+async def _post_fork_echo(
+    bot: Any, chat_id: int, thread_id: int, prompt: str | None,
+    reply: str | None, display_name: str,
+) -> None:
+    """Repeat the source's last exchange in the fork, one message per side."""
+    from open_shrimp.markdown import gfm_to_rich_text, split_message
+    from open_shrimp.rich_message import send_rich
+
+    bodies: list[str] = []
+    if prompt:
+        bodies.append(f"**You:** {escape_rich(prompt)}")
+    if reply:
+        bodies.append(
+            f"**{escape_rich_inline(display_name)}:**\n\n{gfm_to_rich_text(reply)}"
+        )
+    for body in bodies:
+        for chunk in split_message(body):
+            await send_rich(bot, chat_id, chunk, thread_id=thread_id)
+
+
+async def fork_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /fork: copy this topic's session into a new topic.
+
+    The new topic is bound to the same context and session copy, and
+    inherits the source's overrides, session approvals and ``/add_dir``
+    rows, all before anything is posted in it.  Nothing is dispatched: the
+    user's first message there resumes the copy through the normal path.
+    """
+    from open_shrimp.client_manager import resolve_backend
+    from open_shrimp.db import copy_additional_directories, set_active_context
+    from open_shrimp.handlers.state import _additional_dir_cache, copy_scope_state
+    from open_shrimp.rich_message import send_rich
+    from open_shrimp.telegram_topics import can_create_topics
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    sandbox_managers = context.bot_data.get("sandbox_managers")
+    message = update.effective_message
+    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    scope = chat_scope_from_message(message)
+    resolved = await require_context(message, scope, config, db)
+    if resolved is None:
+        return
+    ctx_name, ctx = resolved
+
+    backend = resolve_backend(scope=scope, context=ctx)
+    if "fork" not in backend.command_capabilities():
+        await reply_rich(message, f"/fork is not available on the `{backend.name}` backend.")
+        return
+
+    if not await can_create_topics(
+        context.bot, scope.chat_id,
+        is_private_chat=_is_private_chat(update), thread_id=scope.thread_id,
+    ):
+        await reply_rich(
+            message,
+            "/fork opens a new topic, and this chat has no topics. "
+            "Turn on topics for the group first.",
+        )
+        return
+
+    live = get_session(scope)
+    if live is not None and live.context_name != ctx_name:
+        live = None
+    source_id = (live.session_id if live is not None else None) or await get_session_id(
+        db, scope, ctx_name, backend.name,
+    )
+    if not source_id:
+        await reply_rich(message, "Nothing to fork yet: send a message first.")
+        return
+
+    # A scope can only be mid-turn with a live client, and after a restart
+    # there is no in-flight turn to leave out, so no live client means a
+    # full copy.
+    at_message_id: str | None = None
+    if live is not None and live.in_turn:
+        at_message_id = live.last_completed_message_id
+        if at_message_id is None:
+            await reply_rich(
+                message,
+                "No turn has finished yet in this session. "
+                "Fork once the running one ends.",
+            )
+            return
+
+    backend_kwargs: dict[str, Any] = {
+        "ctx": ctx,
+        "ctx_name": ctx_name,
+        "sandbox_managers": sandbox_managers,
+        "client": live.client if live is not None else None,
+    }
+    try:
+        result = await backend.fork_session(
+            source_id, ctx.directory,
+            at_message_id=at_message_id, **backend_kwargs,
+        )
+    except Exception as exc:
+        logger.exception("Fork of session %s failed", source_id)
+        await reply_rich(message, f"Could not fork this session: {escape_rich(str(exc))}")
+        return
+
+    summary = (result.summary or "").strip()
+    name = f"{summary or ctx_name} (fork)"[:128]
+    try:
+        topic = await context.bot.create_forum_topic(scope.chat_id, name=name)
+    except Exception as exc:
+        logger.exception("create_forum_topic failed during /fork")
+        try:
+            await backend.delete_session(
+                result.session_id, ctx.directory, **backend_kwargs,
+            )
+        except Exception:
+            logger.exception("Could not delete orphaned fork %s", result.session_id)
+        await reply_rich(message, f"Could not create a topic for the fork: {escape_rich(str(exc))}")
+        return
+
+    new_thread_id: int = topic.message_thread_id
+    new_scope = ChatScope(chat_id=scope.chat_id, thread_id=new_thread_id)
+
+    # Bound before anything is posted, so a message the user sends the
+    # moment the topic appears resumes the fork under the right context and
+    # approval policy.
+    try:
+        await set_active_context(db, new_scope, ctx_name)
+        await set_session_id(db, new_scope, ctx_name, backend.name, result.session_id)
+        copy_scope_state(scope, new_scope, ctx_name)
+        _additional_dir_cache[(new_scope, ctx_name)] = await copy_additional_directories(
+            db, scope, new_scope, ctx_name,
+        )
+    except Exception as exc:
+        logger.exception("Binding fork topic %s failed", new_thread_id)
+        await send_rich(
+            context.bot, scope.chat_id,
+            f"Created this topic for a fork of session `{source_id[:8]}…`, but "
+            f"could not bind it: {escape_rich(str(exc))}. Delete the topic and "
+            "fork again.",
+            thread_id=new_thread_id,
+        )
+        return
+
+    model = ctx.model or default_model_label(backend.name)
+    lines = [
+        f"🍴 Forked from {_source_topic_link(message, scope)}",
+        f"Context `{ctx_name}` · model `{model}` · session `{result.session_id[:8]}…`",
+    ]
+    if at_message_id is not None:
+        lines.append("The turn running in the source topic is not included.")
+    try:
+        await send_rich(
+            context.bot, scope.chat_id, "\n\n".join(lines), thread_id=new_thread_id,
+        )
+        await _post_fork_echo(
+            context.bot, scope.chat_id, new_thread_id,
+            result.last_prompt, result.last_reply, backend.display_name,
+        )
+    except Exception:
+        logger.exception("Posting the fork header in topic %s failed", new_thread_id)
+    await _update_pinned_status(context.bot, new_scope, ctx_name, ctx, db, config)
 
 
 # ── /review ──

@@ -161,21 +161,22 @@ async def _iter_response(
         return out
 
     def _flush_step(
+        step_id: str,
         usage: dict[str, Any] | None,
         error: str | None,
     ) -> list[AssistantMessage]:
-        """Flush buffered text and attach the step's usage/error.
+        """Flush buffered text and attach the step's id, usage and error.
 
-        Usage/error rides on the *final* AssistantMessage of the step.
-        When the step produced no text we still emit an empty
-        AssistantMessage so per-turn UI in ``stream.py`` (which reads
-        ``event.usage``) sees the update.
+        All three ride on the *final* AssistantMessage of the step.  When
+        the step produced no text we still emit an empty AssistantMessage
+        so per-turn UI in ``stream.py`` (which reads ``event.usage``) sees
+        the update, and so the turn's last message id reaches
+        ``client_manager`` for ``/fork``.
         """
         out = _flush_text()
-        if usage is None and error is None:
-            return out
         if not out:
             out.append(AssistantMessage(content=[]))
+        out[-1].message_id = step_id
         out[-1].usage = usage
         out[-1].error = error
         return out
@@ -231,7 +232,9 @@ async def _iter_response(
                     model_id if isinstance(model_id, str) else None,
                     tokens, cost,
                 )
-                for msg in _flush_step(usage=_normalise_usage(tokens), error=None):
+                for msg in _flush_step(
+                    step_id, usage=_normalise_usage(tokens), error=None,
+                ):
                     yield msg
             else:
                 errors.append(
@@ -240,7 +243,7 @@ async def _iter_response(
                         "when": (info.get("time") or {}).get("completed"),
                     }
                 )
-                for msg in _flush_step(usage=None, error=err_message):
+                for msg in _flush_step(step_id, usage=None, error=err_message):
                     yield msg
             continue
 

@@ -20,9 +20,9 @@ from open_shrimp.backend.opencode import OpenCodeBackend
 
 
 class TestClaudeSdkCapabilities:
-    def test_command_capabilities_lists_three_opt_in_commands(self) -> None:
+    def test_command_capabilities_lists_the_opt_in_commands(self) -> None:
         b = ClaudeSdkBackend()
-        assert b.command_capabilities() == {"login", "usage", "mcp"}
+        assert b.command_capabilities() == {"login", "usage", "mcp", "fork"}
 
     def test_copy_carries_claude_code_strings(self) -> None:
         b = ClaudeSdkBackend()
@@ -34,9 +34,9 @@ class TestClaudeSdkCapabilities:
 
 
 class TestOpenCodeCapabilities:
-    def test_command_capabilities_has_mcp(self) -> None:
+    def test_command_capabilities_has_mcp_and_fork(self) -> None:
         b = OpenCodeBackend()
-        assert b.command_capabilities() == {"mcp"}
+        assert b.command_capabilities() == {"mcp", "fork"}
 
     def test_copy_auth_error_hint_is_none(self) -> None:
         """``None`` means the auth-error rendering site is skipped —

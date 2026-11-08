@@ -1,9 +1,10 @@
-"""Shared forum-topic resolution for dedicated per-key topics.
+"""Shared forum-topic helpers.
 
 Both the inbound-event sink and the meetings processor post into dedicated
 forum topics recorded in the ``event_topics`` table.  This owns the
 create-or-reuse lookup and the "topic was deleted out from under us"
-detection so the two callers cannot drift.
+detection so the two callers cannot drift, and the "can this chat host a new
+topic" gate shared by the new-topic handoff and ``/fork``.
 """
 
 from __future__ import annotations
@@ -27,6 +28,30 @@ def is_topic_gone(exc: BadRequest) -> bool:
     """Whether *exc* means the target forum topic no longer exists."""
     message = str(exc).lower()
     return any(marker in message for marker in _TOPIC_GONE_MARKERS)
+
+
+async def can_create_topics(
+    bot: Bot,
+    chat_id: int,
+    *,
+    is_private_chat: bool,
+    thread_id: int | None,
+) -> bool:
+    """Whether ``createForumTopic`` can work in this chat.
+
+    Bots may always create topics in a private chat, but Telegram only sets
+    ``Chat.is_forum`` on supergroups, so a private chat reads falsy there and
+    is gated on *is_private_chat* instead.  When ``get_chat`` fails, being in a
+    topic already (*thread_id* set) implies a forum.
+    """
+    if is_private_chat:
+        return True
+    try:
+        chat = await bot.get_chat(chat_id)
+    except Exception:
+        logger.debug("get_chat failed during topic gate", exc_info=True)
+        return thread_id is not None
+    return bool(getattr(chat, "is_forum", False))
 
 
 async def resolve_or_create_topic(

@@ -191,6 +191,7 @@ class SdkTranslator:
                 error=msg.error,
                 session_id=msg.session_id,
                 parent_tool_use_id=getattr(msg, "parent_tool_use_id", None),
+                message_id=getattr(msg, "uuid", None),
             )
         if isinstance(msg, _SdkUser):
             workflow.record_launch(getattr(msg, "tool_use_result", None))

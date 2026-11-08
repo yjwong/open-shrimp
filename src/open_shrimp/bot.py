@@ -59,6 +59,7 @@ from open_shrimp.handlers.commands import (
     model_handler,
     pair_handler,
     restart_handler,
+    fork_handler,
     resume_handler,
     review_handler,
     schedule_handler,
@@ -336,6 +337,7 @@ async def _watch_config(config_path: str, bot_data: dict, bot: Bot) -> None:
 #: at least one configured backend declares the capability — kept here
 #: as a flat map so the registration loop stays one line.
 _OPT_IN_COMMAND_HANDLERS = {
+    "fork": fork_handler,
     "login": login_handler,
     "mcp": mcp_handler,
     "usage": usage_handler,
@@ -556,6 +558,11 @@ async def run_bot(
         BotCommand("status", "Show current context, session, and state"),
         BotCommand("cancel", "Abort running Claude invocation"),
         BotCommand("resume", "List and resume a previous session"),
+        *(
+            [BotCommand("fork", "Copy this session into a new topic")]
+            if "fork" in caps
+            else []
+        ),
         BotCommand("review", "Review and stage git changes"),
         BotCommand("schedule", "List scheduled tasks"),
         BotCommand("tasks", "List or stop background tasks"),

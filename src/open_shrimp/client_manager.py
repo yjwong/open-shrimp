@@ -29,7 +29,11 @@ from typing import Any
 
 from open_shrimp.backend import get_backend, get_backend_by_name
 from open_shrimp.backend.protocol import Backend, BackendClient, BackendOptions
-from open_shrimp.backend.types import ResultMessage, SystemMessage
+from open_shrimp.backend.types import (
+    AssistantMessage,
+    ResultMessage,
+    SystemMessage,
+)
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -105,6 +109,11 @@ class AgentSession:
     wrapper_cleanup_paths: list[str] = field(default_factory=list)
     last_activity: float = field(default_factory=time.monotonic)
     in_turn: bool = False
+    # The newest top-level assistant message id seen, and the newest one that
+    # ended a turn.  /fork cuts a running session at the second so the turn
+    # still in flight stays in the source topic.
+    last_message_id: str | None = None
+    last_completed_message_id: str | None = None
     # Pinned at creation so a config edit mid-turn doesn't shift the policy.
     backend: Backend | None = None
 
@@ -1350,9 +1359,14 @@ async def receive_events(
             sid = getattr(message, "session_id", None)
             if sid:
                 session.session_id = sid
+        elif isinstance(message, AssistantMessage):
+            if message.message_id and message.parent_tool_use_id is None:
+                session.last_message_id = message.message_id
         elif isinstance(message, ResultMessage):
             if message.session_id:
                 session.session_id = message.session_id
+            if session.last_message_id is not None:
+                session.last_completed_message_id = session.last_message_id
             session.in_turn = False
         session.last_activity = time.monotonic()
         yield message

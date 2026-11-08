@@ -342,6 +342,40 @@ class Backend(Protocol):
         """For /resume.  SDK: ``claude_agent_sdk.list_sessions``."""
         ...
 
+    async def fork_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        *,
+        at_message_id: str | None,
+        **kwargs: Any,
+    ) -> bt.ForkResult:
+        """Copy *session_id* into a new session, for /fork.
+
+        *at_message_id* is the id of the last message to keep (inclusive);
+        ``None`` copies everything.  Each backend translates that into its
+        own cut convention.  ``kwargs`` carries the same context routing as
+        :meth:`list_sessions` (``ctx``, ``ctx_name``, ``sandbox_managers``)
+        plus ``client``, the source scope's live client when there is one.
+        Declared only by backends listing ``"fork"`` in
+        :meth:`command_capabilities`.
+        """
+        ...
+
+    async def delete_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        **kwargs: Any,
+    ) -> None:
+        """Delete a session :meth:`fork_session` created and nothing uses.
+
+        /fork calls this when the topic for the fork could not be created,
+        so ``/resume`` does not list an orphan.  Same ``kwargs`` as
+        :meth:`fork_session`.
+        """
+        ...
+
     def host_prefetch(self) -> "HostPrefetch | None":
         """What this backend must download on the host before a first turn.
 

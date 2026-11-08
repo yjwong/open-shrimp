@@ -8,11 +8,15 @@ Each method is thin:
 * ``make_can_use_tool`` delegates to ``hooks.make_can_use_tool``.
 * ``list_sessions`` wraps ``claude_agent_sdk.list_sessions`` and re-packs its
   rows into ``backend.SessionInfo`` (field-for-field).
+* ``fork_session`` runs the SDK's fork transform over a transcript it locates
+  itself, so a sandboxed context's claude-home works without touching
+  ``CLAUDE_CONFIG_DIR``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -34,6 +38,7 @@ from open_shrimp.backend.protocol import (
 )
 from open_shrimp.backend.sessions import SessionInfo
 from open_shrimp.backend.tools import serve_tools_over_mcp_http
+from open_shrimp.backend.types import ForkResult
 from open_shrimp.backend.usage import UsageReport
 
 if TYPE_CHECKING:
@@ -43,6 +48,8 @@ if TYPE_CHECKING:
     from open_shrimp.db import ChatScope
     from open_shrimp.sandbox.agent_runtime import AgentRuntime, HomeMount
     from open_shrimp.stream import StreamResult
+
+logger = logging.getLogger(__name__)
 
 
 def _sandbox_home_mount(
@@ -74,6 +81,187 @@ def _sandbox_home_mount(
         return None
     home_dir = claude_home_dir(mgr.context_state_dir(ctx_name))
     return claude_runtime(home_dir).home_mount
+
+
+def _sandbox_project_dir(
+    home_mount: "HomeMount", directory: str | Path,
+) -> Path | None:
+    """The claude-home ``projects/<sanitized cwd>`` dir for *directory*.
+
+    The SDK resolves this under ``CLAUDE_CONFIG_DIR``, which is process-global,
+    so a sandboxed context's per-context home has to be resolved by hand.
+    Paths whose sanitized form exceeds the SDK's limit carry a hash suffix
+    that may not match ours; those fall back to a prefix scan.
+    """
+    from claude_agent_sdk._internal.sessions import (
+        MAX_SANITIZED_LENGTH,
+        _canonicalize_path,
+        _sanitize_path,
+    )
+
+    projects_dir = home_mount.host_dir / "projects"
+    sanitized = _sanitize_path(_canonicalize_path(str(directory)))
+    candidate = projects_dir / sanitized
+    if candidate.is_dir():
+        return candidate
+    if len(sanitized) > MAX_SANITIZED_LENGTH:
+        prefix = sanitized[:MAX_SANITIZED_LENGTH]
+        try:
+            for entry in projects_dir.iterdir():
+                if entry.is_dir() and entry.name.startswith(prefix + "-"):
+                    return entry
+        except OSError:
+            pass
+    return None
+
+
+def _session_file(
+    session_id: str,
+    directory: str | Path,
+    home_mount: "HomeMount | None",
+) -> Path:
+    """Locate *session_id*'s transcript, host or sandboxed.
+
+    Raises ``FileNotFoundError`` when there is none.
+    """
+    if home_mount is not None and home_mount.holds_session_state:
+        project_dir = _sandbox_project_dir(home_mount, directory)
+        path = (
+            project_dir / f"{session_id}.jsonl"
+            if project_dir is not None
+            else None
+        )
+        if path is None or not path.is_file():
+            raise FileNotFoundError(f"Session {session_id} not found")
+        return path
+
+    from claude_agent_sdk._internal.session_mutations import (
+        _find_session_file_with_dir,
+    )
+
+    found = _find_session_file_with_dir(session_id, str(directory))
+    if found is None:
+        raise FileNotFoundError(f"Session {session_id} not found")
+    return found[0]
+
+
+def _text_of(content: Any) -> str | None:
+    """The text of a transcript ``message.content``, or None.
+
+    ``None`` too for content holding a ``tool_result`` block: that entry is
+    the CLI reporting a tool's output, not something the user typed.
+    """
+    if isinstance(content, str):
+        return content.strip() or None
+    if not isinstance(content, list):
+        return None
+    texts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_result":
+            return None
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            texts.append(block["text"])
+    return "\n\n".join(texts).strip() or None
+
+
+def _last_exchange(
+    transcript: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    """The last typed user prompt and the last assistant text after it.
+
+    A turn that answered only with tool calls has no reply; text from an
+    earlier turn is not borrowed for it.
+    """
+    reply: str | None = None
+    for entry in reversed(transcript):
+        if entry.get("isSidechain") or entry.get("isMeta"):
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            continue
+        kind = entry.get("type")
+        if kind == "assistant" and reply is None:
+            reply = _text_of(message.get("content"))
+        elif kind == "user":
+            prompt = _text_of(message.get("content"))
+            if prompt is not None:
+                return prompt, reply
+    return None, reply
+
+
+def _fork_transcript(
+    path: Path, session_id: str, at_message_id: str | None,
+) -> ForkResult:
+    """Write a fork of the transcript at *path* beside it.
+
+    The CLI appends to *path* while the source turn runs, so the file is
+    read once and the fork, the summary and the echo all come from those
+    bytes.  Uses the SDK's own transform, so the copy is what
+    ``claude_agent_sdk.fork_session`` would have written, minus the
+    ``CLAUDE_CONFIG_DIR`` lookup a sandboxed context cannot use.
+    """
+    import os
+
+    from claude_agent_sdk._internal.session_mutations import (
+        _build_fork_lines,
+        _parse_fork_transcript,
+    )
+    from claude_agent_sdk._internal.sessions import (
+        _jsonl_to_lite,
+        _parse_session_info_from_lite,
+    )
+
+    content = path.read_bytes()
+    if not content:
+        raise ValueError(f"Session {session_id} has no messages to fork")
+
+    summary: str | None = None
+    try:
+        info = _parse_session_info_from_lite(
+            session_id,
+            _jsonl_to_lite(content.decode("utf-8", errors="replace"), 0),
+        )
+        summary = info.summary if info is not None else None
+    except Exception:
+        logger.debug("Could not read a summary for %s", session_id, exc_info=True)
+
+    transcript, replacements = _parse_fork_transcript(content, session_id)
+    forked_id, lines = _build_fork_lines(
+        transcript,
+        replacements,
+        session_id,
+        at_message_id,
+        f"{summary} (fork)" if summary else None,
+        lambda: None,
+    )
+
+    kept = transcript
+    if at_message_id is not None:
+        for i, entry in enumerate(transcript):
+            if entry.get("uuid") == at_message_id:
+                kept = transcript[: i + 1]
+                break
+    try:
+        last_prompt, last_reply = _last_exchange(kept)
+    except Exception:
+        logger.debug("Could not read the last exchange of %s", session_id, exc_info=True)
+        last_prompt = last_reply = None
+
+    fork_path = path.parent / f"{forked_id}.jsonl"
+    fd = os.open(fork_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, ("\n".join(lines) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+    return ForkResult(
+        session_id=forked_id,
+        summary=summary,
+        last_prompt=last_prompt,
+        last_reply=last_reply,
+    )
 
 
 class ClaudeSdkBackend:
@@ -185,34 +373,17 @@ class ClaudeSdkBackend:
 
         if home_mount is not None and home_mount.holds_session_state:
             from claude_agent_sdk._internal.sessions import (
-                MAX_SANITIZED_LENGTH,
                 _apply_sort_limit_offset,
                 _canonicalize_path,
                 _read_sessions_from_dir,
-                _sanitize_path,
             )
 
-            projects_dir = home_mount.host_dir / "projects"
-            canonical = _canonicalize_path(str(directory))
-            sanitized = _sanitize_path(canonical)
-            candidate = projects_dir / sanitized
-            project_dir = None
-            if candidate.is_dir():
-                project_dir = candidate
-            elif len(sanitized) > MAX_SANITIZED_LENGTH:
-                # Prefix scan for long paths (hash mismatch tolerance).
-                prefix = sanitized[:MAX_SANITIZED_LENGTH]
-                try:
-                    for entry in projects_dir.iterdir():
-                        if entry.is_dir() and entry.name.startswith(prefix + "-"):
-                            project_dir = entry
-                            break
-                except OSError:
-                    pass
-
+            project_dir = _sandbox_project_dir(home_mount, directory)
             if project_dir is None:
                 return []
-            sessions = _read_sessions_from_dir(project_dir, canonical)
+            sessions = _read_sessions_from_dir(
+                project_dir, _canonicalize_path(str(directory)),
+            )
             rows = _apply_sort_limit_offset(sessions, limit, offset)
             return [_to_session_info(r) for r in rows]
 
@@ -220,6 +391,46 @@ class ClaudeSdkBackend:
 
         rows = list_sessions(directory=directory, limit=limit, **kwargs)
         return [_to_session_info(r) for r in rows]
+
+    async def fork_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        *,
+        at_message_id: str | None,
+        **kwargs: Any,
+    ) -> ForkResult:
+        """Fork offline: transcripts are host files in both modes.
+
+        A sandboxed context's live in the per-context claude-home, which is
+        the guest's ``~/.claude``, so no guest round-trip is needed.
+        """
+        home_mount = _sandbox_home_mount(
+            kwargs.get("ctx"), kwargs.get("ctx_name"),
+            kwargs.get("sandbox_managers"),
+        )
+
+        def run() -> ForkResult:
+            path = _session_file(session_id, directory, home_mount)
+            return _fork_transcript(path, session_id, at_message_id)
+
+        return await asyncio.to_thread(run)
+
+    async def delete_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        **kwargs: Any,
+    ) -> None:
+        home_mount = _sandbox_home_mount(
+            kwargs.get("ctx"), kwargs.get("ctx_name"),
+            kwargs.get("sandbox_managers"),
+        )
+
+        def run() -> None:
+            _session_file(session_id, directory, home_mount).unlink()
+
+        await asyncio.to_thread(run)
 
     def host_prefetch(self) -> None:
         """Nothing: the CLI arrives as a native ``_bundled/claude`` inside the
@@ -263,7 +474,7 @@ class ClaudeSdkBackend:
         return read
 
     def command_capabilities(self) -> set[str]:
-        return {"login", "usage", "mcp"}
+        return {"login", "usage", "mcp", "fork"}
 
     def normalize_model(self, model: str | None) -> str | None:
         return models.normalize_model(model)

@@ -19,7 +19,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,7 @@ from open_shrimp.backend.protocol import (
 )
 from open_shrimp.backend.sessions import SessionInfo
 from open_shrimp.backend.tools import serve_tools_over_mcp_http
+from open_shrimp.backend.types import ForkResult
 from open_shrimp.backend.usage import UsageReport
 
 if TYPE_CHECKING:
@@ -56,6 +58,72 @@ if TYPE_CHECKING:
 # comfortably past the longest server-side bound.  (Claude Code doesn't need
 # this: it streams slow calls over SSE, so this stays OpenCode-scoped.)
 _MCP_REQUEST_TIMEOUT_MS = 900_000  # 15 min
+
+
+@asynccontextmanager
+async def _server_for(
+    backend: "OpenCodeBackend", kwargs: dict[str, Any],
+) -> AsyncIterator[tuple[str, str]]:
+    """``(base_url, auth_header)`` of the server holding a context's sessions.
+
+    The source scope's live client already has one.  Without it, a host
+    context uses the shared host-local ``opencode serve``, and a sandboxed
+    context boots its guest the way ``ask_context`` does: the sessions live
+    in the in-guest server's database, and a write behind its back would
+    race it.
+    """
+    client = kwargs.get("client")
+    address = client.server_address() if isinstance(client, OpenCodeClient) else None
+    if address is not None:
+        yield address
+        return
+
+    ctx = kwargs.get("ctx")
+    ctx_name = kwargs.get("ctx_name")
+    if ctx is None or ctx_name is None or ctx.sandbox is None or not ctx.sandbox.enabled:
+        from open_shrimp.backend.opencode.process import OpenCodeServer
+
+        server = await OpenCodeServer.get_or_start()
+        yield server.base_url, server.auth_header
+        return
+
+    import asyncio
+    import os
+
+    from open_shrimp.client_manager import _context_locks
+    from open_shrimp.config import sandbox_backend
+    from open_shrimp.sandbox.launch import start_sandboxed_agent
+
+    backend_name = sandbox_backend(ctx)
+    manager = (kwargs.get("sandbox_managers") or {}).get(backend_name)
+    if manager is None:
+        raise RuntimeError(
+            f"Context {ctx_name!r} is sandboxed with backend {backend_name!r}, "
+            "but no sandbox manager is available."
+        )
+    lock = _context_locks.setdefault(ctx_name, asyncio.Lock())
+    async with lock:
+        runtime = backend.make_runtime(
+            manager.context_state_dir(ctx_name),
+            context_name=ctx_name,
+            model=ctx.model,
+        )
+        sandbox = manager.create_sandbox(ctx_name, ctx, runtime=runtime)
+        handle = await start_sandboxed_agent(
+            sandbox, runtime, context_name=ctx_name, backend=backend_name,
+        )
+    try:
+        if handle.endpoint is None:
+            raise RuntimeError(
+                f"Sandbox for {ctx_name!r} started without an OpenCode endpoint"
+            )
+        yield handle.endpoint.base_url, handle.endpoint.auth_header
+    finally:
+        for path in handle.cleanup_paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 class OpenCodeBackend:
@@ -210,6 +278,34 @@ class OpenCodeBackend:
             auth_header=auth_header,
         )
 
+    async def fork_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        *,
+        at_message_id: str | None,
+        **kwargs: Any,
+    ) -> ForkResult:
+        """Fork through the serving ``opencode serve`` (see ``fork.py``)."""
+        from open_shrimp.backend.opencode import fork
+
+        async with _server_for(self, kwargs) as (base_url, auth_header):
+            return await fork.fork(
+                base_url, auth_header, session_id, str(directory),
+                at_message_id=at_message_id,
+            )
+
+    async def delete_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        **kwargs: Any,
+    ) -> None:
+        from open_shrimp.backend.opencode import fork
+
+        async with _server_for(self, kwargs) as (base_url, auth_header):
+            await fork.delete(base_url, auth_header, session_id, str(directory))
+
     def host_prefetch(self) -> "HostPrefetch | None":
         """The pinned CLI, when this host has not downloaded it yet.
 
@@ -241,12 +337,13 @@ class OpenCodeBackend:
         return None
 
     def command_capabilities(self) -> set[str]:
-        """OpenCode supports MCP management; login/usage ship separately.
+        """OpenCode supports MCP management and /fork; login/usage ship
+        separately.
 
         The auth Mini-App (the login/usage equivalents) ships separately
         and flips its capabilities on then.
         """
-        return {"mcp"}
+        return {"mcp", "fork"}
 
     def normalize_model(self, model: str | None) -> str | None:
         """Identity — OpenCode models are already the wire name.

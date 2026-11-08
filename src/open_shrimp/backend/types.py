@@ -84,6 +84,11 @@ class AssistantMessage:
     ``usage`` uses the neutral ``input_tokens``, ``output_tokens``,
     ``reasoning_tokens``, ``cache_creation_input_tokens``, and
     ``cache_read_input_tokens`` keys.
+
+    ``message_id`` is the backend's id for this message in the persisted
+    session (the transcript entry uuid on Claude, the message id on
+    OpenCode).  ``client_manager`` records the last one of each completed
+    turn so ``/fork`` can cut a running session at a turn boundary.
     """
 
     content: list[ContentBlock]
@@ -91,6 +96,7 @@ class AssistantMessage:
     error: str | None = None
     session_id: str | None = None
     parent_tool_use_id: str | None = None
+    message_id: str | None = None
 
 
 @dataclass
@@ -230,6 +236,22 @@ class RateLimitEvent:
     session_id: str | None = None
 
 
+@dataclass
+class ForkResult:
+    """A forked session plus what the new topic shows about its source.
+
+    ``summary``, ``last_prompt`` and ``last_reply`` are read from the same
+    snapshot the fork was cut from, so the echo matches the copy even while
+    the source keeps running.  Any of the three is ``None`` when it could not
+    be read; they are cosmetic and never fail the fork.
+    """
+
+    session_id: str
+    summary: str | None = None
+    last_prompt: str | None = None
+    last_reply: str | None = None
+
+
 Message = Union[
     AssistantMessage,
     UserMessage,
@@ -249,6 +271,7 @@ Message = Union[
 __all__ = [
     "AssistantMessage",
     "ContentBlock",
+    "ForkResult",
     "Message",
     "PermissionResult",
     "PermissionResultAllow",

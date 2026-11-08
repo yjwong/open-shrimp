@@ -73,6 +73,24 @@ List recent sessions or resume a specific one.
 /resume abc123               # resume by ID prefix
 ```
 
+### `/fork`
+
+Copy this topic's session into a new topic, so you can try a different direction without losing the current one.
+
+The new topic is named after the session's summary with `(fork)` appended. It runs on the same project and working directory, and for a sandboxed context it uses the same sandbox. It keeps this topic's `/model`, `/effort` and `/backend` overrides, its `/add_dir` directories, and every approval you gave for the session, including "Accept all edits". Its first message repeats your last prompt and the last reply, and the conversation continues from there when you send a message.
+
+The two topics are independent after the fork. Both edit the same files, so keep track of which one changes what.
+
+If the agent is still working when you fork, the copy ends at the last finished turn, and the running turn stays in this topic. If no turn has finished yet, wait for the first one to end.
+
+```
+/fork
+```
+
+:::note
+`/fork` needs a chat that can have topics: a private chat with the bot, or a group with topics turned on.
+:::
+
 ## Task commands
 
 ### `/cancel`
