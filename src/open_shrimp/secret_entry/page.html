@@ -35,7 +35,13 @@
   }
   textarea { height: 140px; resize: vertical; }
   textarea.masked { -webkit-text-security: disc; text-security: disc; }
-  .show { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--hint); font-size: 13px; }
+  .reveal {
+    margin-top: 8px; padding: 10px; border-radius: 8px; background: var(--field);
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px;
+    white-space: pre-wrap; word-break: break-all; min-height: 1.4em;
+  }
+  .options { display: flex; gap: 16px; margin-top: 8px; }
+  .options label { display: flex; align-items: center; gap: 6px; color: var(--hint); font-size: 13px; }
   .buttons { display: flex; gap: 8px; margin-top: 16px; }
   button {
     flex: 1; padding: 12px; border: 0; border-radius: 8px;
@@ -62,7 +68,12 @@
   <div class="note">Goes straight to this file. It doesn't pass through Telegram, and the agent only learns that the file was written.</div>
   <input type="password" id="single" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
   <textarea id="multi" class="masked" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" hidden></textarea>
-  <label class="show"><input type="checkbox" id="show"> Show</label>
+  <div class="reveal" id="reveal" hidden></div>
+  <div class="note" id="multi-note" hidden>Your keyboard may suggest and remember words typed here. Paste the value rather than typing it.</div>
+  <div class="options">
+    <label><input type="checkbox" id="show"> Show</label>
+    <label id="multiline-row" hidden><input type="checkbox" id="multiline"> Multi-line</label>
+  </div>
   <div class="error" id="error" hidden></div>
   <div class="buttons">
     <button id="cancel" type="button">Cancel</button>
@@ -78,6 +89,10 @@
   const id = params.get("id") || "";
   const api = "/api/secret/" + encodeURIComponent(id);
   const $ = (sel) => document.getElementById(sel);
+  // The value is typed into a password input wherever possible: Android
+  // keyboards key suggestions and word learning off the field type the
+  // WebView reports, and only a password input reports one that disables
+  // both.  CSS masking on the textarea is invisible to the keyboard.
   let field = null;
 
   function authHeader() {
@@ -90,7 +105,9 @@
     $("form").hidden = true;
     $("message").textContent = text;
     $("message").hidden = false;
-    if (field) field.value = "";
+    $("single").value = "";
+    $("multi").value = "";
+    $("reveal").textContent = "";
     if (tg && tg.initData) setTimeout(() => tg.close(), 800);
   }
 
@@ -117,10 +134,10 @@
     if (data.env_key) {
       $("key").textContent = data.env_key;
       $("key-row").hidden = false;
-      field = $("single");
     } else {
-      field = $("multi");
+      $("multiline-row").hidden = false;
     }
+    field = $("single");
     if (data.exists) {
       $("replaces").textContent = data.env_key
         ? "Replaces " + data.env_key + " if the file already sets it."
@@ -132,9 +149,34 @@
     field.focus();
   }
 
+  // Show mirrors the password input into a read-only element instead of
+  // switching it to type=text, which would hand the keyboard a plain text
+  // field for as long as the value is visible.
+  function syncReveal() {
+    const on = $("show").checked && field === $("single");
+    $("reveal").hidden = !on;
+    $("reveal").textContent = on ? field.value : "";
+  }
+
+  $("single").addEventListener("input", syncReveal);
+
   $("show").addEventListener("change", (e) => {
-    if (field === $("single")) field.type = e.target.checked ? "text" : "password";
-    else field.classList.toggle("masked", !e.target.checked);
+    $("multi").classList.toggle("masked", !e.target.checked);
+    syncReveal();
+  });
+
+  $("multiline").addEventListener("change", (e) => {
+    const next = e.target.checked ? $("multi") : $("single");
+    // A password input silently drops line breaks, so a multi-line value is
+    // cleared rather than carried back flattened.
+    next.value = e.target.checked || !/[\r\n]/.test(field.value) ? field.value : "";
+    field.value = "";
+    field.hidden = true;
+    field = next;
+    field.hidden = false;
+    $("multi-note").hidden = !e.target.checked;
+    syncReveal();
+    field.focus();
   });
 
   $("save").addEventListener("click", async () => {
