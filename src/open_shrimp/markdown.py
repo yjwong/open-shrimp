@@ -26,8 +26,10 @@ RICH_MAX_BODY = RICH_MAX_LENGTH - 500
 # the set so a literal one survives the same pass.  Telegram's inline parser is
 # looser than GFM — it italicises the 3 in "5 * 3 * 2" and bolds "__dunder__" —
 # so an asterisk or underscore mistune left as text has to be escaped even
-# where GFM would have ignored it.
-_RICH_ESCAPE_CHARS = "\\" + "`*_[]~=#"
+# where GFM would have ignored it.  "$" opens inline math, so two prices in a
+# paragraph ("S$12k or S$20k") would otherwise render the span between them as
+# LaTeX.
+_RICH_ESCAPE_CHARS = "\\" + "`*_[]~=#$"
 _RICH_ESCAPE_RE = re.compile(r"([" + re.escape(_RICH_ESCAPE_CHARS) + r"])")
 
 # A rich message is parsed as HTML as well as Markdown: an unescaped "<" opens

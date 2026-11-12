@@ -138,6 +138,12 @@ def test_stray_asterisks_are_escaped() -> None:
     assert "".join(gfm_to_rich("5 * 3 * 2")) == "5 \\* 3 \\* 2"
 
 
+def test_dollars_are_escaped() -> None:
+    """Two dollar signs in a paragraph would open and close inline math."""
+    out = "".join(gfm_to_rich("S$12k per module, or S$20k/month"))
+    assert out == "S\\$12k per module, or S\\$20k/month"
+
+
 def test_dunder_stays_bold_and_snake_case_does_not() -> None:
     out = "".join(gfm_to_rich("__dunder__ and snake_case_name"))
     assert out == "**dunder** and snake\\_case\\_name"
