@@ -39,7 +39,7 @@ from open_shrimp.backend.protocol import (
 )
 from open_shrimp.backend.sessions import SessionInfo
 from open_shrimp.backend.tools import serve_tools_over_mcp_http
-from open_shrimp.backend.types import ForkResult
+from open_shrimp.backend.types import ForkResult, SessionTranscript
 from open_shrimp.backend.usage import UsageReport
 
 if TYPE_CHECKING:
@@ -306,6 +306,20 @@ class OpenCodeBackend:
         async with _server_for(self, kwargs) as (base_url, auth_header):
             await fork.delete(base_url, auth_header, session_id, str(directory))
 
+    async def export_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        **kwargs: Any,
+    ) -> SessionTranscript:
+        """Read through the serving ``opencode serve`` (see ``export.py``)."""
+        from open_shrimp.backend.opencode import export
+
+        async with _server_for(self, kwargs) as (base_url, auth_header):
+            return await export.export(
+                base_url, auth_header, session_id, str(directory),
+            )
+
     def host_prefetch(self) -> "HostPrefetch | None":
         """The pinned CLI, when this host has not downloaded it yet.
 
@@ -337,13 +351,13 @@ class OpenCodeBackend:
         return None
 
     def command_capabilities(self) -> set[str]:
-        """OpenCode supports MCP management and /fork; login/usage ship
-        separately.
+        """OpenCode supports MCP management, /fork and /share; login/usage
+        ship separately.
 
         The auth Mini-App (the login/usage equivalents) ships separately
         and flips its capabilities on then.
         """
-        return {"mcp", "fork"}
+        return {"mcp", "fork", "share"}
 
     def normalize_model(self, model: str | None) -> str | None:
         """Identity — OpenCode models are already the wire name.

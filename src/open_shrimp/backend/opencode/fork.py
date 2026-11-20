@@ -81,7 +81,7 @@ def _row_text(row: dict[str, Any]) -> str | None:
     return "\n\n".join(texts).strip() or None
 
 
-async def _request(
+async def request(
     http: httpx.AsyncClient,
     method: str,
     path: str,
@@ -119,10 +119,10 @@ async def fork(
         timeout=30.0,
         headers={"Authorization": auth_header},
     ) as http:
-        info = await _request(
+        info = await request(
             http, "GET", f"/session/{session_id}", params=params,
         )
-        payload = await _request(
+        payload = await request(
             http, "GET", f"/session/{session_id}/message", params=params,
         )
         rows = payload.get("messages") if isinstance(payload, dict) else payload
@@ -136,7 +136,7 @@ async def fork(
             kept = rows[: [_row_id(r) for r in rows].index(cut)]
 
         body: dict[str, Any] = {"messageID": cut} if cut else {}
-        created = await _request(
+        created = await request(
             http, "POST", f"/session/{session_id}/fork",
             params=params, json=body,
         )
@@ -165,7 +165,7 @@ async def delete(
         timeout=30.0,
         headers={"Authorization": auth_header},
     ) as http:
-        await _request(
+        await request(
             http, "DELETE", f"/session/{session_id}",
             params={"directory": directory},
         )

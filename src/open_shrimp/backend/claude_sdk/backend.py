@@ -38,7 +38,7 @@ from open_shrimp.backend.protocol import (
 )
 from open_shrimp.backend.sessions import SessionInfo
 from open_shrimp.backend.tools import serve_tools_over_mcp_http
-from open_shrimp.backend.types import ForkResult
+from open_shrimp.backend.types import ForkResult, SessionTranscript
 from open_shrimp.backend.usage import UsageReport
 
 if TYPE_CHECKING:
@@ -432,6 +432,26 @@ class ClaudeSdkBackend:
 
         await asyncio.to_thread(run)
 
+    async def export_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        **kwargs: Any,
+    ) -> SessionTranscript:
+        """Read offline, as :meth:`fork_session` does (see ``export.py``)."""
+        from open_shrimp.backend.claude_sdk.export import export_transcript
+
+        home_mount = _sandbox_home_mount(
+            kwargs.get("ctx"), kwargs.get("ctx_name"),
+            kwargs.get("sandbox_managers"),
+        )
+
+        def run() -> SessionTranscript:
+            path = _session_file(session_id, directory, home_mount)
+            return export_transcript(path, session_id)
+
+        return await asyncio.to_thread(run)
+
     def host_prefetch(self) -> None:
         """Nothing: the CLI arrives as a native ``_bundled/claude`` inside the
         pinned ``claude-agent-sdk`` wheel, so ``uv sync`` has already paid for
@@ -474,7 +494,7 @@ class ClaudeSdkBackend:
         return read
 
     def command_capabilities(self) -> set[str]:
-        return {"login", "usage", "mcp", "fork"}
+        return {"login", "usage", "mcp", "fork", "share"}
 
     def normalize_model(self, model: str | None) -> str | None:
         return models.normalize_model(model)

@@ -60,6 +60,7 @@ from open_shrimp.handlers.commands import (
     pair_handler,
     restart_handler,
     fork_handler,
+    share_handler,
     resume_handler,
     review_handler,
     schedule_handler,
@@ -340,6 +341,7 @@ _OPT_IN_COMMAND_HANDLERS = {
     "fork": fork_handler,
     "login": login_handler,
     "mcp": mcp_handler,
+    "share": share_handler,
     "usage": usage_handler,
 }
 
@@ -561,6 +563,11 @@ async def run_bot(
         *(
             [BotCommand("fork", "Copy this session into a new topic")]
             if "fork" in caps
+            else []
+        ),
+        *(
+            [BotCommand("share", "Send this session as an HTML file")]
+            if "share" in caps
             else []
         ),
         BotCommand("review", "Review and stage git changes"),

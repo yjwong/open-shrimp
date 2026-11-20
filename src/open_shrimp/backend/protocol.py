@@ -376,6 +376,22 @@ class Backend(Protocol):
         """
         ...
 
+    async def export_session(
+        self,
+        session_id: str,
+        directory: str | Path,
+        **kwargs: Any,
+    ) -> bt.SessionTranscript:
+        """Read *session_id* whole, subagents included, for ``/share``.
+
+        Leaves out what neither the user nor the agent wrote (system
+        prompt, instruction files, hook output, compaction summaries) and
+        keeps everything else verbatim.  Same ``kwargs`` as
+        :meth:`fork_session`.  Declared only by backends listing
+        ``"share"`` in :meth:`command_capabilities`.
+        """
+        ...
+
     def host_prefetch(self) -> "HostPrefetch | None":
         """What this backend must download on the host before a first turn.
 

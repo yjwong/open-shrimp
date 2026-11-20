@@ -8,6 +8,7 @@ into these instances inside its own adapter.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, Union
 
 # --- Section 2: permissions -------------------------------------------------
@@ -252,6 +253,72 @@ class ForkResult:
     last_reply: str | None = None
 
 
+# --- Session export (/share) -------------------------------------------------
+
+
+@dataclass
+class TranscriptImage:
+    """An image as it sat in the transcript: base64 bytes plus MIME type."""
+
+    media_type: str
+    data: str
+
+
+@dataclass
+class TranscriptText:
+    """A prompt, a reply, or reasoning text.
+
+    ``role`` is ``"user"`` for a prompt (a subagent's opening prompt
+    included), ``"assistant"`` for reply text and ``"thinking"`` for
+    reasoning.  ``timestamp`` is timezone-aware, or ``None`` when the
+    backend did not record one.
+    """
+
+    role: Literal["user", "assistant", "thinking"]
+    text: str
+    timestamp: datetime | None = None
+    images: list[TranscriptImage] = field(default_factory=list)
+
+
+@dataclass
+class TranscriptToolCall:
+    """One tool call joined with its result.
+
+    ``output`` is ``None`` while the call has no result yet (a share taken
+    mid-turn).  ``diff`` is a unified diff for file-editing tools, built by
+    the backend that knows its own tools' input shapes.  ``subagent`` holds
+    the transcript of the agent a subagent-spawning call ran.
+    """
+
+    name: str
+    input: dict[str, Any] = field(default_factory=dict)
+    output: str | None = None
+    images: list[TranscriptImage] = field(default_factory=list)
+    is_error: bool = False
+    diff: str | None = None
+    subagent: list["TranscriptItem"] = field(default_factory=list)
+    timestamp: datetime | None = None
+
+
+TranscriptItem = Union[TranscriptText, TranscriptToolCall]
+
+
+@dataclass
+class SessionTranscript:
+    """A whole session in conversation order, for ``/share``.
+
+    Holds only what the user and the agent said and did: system prompts,
+    instruction files, hook output and compaction summaries are left out by
+    the backend that reads it.  ``models`` lists each model that answered,
+    in order of first use.
+    """
+
+    session_id: str
+    items: list[TranscriptItem] = field(default_factory=list)
+    title: str | None = None
+    models: list[str] = field(default_factory=list)
+
+
 Message = Union[
     AssistantMessage,
     UserMessage,
@@ -278,6 +345,7 @@ __all__ = [
     "PermissionResultDeny",
     "RateLimitEvent",
     "ResultMessage",
+    "SessionTranscript",
     "StreamEvent",
     "SystemMessage",
     "TERMINAL_TASK_STATUSES",
@@ -291,5 +359,9 @@ __all__ = [
     "ToolPermissionContext",
     "ToolResultBlock",
     "ToolUseBlock",
+    "TranscriptImage",
+    "TranscriptItem",
+    "TranscriptText",
+    "TranscriptToolCall",
     "UserMessage",
 ]

@@ -91,6 +91,20 @@ If the agent is still working when you fork, the copy ends at the last finished 
 `/fork` needs a chat that can have topics: a private chat with the bot, or a group with topics turned on.
 :::
 
+### `/share`
+
+Send this topic's session as a single HTML file you can forward, to WhatsApp for example. It opens in any browser, offline, with no account.
+
+The page has every prompt, reply and tool call, with tool calls and the agent's reasoning folded until tapped. File edits show as coloured diffs, and screenshots and images you sent are embedded. Subagent runs appear inside the call that started them. The header names the model and the agent, when the session started and ended, and each turn carries its time. Times are in the bot host's time zone.
+
+Tool output goes in verbatim, with nothing redacted, so a session that printed a key, a token or a private path carries it in the file. Read the page before forwarding it. Only the system prompt, `CLAUDE.md`-style instruction files, hook output and compaction summaries are left out.
+
+```
+/share
+```
+
+Telegram caps what a bot can send at 50 MB. A session past that, usually from many screenshots, gets an error instead of a file.
+
 ## Task commands
 
 ### `/cancel`

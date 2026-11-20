@@ -1,5 +1,5 @@
 """Telegram command handlers (/start, /context, /clear, /status, /cancel, /model,
-/backend, /effort, /resume, /fork, /review, /mcp, /tasks, /usage, /login).
+/backend, /effort, /resume, /fork, /share, /review, /mcp, /tasks, /usage, /login).
 """
 
 from __future__ import annotations
@@ -1868,6 +1868,85 @@ async def fork_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         logger.exception("Posting the fork header in topic %s failed", new_thread_id)
     await _update_pinned_status(context.bot, new_scope, ctx_name, ctx, db, config)
+
+
+# ── /share ──
+
+
+async def share_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /share: send this topic's session as one self-contained HTML file.
+
+    The whole session goes in verbatim, tool output and subagents included;
+    only what neither side wrote (system prompt, instruction files, hook
+    output, compaction summaries) is left out.  A page over Telegram's
+    50 MB bot upload limit is reported instead of sent.
+    """
+    from open_shrimp.client_manager import resolve_backend
+    from open_shrimp.share import MAX_SHARE_BYTES, render_html, share_filename
+
+    config: Config = context.bot_data["config"]
+    db: aiosqlite.Connection = context.bot_data["db"]
+    message = update.effective_message
+    if not message or not _is_authorized(update.effective_user and update.effective_user.id, config):
+        return
+
+    scope = chat_scope_from_message(message)
+    resolved = await require_context(message, scope, config, db)
+    if resolved is None:
+        return
+    ctx_name, ctx = resolved
+
+    backend = resolve_backend(scope=scope, context=ctx)
+    if "share" not in backend.command_capabilities():
+        await reply_rich(message, f"/share is not available on the `{backend.name}` backend.")
+        return
+
+    live = get_session(scope)
+    if live is not None and live.context_name != ctx_name:
+        live = None
+    session_id = (live.session_id if live is not None else None) or await get_session_id(
+        db, scope, ctx_name, backend.name,
+    )
+    if not session_id:
+        await reply_rich(message, "Nothing to share yet: send a message first.")
+        return
+
+    try:
+        transcript = await backend.export_session(
+            session_id, ctx.directory,
+            ctx=ctx,
+            ctx_name=ctx_name,
+            sandbox_managers=context.bot_data.get("sandbox_managers"),
+            client=live.client if live is not None else None,
+        )
+        page = await asyncio.to_thread(
+            render_html, transcript, agent_name=backend.display_name,
+        )
+    except Exception as exc:
+        logger.exception("Export of session %s failed", session_id)
+        await reply_rich(message, f"Could not export this session: {escape_rich(str(exc))}")
+        return
+
+    data = page.encode("utf-8")
+    if len(data) > MAX_SHARE_BYTES:
+        await reply_rich(
+            message,
+            f"The page for this session comes to {len(data) / 1024 / 1024:.1f} MB, "
+            "over the 50 MB Telegram lets a bot send. Embedded screenshots and "
+            "images take most of that.",
+        )
+        return
+
+    try:
+        await context.bot.send_document(
+            chat_id=scope.chat_id,
+            document=data,
+            filename=share_filename(transcript),
+            **({"message_thread_id": scope.thread_id} if scope.thread_id is not None else {}),
+        )
+    except Exception as exc:
+        logger.exception("Sending the share page for %s failed", session_id)
+        await reply_rich(message, f"Could not send the page: {escape_rich(str(exc))}")
 
 
 # ── /review ──
