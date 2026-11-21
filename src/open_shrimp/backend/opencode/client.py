@@ -1021,6 +1021,24 @@ class OpenCodeClient:
             )
             return task
 
+        def _start_child_drain(msg: TaskStartedMessage) -> None:
+            assert msg.task_id and msg.tool_use_id
+            previous = child_drains.get(msg.task_id)
+            if previous is not None and previous[0] == msg.tool_use_id:
+                logger.debug(
+                    "Ignoring duplicate child start: session=%s callID=%s",
+                    msg.task_id, msg.tool_use_id,
+                )
+                return
+            queue = self.subscribe_session(msg.task_id)
+            task = _spawn(
+                self._drain_child_session(
+                    msg.task_id, msg.tool_use_id, msg.description, merge, queue,
+                    previous[1] if previous is not None else None,
+                )
+            )
+            child_drains[msg.task_id] = (msg.tool_use_id, task)
+
         async def _produce_parent() -> None:
             async for msg in _iter_response(
                 self._events,
@@ -1030,6 +1048,15 @@ class OpenCodeClient:
                 self._options.handle_questions,
                 self._context_window,
             ):
+                # Subscribe here, not where the merge queue is consumed: the
+                # consumer is the Telegram stream, and while it lags the
+                # child's permission requests would have no subscriber.
+                if (
+                    isinstance(msg, TaskStartedMessage)
+                    and msg.task_id
+                    and msg.tool_use_id
+                ):
+                    _start_child_drain(msg)
                 await merge.put(("msg", msg))
 
         _spawn(_produce_parent())
@@ -1049,30 +1076,6 @@ class OpenCodeClient:
                 if isinstance(msg, ResultMessage) and msg.session_id:
                     self._session_id = msg.session_id
 
-                if (
-                    isinstance(msg, TaskStartedMessage)
-                    and msg.task_id
-                    and msg.tool_use_id
-                ):
-                    previous = child_drains.get(msg.task_id)
-                    if previous is not None and previous[0] == msg.tool_use_id:
-                        logger.debug(
-                            "Ignoring duplicate child start: session=%s callID=%s",
-                            msg.task_id, msg.tool_use_id,
-                        )
-                    else:
-                        if previous is not None:
-                            # Finish the previous invocation before consuming
-                            # the same queue with the resumed call's lineage.
-                            await asyncio.shield(previous[1])
-                        queue = self.subscribe_session(msg.task_id)
-                        task = _spawn(
-                            self._drain_child_session(
-                                msg.task_id, msg.tool_use_id, msg.description, merge, queue,
-                            )
-                        )
-                        child_drains[msg.task_id] = (msg.tool_use_id, task)
-
                 yield msg
         finally:
             for task in producers:
@@ -1090,6 +1093,7 @@ class OpenCodeClient:
         description: str | None,
         merge: asyncio.Queue[tuple[str, Any]],
         queue: EventQueue,
+        previous: asyncio.Task[None] | None = None,
     ) -> None:
         """Drain a subagent's child session into the parent's merge queue.
 
@@ -1100,7 +1104,14 @@ class OpenCodeClient:
         forwarded — it would otherwise overwrite the parent's session id in
         ``stream.py``; ending the async-for on it is enough. The rendered
         turns are also teed to a transcript file for the Terminal Mini App.
+
+        ``previous`` is the drain of an earlier invocation of the same child.
+        It shares ``queue`` and keeps reading until its own ``session.idle``,
+        so this drain waits for it to finish and stop its bridge before
+        reading under the resumed call's lineage.
         """
+        if previous is not None:
+            await asyncio.wait({previous})
         logger.debug(
             "Starting child drain: session=%s callID=%s", child_session_id, call_id,
         )

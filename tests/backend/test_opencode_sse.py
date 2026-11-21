@@ -118,7 +118,7 @@ async def test_endpoint_loss_terminates_hung_stream(monkeypatch, failure, connec
     await asyncio.wait_for(asyncio.gather(reader, return_exceptions=True), 1)
     assert exited.is_set()
     assert bus._http.is_closed
-    for closed in (queue, bus._broadcast, bus.subscribe("late")):
+    for closed in (queue, bus.subscribe("late")):
         with pytest.raises(CLIConnectionError):
             await asyncio.wait_for(closed.get(), 1)
     await bus.stop()
@@ -226,3 +226,53 @@ async def test_endpoint_death_during_reconnect_backoff(monkeypatch) -> None:
     with pytest.raises(CLIConnectionError):
         await queue.get()
     await bus.stop()
+
+
+def _asked(event_type: str, session_id: str, request_id: str) -> dict:
+    return {
+        "type": event_type,
+        "properties": {"sessionID": session_id, "id": request_id},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["permission.asked", "question.asked"])
+async def test_unclaimed_request_replays_to_late_subscriber(event_type: str) -> None:
+    bus = EventBus(OpenCodeEndpoint("http://localhost:1234", ""))
+    asked = _asked(event_type, "child", "req-1")
+    bus._dispatch({"type": "message.part.delta", "properties": {"sessionID": "child"}})
+    bus._dispatch(asked)
+    queue = bus.subscribe("child")
+    assert await asyncio.wait_for(queue.get(), 1) is asked
+    assert queue._q.empty()
+    assert bus._unclaimed == {}
+    await bus.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "settled", ["permission.replied", "question.replied", "question.rejected"],
+)
+async def test_settled_request_is_not_replayed(settled: str) -> None:
+    bus = EventBus(OpenCodeEndpoint("http://localhost:1234", ""))
+    bus._dispatch(_asked("permission.asked", "child", "req-1"))
+    kept = _asked("permission.asked", "child", "req-2")
+    bus._dispatch(kept)
+    bus._dispatch({
+        "type": settled,
+        "properties": {"sessionID": "child", "requestID": "req-1"},
+    })
+    queue = bus.subscribe("child")
+    assert await asyncio.wait_for(queue.get(), 1) is kept
+    assert queue._q.empty()
+    await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_discards_unclaimed_requests() -> None:
+    bus = EventBus(OpenCodeEndpoint("http://localhost:1234", ""))
+    bus._dispatch(_asked("permission.asked", "child", "req-1"))
+    await bus.stop()
+    assert bus._unclaimed == {}
+    with pytest.raises(EventQueueClosed):
+        await asyncio.wait_for(bus.subscribe("child").get(), 1)

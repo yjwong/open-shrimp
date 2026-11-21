@@ -235,9 +235,8 @@ async def test_cancel_final_disconnect_waits_for_bus_cleanup(monkeypatch, make_c
         assert bus._http.is_closed
         assert http.is_closed
         assert bus._subscribers == {}
-        for closed in (queue, bus._broadcast):
-            with pytest.raises(EventQueueClosed):
-                await asyncio.wait_for(closed.get(), 1)
+        with pytest.raises(EventQueueClosed):
+            await asyncio.wait_for(queue.get(), 1)
     finally:
         finish_cleanup.set()
         await asyncio.wait_for(asyncio.gather(disconnect, return_exceptions=True), 1)
@@ -685,3 +684,33 @@ async def test_receive_response_resumes_child_with_permissions(
         finish_cleanup.set()
         consumer.cancel()
         await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_child_drain_starts_while_consumer_lags(monkeypatch, make_client) -> None:
+    client = make_client()
+    await client.connect()
+    drained = asyncio.Event()
+    first = AssistantMessage(content=[])
+    started = TaskStartedMessage(
+        subtype="task_started", data={}, task_id="child", tool_use_id="call",
+    )
+
+    async def parent(*args: Any) -> AsyncIterator[Message]:
+        yield first
+        yield started
+        await asyncio.Event().wait()
+
+    async def child(*args: Any) -> None:
+        drained.set()
+
+    monkeypatch.setattr(oc, "_iter_response", parent)
+    monkeypatch.setattr(client, "_drain_child_session", child)
+    response = client.receive_response()
+    try:
+        assert await asyncio.wait_for(anext(response), 1) is first
+        # The consumer has not pulled the TaskStartedMessage yet.
+        await asyncio.wait_for(drained.wait(), 1)
+        assert "child" in client._bus._subscribers
+    finally:
+        await response.aclose()

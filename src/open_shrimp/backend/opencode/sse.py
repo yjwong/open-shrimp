@@ -28,6 +28,14 @@ _HEALTH_INTERVAL = 1.0
 
 EVT_SERVER_CONNECTED = "server.connected"
 
+# OpenCode blocks the asking tool until one of these requests is answered, so a
+# request for a session nobody has subscribed to yet is held for replay rather
+# than dropped; dropping it hangs the tool until the session is aborted.
+_ASKED_EVENTS = frozenset({"permission.asked", "question.asked"})
+_SETTLED_EVENTS = frozenset({
+    "permission.replied", "question.replied", "question.rejected",
+})
+
 
 class EventQueueClosed(Exception):
     """Raised when a local subscriber queue is closed intentionally."""
@@ -110,7 +118,8 @@ class EventBus:
         )
         self._queue_size = queue_size
         self._subscribers: dict[str, EventQueue] = {}
-        self._broadcast = EventQueue("__broadcast__", maxsize=queue_size)
+        # sessionID -> requestID -> asked event, for sessions with no subscriber.
+        self._unclaimed: dict[str, dict[str, dict[str, Any]]] = {}
         self._ready = asyncio.Event()
         self._stop = asyncio.Event()
         self._reader_task: asyncio.Task[None] | None = None
@@ -172,7 +181,7 @@ class EventBus:
         for q in list(self._subscribers.values()):
             q.close(self._terminal_error)
         self._subscribers.clear()
-        self._broadcast.close(self._terminal_error)
+        self._unclaimed.clear()
         if self._owns_client and not self._http.is_closed:
             await self._http.aclose()
 
@@ -184,6 +193,14 @@ class EventBus:
                 q.close(self._terminal_error)
             else:
                 self._subscribers[session_id] = q
+                held = self._unclaimed.pop(session_id, {})
+                for event in held.values():
+                    q.put_nowait(event)
+                if held:
+                    logger.info(
+                        "Replayed %d held request(s) to new subscriber %s",
+                        len(held), session_id,
+                    )
         return q
 
     def unsubscribe(self, session_id: str) -> None:
@@ -274,12 +291,29 @@ class EventBus:
         if etype == EVT_SERVER_CONNECTED and not self._ready.is_set():
             self._ready.set()
         props = event.get("properties") or {}
-        sid = props.get("sessionID") if isinstance(props, dict) else None
-        target = self._subscribers.get(sid) if sid else None
+        if not isinstance(props, dict):
+            return
+        sid = props.get("sessionID")
+        if not isinstance(sid, str) or not sid:
+            return
+        if etype in _SETTLED_EVENTS:
+            held = self._unclaimed.get(sid)
+            if held is not None:
+                held.pop(str(props.get("requestID")), None)
+                if not held:
+                    del self._unclaimed[sid]
+        target = self._subscribers.get(sid)
         if target is not None:
             target.put_nowait(event)
-        else:
-            self._broadcast.put_nowait(event)
+            return
+        if etype in _ASKED_EVENTS:
+            request_id = props.get("id")
+            if isinstance(request_id, str) and request_id:
+                self._unclaimed.setdefault(sid, {})[request_id] = event
+                logger.info(
+                    "Holding %s %s for unsubscribed session %s",
+                    etype, request_id, sid,
+                )
 
 
 async def _sse_events(response: httpx.Response) -> AsyncIterator[dict[str, Any]]:
