@@ -648,16 +648,16 @@ def test_the_published_digest_is_found_among_the_other_artifacts(
     payload = b"qcow2 bytes" * 1000
     monkeypatch.setattr(urllib.request, "urlopen", _canned({
         _SUMS: _listing(
-            (b"a squashfs", "noble-server-cloudimg-amd64.squashfs"),
-            (payload, "noble-server-cloudimg-amd64.img"),
-            (b"a manifest", "noble-server-cloudimg-arm64.manifest"),
+            (b"a squashfs", "resolute-server-cloudimg-amd64.squashfs"),
+            (payload, "resolute-server-cloudimg-amd64.img"),
+            (b"a manifest", "resolute-server-cloudimg-arm64.manifest"),
         ),
     }))
     image = tmp_path / "cloud.img"
     image.write_bytes(payload)
 
     libvirt_helpers._verify_sha256(
-        image, sums_url=_SUMS, filename="noble-server-cloudimg-amd64.img",
+        image, sums_url=_SUMS, filename="resolute-server-cloudimg-amd64.img",
     )
 
 

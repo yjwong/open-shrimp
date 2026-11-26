@@ -5,11 +5,11 @@
 # guest userland + agent CLI) and produces `<base>-gui.vhdx` next to it: the
 # same rootfs plus a full offscreen desktop stack —
 #
-#   * weston 13 with the RDP backend (renders with pixman, serves RDP over
+#   * weston 14 with the RDP backend (renders with pixman, serves RDP over
 #     TCP :3389 with a baked self-signed TLS cert),
 #   * socat (the in-guest AF_VSOCK:3389 -> 127.0.0.1:3389 relay the host
 #     dials over AF_HYPERV),
-#   * Google Chrome (deb — noble's `chromium` apt package is a snap stub
+#   * Google Chrome (deb — Ubuntu's `chromium` apt package is a snap stub
 #     that cannot run in a chroot), fonts, xdg-utils,
 #   * wl-clipboard (wl-copy/wl-paste — the host implements the clipboard
 #     protocol members over the exec channel),
@@ -77,18 +77,23 @@ mount --bind /dev "$MNT/dev"
 mount --bind /dev/pts "$MNT/dev/pts" 2>/dev/null || true
 mount -t sysfs sys "$MNT/sys" 2>/dev/null || true
 
+# The suite is read from the base rootfs, so the GUI layer always pulls from
+# the release build_hcs_base_rootfs.sh debootstrapped.
+SUITE=$(. "$MNT/etc/os-release" && echo "$VERSION_CODENAME")
+[ -n "$SUITE" ] || { echo "base image has no VERSION_CODENAME"; exit 1; }
+
 echo "=== apt sources: main + universe (weston lives in universe) ==="
 rm -f "$MNT/etc/apt/sources.list"
-cat > "$MNT/etc/apt/sources.list.d/ubuntu.sources" <<'SRC'
+cat > "$MNT/etc/apt/sources.list.d/ubuntu.sources" <<SRC
 Types: deb
 URIs: http://archive.ubuntu.com/ubuntu/
-Suites: noble noble-updates noble-backports
+Suites: $SUITE $SUITE-updates $SUITE-backports
 Components: main universe
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
 Types: deb
 URIs: http://security.ubuntu.com/ubuntu/
-Suites: noble-security
+Suites: $SUITE-security
 Components: main universe
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 SRC
@@ -99,13 +104,13 @@ chroot "$MNT" /usr/bin/env HOME=/root DEBIAN_FRONTEND=noninteractive \
     set -e
     apt-get update 2>&1 | tail -3
     apt-get install -y --no-install-recommends \
-      weston libfreerdp-server2-2 socat openssl ca-certificates \
+      weston libfreerdp-server3-3 socat openssl ca-certificates \
       python3 xkb-data dbus dbus-x11 xdg-utils wget wl-clipboard \
       fonts-dejavu-core fonts-liberation fonts-noto-core fonts-noto-cjk \
       fonts-noto-color-emoji \
       2>&1 | tail -5
     echo "weston: $(weston --version)"
-    ls -l /usr/lib/x86_64-linux-gnu/libweston-13/rdp-backend.so
+    ls -l /usr/lib/x86_64-linux-gnu/libweston-14/rdp-backend.so
     # python3 is named explicitly in the package set above rather than left to
     # arrive as another package transitive dependency: the host->guest bridge and
     # the guest->host relay are launched as `python3 <script>`, so a variant

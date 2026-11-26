@@ -36,7 +36,7 @@ set -eu
 OUT=${1:?usage: build_hcs_base_rootfs.sh /path/to/base.vhdx}
 LABEL=clauderoot
 SIZE=${SIZE:-6G}
-SUITE=${SUITE:-noble}
+SUITE=${SUITE:-resolute}
 MIRROR=${MIRROR:-http://archive.ubuntu.com/ubuntu/}
 WORK=${WORK:-/root/hcs-base-build}
 NODE_DIST=${NODE_DIST:-https://nodejs.org/dist/latest-v22.x}

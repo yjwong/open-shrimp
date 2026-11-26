@@ -117,15 +117,15 @@ _DOWNLOAD_MAP: dict[tuple[str, str], str] = {
     ("Darwin", "x86_64"): f"lima-{LIMA_VERSION}-Darwin-x86_64.tar.gz",
 }
 
-# Ubuntu 24.04 LTS cloud images.
+# Ubuntu 26.04 LTS cloud images.
 _CLOUD_IMAGES: dict[str, str] = {
     "aarch64": (
-        "https://cloud-images.ubuntu.com/releases/24.04/release/"
-        "ubuntu-24.04-server-cloudimg-arm64.img"
+        "https://cloud-images.ubuntu.com/releases/resolute/release/"
+        "ubuntu-26.04-server-cloudimg-arm64.img"
     ),
     "x86_64": (
-        "https://cloud-images.ubuntu.com/releases/24.04/release/"
-        "ubuntu-24.04-server-cloudimg-amd64.img"
+        "https://cloud-images.ubuntu.com/releases/resolute/release/"
+        "ubuntu-26.04-server-cloudimg-amd64.img"
     ),
 }
 

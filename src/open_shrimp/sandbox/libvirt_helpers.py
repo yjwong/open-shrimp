@@ -61,10 +61,12 @@ LIBVIRT_INSTALL_REMEDY = (
 # ---------------------------------------------------------------------------
 
 DEFAULT_BASE_IMAGE_URL = (
-    "https://cloud-images.ubuntu.com/noble/current/"
-    "noble-server-cloudimg-amd64.img"
+    "https://cloud-images.ubuntu.com/resolute/current/"
+    "resolute-server-cloudimg-amd64.img"
 )
-DEFAULT_BASE_IMAGE_NAME = "ubuntu-24.04-cloud.img"
+#: Carries the release so a cache filled by an older release misses.  The
+#: older file stays on disk: existing overlays name it as their backing file.
+DEFAULT_BASE_IMAGE_NAME = "ubuntu-26.04-cloud.img"
 
 #: Ubuntu publishes one ``sha256sum`` listing covering every artifact in the
 #: image directory.  Derived from the image URL rather than written out again,
@@ -549,8 +551,10 @@ def _phone_use_runcmd() -> str:
     """
     return (
         "  - apt-get install -y -qq curl ca-certificates > /dev/null 2>&1\n"
-        # binder ships in linux-modules-extra for the running kernel.
-        "  - apt-get install -y -qq linux-modules-extra-$(uname -r) > /dev/null 2>&1\n"
+        # binder ships in linux-modules on 26.04 kernels, which the cloud
+        # image already carries; a 24.04 base_image keeps it in
+        # linux-modules-extra, a package 26.04 kernels no longer build.
+        "  - modinfo binder_linux > /dev/null 2>&1 || apt-get install -y -qq linux-modules-extra-$(uname -r) > /dev/null 2>&1\n"
         "  - modprobe binder_linux devices=binder,hwbinder,vndbinder || true\n"
         # Add the Waydroid apt repo + signing key, then install Waydroid
         # and its runtime deps (pulseaudio provides the LXC pulse socket).
@@ -1176,7 +1180,7 @@ def ensure_base_image(
 
     Args:
         base_image: Path to a custom base image, or ``None`` to download
-            the default Ubuntu 24.04 cloud image.
+            the default Ubuntu 26.04 cloud image.
         log_file: Optional log file for download progress.
         progress: Optional per-chunk callback taking the bytes transferred
             and the image's ``Content-Length``, or ``None`` where the server
@@ -1194,7 +1198,7 @@ def ensure_base_image(
             )
         return path
 
-    # Default: download Ubuntu 24.04 cloud image if not cached.
+    # Default: download Ubuntu 26.04 cloud image if not cached.
     image_path = base_image_path()
     if image_path.exists():
         return image_path
