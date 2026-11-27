@@ -629,6 +629,12 @@ def _build_cloud_init_user_data(
             f"      User={SANDBOX_USER}\n"
             "      SupplementaryGroups=video render input\n"
             "      Environment=WLR_BACKENDS=drm,libinput\n"
+            # wlroots 0.19 GL-renders the cursor onto the virtio-gpu
+            # cursor plane, and QEMU's virgl path reads that buffer back
+            # upside down with hotspot (0,0): VNC clients paint the arrow
+            # tip ~60px below the real pointer. Compositing the cursor
+            # into the framebuffer sidesteps the cursor plane entirely.
+            "      Environment=WLR_NO_HARDWARE_CURSORS=1\n"
             f"      Environment=XDG_RUNTIME_DIR=/run/user/{SANDBOX_UID}\n"
             "      Environment=WAYLAND_DISPLAY=wayland-0\n"
             "      ExecStart=/usr/bin/labwc\n"
