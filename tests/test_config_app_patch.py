@@ -293,7 +293,10 @@ def _no_auth(monkeypatch):
     disable_auth(monkeypatch)
 
 
-def _make_request(config, config_path, body=None):
+def _make_request(config, config_path, body=None, purge_history=()):
+    """A request for the endpoints; a *body* is sent as a PUT's config."""
+    if body is not None:
+        body = {"config": body, "purge_history": list(purge_history)}
     return make_request(config, config_path, body)
 
 
@@ -353,3 +356,57 @@ async def test_context_deletion_through_endpoints_removes_it(tmp_path, _no_auth)
     reloaded = load_config(str(config_file))
     assert set(reloaded.contexts) == {"default"}
     assert reloaded.contexts["default"].mcp
+
+
+@pytest.mark.asyncio
+async def test_context_deletion_purges_only_requested_removed_history(
+    tmp_path, _no_auth, monkeypatch,
+):
+    from open_shrimp.sandbox import manager as sandbox_manager
+
+    calls = []
+    monkeypatch.setattr(
+        sandbox_manager, "destroy_contexts_background",
+        lambda names, managers, *, purge_history: calls.append(
+            (names, purge_history),
+        ),
+    )
+    config_file = _write_config(tmp_path)
+    payload = {
+        "allowed_users": [1],
+        "default_context": "default",
+        "contexts": {
+            "default": _saved_context(), "scratch": _saved_context(),
+        },
+    }
+    resp = await config_put_endpoint(
+        _make_request(load_config(str(config_file)), config_file, payload),
+    )
+    assert resp.status_code == 200
+
+    del payload["contexts"]["scratch"]
+    # "default" survives the save, so naming it must not reach the purge as
+    # a removed context.
+    resp = await config_put_endpoint(_make_request(
+        load_config(str(config_file)), config_file, payload,
+        purge_history=["scratch", "default"],
+    ))
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    names, purge = calls[0]
+    assert names == {"scratch"}
+    assert names & purge == {"scratch"}
+
+
+@pytest.mark.asyncio
+async def test_put_without_config_envelope_is_rejected(tmp_path, _no_auth):
+    config_file = _write_config(tmp_path)
+    config = load_config(str(config_file))
+    bare = {"allowed_users": [1], "default_context": "default", "contexts": {}}
+
+    resp = await config_put_endpoint(make_request(config, config_file, bare))
+    assert resp.status_code == 400
+    resp = await config_put_endpoint(make_request(
+        config, config_file, {"config": bare, "purge_history": "scratch"},
+    ))
+    assert resp.status_code == 400

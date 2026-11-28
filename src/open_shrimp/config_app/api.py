@@ -68,7 +68,12 @@ async def config_get_endpoint(request: Request) -> JSONResponse:
 
 
 async def config_put_endpoint(request: Request) -> JSONResponse:
-    """PUT /api/config -- save updated config (comment-preserving)."""
+    """PUT /api/config -- save updated config (comment-preserving).
+
+    Body: ``{"config": {...}, "purge_history": [names]}``.  A removed
+    context's transcripts and memory are kept unless its name is in
+    ``purge_history``.
+    """
     try:
         await _authenticate(request)
     except AuthError as e:
@@ -81,9 +86,22 @@ async def config_put_endpoint(request: Request) -> JSONResponse:
         )
 
     try:
-        body = await request.json()
+        payload = await request.json()
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    if not isinstance(payload, dict):
+        payload = {}
+    body = payload.get("config")
+    purge_history = payload.get("purge_history", [])
+    if not (
+        isinstance(body, dict)
+        and isinstance(purge_history, list)
+        and all(isinstance(n, str) for n in purge_history)
+    ):
+        return JSONResponse(
+            {"error": "Body must be {config: object, purge_history: string[]}"},
+            status_code=400,
+        )
 
     old_config: Config = request.app.state.config
     old_context_names = set(old_config.contexts.keys())
@@ -130,10 +148,13 @@ async def config_put_endpoint(request: Request) -> JSONResponse:
     new_context_names = set(new_config.contexts.keys())
     removed = old_context_names - new_context_names
     if removed:
+        from open_shrimp.sandbox.manager import destroy_contexts_background
+
         sandbox_managers = getattr(request.app.state, "sandbox_managers", None)
-        if sandbox_managers:
-            from open_shrimp.sandbox.manager import destroy_contexts_background
-            destroy_contexts_background(removed, sandbox_managers)
+        destroy_contexts_background(
+            removed, sandbox_managers or {},
+            purge_history=set(purge_history),
+        )
 
     return JSONResponse({"ok": True})
 

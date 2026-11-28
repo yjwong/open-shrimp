@@ -15,7 +15,7 @@ interface ContextEditorProps {
   sandboxCatalog: SandboxCatalog;
   contextName: string | null; // null = new context
   onSave: (name: string, ctx: ContextConfig, isDefault: boolean) => void;
-  onDelete: (name: string) => void;
+  onDelete: (name: string, purgeHistory: boolean) => void;
   onBack: () => void;
 }
 
@@ -130,6 +130,8 @@ export default function ContextEditor({
   const [isDefault, setIsDefault] = useState(
     contextName === config.default_context,
   );
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [purgeHistory, setPurgeHistory] = useState(false);
 
   const effectiveBackend = backend || config.backend || "claude_sdk";
   const isOpencode = effectiveBackend === "opencode";
@@ -417,24 +419,70 @@ export default function ContextEditor({
 
       {contextName && (
         <div className="delete-section">
-          <button
-            type="button"
-            className="btn btn-danger"
-            style={{ width: "100%" }}
-            onClick={() => {
-              if (
-                Object.keys(config.contexts).length <= 1
-              ) {
-                alert("Cannot delete the last context");
-                return;
-              }
-              if (confirm(`Delete context "${contextName}"?`)) {
-                onDelete(contextName);
-              }
-            }}
-          >
-            Delete Context
-          </button>
+          {!confirmingDelete ? (
+            <button
+              type="button"
+              className="btn btn-danger"
+              style={{ width: "100%" }}
+              onClick={() => {
+                if (
+                  Object.keys(config.contexts).length <= 1
+                ) {
+                  alert("Cannot delete the last context");
+                  return;
+                }
+                setConfirmingDelete(true);
+              }}
+            >
+              Delete Context
+            </button>
+          ) : (
+            <div className="delete-confirm">
+              <p className="delete-confirm-title">
+                Delete context "{contextName}"?
+              </p>
+              {existing?.sandbox && (
+                <>
+                  <div className="form-toggle-row">
+                    <span className="form-toggle-label">
+                      Also delete conversation history and memory
+                    </span>
+                    <button
+                      type="button"
+                      className={`toggle${purgeHistory ? " on" : ""}`}
+                      onClick={() => setPurgeHistory(!purgeHistory)}
+                    />
+                  </div>
+                  <span className="form-hint">
+                    {purgeHistory
+                      ? "Deleted for good when you save."
+                      : "Kept on disk. A context re-added under this name picks it up again."}
+                  </span>
+                </>
+              )}
+              <div className="delete-confirm-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setConfirmingDelete(false);
+                    setPurgeHistory(false);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  onClick={() =>
+                    onDelete(contextName, !!existing?.sandbox && purgeHistory)
+                  }
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

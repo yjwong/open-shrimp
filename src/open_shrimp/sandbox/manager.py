@@ -74,8 +74,18 @@ def lookup_active_build(
 def destroy_contexts_background(
     context_names: set[str],
     managers: dict[str, SandboxManager],
+    *,
+    purge_history: set[str] = frozenset(),
 ) -> None:
-    """Run ``destroy_context`` for each context on all managers in a daemon thread."""
+    """Run ``destroy_context`` for each context on all managers in a daemon thread.
+
+    ``destroy_context`` leaves :func:`~open_shrimp.paths.sandbox_state_dir`
+    alone, so a removed context's transcripts and agent memory survive and a
+    context re-added under the same name resumes them.  Names in
+    *purge_history* (only those also in *context_names*) lose that dir too,
+    after every manager has stopped the guest sharing it.
+    """
+    from open_shrimp.paths import sandbox_state_root
 
     def _run() -> None:
         for ctx_name in context_names:
@@ -88,6 +98,18 @@ def destroy_contexts_background(
                         "Error cleaning up context '%s'", ctx_name,
                         exc_info=True,
                     )
+        for ctx_name in context_names & purge_history:
+            root = sandbox_state_root()
+            path = root / ctx_name
+            # A name that is not a single path component would reach
+            # outside the root.
+            if path.parent != root or ctx_name in ("", ".", ".."):
+                logger.warning(
+                    "Refusing to purge history for context %r", ctx_name,
+                )
+                continue
+            logger.info("Purging history for removed context '%s'", ctx_name)
+            shutil.rmtree(path, ignore_errors=True)
 
     threading.Thread(target=_run, daemon=True).start()
 

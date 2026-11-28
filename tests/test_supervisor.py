@@ -144,7 +144,7 @@ async def test_mini_app_save_cannot_create_the_reserved_context(tmp_path, _no_au
         },
     }
     response = await config_put_endpoint(
-        make_request(config, config_file, payload),
+        make_request(config, config_file, {"config": payload}),
     )
 
     assert response.status_code == 422

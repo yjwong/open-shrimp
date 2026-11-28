@@ -30,14 +30,19 @@ export async function fetchSandboxes(): Promise<SandboxCatalog> {
   return response.json() as Promise<SandboxCatalog>;
 }
 
-export async function saveConfig(config: AppConfig): Promise<void> {
+/** Save *config*.  A context removed by this save keeps its conversation
+ * history and memory unless its name is in *purgeHistory*. */
+export async function saveConfig(
+  config: AppConfig,
+  purgeHistory: string[],
+): Promise<void> {
   const response = await fetch("/api/config", {
     method: "PUT",
     headers: {
       ...getAuthHeader(),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(config),
+    body: JSON.stringify({ config, purge_history: purgeHistory }),
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));

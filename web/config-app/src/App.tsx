@@ -12,6 +12,7 @@ export default function App() {
   const {
     config,
     setConfig,
+    setPurgeHistory,
     sandboxCatalog,
     loading,
     saving,
@@ -62,6 +63,7 @@ export default function App() {
         config={config}
         sandboxCatalog={sandboxCatalog}
         setConfig={setConfig}
+        setPurgeHistory={setPurgeHistory}
         contextName={view.name}
         onBack={() => setView({ type: "list" })}
       />
@@ -181,12 +183,14 @@ function ContextEditorView({
   config,
   sandboxCatalog,
   setConfig,
+  setPurgeHistory,
   contextName,
   onBack,
 }: {
   config: AppConfig;
   sandboxCatalog: SandboxCatalog;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig | null>>;
+  setPurgeHistory: React.Dispatch<React.SetStateAction<Set<string>>>;
   contextName: string | null;
   onBack: () => void;
 }) {
@@ -226,13 +230,21 @@ function ContextEditorView({
 
         return next;
       });
+      // A context saved under a name deleted earlier in this session takes
+      // that name's history over, so the save must not purge it.
+      setPurgeHistory((prev) => {
+        if (!prev.has(name)) return prev;
+        const next = new Set(prev);
+        next.delete(name);
+        return next;
+      });
       onBack();
     },
-    [contextName, setConfig, onBack],
+    [contextName, setConfig, setPurgeHistory, onBack],
   );
 
   const handleDelete = useCallback(
-    (name: string) => {
+    (name: string, purgeHistory: boolean) => {
       setConfig((prev) => {
         if (!prev) return prev;
         const next = { ...prev, contexts: { ...prev.contexts } };
@@ -244,9 +256,15 @@ function ContextEditorView({
         }
         return next;
       });
+      setPurgeHistory((prev) => {
+        const next = new Set(prev);
+        if (purgeHistory) next.add(name);
+        else next.delete(name);
+        return next;
+      });
       onBack();
     },
-    [setConfig, onBack],
+    [setConfig, setPurgeHistory, onBack],
   );
 
   return (

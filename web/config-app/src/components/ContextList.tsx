@@ -25,7 +25,7 @@ export default function ContextList({ config, onEdit, onAdd, onMove }: ContextLi
     const detail =
       action === "reboot"
         ? "Active sessions will be closed."
-        : "This destroys all sandbox state (overlays, images). Persistent volumes survive. Active sessions will be closed.";
+        : "This destroys all sandbox state (overlays, images). Persistent volumes, conversation history and memory survive. Active sessions will be closed.";
     if (!window.confirm(`${verb} sandbox for "${name}"? ${detail}`)) {
       return;
     }

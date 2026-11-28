@@ -9,6 +9,8 @@ export function useConfig() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Removed contexts whose history the next save also deletes.
+  const [purgeHistory, setPurgeHistory] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
   const initialRef = useRef<string>("");
 
@@ -22,6 +24,7 @@ export function useConfig() {
       ]);
       setConfig(data);
       setSandboxCatalog(sandboxes);
+      setPurgeHistory(new Set());
       initialRef.current = JSON.stringify(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load config");
@@ -38,8 +41,9 @@ export function useConfig() {
     if (!config) return;
     setSaving(true);
     try {
-      await saveConfig(config);
+      await saveConfig(config, [...purgeHistory]);
       initialRef.current = JSON.stringify(config);
+      setPurgeHistory(new Set());
       setToast({ message: "Config saved", type: "success" });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to save";
@@ -47,13 +51,14 @@ export function useConfig() {
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [config, purgeHistory]);
 
   const dismissToast = useCallback(() => setToast(null), []);
 
   return {
     config,
     setConfig,
+    setPurgeHistory,
     sandboxCatalog,
     loading,
     saving,
