@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote
@@ -58,24 +59,37 @@ _BUS_REGISTRY: dict[tuple[str, str, str], tuple[EventBus, int]] = {}
 _BUS_LOCK: asyncio.Lock | None = None
 
 
-def _context_window_from_models(
-    models: list[dict[str, Any]],
+def _context_window_from_providers(
+    payload: dict[str, Any],
     provider_id: str,
     model_id: str,
 ) -> int | None:
-    """Return the selected model's context limit from OpenCode's catalog."""
-    for model in models:
-        if model.get("providerID") != provider_id:
+    """Return the selected model's context limit from a ``GET /provider`` payload.
+
+    ``/provider`` is read rather than ``/api/model`` because only it carries
+    custom providers declared in the user's opencode config.
+    """
+    providers = payload.get("all")
+    if not isinstance(providers, list):
+        return None
+    for provider in providers:
+        if not isinstance(provider, dict) or provider.get("id") != provider_id:
             continue
-        if model_id not in (model.get("id"), model.get("apiID")):
-            continue
+        models = provider.get("models")
+        if not isinstance(models, dict):
+            return None
+        model = models.get(model_id)
+        if not isinstance(model, dict):
+            return None
         limit = model.get("limit")
         if not isinstance(limit, dict):
             return None
         context = limit.get("context")
         if isinstance(context, bool) or not isinstance(context, (int, float)):
             return None
-        return int(context) if context > 0 else None
+        if not math.isfinite(context) or context <= 0:
+            return None
+        return int(context)
     return None
 
 
@@ -220,15 +234,21 @@ class OpenCodeClient:
     async def _load_context_window(self) -> None:
         """Best-effort model metadata lookup; failure must not prevent a session."""
         try:
-            models = await self.get_models()
+            providers = await self.list_providers()
         except Exception:
-            logger.debug("Failed to load OpenCode model metadata", exc_info=True)
+            logger.debug("Failed to load OpenCode provider metadata", exc_info=True)
             return
-        self._context_window = _context_window_from_models(
-            models,
+        self._context_window = _context_window_from_providers(
+            providers,
             self._options.provider,
             self._options.model,
         )
+        if self._context_window is None:
+            logger.debug(
+                "No context limit for %s/%s in GET /provider",
+                self._options.provider,
+                self._options.model,
+            )
 
     async def connect_control(self) -> None:
         """Connect HTTP control-plane APIs without creating a session."""
@@ -669,9 +689,10 @@ class OpenCodeClient:
         if r.status_code >= 400:
             raise ProcessError(f"GET /api/model returned {r.status_code}: {r.text[:300]}")
         payload = r.json()
-        if not isinstance(payload, list):
-            raise ProcessError(f"GET /api/model returned non-list: {payload!r}")
-        return [item for item in payload if isinstance(item, dict)]
+        items = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise ProcessError(f"GET /api/model returned no data list: {payload!r}")
+        return [item for item in items if isinstance(item, dict)]
 
     async def list_providers(self) -> dict[str, Any]:
         """Fetch provider list and connected state from OpenCode."""

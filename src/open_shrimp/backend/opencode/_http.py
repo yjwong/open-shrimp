@@ -1,7 +1,7 @@
 """Shared helpers for one-shot HTTP calls to ``opencode serve``.
 
 ``OpenCodeClient`` keeps a long-lived httpx client for its hot path,
-but read-only endpoints (``GET /session``, ``GET /api/model``) are
+but read-only endpoints (``GET /session``, ``GET /provider``) are
 called from outside that lifecycle. They all share the same auth
 header + 401/4xx triage; this module is that boilerplate, once.
 """

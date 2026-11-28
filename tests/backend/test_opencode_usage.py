@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from open_shrimp.backend import types as bt
-from open_shrimp.backend.opencode.client import _context_window_from_models
+from open_shrimp.backend.opencode.client import _context_window_from_providers
 from open_shrimp.backend.opencode.sse import EventQueueClosed
 from open_shrimp.backend.opencode.translate import _iter_response
 from open_shrimp.config import Config, ContextConfig, TelegramConfig
@@ -95,29 +95,51 @@ async def test_usage_is_normalised_for_status_rendering() -> None:
     assert "$0.1234" in status
 
 
+def _providers(provider_id: str, models: dict[str, object]) -> dict[str, object]:
+    return {
+        "all": [{"id": provider_id, "models": models}],
+        "default": {},
+        "connected": [provider_id],
+    }
+
+
 def test_context_window_matches_provider_and_model_id() -> None:
-    models = [
-        {
-            "providerID": "other",
-            "id": "gpt-5.5",
-            "limit": {"context": 100_000},
-        },
-        {
-            "providerID": "openai",
-            "apiID": "gpt-5.5",
-            "limit": {"context": 400_000},
-        },
-    ]
+    payload = {
+        "all": [
+            {
+                "id": "other",
+                "models": {"inkling-2-mini": {"limit": {"context": 100_000}}},
+            },
+            {
+                "id": "llamacpp",
+                "models": {
+                    "inkling-2-mini": {
+                        "id": "inkling-2-mini",
+                        "limit": {"context": 524_288, "output": 32_768},
+                    },
+                },
+            },
+        ],
+        "default": {},
+        "connected": ["llamacpp"],
+    }
 
-    assert _context_window_from_models(models, "openai", "gpt-5.5") == 400_000
+    assert _context_window_from_providers(payload, "llamacpp", "inkling-2-mini") == 524_288
 
 
-@pytest.mark.parametrize("context", [None, True, 0, -1, "400000"])
+@pytest.mark.parametrize("context", [None, True, 0, -1, "400000", float("inf"), float("nan")])
 def test_context_window_rejects_invalid_limits(context: object) -> None:
-    models = [{
-        "providerID": "openai",
-        "id": "gpt-5.5",
-        "limit": {"context": context},
-    }]
+    payload = _providers("openai", {"gpt-5.5": {"limit": {"context": context}}})
 
-    assert _context_window_from_models(models, "openai", "gpt-5.5") is None
+    assert _context_window_from_providers(payload, "openai", "gpt-5.5") is None
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    {"all": {}},
+    {"all": [{"id": "openai", "models": []}]},
+    _providers("openai", {"gpt-5": {"limit": {"context": 400_000}}}),
+    _providers("other", {"gpt-5.5": {"limit": {"context": 400_000}}}),
+])
+def test_context_window_missing_model_or_bad_shape(payload: dict[str, object]) -> None:
+    assert _context_window_from_providers(payload, "openai", "gpt-5.5") is None

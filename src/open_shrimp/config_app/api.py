@@ -195,6 +195,40 @@ def _normalise_model_options(
     return sorted(options, key=lambda option: option["value"])
 
 
+def _connected_provider_models(payload: Any) -> list[dict[str, Any]]:
+    """Flatten a ``GET /provider`` payload into catalog items for connected providers.
+
+    ``all`` is the whole models.dev catalog plus custom providers, so only
+    providers named in ``connected`` are kept. Each item takes its provider id
+    and its key in the ``models`` map, which is what a context's ``model``
+    field names.
+    """
+    if not isinstance(payload, dict):
+        return []
+    providers = payload.get("all")
+    connected = payload.get("connected")
+    if not isinstance(providers, list) or not isinstance(connected, list):
+        return []
+    connected_ids = {c for c in connected if isinstance(c, str)}
+    items: list[dict[str, Any]] = []
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = provider.get("id")
+        models = provider.get("models")
+        if provider_id not in connected_ids or not isinstance(models, dict):
+            continue
+        for model_id, model in models.items():
+            if not isinstance(model, dict):
+                continue
+            items.append({
+                "providerID": provider_id,
+                "id": model_id,
+                "name": model.get("name"),
+            })
+    return items
+
+
 async def models_endpoint(request: Request) -> JSONResponse:
     """GET /api/config/models -- return OpenCode model options.
 
@@ -228,9 +262,7 @@ async def models_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"models": []})
 
     try:
-        raw = await _http.get_json(
-            "/api/model", params={"location[directory]": directory},
-        )
+        raw = await _http.get_json("/provider", params={"directory": directory})
     except Exception as e:
         logger.exception("Failed to fetch OpenCode model catalog")
         return JSONResponse(
@@ -238,9 +270,7 @@ async def models_endpoint(request: Request) -> JSONResponse:
             status_code=502,
         )
 
-    models = (
-        [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
-    )
+    models = _connected_provider_models(raw)
 
     configured_models = {
         ctx.model

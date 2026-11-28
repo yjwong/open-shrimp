@@ -1,5 +1,5 @@
 """Phase-2 OpenCode model catalog: ``_normalise_model_options`` shaping and
-the ``GET /api/config/models`` endpoint (catalog fetch + 502 on failure)."""
+the ``GET /api/config/models`` endpoint (``GET /provider`` fetch + 502 on failure)."""
 
 from __future__ import annotations
 
@@ -104,9 +104,17 @@ async def test_endpoint_returns_models_with_configured_value(monkeypatch):
     config = _parse(_base_raw())
 
     async def fake_get_json(path, *, params=None):
-        assert path == "/api/model"
-        assert params == {"location[directory]": "/tmp/proj"}
-        return [{"providerID": "openai", "id": "gpt-6"}]
+        assert path == "/provider"
+        assert params == {"directory": "/tmp/proj"}
+        return {
+            "all": [
+                {"id": "openai", "models": {"gpt-6": {"id": "gpt-6", "name": "GPT-6"}}},
+                {"id": "llamacpp", "models": {"inkling-2-mini": {"name": "Inkling"}}},
+                {"id": "unconnected", "models": {"m": {"name": "m"}}},
+            ],
+            "default": {},
+            "connected": ["openai", "llamacpp"],
+        }
 
     monkeypatch.setattr(config_api._http, "get_json", fake_get_json)
 
@@ -116,6 +124,8 @@ async def test_endpoint_returns_models_with_configured_value(monkeypatch):
     # The configured model (not in the live catalog) still appears.
     assert "openai/gpt-5.5" in values
     assert "openai/gpt-6" in values
+    assert "llamacpp/inkling-2-mini" in values
+    assert "unconnected/m" not in values
 
 
 @pytest.mark.asyncio
