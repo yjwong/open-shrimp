@@ -661,7 +661,6 @@ async def get_or_create_session(
             # served-launch home mounts are in hand when the sandbox is built.
             # ``make_runtime`` is pure/cheap, so computing it first is safe.
             _runtime = backend.make_runtime(
-                sandbox_manager.context_state_dir(context_name),
                 context_name=context_name,
                 model=context.model,
             )

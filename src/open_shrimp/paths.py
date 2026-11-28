@@ -54,14 +54,19 @@ def db_path() -> Path:
     return data_dir() / "sessions.db"
 
 
+def sandbox_state_root() -> Path:
+    """Parent of every context's :func:`sandbox_state_dir`."""
+    return data_dir() / "containers"
+
+
 def sandbox_state_dir(context_name: str) -> Path:
     """Per-context host-side sandbox state directory, created on demand.
 
-    Holds the host halves of the guest's agent home — the resumable session
-    corpus among them — so it is keyed by context and outlives any single
-    sandbox instance.
+    Holds the host halves of the guest's agent homes — session transcripts
+    and agent memory among them — so it is keyed by context and lives outside
+    every backend's VM state dir, which a sandbox reset deletes.
     """
-    path = data_dir() / "containers" / context_name
+    path = sandbox_state_root() / context_name
     path.mkdir(parents=True, exist_ok=True)
     return path
 

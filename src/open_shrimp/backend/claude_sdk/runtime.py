@@ -30,16 +30,18 @@ from open_shrimp.sandbox.agent_runtime import (
 logger = logging.getLogger(__name__)
 
 
-def claude_home_dir(state_dir: Path) -> Path:
+def claude_home_dir(context_name: str) -> Path:
     """The host dir a sandbox mounts as Claude's ``~/.claude``.
 
-    Derived from the context's state dir
-    (:meth:`SandboxManager.context_state_dir`) so the sandbox layer never
-    spells an agent's name.  The leaf is fixed: it holds the resumable session
-    corpus under ``projects/``, which ``/resume`` lists and which
+    Lives under :func:`~open_shrimp.paths.sandbox_state_dir`, not the
+    backend's VM state dir, so a sandbox reset leaves transcripts and memory
+    alone.  The leaf is fixed: it holds the resumable session corpus under
+    ``projects/``, which ``/resume`` lists and which
     ``terminal/log_source.py`` resolves a guest ``.output`` symlink against.
     """
-    return state_dir / "claude-home"
+    from open_shrimp.paths import sandbox_state_dir
+
+    return sandbox_state_dir(context_name) / "claude-home"
 
 
 def claude_runtime(

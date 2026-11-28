@@ -124,9 +124,7 @@ def _cached_sandbox_for(
     return cached
 
 
-def _runtimes_for_layout(
-    state_dir: Path, context_name: str,
-) -> list["AgentRuntime"]:
+def _runtimes_for_layout(context_name: str) -> list["AgentRuntime"]:
     """Every backend's runtime for *context_name*, built for its shares alone.
 
     A guest's share plan is fixed when the guest is defined — one virtiofs
@@ -152,7 +150,7 @@ def _runtimes_for_layout(
     for name in known_backends():
         try:
             layout.append(get_backend_by_name(name).make_runtime(
-                state_dir, context_name=context_name, model=None,
+                context_name=context_name, model=None,
             ))
         except Exception:
             logger.warning(
@@ -309,10 +307,8 @@ class SandboxManager(Protocol):
         """Per-context host state directory, the same one this backend's
         :class:`Sandbox` writes its guest artifacts under.
 
-        A backend hangs its agent home off this (``backend.make_runtime``
-        takes it and each backend spells its own leaf), so a caller can reach
-        a context's session corpus without creating a full :class:`Sandbox` —
-        ``/resume`` session listing does.
+        :meth:`destroy_context` deletes it, so agent homes live elsewhere
+        (:func:`~open_shrimp.paths.sandbox_state_dir`).
         """
         ...
 
@@ -479,9 +475,7 @@ class LimaSandboxManager:
             instance_prefix=self._instance_prefix,
             computer_use=context.sandbox.computer_use,
             guest_os=context.sandbox.guest_os,
-            runtimes=_runtimes_for_layout(
-                self.context_state_dir(context_name), context_name,
-            ),
+            runtimes=_runtimes_for_layout(context_name),
         )
         return _register_sandbox(self, context_name, sandbox, runtime)
 
@@ -827,9 +821,7 @@ class LibvirtSandboxManager:
             computer_use=context.sandbox.computer_use,
             virgl=context.sandbox.virgl,
             phone_use=context.sandbox.phone_use,
-            runtimes=_runtimes_for_layout(
-                self.context_state_dir(context_name), context_name,
-            ),
+            runtimes=_runtimes_for_layout(context_name),
         )
         return _register_sandbox(self, context_name, sandbox, runtime)
 
@@ -998,9 +990,7 @@ class HcsSandboxManager:
             state_dir=self._state_dir / context_name,
             additional_directories=context.additional_directories or None,
             instance_prefix=self._instance_prefix,
-            runtimes=_runtimes_for_layout(
-                self.context_state_dir(context_name), context_name,
-            ),
+            runtimes=_runtimes_for_layout(context_name),
         )
         return _register_sandbox(self, context_name, sandbox, runtime)
 

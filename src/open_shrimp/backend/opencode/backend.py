@@ -104,7 +104,6 @@ async def _server_for(
     lock = _context_locks.setdefault(ctx_name, asyncio.Lock())
     async with lock:
         runtime = backend.make_runtime(
-            manager.context_state_dir(ctx_name),
             context_name=ctx_name,
             model=ctx.model,
         )
@@ -143,7 +142,6 @@ class OpenCodeBackend:
 
     def make_runtime(
         self,
-        state_dir: Path,
         *,
         context_name: str,
         model: str | None = None,
@@ -152,8 +150,7 @@ class OpenCodeBackend:
 
         Parses the provider id from ``model`` (``provider/model``) to filter the
         injected host ``auth.json``; ``context_name`` lets the runtime resolve
-        the per-context host dirs the sandbox actually bind-mounts, so
-        *state_dir* goes unread.
+        the per-context host dirs the sandbox bind-mounts.
 
         ``model=None`` builds the profile for its shares alone — what a sandbox
         needs to lay a guest out for a backend nobody has launched yet.  No

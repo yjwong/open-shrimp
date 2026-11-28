@@ -121,9 +121,9 @@ def _resolve_guest_symlink(
     Agent task ``.output`` files are symlinks to ``.jsonl`` session files
     under ``<guest-home>/.claude/projects/…``, which don't exist on the host
     at that path.  This function translates the guest path back to the host
-    equivalent: *context_dir* holds the agent home
-    (``claude_sdk.runtime.claude_home_dir``), which is shared into the guest
-    as ``<guest-home>/.claude``.
+    equivalent: *context_dir* is named for its context, whose agent home
+    (``claude_sdk.runtime.claude_home_dir``) is shared into the guest as
+    ``<guest-home>/.claude``.
 
     The guest home varies by backend and user (``/home/openshrimp`` for
     libvirt and HCS, ``/home/<user>.guest`` for Lima), so the stable
@@ -151,7 +151,7 @@ def _guest_to_host(guest_path: str, context_dir: Path) -> Path | None:
     idx = guest_path.find(marker)
     if idx == -1:
         return None
-    return claude_home_dir(context_dir) / guest_path[idx + len(marker):]
+    return claude_home_dir(context_dir.name) / guest_path[idx + len(marker):]
 
 
 def _sandbox_context_dirs(
@@ -247,7 +247,8 @@ def _claude_homes(
 
     homes = [_get_claude_config_home_dir()]
     homes.extend(
-        claude_home_dir(d) for d in _sandbox_context_dirs(sandbox_managers)
+        claude_home_dir(d.name)
+        for d in _sandbox_context_dirs(sandbox_managers)
     )
     return homes
 

@@ -289,7 +289,6 @@ class Backend(Protocol):
 
     def make_runtime(
         self,
-        state_dir: Path,
         *,
         context_name: str,
         model: str | None,
@@ -297,12 +296,12 @@ class Backend(Protocol):
         """The sandbox launch profile for this backend.  Mirrors ``make_client``:
         the backend owns which runtime it wants and how to derive its inputs.
 
-        *state_dir* is the context's host state dir
-        (``SandboxManager.context_state_dir``); the backend spells the leaf its
-        own agent home lands at, so the sandbox layer never names an agent.
+        Each backend places its agent home under
+        ``paths.sandbox_state_dir(context_name)`` and spells its own leaf, so
+        the sandbox layer never names an agent.
 
-        ``claude_sdk`` → ``claude_runtime`` (WrappedCLI; ``context_name``/``model``
-        unused); ``opencode`` → ``opencode_runtime`` (ServedEndpoint, parsing the
+        ``claude_sdk`` → ``claude_runtime`` (WrappedCLI; ``model`` unused);
+        ``opencode`` → ``opencode_runtime`` (ServedEndpoint, parsing the
         provider id from ``model`` and resolving its per-context host dirs from
         ``context_name``).
         """

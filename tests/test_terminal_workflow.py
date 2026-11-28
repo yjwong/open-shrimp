@@ -107,13 +107,17 @@ def test_half_written_journal_line_is_skipped(tmp_path: Path) -> None:
 
 
 def test_guest_transcript_dir_maps_to_the_sandbox_claude_home(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from open_shrimp import paths
+
+    monkeypatch.setattr(paths, "_data_dir", tmp_path / "data")
     state_dir = tmp_path / "state"
-    context_dir = state_dir / "myctx"
-    run = _run_dir(context_dir / "claude-home")
+    (state_dir / "myctx").mkdir(parents=True)
+    claude_home = paths.sandbox_state_root() / "myctx" / "claude-home"
+    run = _run_dir(claude_home)
     _journal(run, _started("aaa1", "a1"))
-    guest = f"/home/nobody-here/.claude/{run.relative_to(context_dir / 'claude-home')}"
+    guest = f"/home/nobody-here/.claude/{run.relative_to(claude_home)}"
     _launch(guest)
     managers = {"libvirt": SimpleNamespace(state_dir=state_dir)}
 
